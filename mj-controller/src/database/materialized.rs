@@ -462,29 +462,23 @@ pub fn load_materialized_finished_turn_message(session_id: &str) -> Result<Optio
     load_materialized_finished_turn_message_from(&database_path(), session_id)
 }
 
-/// Read answer text only when returning a child wait. Turn bounds are from
-/// the observation that decided completion, even if another turn starts now.
-pub(crate) struct ChildAnswerMessages {
-    pub latest: Option<String>,
-    pub finished: Option<String>,
-}
-
+/// Read report text within the turn bounds that decided completion,
+/// even if the child has started another turn since that observation.
 pub(crate) fn load_child_answer_messages(
     children: &[(String, Option<(u64, u64)>)],
-) -> Result<BTreeMap<String, ChildAnswerMessages>> {
+) -> Result<BTreeMap<String, Option<String>>> {
     let mut reader = open_reader(&database_path())?;
     let connection = reader.transaction()?;
     children
         .iter()
         .map(|(id, span)| {
-            let latest = last_materialized_agent_message(&connection, id)?.map(|(_, text)| text);
             let finished = span
                 .map(|(start, end)| {
                     last_materialized_agent_message_within(&connection, id, start, end)
                 })
                 .transpose()?
                 .flatten();
-            Ok((id.clone(), ChildAnswerMessages { latest, finished }))
+            Ok((id.clone(), finished))
         })
         .collect()
 }

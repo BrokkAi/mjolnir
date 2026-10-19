@@ -600,7 +600,7 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
             session.project.as_ref().map(serde_json::to_string).transpose()?,
             session.review.as_ref().map(serde_json::to_string).transpose()?,
             session.no_project_memory,
-            session.no_mailbox,
+            session.no_github_events,
         ],
     )?;
     tx.execute(
@@ -653,7 +653,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         // Chosen once, when the session is created.
         review: _,
         no_project_memory: _,
-        no_mailbox: _,
+        no_github_events: _,
         // A Move can change it along with the profile the session runs on.
         subagents,
         additional_mounts: _,
@@ -1266,7 +1266,8 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRec
                 }
             }),
         no_project_memory: row.get(34)?,
-        no_mailbox: row.get(35)?,
+        // Keep the shipped no_mailbox column for the GitHub target opt-out.
+        no_github_events: row.get(35)?,
         target_template_id: row.get(5)?,
         resource_allocation: row
             .get::<_, Option<String>>(14)?

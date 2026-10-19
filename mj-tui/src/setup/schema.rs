@@ -5,7 +5,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "mailbox":{}, "jev":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "github":{}, "jev":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
             json!({"enabled":true,"bind":mj_core::config::PhoneConfig::default().bind,"tailscale_detect":true,"tls_cert":null,"tls_key":null})
@@ -22,7 +22,11 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"enabled":false,"profile":null,"model":null,"effort":null})
         }
         "continuation" => json!({"enabled":true}),
-        "mailbox" => json!({"enabled":true}),
+        "github" if path.len() == 1 => json!({"watch":{}}),
+        "github" if key == "watch" => {
+            let watch = mj_core::config::GithubWatchConfig::default();
+            json!({"enabled":watch.enabled,"interval_seconds":watch.interval_seconds,"api_base":watch.api_base})
+        }
         "jev" => json!({"enabled":true}),
         "sessionwiki" => {
             json!({"archive_after_days":null})
@@ -232,7 +236,7 @@ pub(super) fn label(key: &str) -> String {
         "phone" => "Web Access",
         "review" => "Code Review",
         "continuation" => "Continuation",
-        "mailbox" => "Agent mailboxes",
+        "watch" => "Watcher",
         "jev" => "Jev (hosted service)",
         "sessionwiki" => "SessionWiki",
         "archive_after_days" => "Archive after (days)",
@@ -302,6 +306,7 @@ pub(super) fn field_label(path: &[String]) -> String {
         .collect::<Vec<_>>()
         .as_slice()
     {
+        ["github"] => "GitHub events".to_owned(),
         ["machines", _, "build_cache", "scheduler", "cpus"] => {
             "Concurrent compile permits".to_owned()
         }
@@ -476,15 +481,15 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
                 "On · 3 continuations plus quota recovery".to_owned()
             }
         }
-        "mailbox" => {
-            if section["enabled"] == Value::Bool(false) {
+        "github" => {
+            if section["watch"]["enabled"] == Value::Bool(false) {
                 "Off".to_owned()
             } else if !jev_enabled(draft) {
-                // `Config::agent_mailboxes_enabled`: GitHub items are
-                // classified by Jev, so no mailbox events are delivered.
+                // `Config::github_events_enabled`: GitHub items are
+                // classified by Jev, so the GitHub watcher is off.
                 "Off · Jev is off (Privacy)".to_owned()
             } else {
-                "On · external events at tool boundaries".to_owned()
+                "On · GitHub activity".to_owned()
             }
         }
         "jev" => {
@@ -698,8 +703,14 @@ pub(super) fn page_help(path: &[String], draft: &Value) -> &'static str {
         [section] if section == "continuation" && !jev_enabled(draft) => {
             "Off because Jev is off: continuation needs Jev to judge each reply. Turn Jev on under Privacy to use it."
         }
-        [section] if section == "mailbox" && !jev_enabled(draft) => {
-            "Off because Jev is off: agent mailboxes need Jev to classify GitHub activity. Turn Jev on under Privacy to use them."
+        [section] | [section, _]
+            if section == "github"
+                && path
+                    .last()
+                    .is_some_and(|key| key == "github" || key == "watch")
+                && !jev_enabled(draft) =>
+        {
+            "Off because Jev is off: the GitHub watcher needs Jev to classify activity. Mailbox delivery and child reports remain available."
         }
         _ => help(path),
     }
@@ -729,6 +740,9 @@ pub(super) fn help(path: &[String]) -> &'static str {
         .collect::<Vec<_>>()
         .as_slice()
     {
+        ["github"] | ["github", "watch"] => {
+            return "Receive GitHub activity selected by Jev. This switch controls only the GitHub event source. Mailbox hooks, peer messages and child reports remain available at tool boundaries and through idle wakes.";
+        }
         ["machines", _, "build_cache", "scheduler"] => {
             return "mbx shares this scheduler across all builds on the machine. Blank fields keep mbx's defaults.";
         }
@@ -803,9 +817,6 @@ pub(super) fn help(path: &[String]) -> &'static str {
         }
         "continuation" => {
             "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
-        }
-        "mailbox" => {
-            "Deliver external events such as GitHub activity and parent messages at agent tool boundaries. Jev classifies GitHub items. Running sessions pick up hook changes after their next resume or restart."
         }
         "jev" => {
             "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart."

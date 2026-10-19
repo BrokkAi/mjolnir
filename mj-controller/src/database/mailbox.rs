@@ -100,12 +100,17 @@ pub(crate) fn enqueue_mailbox_event_with(
     Ok(inserted)
 }
 
+/// Select a bounded batch for each target so blocked targets cannot starve others.
 pub(crate) fn pending_mailbox_events(limit: usize) -> Result<Vec<MailboxOutboxEntry>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(
         "SELECT event_key, target_session_id, event_json, unpark
-         FROM mailbox_outbox WHERE accepted_at IS NULL
-         ORDER BY created_at, event_key LIMIT ?1",
+         FROM (
+             SELECT event_key, target_session_id, event_json, unpark, created_at,
+                    ROW_NUMBER() OVER (PARTITION BY target_session_id ORDER BY created_at, event_key) AS position
+             FROM mailbox_outbox WHERE accepted_at IS NULL
+         ) WHERE position <= ?1
+         ORDER BY target_session_id, created_at, event_key",
     )?;
     statement
         .query_map([limit.min(i64::MAX as usize) as i64], |row| {

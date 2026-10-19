@@ -29,7 +29,7 @@
 │                     │   Jev (hosted service)                              On · sends turn text for classification  │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │   Other                                                                                      │                     │
-│                     │   Agent mailboxes                                   On · external events at tool boundaries  │                     │
+│                     │   GitHub events                                                        On · GitHub activity  │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▪ ╮
 │                     │                                                                                              │                     │

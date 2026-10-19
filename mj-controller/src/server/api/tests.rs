@@ -79,30 +79,6 @@ fn error_event(seq: u64) -> crate::database::ApiEvent {
 }
 
 #[tokio::test]
-async fn disabled_agent_mailboxes_refuse_external_events_with_a_clear_reason() {
-    let (app, _actions, snapshots, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
-    snapshots.send_modify(|snapshot| snapshot.agent_mailboxes_enabled = false);
-    let response = app
-        .oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/events"))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"key":"test","text":"event","wake":false}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let message = error["error"].as_str().unwrap();
-    assert!(
-        message.contains("agent mailboxes are disabled"),
-        "{message}"
-    );
-    assert!(message.contains("Agent mailboxes and Jev"), "{message}");
-}
-
-#[tokio::test]
 async fn external_events_cannot_create_internal_message_bodies() {
     let (app, _actions, _snapshots, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
     for body in [
@@ -229,7 +205,9 @@ async fn external_event_same_key_retries_ignore_creation_time() {
     }
 
     let writer = crate::database::install_isolated_test_writer();
-    crate::database::save_session(&crate::database::test_session("session-1", "project")).unwrap();
+    let mut target = crate::database::test_session("session-1", "project");
+    target.no_github_events = true;
+    crate::database::save_session(&target).unwrap();
     crate::database::save_session(&crate::database::test_session("session-2", "project")).unwrap();
     let (app, _actions, _snapshots, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let request = |text: &str, wake: bool| {
@@ -2044,8 +2022,16 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
     let backend = Arc::new(FakeBackend::default());
     let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
 
+    let old_name = app
+        .clone()
+        .oneshot(start_request(start_body(r#","no_mailbox":true"#)))
+        .await
+        .unwrap();
+    assert_eq!(old_name.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(actions.try_recv().is_err());
+
     let response = tokio::spawn(app.oneshot(start_request(start_body(
-        r#","prompt":"add a README line""#,
+        r#","prompt":"add a README line","no_github_events":true"#,
     ))));
     let request = actions.recv().await.unwrap();
     assert_eq!(
@@ -2053,7 +2039,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
         ControllerAction::New {
             review: None,
             no_project_memory: false,
-            no_mailbox: false,
+            no_github_events: true,
             at: None,
             branch: None,
             base: None,

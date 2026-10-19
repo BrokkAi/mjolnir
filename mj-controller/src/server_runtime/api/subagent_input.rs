@@ -130,13 +130,6 @@ impl ApiBackend {
                     "target session was destroyed and cannot receive messages"
                 ));
             }
-            // The person's own message still reaches the session as a turn, as
-            // it does with mailboxes off; another session's does not.
-            if !own_child && sender.is_some() && target.no_mailbox {
-                anyhow::bail!(mj_core::refusal::Refusal::unusable(
-                    "target session was started with --no-mailbox and accepts no messages from other sessions"
-                ));
-            }
             if !own_child {
                 if target.state == SessionState::Stopped {
                     anyhow::bail!(mj_core::refusal::Refusal::precondition(
@@ -237,7 +230,7 @@ impl ApiBackend {
             });
         }
 
-        let protocol = if self.exports.agent_mailboxes_enabled_for(&target_session_id) {
+        let protocol = {
             match self.sessions.session(target_session_id.clone()).await {
                 Ok(handle) => {
                     crate::mailbox_outbox::published_worker_relay_protocol(&handle.view())
@@ -251,8 +244,6 @@ impl ApiBackend {
                     None
                 }
             }
-        } else {
-            None
         };
         let mailbox_supported = protocol
             .is_some_and(|protocol| protocol >= mj_core::relay::RELAY_SESSION_MESSAGE_PROTOCOL);
@@ -362,15 +353,15 @@ impl ApiBackend {
         }
 
         let command_id = format!("subagent-input-{}", request.request_id);
-        // A prior accepted turn also fixes the route before checking current
-        // mailbox settings or worker protocol.
+        // A prior accepted turn fixes the route before checking the current
+        // worker protocol.
         if let Some(ordinal) = prompt_acceptance(child, &command_id).await? {
             return Ok(SubagentInputDelivery::Turn { ordinal });
         }
 
         // This is the single routing decision for send_message. Reuse the
         // published protocol fact and compatibility check used by the outbox.
-        let published_protocol = if self.exports.agent_mailboxes_enabled_for(child) {
+        let published_protocol = {
             match self.sessions.session(child.to_owned()).await {
                 Ok(handle) => {
                     crate::mailbox_outbox::published_worker_relay_protocol(&handle.view())
@@ -384,8 +375,6 @@ impl ApiBackend {
                     None
                 }
             }
-        } else {
-            None
         };
         let deliver_via_mailbox = published_protocol.is_some_and(|protocol| {
             crate::mailbox_outbox::trusted_parent_message_protocol_error(Some(protocol)).is_none()

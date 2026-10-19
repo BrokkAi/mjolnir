@@ -267,7 +267,7 @@ impl Controller {
             review: None,
             // A child works in its parent's tree and gets what its parent got.
             no_project_memory: parent.no_project_memory,
-            no_mailbox: parent.no_mailbox,
+            no_github_events: parent.no_github_events,
             target_template_id: parent.target_template_id.clone(),
             resource_allocation: parent.resource_allocation.clone(),
             additional_mounts: parent.additional_mounts.clone(),

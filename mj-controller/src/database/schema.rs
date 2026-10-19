@@ -1501,6 +1501,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Keep notification_epoch for schema-84 compatibility; new notifications do not use it.
     // Breaking: older daemons cannot decode persisted AwaitChildren requests
     // and discard the worker-owned child-wait intent from continuation state.
     if version < 84 {

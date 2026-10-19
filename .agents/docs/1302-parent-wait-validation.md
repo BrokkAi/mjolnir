@@ -2,7 +2,7 @@
 
 The final real Codex run passed on 2026-10-16 after merging upstream's incremental delegation exchange. The combined build retains feed protocol 38 and uses protocol 39 for explicit child waits; its store revision is 84.
 
-The opt-in driver is `tests/e2e/codex_parent_wait.py`. It used named instance `issue-1302-waits`, development CLI/worker binaries, and separate configuration, data, project and copied login files under `/home/jonathan/.cache/mjolnir/build/issue-1302-live-5`. The default instance and real profile homes were not modified.
+The current opt-in live driver is `tests/e2e/parent_report_notifications.py`. The historical 2026-10-16 parent-wait validation used named instance `issue-1302-waits`, development CLI/worker binaries, and separate configuration, data, project and copied login files under `/home/jonathan/.cache/mjolnir/build/issue-1302-live-5`. The default instance and real profile homes were not modified.
 
 Parent: `e1b538b263d64cc2fb59fe1266c30d2e` (`gpt-6.1-sol`, medium).
 Children (`gpt-6-luna`, high): `95ea37960ca45fea0abd75b9d5951e8e` (delayed-a), `ae8d330e20746fc5adac41f5478d1f79` (delayed-b).

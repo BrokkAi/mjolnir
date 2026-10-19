@@ -45,6 +45,27 @@ pub(super) fn edit_in_place(existing: &str, loaded: &str, updated: &str) -> Opti
             }
         }
     }
+    // The legacy veto was folded during loading. Compare GitHub against
+    // the actual file so saving writes the moved switch before removing it.
+    if raw
+        .get("mailbox")
+        .and_then(|mailbox| mailbox.get("enabled"))
+        == Some(&toml::Value::Boolean(false))
+        && raw
+            .get("github")
+            .and_then(|github| github.get("watch"))
+            .and_then(|watch| watch.get("enabled"))
+            .is_none()
+    {
+        match raw.get("github") {
+            Some(github) => {
+                loaded.insert("github".into(), github.clone());
+            }
+            None => {
+                loaded.remove("github");
+            }
+        }
+    }
     let updated_table = updated.parse::<toml::Table>().ok()?;
     let source = updated.parse::<Document>().ok()?;
     let mut next_position = usize::MAX / 2;

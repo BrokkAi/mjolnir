@@ -1154,7 +1154,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
         managed_worktree: None,
         review: None,
         no_project_memory: false,
-        no_mailbox: false,
+        no_github_events: false,
         target_template_id: "podman-old".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),

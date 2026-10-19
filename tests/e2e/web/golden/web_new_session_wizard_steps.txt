@@ -459,6 +459,6 @@ Start
 Cancel
 controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"fake","bundle_id":"","target_id":"local","project_directory":"/work/a","create_managed_worktree":true,"subagents":{"mode":"native"}}]
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"fake","bundle_id":"","target_id":"local","project_directory":"/work/a","create_managed_worktree":true,"subagents":{"mode":"native"},"no_github_events":false}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"fake","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
 project creation requests: 0

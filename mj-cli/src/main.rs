@@ -2549,7 +2549,7 @@ mod tests {
                 managed_worktree: None,
                 review: None,
                 no_project_memory: false,
-                no_mailbox: false,
+                no_github_events: false,
                 target_template_id: "podman".into(),
                 resource_allocation: None,
                 additional_mounts: Vec::new(),

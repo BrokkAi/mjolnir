@@ -1,5 +1,5 @@
 Session: session-mailbox
-1: External events:
+1: Mailbox events:
   - Comment on your PR #12 by alice: The first comment line.
   - New PR #4623 Model Rust built-in macro values for CQ07
   - Comment on your PR #4623 by alice: Please check the ‹macro› case.

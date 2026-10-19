@@ -173,8 +173,8 @@ pub struct WorkerLaunchConfig {
     /// the `mj-agents` MCP server's `handback` tool. Children suppress native delegation.
     #[serde(default)]
     pub handback_tool: bool,
-    /// Mailbox hook policy captured from the daemon config at worker launch.
-    /// Running workers pick up changes on their next resume or restart.
+    /// Legacy wire flag retained for older workers. New workers ignore it.
+    /// Mailbox delivery and hooks are always present in protocol-41 workers.
     #[serde(default = "default_agent_mailboxes_enabled")]
     pub agent_mailboxes_enabled: bool,
     /// Whether a delegating parent may choose the subtle task type. False when
@@ -418,15 +418,14 @@ pub fn resolve_subagent_mcp_role(
     subagents: &crate::subagent::SubagentPolicy,
     managed_subagent: bool,
     handback_tool: bool,
-    agent_mailboxes_enabled: bool,
+    _legacy_agent_mailboxes_enabled: bool,
     message_mcp_staged: bool,
 ) -> Option<crate::subagent::SubagentMcpRole> {
     subagents.parent_role().or_else(|| {
         if managed_subagent {
             handback_tool.then_some(crate::subagent::SubagentMcpRole::Child)
         } else {
-            (agent_mailboxes_enabled && message_mcp_staged)
-                .then_some(crate::subagent::SubagentMcpRole::MessageOnly)
+            message_mcp_staged.then_some(crate::subagent::SubagentMcpRole::MessageOnly)
         }
     })
 }

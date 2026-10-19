@@ -1287,7 +1287,7 @@ fn in_place_drain_waits_for_mutations_and_durable_effects_but_not_wait_or_list()
     for action in mutating {
         assert!(super::subagent_mutations_pending(&[request(action)], false));
     }
-    let observations = [Action::ListAgents, Action::WaitAgents];
+    let observations = [Action::ListAgents, Action::LegacyWaitAgents];
     assert!(
         observations
             .iter()

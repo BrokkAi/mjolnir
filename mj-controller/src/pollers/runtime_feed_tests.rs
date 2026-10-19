@@ -42,7 +42,7 @@ fn session_record(id: &str) -> SessionRecord {
         managed_worktree: None,
         review: None,
         no_project_memory: false,
-        no_mailbox: false,
+        no_github_events: false,
         target_template_id: "target-1".into(),
         resource_allocation: None,
         container_cpus: None,

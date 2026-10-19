@@ -164,7 +164,7 @@ pub fn import_native_session(
             managed_worktree: None,
             review: None,
             no_project_memory: false,
-            no_mailbox: false,
+            no_github_events: false,
             target_template_id: raw_project.map_or(target_id, |(_, raw_target_id)| raw_target_id),
             resource_allocation: None,
             additional_mounts: Vec::new(),

@@ -66,14 +66,15 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 17
+version = 18
 ```
 
-The only accepted top-level keys are:
+The top-level keys are listed below. The legacy `[mailbox] enabled` switch is
+also accepted when reading and is saved under `[github.watch] enabled`.
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `17`. |
+| `version` | integer | yes | none | Configuration schema version; use `18`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed only in the resume dialog. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
@@ -88,7 +89,7 @@ The only accepted top-level keys are:
 | `keys` | table | no | default `[keys]` values | The prefix key and every command's key bindings. |
 | `profiles` | table of named tables | no | empty | Named harness accounts and homes. |
 | `bundles` | table of named tables | no | empty | Named repository sets for managed targets. |
-| `github` | table | no | empty | Optional GitHub App credentials shared by the controller. |
+| `github` | table | no | App absent; watcher enabled | GitHub App credentials and event watcher settings. |
 | `machines` | table of named tables | no | empty | Named hosts sessions run on. `local` is implied even when it is absent. |
 | `targets` | table of named tables | no | empty | Named runtimes, each naming the machine it runs on. |
 | `subagents` | table | no | default `[subagents]` values | Global task choices and limits for Mjolnir-owned child agents. |
@@ -99,7 +100,7 @@ and `theme` under **Interface**. This is a presentation grouping: the prefix
 remains at `keys.prefix`, while the other three fields remain at the top level
 in `config.toml`.
 
-A missing or empty file is treated as an empty version 17 configuration. Older
+A missing or empty file is treated as an empty version 18 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -399,6 +400,18 @@ With `enabled = false`:
 Workers read the switch when they start, so a running session follows the
 new value after it is next resumed or restarted. In the terminal the switch
 is **Settings → Privacy → Jev (hosted service)**.
+
+## GitHub events `[github.watch]`
+
+`enabled` is a boolean that defaults to `true`. Together with `[jev] enabled`,
+it controls the GitHub watcher as an event source. Jev classifies GitHub
+activity. Neither setting disables mailbox delivery, peer messages, child
+reports, drain hooks or idle wakes. The old `[mailbox] enabled` key still loads
+silently. If either key is `false`, the watcher stays off. Saving writes only
+`[github.watch] enabled`, preserving an older `false` setting.
+
+`mj new --no-github-events` prevents the GitHub watcher from registering the session
+as a delivery target. Sub-agents inherit the flag. This is the flag's only effect.
 
 ## Automatic continuation `[continuation]`
 
@@ -1044,7 +1057,7 @@ and runtime kinds from the examples above rather than mixing fields between
 variants.
 
 ```toml
-version = 17
+version = 18
 
 [phone]
 enabled = true

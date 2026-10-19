@@ -2834,6 +2834,7 @@ async function commitNew() {
     project_directory: bare ? newDraft.projectDirectory : null,
     create_managed_worktree: bare && draft.worktreeOptions?.available === true && draft.createManagedWorktree,
     subagents: draft.subagents,
+    no_github_events: false,
   };
   if (!bare) body.additional_mounts = mountEditorWire(draft.mountEditors[draft.targetId]);
   const kind = targetResourceKind(draft.targetId);

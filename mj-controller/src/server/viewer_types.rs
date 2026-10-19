@@ -13,10 +13,6 @@ pub(crate) fn take_viewer_row_visits() -> usize {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSnapshot {
-    /// Controller-owned runtime policy for the API event route. This is not
-    /// published to clients; it follows config reloads with each snapshot.
-    #[serde(skip, default = "default_agent_mailboxes_enabled")]
-    pub(crate) agent_mailboxes_enabled: bool,
     #[serde(default)]
     pub profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
     #[serde(
@@ -54,10 +50,6 @@ pub struct ViewerSnapshot {
     /// Recent failed launches, independent of provisional session rollback.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launch_failures: Vec<ViewerLaunchFailure>,
-}
-
-fn default_agent_mailboxes_enabled() -> bool {
-    true
 }
 
 /// The public wire shape remains an array; in-process publications share rows.
@@ -213,7 +205,6 @@ impl ViewerSnapshot {
                     retry_assessment_pending: false,
                     quota_recovery: None,
                     is_subagent_session: state.is_subagent_session(&session.id),
-                    no_mailbox: session.no_mailbox,
                     id: session.id.clone(),
                     publication_state: session.publication_state(),
                     managed_checkout_kind: checkout.managed_worktree().map(|owned| owned.kind),
@@ -398,7 +389,6 @@ impl ViewerSnapshot {
             })
             .collect();
         Self {
-            agent_mailboxes_enabled: config.agent_mailboxes_enabled(),
             profile_capabilities: Default::default(),
             last_subagent_policy: state.last_subagent_policy.clone(),
             subagents_configured: config.subagents.is_configured(),
@@ -443,10 +433,6 @@ pub struct ViewerSession {
     /// viewer or API JSON contract.
     #[serde(skip, default)]
     pub(crate) is_subagent_session: bool,
-    /// In-process copy of the session's mailbox opt-out, read by the mailbox
-    /// event route; not part of the viewer or API JSON contract.
-    #[serde(skip, default)]
-    pub(crate) no_mailbox: bool,
     #[serde(default)]
     pub subagents: mj_core::subagent::SubagentPolicy,
     /// Commit the workspace started checked out at, when one was named.

@@ -822,9 +822,6 @@ impl DurableRelay {
         {
             self.persist_snapshot()?;
         }
-        if stage_snapshot {
-            self.changes.send_replace(());
-        }
         Ok(ordinal)
     }
 

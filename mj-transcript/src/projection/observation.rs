@@ -853,7 +853,7 @@ fn mailbox_queued_notice(
             mutation,
             event,
             MAILBOX_EVENTS_NOTICE_ID.to_owned(),
-            format!("External events:\n  - {}", description.transcript_line),
+            format!("Mailbox events:\n  - {}", description.transcript_line),
         );
     }
 }

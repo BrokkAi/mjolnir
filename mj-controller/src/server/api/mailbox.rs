@@ -8,20 +8,9 @@ pub(super) async fn enqueue_event(
     Path(session_id): Path<String>,
     Json(request): Json<MailboxEventRequest>,
 ) -> Result<(StatusCode, Json<MailboxEventResponse>), ApiFailure> {
-    let mailboxes_enabled = {
+    {
         let snapshot = state.snapshot_rx.borrow();
-        let session = require_session_record(&snapshot, &session_id)?;
-        if session.no_mailbox {
-            return Err(ApiFailure::conflict(
-                "this session was started with --no-mailbox and has no agent mailbox",
-            ));
-        }
-        snapshot.agent_mailboxes_enabled
-    };
-    if !mailboxes_enabled {
-        return Err(ApiFailure::conflict(
-            "agent mailboxes are disabled; enable Agent mailboxes and Jev in Settings",
-        ));
+        require_session_record(&snapshot, &session_id)?;
     }
     if request.key.trim().is_empty() || request.key.len() > MAX_EVENT_KEY_BYTES {
         return Err(ApiFailure::bad_request(format!(

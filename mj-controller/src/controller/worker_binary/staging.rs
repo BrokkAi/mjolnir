@@ -156,10 +156,7 @@ pub(super) fn configure_claude_subagent_mcp(
                     Path::new(worker_root),
                     Path::new(mj_worker_socket_name()),
                 )),
-                // Claude's own limit is on silence, which the server's
-                // progress notifications break, so this keeps the full
-                // advertised wait. Naming the harness anyway keeps both
-                // delivery paths explicit.
+                // The harness selects the matching MCP server instructions.
                 "--harness",
                 mj_core::config::HarnessKind::Claude.id(),
                 "--role",
@@ -222,14 +219,7 @@ pub(super) fn configure_claude_subagent_mcp(
 /// Add the worker-owned mailbox drain to Claude's session-private settings.
 /// The command is finalized on the worker because remote worker roots are
 /// home-relative while staging runs on the controller.
-pub(super) fn configure_claude_mailbox_hook(
-    profile_stage: &Path,
-    worker_root: &str,
-    enabled: bool,
-) -> Result<()> {
-    if !enabled {
-        return Ok(());
-    }
+pub(super) fn configure_claude_mailbox_hook(profile_stage: &Path, worker_root: &str) -> Result<()> {
     let path = profile_stage.join("settings.json");
     let worker = mj_core::target_path::join(Path::new(worker_root), Path::new("hel"));
     let socket = mj_core::target_path::join(Path::new(worker_root), Path::new("control.sock"));

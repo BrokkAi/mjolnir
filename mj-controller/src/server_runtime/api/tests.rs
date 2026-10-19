@@ -657,163 +657,6 @@ impl SessionControlBackend for FakeControl {
     }
 }
 
-/// A parent actor that applies prompt queue commands to a shared view, so
-/// reconciliation tests can observe queueing, coalescing, and withdrawal.
-#[derive(Clone)]
-struct WaitPromptSession {
-    inner: FakeSession,
-    view: Arc<std::sync::Mutex<ManagedSessionView>>,
-    accepted: Arc<std::sync::Mutex<BTreeMap<String, RelayCommand>>>,
-}
-
-impl SessionHandleBackend for WaitPromptSession {
-    fn search_prompts(
-        &self,
-        bundle_id: String,
-        scope: mj_core::storage::HistoryScope,
-        query: String,
-    ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
-        self.inner.search_prompts(bundle_id, scope, query)
-    }
-    fn review_state(&self) -> BoxFuture<'_, Result<mj_client::session::ReviewState>> {
-        self.inner.review_state()
-    }
-    fn config_result(&self, command_id: String) -> BoxFuture<'_, Result<Option<Option<String>>>> {
-        self.inner.config_result(command_id)
-    }
-    fn clone_box(&self) -> Box<dyn SessionHandleBackend> {
-        Box::new(self.clone())
-    }
-    fn session_id(&self) -> &str {
-        self.inner.session_id()
-    }
-    fn view(&self) -> ManagedSessionView {
-        self.view.lock().unwrap().clone()
-    }
-    fn is_stopped(&self) -> bool {
-        false
-    }
-    fn has_changed(&self) -> Result<bool> {
-        Ok(false)
-    }
-    fn changed(&mut self) -> BoxFuture<'_, Result<ManagedSessionView>> {
-        Box::pin(std::future::pending())
-    }
-    fn enqueue_submit(
-        &self,
-        command_id: String,
-        command: RelayCommand,
-    ) -> BoxFuture<'_, Result<PendingRelaySubmit>> {
-        // The real relay is idempotent by command ID across reconnects.
-        let mut accepted = self.accepted.lock().unwrap();
-        if let Some(previous) = accepted.get(&command_id) {
-            assert_eq!(previous, &command);
-            let ordinal = self.inner.accepted_ordinal;
-            return Box::pin(async move {
-                Ok(PendingRelaySubmit::new(Box::pin(
-                    async move { Ok(ordinal) },
-                )))
-            });
-        }
-        accepted.insert(command_id.clone(), command.clone());
-        drop(accepted);
-        let _ = self
-            .inner
-            .submitted
-            .send((command_id.clone(), command.clone()));
-        let view = self.view.clone();
-        let accepted_ordinal = self.inner.accepted_ordinal;
-        Box::pin(async move {
-            let mut view = view.lock().unwrap();
-            let Some(snapshot) = view.snapshot.as_mut() else {
-                anyhow::bail!("the test parent has no snapshot")
-            };
-            match command {
-                RelayCommand::Prompt { prompt } => {
-                    let content = prompt
-                        .iter()
-                        .map(serde_json::to_value)
-                        .collect::<std::result::Result<Vec<_>, _>>()?;
-                    if snapshot.materialized.active_turn.is_some() {
-                        snapshot.materialized.queued_prompts.push(
-                            mj_core::state::MaterializedQueuedPrompt {
-                                command_id,
-                                kind: Default::default(),
-                                content,
-                                queued_at_ms: 1,
-                                accepted_ordinal: Some(accepted_ordinal),
-                            },
-                        );
-                    } else {
-                        snapshot.materialized.execution =
-                            MaterializedExecutionState::Running { started_at_ms: 1 };
-                        snapshot.materialized.active_turn =
-                            Some(mj_core::state::MaterializedTurn {
-                                command_id: command_id.clone(),
-                                accepted_ordinal: Some(accepted_ordinal),
-                                turn_start_position: accepted_ordinal,
-                                started_at_ms: 1,
-                                steered_into: None,
-                            });
-                        snapshot.materialized.transcript.push(Arc::new(
-                            mj_core::transcript::TranscriptItem {
-                                stable_id: format!("user-{command_id}"),
-                                position: accepted_ordinal,
-                                latest_content_event_ordinal: None,
-                                created_at_ms: 1,
-                                last_changed_at_ms: 1,
-                                body: mj_core::transcript::TranscriptBody::User { content },
-                            },
-                        ));
-                    }
-                }
-                RelayCommand::RemoveQueuedPrompt { queued_command_id } => {
-                    snapshot
-                        .materialized
-                        .queued_prompts
-                        .retain(|prompt| prompt.command_id != queued_command_id);
-                }
-                _ => {}
-            }
-            Ok(PendingRelaySubmit::new(Box::pin(async move {
-                Ok(accepted_ordinal)
-            })))
-        })
-    }
-    fn enqueue_sync(&self) -> BoxFuture<'_, Result<PendingRelaySync>> {
-        Box::pin(async { Ok(PendingRelaySync::new(Box::pin(async { Ok(()) }))) })
-    }
-    fn respond_elicitation(
-        &self,
-        elicitation_id: String,
-        response: mj_core::elicitation::ElicitationResponse,
-    ) -> BoxFuture<'_, Result<()>> {
-        self.inner.respond_elicitation(elicitation_id, response)
-    }
-    fn stop_background_task(&self, background_task_id: String) -> BoxFuture<'_, Result<()>> {
-        self.inner.stop_background_task(background_task_id)
-    }
-    fn reviewer(
-        &self,
-        role: Option<String>,
-        action: mj_client::session::ReviewerAction,
-    ) -> BoxFuture<'_, Result<mj_client::session::ReviewerOutcome>> {
-        self.inner.reviewer(role, action)
-    }
-}
-
-struct WaitPromptControl(WaitPromptSession);
-
-impl SessionControlBackend for WaitPromptControl {
-    fn session(&self, session_id: String) -> BoxFuture<'_, Result<SessionHandle>> {
-        let session = self.0.clone();
-        Box::pin(async move {
-            anyhow::ensure!(session_id == session.session_id(), "unknown session");
-            Ok(SessionHandle::new(session))
-        })
-    }
-}
-
 /// A running parent session, as the durable record the tool path reads it
 /// from. Only the fields the tool path uses carry meaning.
 struct ParentExports(SessionRecord);
@@ -872,7 +715,7 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         managed_worktree: None,
         review: None,
         no_project_memory: false,
-        no_mailbox: false,
+        no_github_events: false,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
@@ -2001,18 +1844,18 @@ struct ParkingExports {
     unparks: std::sync::atomic::AtomicUsize,
     unpark_failure: Option<String>,
     defer_unpark: std::sync::atomic::AtomicBool,
-    mailboxes_enabled: bool,
+    protocol: u32,
 }
 
 impl ParkingExports {
     fn new(child_state: SessionState, unpark_failure: Option<&str>) -> Arc<Self> {
-        Self::with_mailboxes_enabled(child_state, unpark_failure, false)
+        Self::with_modern_worker(child_state, unpark_failure, false)
     }
 
-    fn with_mailboxes_enabled(
+    fn with_modern_worker(
         child_state: SessionState,
         unpark_failure: Option<&str>,
-        mailboxes_enabled: bool,
+        modern_worker: bool,
     ) -> Arc<Self> {
         let mut child = parent_record("child-1", "helper");
         child.state = child_state;
@@ -2025,7 +1868,11 @@ impl ParkingExports {
             unparks: Default::default(),
             unpark_failure: unpark_failure.map(str::to_owned),
             defer_unpark: Default::default(),
-            mailboxes_enabled,
+            protocol: if modern_worker {
+                mj_core::relay::RELAY_PROTOCOL_VERSION
+            } else {
+                mj_core::relay::RELAY_LEGACY_MAILBOX_PROTOCOL
+            },
         })
     }
 
@@ -2048,10 +1895,6 @@ impl ParkingExports {
 }
 
 impl ExportRuntime for ParkingExports {
-    fn agent_mailboxes_enabled(&self) -> bool {
-        self.mailboxes_enabled
-    }
-
     fn startup_status(&self, session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
         Box::pin(load_startup_status(session_id))
     }
@@ -2089,33 +1932,19 @@ impl ExportRuntime for ParkingExports {
     }
 }
 
-type WaitPromptBackend = (
-    Arc<ApiBackend>,
-    Arc<ParkingExports>,
-    Arc<std::sync::Mutex<ManagedSessionView>>,
-    mpsc::UnboundedReceiver<(String, RelayCommand)>,
-);
-
-fn wait_prompt_backend(view: ManagedSessionView) -> WaitPromptBackend {
+fn report_backend(view: ManagedSessionView) -> (Arc<ApiBackend>, Arc<ParkingExports>) {
     let exports = ParkingExports::new(SessionState::Parked, None);
-    let shared_view = Arc::new(std::sync::Mutex::new(view));
-    let (submitted, received) = mpsc::unbounded_channel();
-    let session = WaitPromptSession {
-        inner: FakeSession {
+    let backend = Arc::new(ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
             session_id: "parent-1".into(),
             accepted_ordinal: 30,
-            submitted,
-            view: None,
-        },
-        view: shared_view.clone(),
-        accepted: Default::default(),
-    };
-    let backend = Arc::new(ApiBackend::new(
-        SessionControl::new(WaitPromptControl(session)),
+            submitted: mpsc::unbounded_channel().0,
+            view: Some(view),
+        })),
         running_states(),
         exports.clone(),
     ));
-    (backend, exports, shared_view, received)
+    (backend, exports)
 }
 
 fn active_parent_view(text: &str) -> ManagedSessionView {
@@ -2296,12 +2125,8 @@ fn parking_backend(
     Arc<ApiBackend>,
     mpsc::UnboundedReceiver<(String, RelayCommand)>,
 ) {
-    parking_backend_with_protocol(
-        exports,
-        failures,
-        on_failure,
-        mj_core::relay::RELAY_PROTOCOL_VERSION,
-    )
+    let protocol = exports.protocol;
+    parking_backend_with_protocol(exports, failures, on_failure, protocol)
 }
 
 fn parking_backend_with_protocol(
@@ -2362,12 +2187,18 @@ fn reserved_parking_backend(
     mpsc::UnboundedReceiver<(String, RelayCommand)>,
 ) {
     let (submitted, delivered) = mpsc::unbounded_channel();
+    let mut view = ready_view("model");
+    view.snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .relay_protocol_version = Some(exports.protocol);
     let session = ScriptedSession {
         inner: FakeSession {
             session_id: "child-1".into(),
             accepted_ordinal: 9,
             submitted,
-            view: Some(ready_view("model")),
+            view: Some(view),
         },
         failures: Arc::default(),
         on_failure: Arc::new(|| {}),
@@ -2390,7 +2221,7 @@ async fn send_message_to_parked_child_unparks_once_and_legacy_request_uses_the_s
     }
     let _writer = crate::database::install_isolated_test_writer();
     store_parent_and_child("child-1");
-    let exports = ParkingExports::with_mailboxes_enabled(SessionState::Parked, None, true);
+    let exports = ParkingExports::with_modern_worker(SessionState::Parked, None, true);
     let (backend, _) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
     let request = mj_core::subagent::SubagentToolRequest {
         originating_command_id: None,
@@ -2537,8 +2368,8 @@ async fn send_message_to_parked_child_unparks_once_and_legacy_request_uses_the_s
         Some(command_id.as_str())
     );
 
-    // A daemon retry keeps the durable route even if mailbox settings change.
-    let retry_exports = ParkingExports::with_mailboxes_enabled(SessionState::Parked, None, false);
+    // A daemon retry keeps the durable route even if the worker protocol changes.
+    let retry_exports = ParkingExports::with_modern_worker(SessionState::Parked, None, false);
     let (retry_backend, mut retry_delivered) = parking_backend(retry_exports, &[], Arc::new(|| {}));
     let retried = retry_backend
         .execute_subagent_tool("parent-1".into(), request)
@@ -2616,8 +2447,10 @@ async fn send_message_to_peer_queues_typed_event_with_the_calling_session_as_sen
     }
     let _writer = crate::database::install_isolated_test_writer();
     store_parent_and_child("child-1");
-    crate::database::save_session(&parent_record("peer-1", "peer")).unwrap();
-    let exports = ParkingExports::with_mailboxes_enabled(SessionState::Running, None, true);
+    let mut peer = parent_record("peer-1", "peer");
+    peer.no_github_events = true;
+    crate::database::save_session(&peer).unwrap();
+    let exports = ParkingExports::with_modern_worker(SessionState::Running, None, true);
     let (backend, _) = message_backend_for_session(
         "peer-1",
         exports,
@@ -2731,7 +2564,7 @@ async fn send_message_resolves_only_authorized_hex_session_prefixes() {
     let own_child_record = save_child(OWN_CHILD, CALLER, "own helper");
     save_child(FOREIGN_CHILD, OTHER_PARENT, "foreign helper");
 
-    let exports = ParkingExports::with_mailboxes_enabled(SessionState::Running, None, true);
+    let exports = ParkingExports::with_modern_worker(SessionState::Running, None, true);
     exports
         .records
         .lock()
@@ -2759,7 +2592,7 @@ async fn send_message_resolves_only_authorized_hex_session_prefixes() {
 
     let unique_backend = backend_for(
         UNIQUE_PEER,
-        ParkingExports::with_mailboxes_enabled(SessionState::Running, None, true),
+        ParkingExports::with_modern_worker(SessionState::Running, None, true),
     );
     let unique_request = send("unique-prefix", "BC87D30841");
     let unique = unique_backend
@@ -2787,7 +2620,7 @@ async fn send_message_resolves_only_authorized_hex_session_prefixes() {
 
     let exact = backend_for(
         EXACT_PEER,
-        ParkingExports::with_mailboxes_enabled(SessionState::Running, None, true),
+        ParkingExports::with_modern_worker(SessionState::Running, None, true),
     )
     .execute_subagent_tool(CALLER.into(), send("exact-wins", EXACT_PEER))
     .await;
@@ -2816,7 +2649,7 @@ async fn send_message_resolves_only_authorized_hex_session_prefixes() {
 
     let refusals = backend_for(
         UNIQUE_PEER,
-        ParkingExports::with_mailboxes_enabled(SessionState::Running, None, true),
+        ParkingExports::with_modern_worker(SessionState::Running, None, true),
     );
     let ambiguous = refusals
         .execute_subagent_tool(CALLER.into(), send("ambiguous", "deadbeef"))
@@ -2916,7 +2749,7 @@ async fn send_message_refuses_stopped_self_foreign_child_unknown_target_and_chil
     stopped.state = SessionState::Stopped;
     crate::database::save_session(&stopped).unwrap();
     crate::database::save_session(&parent_record("peer-1", "peer")).unwrap();
-    let exports = ParkingExports::with_mailboxes_enabled(SessionState::Running, None, true);
+    let exports = ParkingExports::with_modern_worker(SessionState::Running, None, true);
     let (backend, mut delivered) = message_backend_for_session(
         "peer-1",
         exports,
@@ -2980,7 +2813,7 @@ async fn send_message_to_protocol_34_peer_queues_a_labeled_turn() {
     let _writer = crate::database::install_isolated_test_writer();
     store_parent_and_child("child-1");
     crate::database::save_session(&parent_record("peer-1", "peer")).unwrap();
-    let exports = ParkingExports::with_mailboxes_enabled(SessionState::Running, None, true);
+    let exports = ParkingExports::with_modern_worker(SessionState::Running, None, true);
     let (backend, mut delivered) = message_backend_for_session(
         "peer-1",
         exports,
@@ -3073,7 +2906,7 @@ async fn send_message_uses_a_turn_for_a_protocol_33_child() {
     }
     let _writer = crate::database::install_isolated_test_writer();
     store_parent_and_child("child-1");
-    let exports = ParkingExports::with_mailboxes_enabled(SessionState::Running, None, true);
+    let exports = ParkingExports::with_modern_worker(SessionState::Running, None, true);
     let (backend, mut delivered) = parking_backend_with_protocol(
         exports,
         &[],
@@ -3113,45 +2946,6 @@ async fn send_message_uses_a_turn_for_a_protocol_33_child() {
             .unwrap()
             .is_empty(),
         "an older worker receives a queued turn instead of a mailbox row"
-    );
-}
-
-#[tokio::test]
-async fn send_message_uses_a_turn_when_mailboxes_are_disabled() {
-    if !isolated_parked_test("send_message_uses_a_turn_when_mailboxes_are_disabled") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    let exports = ParkingExports::with_mailboxes_enabled(SessionState::Running, None, false);
-    let (backend, mut delivered) = parking_backend(exports, &[], Arc::new(|| {}));
-    let request = mj_core::subagent::SubagentToolRequest {
-        originating_command_id: None,
-        request_id: "mailboxes-disabled".into(),
-        created_at_ms: mj_core::clock::epoch_millis(),
-        action: mj_core::subagent::SubagentToolAction::SendMessage {
-            child_session_id: "child-1".into(),
-            message: "continue the task".into(),
-        },
-    };
-
-    let answer = backend
-        .execute_subagent_tool("parent-1".into(), request)
-        .await;
-    assert!(!answer.is_error, "{}", answer.message);
-    let result: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
-    assert_eq!(result["status"], "submitted");
-    assert_eq!(result["via"], "turn");
-    assert_eq!(result["child_session_id"], "child-1");
-    assert!(result.get("session_id").is_none());
-    assert!(matches!(
-        delivered.try_recv().unwrap().1,
-        RelayCommand::Prompt { .. }
-    ));
-    assert!(
-        crate::database::pending_mailbox_events(10)
-            .unwrap()
-            .is_empty()
     );
 }
 
@@ -3253,16 +3047,10 @@ async fn outbox_fails_queued_parent_message_for_protocol_33_and_reports_it() {
         running_states(),
         exports,
     ));
-    for (request_id, action) in [
-        (
-            "list-after-message-failure",
-            mj_core::subagent::SubagentToolAction::ListAgents,
-        ),
-        (
-            "wait-after-message-failure",
-            mj_core::subagent::SubagentToolAction::WaitAgents,
-        ),
-    ] {
+    for (request_id, action) in [(
+        "list-after-message-failure",
+        mj_core::subagent::SubagentToolAction::ListAgents,
+    )] {
         let answer = backend
             .execute_subagent_tool(
                 "parent-1".into(),
@@ -3390,8 +3178,8 @@ fn hold_child_start(_backend: &ApiBackend) -> String {
 }
 
 #[tokio::test]
-async fn queued_input_waits_for_initial_prompt_when_mailboxes_are_disabled() {
-    if !isolated_parked_test("queued_input_waits_for_initial_prompt_when_mailboxes_are_disabled") {
+async fn queued_input_waits_for_initial_prompt_with_a_legacy_worker() {
+    if !isolated_parked_test("queued_input_waits_for_initial_prompt_with_a_legacy_worker") {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
@@ -3529,9 +3317,6 @@ async fn a_child_recorded_failed_after_a_refused_startup_reports_its_cause() {
             serde_json::from_str::<serde_json::Value>(&answer.message).unwrap()
         }
     };
-    let waited = call(mj_core::subagent::SubagentToolAction::WaitAgents).await;
-    assert_eq!(waited["agents"][0]["state"], "error", "{waited}");
-    assert_eq!(waited["agents"][0]["output"], cause, "{waited}");
     let listed = call(mj_core::subagent::SubagentToolAction::ListAgents).await;
     assert_eq!(listed["agents"][0]["state"], "error", "{listed}");
 }
@@ -3745,12 +3530,8 @@ async fn queued_input_is_visible_through_wait_and_list_agents() {
             running_states(),
             ParkingExports::new(SessionState::Parked, None),
         ));
-        for wait in [false, true] {
-            let action = if wait {
-                mj_core::subagent::SubagentToolAction::WaitAgents
-            } else {
-                mj_core::subagent::SubagentToolAction::ListAgents
-            };
+        {
+            let action = mj_core::subagent::SubagentToolAction::ListAgents;
             let answer = backend
                 .execute_subagent_tool(
                     "parent-1".into(),
@@ -3794,13 +3575,6 @@ async fn queued_input_is_visible_through_wait_and_list_agents() {
             );
             assert_eq!(child["pending_inputs"], child["pending_messages"]);
             assert_eq!(child["input_deliveries"], child["message_deliveries"]);
-            if wait {
-                assert_eq!(
-                    value["status"],
-                    mj_core::subagent::WAIT_STATUS_STILL_RUNNING
-                );
-                assert_ne!(child["output"], "old result");
-            }
         }
     }
 }
@@ -4163,865 +3937,6 @@ fn record_finished_child(
     );
 }
 
-fn add_child_relation(child_id: &str) {
-    let session = parent_record(child_id, "helper");
-    crate::database::save_subagent_session(
-        &session,
-        &mj_core::subagent::SubagentRecord {
-            child_session_id: child_id.into(),
-            parent_session_id: "parent-1".into(),
-            task_name: format!("task {child_id}"),
-            profile_id: "helper".into(),
-            model: None,
-            effort: None,
-            working_directory: Default::default(),
-            initial_prompt: "inspect".into(),
-            request_key: format!("request-{child_id}"),
-            created_at: "2026-09-24T00:00:00Z".into(),
-            noticed_turn: None,
-            reported_finish: None,
-            handback_tool: true,
-        },
-    )
-    .unwrap();
-}
-
-async fn durable_wait(backend: &Arc<ApiBackend>, request_id: &str) -> serde_json::Value {
-    let answer = backend
-        .execute_subagent_tool_durable(
-            "parent-1".into(),
-            mj_core::subagent::SubagentToolRequest {
-                originating_command_id: None,
-                request_id: request_id.into(),
-                created_at_ms: mj_core::clock::epoch_millis(),
-                action: mj_core::subagent::SubagentToolAction::WaitAgents,
-            },
-        )
-        .await
-        .unwrap();
-    assert!(!answer.result.is_error, "{}", answer.result.message);
-    serde_json::from_str(&answer.result.message).unwrap()
-}
-
-// Hard-won: 8c73d3a8f: steering must retire the old wait without consuming a later child report.
-#[tokio::test]
-async fn worker_completed_wait_is_retired_without_collecting_child_reports() {
-    if !isolated_parked_test("worker_completed_wait_is_retired_without_collecting_child_reports") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    record_finished_child("child-1", "task-1", "still collectible", 3, 9, 7);
-    let mut view = ready_view("model");
-    let yielded = serde_json::json!({"status": "interrupted", "agents": [], "waited_seconds": 1});
-    view.snapshot.as_mut().unwrap().subagent_completions.push(
-        mj_core::subagent::SubagentCompletion::from(&mj_core::subagent::SubagentToolResult {
-            request_id: "yielded-wait".into(),
-            completed_at_ms: mj_core::clock::epoch_millis(),
-            is_error: false,
-            message: yielded.to_string(),
-        }),
-    );
-    // A replacement daemon sees the worker's completed answer before it
-    // attempts to resume the durable wait. Even a ready report stays unread.
-    let (backend, _, _, _) = wait_prompt_backend(view);
-    assert_eq!(durable_wait(&backend, "yielded-wait").await, yielded);
-    assert!(
-        crate::database::load_subagent("child-1")
-            .unwrap()
-            .unwrap()
-            .reported_finish
-            .is_none()
-    );
-    assert_eq!(durable_wait(&backend, "yielded-wait").await, yielded);
-    let next = durable_wait(&backend, "next-wait").await;
-    assert_eq!(next["agents"][0]["output"], "still collectible");
-}
-
-/// A wait commits its report marker with the durable result. Replaying the
-/// same request returns that exact result, while a later request omits output.
-#[tokio::test]
-async fn wait_reports_a_finished_child_once_and_replay_preserves_the_answer() {
-    if !isolated_parked_test("wait_reports_a_finished_child_once_and_replay_preserves_the_answer") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    record_finished_child("child-1", "task-1", "The lockfile is current.", 3, 9, 7);
-    let exports = ParkingExports::new(SessionState::Parked, None);
-    let (backend, _delivered) = parking_backend(exports, &[], Arc::new(|| {}));
-
-    let request = mj_core::subagent::SubagentToolRequest {
-        originating_command_id: None,
-        request_id: "first-wait".into(),
-        created_at_ms: mj_core::clock::epoch_millis(),
-        action: mj_core::subagent::SubagentToolAction::WaitAgents,
-    };
-    let first_result = backend
-        .execute_subagent_tool_durable("parent-1".into(), request.clone())
-        .await
-        .unwrap();
-    let first: serde_json::Value = serde_json::from_str(&first_result.result.message).unwrap();
-    assert_eq!(
-        first["status"],
-        mj_core::subagent::WAIT_STATUS_REPORTED,
-        "{first}"
-    );
-    let agent = &first["agents"][0];
-    assert_eq!(agent["state"], "completed", "{agent}");
-    assert_eq!(agent["output"], "The lockfile is current.", "{agent}");
-    assert_eq!(agent["parked"], true, "{agent}");
-    assert!(
-        crate::database::load_subagent("child-1")
-            .unwrap()
-            .unwrap()
-            .reported_finish
-            .is_some(),
-        "the finish marker is durable with the answer"
-    );
-
-    let replay = backend
-        .execute_subagent_tool_durable("parent-1".into(), request)
-        .await
-        .unwrap();
-    assert_eq!(replay, first_result, "replay must not recompute the wait");
-
-    let later = durable_wait(&backend, "second-wait").await;
-    assert_eq!(
-        later["status"],
-        mj_core::subagent::WAIT_STATUS_NOTHING_TO_WAIT_FOR,
-        "{later}"
-    );
-    assert_eq!(later["agents"][0]["child_session_id"], "child-1", "{later}");
-    assert_eq!(
-        later["agents"][0]["output"],
-        serde_json::Value::Null,
-        "{later}"
-    );
-}
-
-// Hard-won: #1302: restoring an undelivered report must renew its withdrawn notification.
-#[tokio::test]
-async fn an_undelivered_fallback_answer_restores_its_report_for_the_next_wait() {
-    if !isolated_parked_test("an_undelivered_fallback_answer_restores_its_report_for_the_next_wait")
-    {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    record_finished_child("child-1", "task-1", "fallback report", 3, 9, 7);
-    let (backend, _, shared_view, mut submitted) =
-        wait_prompt_backend(active_parent_view("working"));
-    backend.ensure_parent_wait_prompt("parent-1").await.unwrap();
-    let (first_notification_id, _) = submitted.try_recv().unwrap();
-
-    let first = backend
-        .execute_subagent_tool_durable(
-            "parent-1".into(),
-            mj_core::subagent::SubagentToolRequest {
-                originating_command_id: None,
-                request_id: "fallback-wait".into(),
-                created_at_ms: mj_core::clock::epoch_millis(),
-                action: mj_core::subagent::SubagentToolAction::WaitAgents,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&first.result.message).unwrap()["status"],
-        mj_core::subagent::WAIT_STATUS_REPORTED
-    );
-    assert!(
-        crate::database::load_subagent("child-1")
-            .unwrap()
-            .unwrap()
-            .reported_finish
-            .is_some()
-    );
-
-    let stored = crate::database::load_delegation("parent-1", "fallback-wait")
-        .unwrap()
-        .unwrap()
-        .1
-        .unwrap();
-    assert_eq!(stored.reported_finishes.len(), 1);
-    for _ in 0..2 {
-        crate::database::unreport_delegation_finishes(
-            "parent-1".into(),
-            stored.reported_finishes.clone(),
-        )
-        .unwrap();
-    }
-    assert_eq!(
-        crate::database::subagent_notification_epochs("parent-1").unwrap()["child-1"],
-        1
-    );
-    assert!(
-        crate::database::load_subagent("child-1")
-            .unwrap()
-            .unwrap()
-            .reported_finish
-            .is_none(),
-        "a worker timeout fallback did not deliver the durable answer"
-    );
-
-    backend.ensure_parent_wait_prompt("parent-1").await.unwrap();
-    let next_notification_id = std::iter::from_fn(|| submitted.try_recv().ok())
-        .find_map(|(id, command)| matches!(command, RelayCommand::Prompt { .. }).then_some(id))
-        .expect("a restored report needs a fresh notification admission");
-    assert_ne!(first_notification_id, next_notification_id);
-    assert_eq!(
-        shared_view
-            .lock()
-            .unwrap()
-            .snapshot
-            .as_ref()
-            .unwrap()
-            .materialized
-            .queued_prompts
-            .len(),
-        1
-    );
-    let next = durable_wait(&backend, "fallback-wait-retry").await;
-    assert_eq!(next["status"], mj_core::subagent::WAIT_STATUS_REPORTED);
-    assert_eq!(next["agents"][0]["output"], "fallback report", "{next}");
-}
-
-#[tokio::test]
-async fn renaming_a_terminally_failed_child_does_not_report_it_again() {
-    if !isolated_parked_test("renaming_a_terminally_failed_child_does_not_report_it_again") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    let (backend, exports, _, mut submitted) = wait_prompt_backend(active_parent_view("working"));
-    {
-        let mut records = exports.records.lock().unwrap();
-        let child = records.get_mut("child-1").unwrap();
-        child.state = SessionState::Error;
-        child.last_error = Some("worker exited during startup".into());
-        child.updated_at = "2026-10-06T12:00:00Z".into();
-    }
-
-    let first = durable_wait(&backend, "terminal-first").await;
-    assert_eq!(first["status"], mj_core::subagent::WAIT_STATUS_REPORTED);
-    assert_eq!(first["agents"][0]["output"], "worker exited during startup");
-    assert!(matches!(
-        crate::database::load_subagent("child-1")
-            .unwrap()
-            .unwrap()
-            .reported_finish,
-        Some(mj_core::subagent::SubagentFinishIdentity::Terminal {
-            last_completed_ordinal: None,
-            ..
-        })
-    ));
-
-    {
-        let mut records = exports.records.lock().unwrap();
-        let child = records.get_mut("child-1").unwrap();
-        child.session_title_override = Some("renamed helper".into());
-        child.updated_at = "2026-10-06T13:00:00Z".into();
-    }
-    let second = durable_wait(&backend, "terminal-after-rename").await;
-    assert_eq!(
-        second["status"],
-        mj_core::subagent::WAIT_STATUS_NOTHING_TO_WAIT_FOR,
-        "mutable session metadata does not create a new finish"
-    );
-    assert_eq!(second["agents"][0]["output"], serde_json::Value::Null);
-    backend.ensure_parent_wait_prompt("parent-1").await.unwrap();
-    assert!(submitted.try_recv().is_err());
-}
-
-/// A child resumed with send_input has a new turn span and can report again.
-#[tokio::test]
-async fn wait_reports_a_second_finish_after_send_input() {
-    if !isolated_parked_test("wait_reports_a_second_finish_after_send_input") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    record_finished_child("child-1", "task-1", "first report", 3, 9, 7);
-    let exports = ParkingExports::new(SessionState::Parked, None);
-    let (backend, mut delivered) = parking_backend(exports, &[], Arc::new(|| {}));
-    let first = durable_wait(&backend, "first-wait").await;
-    assert_eq!(
-        first["status"],
-        mj_core::subagent::WAIT_STATUS_REPORTED,
-        "{first}"
-    );
-
-    let input = send_input(&backend, "one more thing").await;
-    assert!(!input.is_error, "{}", input.message);
-    let accepted_ordinal =
-        serde_json::from_str::<serde_json::Value>(&input.message).unwrap()["turn_id"]
-            .as_u64()
-            .unwrap();
-    assert_eq!(delivered_prompts(&mut delivered), ["one more thing"]);
-    record_finished_child(
-        "child-1",
-        "task-2",
-        "second report",
-        13,
-        19,
-        accepted_ordinal,
-    );
-    let second = durable_wait(&backend, "second-wait").await;
-    assert_eq!(
-        second["status"],
-        mj_core::subagent::WAIT_STATUS_REPORTED,
-        "{second}"
-    );
-    assert_eq!(second["agents"][0]["output"], "second report", "{second}");
-    assert_ne!(
-        crate::database::load_subagent("child-1")
-            .unwrap()
-            .unwrap()
-            .reported_finish,
-        None
-    );
-}
-
-/// A wait stays blocked while children run and answers as soon as any one
-/// child finishes, with output only for that child.
-#[tokio::test]
-async fn wait_blocks_until_any_child_finishes_and_hides_other_output() {
-    if !isolated_parked_test("wait_blocks_until_any_child_finishes_and_hides_other_output") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
-    conversation.execution = MaterializedExecutionState::Running { started_at_ms: 1 };
-    conversation.applied_event_ordinal = 2;
-    conversation.applied_event_digest = format!("{:064x}", 2);
-    crate::database::save_materialized_session(&conversation).unwrap();
-    let exports = ParkingExports::new(SessionState::Running, None);
-    exports
-        .records
-        .lock()
-        .unwrap()
-        .insert("child-2".into(), parent_record("child-2", "helper"));
-    let (backend, _delivered) = parking_backend(exports, &[], Arc::new(|| {}));
-    let waiting = {
-        let backend = backend.clone();
-        tokio::spawn(async move { durable_wait(&backend, "blocking-wait").await })
-    };
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(100), async {
-            while waiting.is_finished() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .is_ok()
-    );
-    assert!(!waiting.is_finished(), "wait should block before a finish");
-
-    add_child_relation("child-2");
-    let mut conversation = mj_core::state::MaterializedSession::empty("child-2");
-    conversation.execution = MaterializedExecutionState::Running { started_at_ms: 1 };
-    conversation.applied_event_ordinal = 2;
-    conversation.applied_event_digest = format!("{:064x}", 2);
-    crate::database::save_materialized_session(&conversation).unwrap();
-    record_finished_child("child-2", "task-2", "child two report", 13, 19, 12);
-    let answer = tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
-        .await
-        .expect("wait wakes on one child's finish")
-        .unwrap();
-    assert_eq!(
-        answer["status"],
-        mj_core::subagent::WAIT_STATUS_REPORTED,
-        "{answer}"
-    );
-    let child_one = answer["agents"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|agent| agent["child_session_id"] == "child-1")
-        .unwrap();
-    let child_two = answer["agents"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|agent| agent["child_session_id"] == "child-2")
-        .unwrap();
-    assert_eq!(child_one["output"], serde_json::Value::Null, "{child_one}");
-    assert_eq!(child_two["output"], "child two report", "{child_two}");
-}
-
-// Hard-won: 039633bb6: an in-flight wait collected a newly registered child before startup.
-#[tokio::test]
-async fn wait_keeps_a_child_spawned_during_the_wait_unfinished_until_its_first_answer() {
-    if !isolated_parked_test(
-        "wait_keeps_a_child_spawned_during_the_wait_unfinished_until_its_first_answer",
-    ) {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
-    conversation.execution = MaterializedExecutionState::Running { started_at_ms: 1 };
-    conversation.applied_event_ordinal = 2;
-    conversation.applied_event_digest = format!("{:064x}", 2);
-    crate::database::save_materialized_session(&conversation).unwrap();
-    let exports = ParkingExports::new(SessionState::Running, None);
-    let (backend, _delivered) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
-    let mut waiting = {
-        let backend = backend.clone();
-        tokio::spawn(async move { durable_wait(&backend, "wait-before-spawn").await })
-    };
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut waiting)
-            .await
-            .is_err(),
-        "the parent is already waiting on its running child"
-    );
-
-    // Registration publishes an idle projection before the startup group or
-    // accepted prompt exists. An in-flight wait discovers this child too.
-    let mut child = parent_record("child-2", "helper");
-    child.state = SessionState::Provisioning;
-    exports
-        .records
-        .lock()
-        .unwrap()
-        .insert(child.id.clone(), child);
-    add_child_relation("child-2");
-    crate::database::save_materialized_session(&mj_core::state::MaterializedSession::empty(
-        "child-2",
-    ))
-    .unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut waiting)
-            .await
-            .is_err(),
-        "registration must not complete the wait before the child's first prompt"
-    );
-    record_finished_child("child-1", "task-1", "first child report", 3, 9, 7);
-    let answer = tokio::time::timeout(Duration::from_secs(2), waiting)
-        .await
-        .expect("the genuine report wakes the wait")
-        .unwrap();
-    let child = answer["agents"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|agent| agent["child_session_id"] == "child-2")
-        .unwrap();
-    assert_eq!(child["state"], "running", "{answer}");
-    assert_eq!(child["finished"], false, "{answer}");
-    assert!(
-        crate::database::load_subagent("child-2")
-            .unwrap()
-            .unwrap()
-            .reported_finish
-            .is_none()
-    );
-
-    // Launching and accepted-but-not-yet-answered must also stay unfinished.
-    exports
-        .records
-        .lock()
-        .unwrap()
-        .get_mut("child-2")
-        .unwrap()
-        .state = SessionState::Running;
-    let (_, children) = backend.wait_children("parent-1").await.unwrap();
-    assert!(
-        !children
-            .iter()
-            .find(|child| child.relation.child_session_id == "child-2")
-            .unwrap()
-            .finished
-    );
-    crate::database::record_subagent_prompt("child-2", 12).unwrap();
-    let (_, children) = backend.wait_children("parent-1").await.unwrap();
-    assert!(
-        !children
-            .iter()
-            .find(|child| child.relation.child_session_id == "child-2")
-            .unwrap()
-            .finished
-    );
-    // A persisted false finish from an older daemon must not suppress the
-    // child's eventual real answer. Seed exactly the old terminal identity.
-    let request = mj_core::subagent::SubagentToolRequest {
-        originating_command_id: None,
-        request_id: "old-false-wait".into(),
-        created_at_ms: 1,
-        action: mj_core::subagent::SubagentToolAction::WaitAgents,
-    };
-    crate::database::prepare_delegation(
-        "parent-1".into(),
-        crate::database::PreparedDelegation {
-            request: request.clone(),
-            turn_target: None,
-            spawn: None,
-        },
-    )
-    .unwrap();
-    crate::database::record_delegation_result_with_reports(
-        "parent-1".into(),
-        crate::database::StoredDelegationResult {
-            result: mj_core::subagent::SubagentToolResult {
-                request_id: request.request_id,
-                completed_at_ms: 1,
-                is_error: false,
-                message: "{}".into(),
-            },
-            reported_finishes: vec![(
-                "child-2".into(),
-                mj_core::subagent::SubagentFinishIdentity::Terminal {
-                    state: "completed".into(),
-                    detail: None,
-                    last_completed_ordinal: None,
-                },
-            )],
-        },
-    )
-    .unwrap();
-    record_finished_child("child-2", "task-2", "real second report", 13, 19, 12);
-    let answer = durable_wait(&backend, "wait-after-first-answer").await;
-    let child = answer["agents"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|agent| agent["child_session_id"] == "child-2")
-        .unwrap();
-    assert_eq!(child["output"], "real second report", "{answer}");
-    assert_eq!(child["finished"], true, "{answer}");
-
-    // A genuine startup failure still ends the wait without any first turn.
-    let mut failed = parent_record("child-3", "helper");
-    failed.state = SessionState::Error;
-    failed.last_error = Some("worker launch failed: no space left on device".into());
-    exports
-        .records
-        .lock()
-        .unwrap()
-        .insert(failed.id.clone(), failed);
-    add_child_relation("child-3");
-    let answer = tokio::time::timeout(
-        Duration::from_secs(2),
-        durable_wait(&backend, "wait-startup-error"),
-    )
-    .await
-    .expect("startup failure must not hang wait");
-    let child = answer["agents"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|agent| agent["child_session_id"] == "child-3")
-        .unwrap();
-    assert_eq!(child["state"], "error", "{answer}");
-    assert_eq!(child["finished"], true, "{answer}");
-    assert_eq!(
-        child["output"], "worker launch failed: no space left on device",
-        "{answer}"
-    );
-    exports
-        .records
-        .lock()
-        .unwrap()
-        .get_mut("child-3")
-        .unwrap()
-        .state = SessionState::Stopped;
-    let answer = tokio::time::timeout(
-        Duration::from_secs(2),
-        durable_wait(&backend, "wait-closed-before-first-turn"),
-    )
-    .await
-    .expect("closed children must not hang wait");
-    assert_eq!(
-        answer["status"],
-        mj_core::subagent::WAIT_STATUS_NOTHING_TO_WAIT_FOR,
-        "{answer}"
-    );
-}
-
-/// A wait with no child to watch answers immediately, and the reminder turn
-/// remains a report even though it has no ordinary turn span.
-/// I1-3 and I1-4: the reminder turn has no acceptance ordinal, but answers the
-/// prompt it reminded about and must still be reported immediately.
-// Hard-won: e1207055: a handback in a reminder turn had no acceptance ordinal so wait hung indefinitely.
-#[tokio::test]
-async fn wait_returns_nothing_to_wait_for_and_reports_reminder_turns() {
-    if !isolated_parked_test("wait_returns_nothing_to_wait_for_and_reports_reminder_turns") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    crate::database::save_session(&parent_record("parent-1", "parent")).unwrap();
-    let exports = ParkingExports::new(SessionState::Parked, None);
-    let (backend, _delivered) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
-    let started = std::time::Instant::now();
-    let none = durable_wait(&backend, "empty-wait").await;
-    assert_eq!(
-        none["status"],
-        mj_core::subagent::WAIT_STATUS_NOTHING_TO_WAIT_FOR,
-        "{none}"
-    );
-    assert_eq!(none["agents"], serde_json::json!([]), "{none}");
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
-
-    store_parent_and_child("child-1");
-    crate::database::record_subagent_prompt("child-1", 84).unwrap();
-    let reminder = mj_core::subagent::handback_reminder_command_id(103);
-    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
-    conversation.applied_event_ordinal = 120;
-    conversation.applied_event_digest = format!("{:064x}", 120);
-    conversation.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
-        accepted_ordinal: None,
-        turn_start_position: None,
-        completed_ordinal: 118,
-        ..finished_turn(&reminder)
-    });
-    crate::database::save_materialized_session(&conversation).unwrap();
-    assert!(
-        crate::database::record_subagent_handback(
-            "child-1",
-            &mj_core::subagent::SubagentHandback {
-                command_id: reminder,
-                message: "README.md contains 10 words and 6 lines.".into(),
-                recorded_at_ms: 1,
-            },
-        )
-        .unwrap()
-    );
-    let started = std::time::Instant::now();
-    let waited = durable_wait(&backend, "reminder-wait").await;
-    assert_eq!(
-        waited["status"],
-        mj_core::subagent::WAIT_STATUS_REPORTED,
-        "{waited}"
-    );
-    assert_eq!(
-        waited["agents"][0]["output"], "README.md contains 10 words and 6 lines.",
-        "{waited}"
-    );
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
-
-    crate::database::record_subagent_prompt("child-1", 110).unwrap();
-    let progress = load_child_progress("child-1").unwrap();
-    assert!(progress.awaiting_prompt(None), "{progress:?}");
-}
-
-// Hard-won: #1302: reconciliation queued a duplicate wake while its reminder was active.
-#[tokio::test]
-async fn finished_child_queues_one_wait_prompt_for_an_idle_parent() {
-    if !isolated_parked_test("finished_child_queues_one_wait_prompt_for_an_idle_parent") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    record_finished_child("child-1", "task-1", "report", 3, 9, 7);
-    let (backend, _, shared_view, mut submitted) = wait_prompt_backend(ready_view("model"));
-
-    backend.ensure_parent_wait_prompt("parent-1").await.unwrap();
-    let view = shared_view.lock().unwrap().clone();
-    let snapshot = view.snapshot.unwrap();
-    assert!(
-        snapshot.materialized.active_turn.is_some(),
-        "idle parent starts a turn"
-    );
-    backend.ensure_parent_wait_prompt("parent-1").await.unwrap();
-    assert_eq!(
-        shared_view
-            .lock()
-            .unwrap()
-            .snapshot
-            .as_ref()
-            .unwrap()
-            .materialized
-            .queued_prompts
-            .len(),
-        0,
-        "the same report batch cannot queue another model turn"
-    );
-    assert_eq!(delivered_prompts(&mut submitted), [PARENT_WAIT_PROMPT_TEXT]);
-}
-
-#[tokio::test]
-async fn a_later_finish_queues_a_prompt_during_the_active_reminder_turn() {
-    if !isolated_parked_test("a_later_finish_queues_a_prompt_during_the_active_reminder_turn") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    record_finished_child("child-1", "task-a", "report A", 3, 9, 7);
-    let (backend, exports, shared_view, mut submitted) = wait_prompt_backend(ready_view("model"));
-
-    backend.ensure_parent_wait_prompt("parent-1").await.unwrap();
-    assert!(
-        shared_view
-            .lock()
-            .unwrap()
-            .snapshot
-            .as_ref()
-            .unwrap()
-            .materialized
-            .active_turn
-            .is_some(),
-        "the first reminder starts the parent's turn"
-    );
-    assert_eq!(delivered_prompts(&mut submitted), [PARENT_WAIT_PROMPT_TEXT]);
-
-    let collected = durable_wait(&backend, "collect-a").await;
-    assert_eq!(collected["agents"][0]["output"], "report A", "{collected}");
-    backend.ensure_parent_wait_prompt("parent-1").await.unwrap();
-
-    add_child_relation("child-b");
-    let mut child_b = parent_record("child-b", "helper");
-    child_b.state = SessionState::Parked;
-    exports
-        .records
-        .lock()
-        .unwrap()
-        .insert("child-b".into(), child_b);
-    record_finished_child("child-b", "task-b", "report B", 4, 12, 10);
-    backend.ensure_parent_wait_prompt("parent-1").await.unwrap();
-
-    let view = shared_view.lock().unwrap().clone();
-    assert_eq!(
-        view.snapshot.unwrap().materialized.queued_prompts.len(),
-        1,
-        "B finishing after A was collected queues a reminder during the same turn"
-    );
-    assert_eq!(delivered_prompts(&mut submitted), [PARENT_WAIT_PROMPT_TEXT]);
-}
-
-#[tokio::test]
-async fn parent_with_outstanding_wait_does_not_get_a_wait_prompt() {
-    if !isolated_parked_test("parent_with_outstanding_wait_does_not_get_a_wait_prompt") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    record_finished_child("child-1", "task-1", "report", 3, 9, 7);
-    let mut view = active_parent_view("working");
-    view.snapshot.as_mut().unwrap().subagent_requests.push(
-        mj_core::subagent::SubagentToolRequest {
-            originating_command_id: Some("parent-turn".into()),
-            request_id: "pending-wait".into(),
-            created_at_ms: 1,
-            action: mj_core::subagent::SubagentToolAction::WaitAgents,
-        },
-    );
-    let (backend, _, _, mut submitted) = wait_prompt_backend(view);
-
-    backend.ensure_parent_wait_prompt("parent-1").await.unwrap();
-
-    assert!(submitted.try_recv().is_err());
-}
-
-// Hard-won: #1302: notification reconciliation could race report collection and leave an empty wake.
-#[tokio::test]
-async fn queued_wait_prompt_coalesces_and_wait_withdraws_it() {
-    if !isolated_parked_test("queued_wait_prompt_coalesces_and_wait_withdraws_it") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    record_finished_child("child-1", "task-1", "report", 3, 9, 7);
-    let (backend, _, shared_view, mut submitted) =
-        wait_prompt_backend(active_parent_view("working"));
-
-    backend.ensure_parent_wait_prompt("parent-1").await.unwrap();
-    backend.ensure_parent_wait_prompt("parent-1").await.unwrap();
-    assert_eq!(
-        shared_view
-            .lock()
-            .unwrap()
-            .snapshot
-            .as_ref()
-            .unwrap()
-            .materialized
-            .queued_prompts
-            .len(),
-        1,
-        "a busy parent keeps one queued reminder"
-    );
-
-    let (answer, reconciled) = tokio::join!(
-        durable_wait(&backend, "wait-withdrawal"),
-        backend.ensure_parent_wait_prompt("parent-1")
-    );
-    reconciled.unwrap();
-    assert_eq!(answer["status"], mj_core::subagent::WAIT_STATUS_REPORTED);
-    assert!(
-        shared_view
-            .lock()
-            .unwrap()
-            .snapshot
-            .as_ref()
-            .unwrap()
-            .materialized
-            .queued_prompts
-            .is_empty()
-    );
-    let commands = std::iter::from_fn(|| submitted.try_recv().ok())
-        .map(|(_, command)| command)
-        .collect::<Vec<_>>();
-    assert!(commands.iter().any(|command| matches!(
-        command,
-        RelayCommand::Prompt { prompt }
-            if prompt.iter().any(|block| matches!(
-                block,
-                ContentBlock::Text(text) if text.text == PARENT_WAIT_PROMPT_TEXT
-            ))
-    )));
-    assert!(
-        commands
-            .iter()
-            .any(|command| matches!(command, RelayCommand::RemoveQueuedPrompt { .. }))
-    );
-}
-
-#[tokio::test]
-async fn closed_child_does_not_queue_a_wait_prompt() {
-    if !isolated_parked_test("closed_child_does_not_queue_a_wait_prompt") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    record_finished_child("child-1", "task-1", "report", 3, 9, 7);
-    let (backend, exports, _, mut submitted) = wait_prompt_backend(active_parent_view("working"));
-    exports.set_child_state(SessionState::Stopped);
-
-    backend.ensure_parent_wait_prompt("parent-1").await.unwrap();
-
-    assert!(submitted.try_recv().is_err());
-    let answer = durable_wait(&backend, "wait-after-close").await;
-    assert_eq!(
-        answer["status"],
-        mj_core::subagent::WAIT_STATUS_NOTHING_TO_WAIT_FOR,
-        "a child stopped by close is outside wait's scope even if it finished first"
-    );
-    assert_eq!(answer["agents"], serde_json::json!([]));
-}
-
-#[tokio::test]
-async fn startup_failure_queues_a_wait_prompt() {
-    if !isolated_parked_test("startup_failure_queues_a_wait_prompt") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    let (backend, exports, _, mut submitted) = wait_prompt_backend(active_parent_view("working"));
-    {
-        let mut records = exports.records.lock().unwrap();
-        let child = records.get_mut("child-1").unwrap();
-        child.state = SessionState::Error;
-        child.last_error = Some("worker exited during startup".into());
-        child.updated_at = "2026-10-06T12:00:00Z".into();
-    }
-
-    backend.ensure_parent_wait_prompt("parent-1").await.unwrap();
-
-    assert_eq!(delivered_prompts(&mut submitted), [PARENT_WAIT_PROMPT_TEXT]);
-}
-
 #[test]
 fn startup_cleanup_is_unfinished_even_after_startup_delivery_failed() {
     let mut record = crate::controller::test_support::checkpoint_test_session("child");
@@ -5043,60 +3958,221 @@ fn startup_cleanup_is_unfinished_even_after_startup_delivery_failed() {
     assert!(!finished);
 }
 
-// Hard-won: #1302: waiting for notification must not consume the report that wakes the parent.
 #[tokio::test]
-async fn awaiting_children_arms_a_guarded_wait_without_collecting_reports() {
-    if !isolated_parked_test("awaiting_children_arms_a_guarded_wait_without_collecting_reports") {
+async fn legacy_worker_wait_requests_answer_immediately_without_marking_reports() {
+    if !isolated_parked_test(
+        "legacy_worker_wait_requests_answer_immediately_without_marking_reports",
+    ) {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
     store_parent_and_child("child-1");
-    let (backend, exports, _, mut submitted) = wait_prompt_backend(active_parent_view("work"));
-    exports.set_child_state(SessionState::Running);
-    let request = |id: &str| mj_core::subagent::SubagentToolRequest {
-        originating_command_id: Some("parent-turn".into()),
-        request_id: id.into(),
-        created_at_ms: mj_core::clock::epoch_millis(),
-        action: mj_core::subagent::SubagentToolAction::AwaitChildren,
-    };
-    let result = backend
-        .execute_subagent_tool_durable("parent-1".into(), request("await-1"))
-        .await
+    record_finished_child("child-1", "task-1", "ready report", 3, 9, 7);
+    let (backend, _) = report_backend(active_parent_view("working"));
+    for (id, wire) in [("old-wait", "wait_agents"), ("old-await", "await_children")] {
+        let request: mj_core::subagent::SubagentToolRequest = serde_json::from_value(
+            serde_json::json!({"request_id":id, "created_at_ms":1, "action":{"action":wire}}),
+        )
         .unwrap();
-    assert!(!result.result.is_error, "{}", result.result.message);
-    let result: serde_json::Value = serde_json::from_str(&result.result.message).unwrap();
-    assert_eq!(result["status"], "awaiting_children");
-    let (_, command) = submitted.try_recv().unwrap();
-    assert!(
-        matches!(command, RelayCommand::SetSubagentWait { active_prompt_id, waiting: true }
-        if active_prompt_id == "parent-turn")
-    );
-    assert!(submitted.try_recv().is_err());
+        let answer = tokio::time::timeout(
+            Duration::from_secs(1),
+            backend.execute_subagent_tool_durable("parent-1".into(), request.clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!answer.result.is_error);
+        let payload: serde_json::Value = serde_json::from_str(&answer.result.message).unwrap();
+        assert_eq!(payload["status"], "reports_arrive_as_messages");
+        assert!(
+            payload["next_action"]
+                .as_str()
+                .unwrap()
+                .contains("end your turn")
+        );
+        assert!(answer.reported_finishes.is_empty());
+        assert!(
+            crate::database::load_subagent("child-1")
+                .unwrap()
+                .unwrap()
+                .reported_finish
+                .is_none()
+        );
+        // Recovery must replace a stored wait answer as well as answer a new call.
+        let mut request = request;
+        request.request_id = format!("recover-{id}");
+        crate::database::prepare_delegation(
+            "parent-1".into(),
+            crate::database::PreparedDelegation {
+                request: request.clone(),
+                turn_target: None,
+                spawn: None,
+            },
+        )
+        .unwrap();
+        crate::database::record_delegation_result(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolResult {
+                request_id: request.request_id.clone(),
+                completed_at_ms: 1,
+                is_error: false,
+                message: "old wait answer".into(),
+            },
+        )
+        .unwrap();
+        let recovered_id = request.request_id.clone();
+        let recovered = backend
+            .execute_subagent_tool_durable("parent-1".into(), request)
+            .await
+            .unwrap();
+        let recovered: serde_json::Value = serde_json::from_str(&recovered.result.message).unwrap();
+        assert_eq!(recovered, payload);
+        assert!(
+            crate::database::load_delegation("parent-1", &recovered_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    let events = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].event_json.contains("ready report"));
+}
 
-    exports.set_child_state(SessionState::Parked);
-    record_finished_child("child-1", "task-1", "still uncollected", 3, 9, 7);
-    let result = backend
-        .execute_subagent_tool_durable("parent-1".into(), request("await-2"))
-        .await
-        .unwrap();
-    assert!(!result.result.is_error, "{}", result.result.message);
-    let result: serde_json::Value = serde_json::from_str(&result.result.message).unwrap();
-    assert_eq!(result["status"], "reports_ready");
-    let changes = std::iter::from_fn(|| submitted.try_recv().ok())
-        .map(|(_, command)| command)
-        .collect::<Vec<_>>();
-    assert!(matches!(
-        changes.as_slice(),
-        [
-            RelayCommand::SetSubagentWait { waiting: true, .. },
-            RelayCommand::SetSubagentWait { waiting: false, .. }
-        ]
-    ));
-    let collected = durable_wait(&backend, "collect-after-notification").await;
-    assert_eq!(collected["agents"][0]["output"], "still uncollected");
-    let collected_again = durable_wait(&backend, "collect-once").await;
-    assert_eq!(
-        collected_again["status"],
-        mj_core::subagent::WAIT_STATUS_NOTHING_TO_WAIT_FOR
+#[tokio::test]
+async fn report_reconcile_recovers_unreported_finishes_and_ignores_parent_opt_out() {
+    if !isolated_parked_test(
+        "report_reconcile_recovers_unreported_finishes_and_ignores_parent_opt_out",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    record_finished_child(
+        "child-1",
+        "task-1",
+        "report recovered after restart",
+        3,
+        9,
+        7,
     );
+    let (backend, exports) = report_backend(active_parent_view("working"));
+    exports
+        .records
+        .lock()
+        .unwrap()
+        .get_mut("parent-1")
+        .unwrap()
+        .no_github_events = true;
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].target_session_id, "parent-1");
+    assert!(!pending[0].unpark);
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&pending[0].event_json).unwrap();
+    assert!(event.wake);
+    let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = &event.body else {
+        panic!("wrong event: {event:?}")
+    };
+    assert_eq!(
+        report.output.as_deref(),
+        Some("report recovered after restart")
+    );
+    assert_eq!(report.task_name, "audit deps");
+    assert_eq!(report.parked, Some(true));
+    assert!(
+        crate::database::load_subagent("child-1")
+            .unwrap()
+            .unwrap()
+            .reported_finish
+            .is_some()
+    );
+    // A protocol-33 worker gets the same report as supported plain text.
+    let mut remote = crate::session_manager::spawn_remote_session_manager().unwrap();
+    remote
+        .targets
+        .send_replace(vec![crate::session_manager::RelaySessionTarget {
+            session_id: "parent-1".into(),
+            spec: crate::targets::CommandSpec::new("true", Vec::<String>::new()),
+            worker_recovery: None,
+            project_memory: None,
+        }]);
+    for protocol in [32, 33, 40, mj_core::relay::RELAY_SUBAGENT_FINISHED_PROTOCOL] {
+        let mut view = ready_view("model");
+        let snapshot = view.snapshot.as_mut().unwrap();
+        snapshot.materialized.session_id = "parent-1".into();
+        snapshot.operational.session_id = "parent-1".into();
+        snapshot.operational.relay_protocol_version = Some(protocol);
+        remote
+            .publisher
+            .publish("parent-1".into(), view)
+            .await
+            .unwrap();
+        remote
+            .control
+            .wait_for_session("parent-1", Duration::from_secs(5))
+            .await
+            .unwrap();
+        if protocol < mj_core::relay::RELAY_LEGACY_MAILBOX_PROTOCOL {
+            assert_eq!(
+                crate::mailbox_outbox::deliver_mailbox_event(
+                    exports.clone(),
+                    &remote.control,
+                    "parent-1",
+                    event.clone(),
+                    false
+                )
+                .await
+                .unwrap(),
+                crate::mailbox_outbox::MailboxEventDelivery::Pending
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), remote.requests.recv())
+                    .await
+                    .is_err()
+            );
+            continue;
+        }
+        let control = remote.control.clone();
+        let exports = exports.clone();
+        let event = event.clone();
+        let delivery = tokio::spawn(async move {
+            crate::mailbox_outbox::deliver_mailbox_event(
+                exports, &control, "parent-1", event, false,
+            )
+            .await
+        });
+        let request = tokio::time::timeout(Duration::from_secs(5), remote.requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let crate::session_manager::RemoteSessionRequest::Submit { command, reply, .. } = request
+        else {
+            panic!("expected mailbox submit")
+        };
+        let RelayCommand::DeliverMailboxEvent { event } = command else {
+            panic!("expected mailbox event")
+        };
+        if protocol < mj_core::relay::RELAY_SUBAGENT_FINISHED_PROTOCOL {
+            let mj_core::mailbox::MailboxEventBody::PlainText { text } = event.body else {
+                panic!("older worker needs plain text")
+            };
+            assert!(
+                text.contains("report recovered after restart")
+                    && text.contains("Mjolnir wrote this message")
+            );
+        } else {
+            assert!(matches!(
+                event.body,
+                mj_core::mailbox::MailboxEventBody::SubagentFinished { .. }
+            ));
+        }
+        reply.send(Ok(40)).unwrap();
+        assert_eq!(
+            delivery.await.unwrap().unwrap(),
+            crate::mailbox_outbox::MailboxEventDelivery::Accepted(40)
+        );
+    }
 }

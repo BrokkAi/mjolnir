@@ -257,24 +257,7 @@ pub fn delegation_policy(limit: usize, offers_subtle: bool) -> String {
         .replace("$N", &limit.to_string())
 }
 
-/// Longest time a sub-agent completion wait may remain pending.
-pub const MAX_WAIT_SECONDS: u64 = 3_600;
-
-/// Default `wait` duration before applying the caller harness's ceiling.
-pub const DEFAULT_WAIT_SECONDS: u64 = MAX_WAIT_SECONDS;
-
-/// `status` when this wait returned one or more previously unreported finishes.
-pub const WAIT_STATUS_REPORTED: &str = "reported";
-
-/// `status` when the deadline arrived first. It is an answer, not a failure:
-/// the children are still working and the caller collects them by calling
-/// `wait` again.
-pub const WAIT_STATUS_STILL_RUNNING: &str = "still_running";
-
-/// `status` when this wait found no new reports and no unfinished children.
-pub const WAIT_STATUS_NOTHING_TO_WAIT_FOR: &str = "nothing_to_wait_for";
-
-/// Identity of one finish already returned to the parent by `wait`.
+/// Identity of one finish already sent to the parent in a notification.
 ///
 /// Turn spans distinguish repeated finishes of a child resumed with
 /// `send_message`. Terminal failures without a turn span use their state,
@@ -316,93 +299,8 @@ where
     Ok(value.and_then(|value| value.as_u64()))
 }
 
-/// The longest `wait` a Codex parent can be given. Codex abandons a `tools/call`
-/// after 300 seconds of total elapsed time, and progress notifications do not
-/// reset that timer, so a Codex parent's wait has to fit underneath it: measured
-/// on 2026-09-18 with `codex` 0.60.0, where a call asking for 3600 seconds came
-/// back at 303 seconds with "timed out awaiting tools/call after 300s". The
-/// answer must be written well before that, so the cap leaves room for the
-/// worker's five-second grace and the trip back.
-///
-/// Claude Code's limit is on silence rather than on elapsed time, and the
-/// progress notifications this server sends break that silence, so a Claude
-/// parent keeps the full [`MAX_WAIT_SECONDS`].
-pub const MAX_CODEX_WAIT_SECONDS: u64 = 240;
-
-/// The answer to a capped wait, plus every grace on top of it, must still be
-/// written before the client gives up.
-const _: () = assert!(MAX_CODEX_WAIT_SECONDS + 30 < 300);
-
-/// The longest single `wait` this harness's own MCP client will hold open.
-pub fn max_wait_seconds_for(harness: Option<crate::config::HarnessKind>) -> u64 {
-    match harness {
-        Some(crate::config::HarnessKind::Codex) => MAX_CODEX_WAIT_SECONDS,
-        _ => MAX_WAIT_SECONDS,
-    }
-}
-
-/// How long one `wait` call blocks for this harness. The shim, worker, and
-/// daemon use the same default and harness ceiling so they agree on the answer
-/// deadline without carrying a timeout in the request.
-pub fn subagent_wait_timeout_for(
-    harness: Option<crate::config::HarnessKind>,
-) -> std::time::Duration {
-    std::time::Duration::from_secs(DEFAULT_WAIT_SECONDS.min(max_wait_seconds_for(harness)))
-}
-
-/// What is left of a `wait` call's harness budget, counted from when the caller
-/// made the request rather than from when work on it started. A request that is
-/// executed again after a daemon restart still answers at its original
-/// deadline instead of starting the window over.
-///
-/// The two clocks involved can belong to different hosts, so the elapsed time
-/// is clamped into `0..=budget`: skew cannot extend the harness window or make
-/// the remaining duration negative.
-pub fn remaining_subagent_wait(
-    created_at_ms: i64,
-    harness: Option<crate::config::HarnessKind>,
-    now_ms: i64,
-) -> std::time::Duration {
-    let budget = subagent_wait_timeout_for(harness);
-    let elapsed_ms = now_ms.saturating_sub(created_at_ms).max(0) as u64;
-    budget.saturating_sub(std::time::Duration::from_millis(elapsed_ms))
-}
-
-/// The worker-side answer when the daemon does not answer a `wait` by its
-/// deadline. The worker does not own the child list or their current state.
-pub fn still_running_payload(waited_seconds: u64, note: Option<&str>) -> serde_json::Value {
-    let mut payload = serde_json::json!({
-        "status": WAIT_STATUS_STILL_RUNNING,
-        "waited_seconds": waited_seconds,
-        "agents": [],
-        "next_action": next_action(WAIT_STATUS_STILL_RUNNING, 0, 0),
-    });
-    if let Some(note) = note
-        && let Some(object) = payload.as_object_mut()
-    {
-        object.insert("note".into(), serde_json::Value::String(note.into()));
-    }
-    payload
-}
-
-/// The one sentence that tells the parent what to do with a wait answer.
-/// Child selection is owned by the daemon, so this never names child IDs.
-pub fn next_action(status: &str, new_reports: usize, unfinished: usize) -> String {
-    match status {
-        WAIT_STATUS_REPORTED if unfinished > 0 => format!(
-            "Collected {new_reports} new report(s). {unfinished} child session(s) are still unfinished. With no independent work, call await_children and end the turn; collect reports after notification."
-        ),
-        WAIT_STATUS_REPORTED => format!(
-            "Collected {new_reports} new report(s). Call wait again after a child has more work if you need another report."
-        ),
-        WAIT_STATUS_NOTHING_TO_WAIT_FOR => {
-            "There are no new reports or unfinished children. Call wait again after spawning a child or giving one more input.".to_owned()
-        }
-        _ => {
-            "This harness's wait window ended before a new report was available. With no independent work, call await_children and end the turn. Call wait again after a report-ready notification to collect reports.".to_owned()
-        }
-    }
-}
+/// Guidance for parents whose older workers still call a removed wait tool.
+pub const REPORT_NOTIFICATION_NEXT_ACTION: &str = "Each finished child's report arrives as a message from Mjolnir. Do independent work; when none remains, end your turn with a brief waiting status. Your session stays live and children keep running. While you are working reports arrive between tool calls. When you are idle a report starts a new turn. Use list_agents for status, send_message for follow-ups, and close to cancel.";
 
 /// An inclusive, one-based line range within a file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -471,8 +369,12 @@ pub enum SubagentToolAction {
         child_session_id: String,
         message: String,
     },
-    WaitAgents,
-    AwaitChildren,
+    /// Decode-only request from an older worker; reports now arrive as messages.
+    #[serde(rename = "wait_agents")]
+    LegacyWaitAgents,
+    /// Decode-only request from an older worker; no wait is armed.
+    #[serde(rename = "await_children")]
+    LegacyAwaitChildren,
     /// An accepted request from an older parent worker. New MCP servers do
     /// not expose interrupt, and the daemon rejects this legacy action.
     #[serde(rename = "interrupt_agent")]
@@ -528,8 +430,10 @@ enum SubagentToolActionWire {
         child_session_id: String,
         message: String,
     },
-    WaitAgents,
-    AwaitChildren,
+    #[serde(rename = "wait_agents")]
+    LegacyWaitAgents,
+    #[serde(rename = "await_children")]
+    LegacyAwaitChildren,
     #[serde(rename = "interrupt_agent")]
     LegacyInterruptAgent {
         child_session_id: String,
@@ -624,8 +528,8 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                 child_session_id,
                 message,
             },
-            SubagentToolActionWire::WaitAgents => Self::WaitAgents,
-            SubagentToolActionWire::AwaitChildren => Self::AwaitChildren,
+            SubagentToolActionWire::LegacyWaitAgents => Self::LegacyWaitAgents,
+            SubagentToolActionWire::LegacyAwaitChildren => Self::LegacyAwaitChildren,
             SubagentToolActionWire::LegacyInterruptAgent { child_session_id } => {
                 Self::LegacyInterruptAgent { child_session_id }
             }
@@ -655,6 +559,7 @@ pub struct SubagentCompletion {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_delivery: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Legacy worker completion field, retained for decoding.
     pub interrupted_wait: Option<SubagentWaitInterruption>,
 }
 
@@ -700,29 +605,8 @@ impl From<&SubagentToolResult> for SubagentCompletion {
             completed_at_ms: result.completed_at_ms,
             is_error: result.is_error,
             input_delivery,
-            interrupted_wait: value
-                .as_ref()
-                .filter(|v| v["status"] == "interrupted")
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            interrupted_wait: None,
         }
-    }
-}
-
-impl SubagentCompletion {
-    pub fn interrupted_wait_result(&self) -> Option<SubagentToolResult> {
-        let interruption = self.interrupted_wait.as_ref()?;
-        let mut payload = serde_json::json!({
-            "status": "interrupted", "waited_seconds": interruption.waited_seconds, "agents": [],
-        });
-        if let Some(next_action) = &interruption.next_action {
-            payload["next_action"] = next_action.clone().into();
-        }
-        Some(SubagentToolResult {
-            request_id: self.request_id.clone(),
-            completed_at_ms: self.completed_at_ms,
-            is_error: self.is_error,
-            message: payload.to_string(),
-        })
     }
 }
 
@@ -782,8 +666,8 @@ pub struct SubagentRecord {
         rename = "delivered_turn"
     )]
     pub noticed_turn: Option<u64>,
-    /// The last child finish whose report was durably returned by a parent
-    /// `wait`. This is part of record_json, so adding it needs no SQL migration.
+    /// The last child finish carried by an admitted parent notification.
+    /// Stored in record_json without changing the database schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reported_finish: Option<SubagentFinishIdentity>,
     /// Whether this child was given the `handback` tool. It is decided once,
@@ -846,14 +730,7 @@ impl SubagentMcpRole {
     #[must_use]
     pub fn tool_names(self) -> &'static [&'static str] {
         match self {
-            Self::Parent => &[
-                "spawn",
-                "list_agents",
-                "send_message",
-                "await_children",
-                "wait",
-                "close",
-            ],
+            Self::Parent => &["spawn", "list_agents", "send_message", "close"],
             Self::MessageOnly => &["send_message"],
             Self::Child => &["handback"],
         }
@@ -913,9 +790,8 @@ pub fn handback_prompt_note(report_dir: &str) -> String {
 /// or it never reached the child; either way it is not coming.
 pub const HANDBACK_REMINDER_GRACE_MS: i64 = 30_000;
 
-/// The longest report a child can hand back, and the longest output a `wait`
-/// shows for any child. Details belong in files in the child's report
-/// directory; the parent reads this on every later request it makes.
+/// The longest report a child can hand back or a notification includes.
+/// Details belong in files in the child's report directory.
 pub const MAX_HANDBACK_CHARS: usize = 4_000;
 
 /// Directory under a parent's workspace root that holds its children's report
@@ -1120,8 +996,8 @@ pub enum ReportState {
     Fallback,
 }
 
-/// The one rule for a child's report, shared by the sub-agent `wait`, the
-/// session wait and the reminder.
+/// The rule for a child's report, shared by notifications, session waiting
+/// and the reminder.
 ///
 /// `in_flight` names the commands queued or running on the child, so a sent
 /// reminder is known to be on its way. A child without the tool, and a turn
@@ -1543,8 +1419,8 @@ mod tests {
         for observation in [
             SubagentToolAction::ListProfiles,
             SubagentToolAction::ListAgents,
-            SubagentToolAction::WaitAgents,
-            SubagentToolAction::AwaitChildren,
+            SubagentToolAction::LegacyWaitAgents,
+            SubagentToolAction::LegacyAwaitChildren,
             SubagentToolAction::Handback {
                 message: "done".into(),
             },
@@ -1999,83 +1875,6 @@ mod tests {
     }
 
     #[test]
-    fn wait_uses_the_default_capped_by_its_harness() {
-        use std::time::Duration;
-        assert_eq!(
-            subagent_wait_timeout_for(None),
-            Duration::from_secs(DEFAULT_WAIT_SECONDS)
-        );
-        assert_eq!(
-            subagent_wait_timeout_for(Some(crate::config::HarnessKind::Codex)),
-            Duration::from_secs(MAX_CODEX_WAIT_SECONDS)
-        );
-    }
-
-    // Hard-won: 605bd734: A Codex tools/call timed out at 303 seconds against its 300-second client limit.
-    #[test]
-    fn a_codex_parents_wait_fits_under_that_clients_own_three_hundred_second_limit() {
-        use crate::config::HarnessKind;
-        use std::time::Duration;
-        assert_eq!(
-            subagent_wait_timeout_for(Some(HarnessKind::Codex)),
-            Duration::from_secs(MAX_CODEX_WAIT_SECONDS)
-        );
-        // Claude's limit is on silence, which progress notifications break.
-        assert_eq!(
-            subagent_wait_timeout_for(Some(HarnessKind::Claude)),
-            Duration::from_secs(MAX_WAIT_SECONDS)
-        );
-        assert_eq!(
-            subagent_wait_timeout_for(None),
-            Duration::from_secs(MAX_WAIT_SECONDS)
-        );
-    }
-
-    // Hard-won: 89c54ab1: A daemon restart restarted the full wait timeout and clock skew could extend it.
-    #[test]
-    fn the_remaining_wait_counts_from_the_callers_request_and_survives_clock_skew() {
-        use std::time::Duration;
-        // Forty seconds of the default window have already gone by.
-        assert_eq!(
-            remaining_subagent_wait(1_000_000, None, 1_040_000),
-            Duration::from_secs(DEFAULT_WAIT_SECONDS - 40)
-        );
-        // A request whose deadline has passed answers at once.
-        assert_eq!(
-            remaining_subagent_wait(
-                1_000_000,
-                Some(crate::config::HarnessKind::Codex),
-                1_300_000,
-            ),
-            Duration::ZERO
-        );
-        // A worker clock ahead of the daemon's cannot extend the wait.
-        assert_eq!(
-            remaining_subagent_wait(2_000_000, None, 1_000_000),
-            Duration::from_secs(DEFAULT_WAIT_SECONDS)
-        );
-    }
-
-    #[test]
-    fn an_old_wait_replay_ignores_its_timeout_and_uses_the_default_from_creation() {
-        use crate::config::HarnessKind;
-        use std::time::Duration;
-        let old: SubagentToolRequest = serde_json::from_str(
-            r#"{"request_id":"old-wait","created_at_ms":1000000,"action":{"action":"wait_agents","params":{"timeout_seconds":5}}}"#,
-        )
-        .unwrap();
-        assert_eq!(old.action, SubagentToolAction::WaitAgents);
-        assert_eq!(
-            remaining_subagent_wait(old.created_at_ms, None, 1_010_000),
-            Duration::from_secs(DEFAULT_WAIT_SECONDS - 10)
-        );
-        assert_eq!(
-            remaining_subagent_wait(old.created_at_ms, Some(HarnessKind::Codex), 1_010_000,),
-            Duration::from_secs(MAX_CODEX_WAIT_SECONDS - 10)
-        );
-    }
-
-    #[test]
     fn an_old_interrupt_request_remains_readable_but_is_not_an_offered_tool() {
         let old: SubagentToolRequest = serde_json::from_str(
             r#"{"request_id":"old-interrupt","created_at_ms":1,"action":{"action":"interrupt_agent","params":{"child_session_id":"child"}}}"#,
@@ -2132,9 +1931,17 @@ mod tests {
 
     #[test]
     fn wait_serializes_without_params_and_old_shapes_deserialize() {
-        let wait = SubagentToolAction::WaitAgents;
+        let wait = SubagentToolAction::LegacyWaitAgents;
         let encoded = serde_json::to_value(&wait).unwrap();
         assert_eq!(encoded, serde_json::json!({"action":"wait_agents"}));
+        assert_eq!(
+            serde_json::from_str::<SubagentToolAction>(r#"{"action":"await_children"}"#).unwrap(),
+            SubagentToolAction::LegacyAwaitChildren
+        );
+        for role in [SubagentMcpRole::Parent, SubagentMcpRole::Child] {
+            assert!(!role.tool_names().contains(&"wait"));
+            assert!(!role.tool_names().contains(&"await_children"));
+        }
 
         for old_shape in [
             r#"{"action":"wait_agents"}"#,
@@ -2160,24 +1967,6 @@ mod tests {
         assert!(error.to_string().contains("unexpected"), "{error}");
     }
 
-    #[test]
-    fn wait_uses_the_harness_default_not_a_legacy_timeout() {
-        use crate::config::HarnessKind;
-        use std::time::Duration;
-        assert_eq!(
-            subagent_wait_timeout_for(Some(HarnessKind::Claude)),
-            Duration::from_secs(MAX_WAIT_SECONDS)
-        );
-        assert_eq!(
-            subagent_wait_timeout_for(None),
-            Duration::from_secs(MAX_WAIT_SECONDS)
-        );
-        assert_eq!(
-            subagent_wait_timeout_for(Some(HarnessKind::Codex)),
-            Duration::from_secs(MAX_CODEX_WAIT_SECONDS)
-        );
-    }
-
     // Hard-won: cc7e6a2a: Real child reports of 27 to 62 KB were inlined into waits and triggered 21 repeated polls.
     #[test]
     fn a_long_report_is_cut_on_a_character_boundary_and_says_how_to_get_the_rest() {
@@ -2191,21 +1980,6 @@ mod tests {
         assert!(cut.starts_with(&exact));
         assert!(cut.contains("[truncated: 25 more characters"), "{cut}");
         assert!(cut.contains("send_message"), "{cut}");
-    }
-
-    // Hard-won: 89c54ab1: Timed-out waits were presented as failures instead of a still-running result with an ask-again action.
-    #[test]
-    fn the_worker_side_still_running_answer_does_not_guess_child_state() {
-        let payload = still_running_payload(45, Some("Mjolnir was late"));
-        assert_eq!(payload["status"], WAIT_STATUS_STILL_RUNNING);
-        assert_eq!(payload["waited_seconds"], 45);
-        assert_eq!(payload["agents"], serde_json::json!([]));
-        assert_eq!(payload["note"], "Mjolnir was late");
-        let next = payload["next_action"].as_str().expect("next_action text");
-        assert!(
-            next.contains("Call wait again") && !next.contains("child_session_ids"),
-            "{next}"
-        );
     }
 
     #[test]

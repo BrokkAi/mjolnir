@@ -265,13 +265,9 @@ pub struct StartSessionRequest {
     /// directory. Omitted or false keeps the workspace's project memory.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_project_memory: bool,
-    /// Start the session with no agent mailbox: no GitHub watch events or
-    /// peer messages are routed to it and its harness gets no mailbox hook or
-    /// message tool. Only turns the session's mailbox off; it does not turn
-    /// mailboxes on when `[mailbox]` is off. Omitted or false follows
-    /// `[mailbox]`.
+    /// Exclude this session and its children from GitHub watcher delivery targets.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub no_mailbox: bool,
+    pub no_github_events: bool,
     #[serde(default)]
     pub workspace_id: Option<String>,
     /// Omitted follows the saved default, or anchors model-based profile

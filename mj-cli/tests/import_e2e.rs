@@ -75,7 +75,6 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
     let mut config = Config {
         keys: Default::default(),
         jev: Default::default(),
-        mailbox: Default::default(),
         subagents: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
@@ -204,7 +203,6 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
     let config = Config {
         keys: Default::default(),
         jev: Default::default(),
-        mailbox: Default::default(),
         subagents: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
@@ -340,7 +338,6 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
     let config = Config {
         keys: Default::default(),
         jev: Default::default(),
-        mailbox: Default::default(),
         subagents: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
@@ -583,7 +580,6 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
     let config = Config {
         keys: Default::default(),
         jev: Default::default(),
-        mailbox: Default::default(),
         subagents: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),

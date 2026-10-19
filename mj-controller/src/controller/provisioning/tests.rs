@@ -340,7 +340,7 @@ fn stale_worker_fails_before_any_container_is_created() {
             SessionLaunchOptions {
                 review: None,
                 no_project_memory: false,
-                no_mailbox: false,
+                no_github_events: false,
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                 create_managed_worktree: None,
                 at: None,
@@ -406,7 +406,7 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
             SessionLaunchOptions {
                 review: None,
                 no_project_memory: false,
-                no_mailbox: false,
+                no_github_events: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -492,7 +492,7 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
             SessionLaunchOptions {
                 review: None,
                 no_project_memory: false,
-                no_mailbox: false,
+                no_github_events: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -773,7 +773,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
             SessionLaunchOptions {
                 review: None,
                 no_project_memory: false,
-                no_mailbox: false,
+                no_github_events: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -852,7 +852,7 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         managed_worktree: None,
         review: None,
         no_project_memory: false,
-        no_mailbox: false,
+        no_github_events: false,
         target_template_id: "remote".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
@@ -978,7 +978,7 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
             SessionLaunchOptions {
                 review: None,
                 no_project_memory: false,
-                no_mailbox: false,
+                no_github_events: false,
                 at: None,
                 branch: None,
                 base: None,

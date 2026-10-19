@@ -198,16 +198,6 @@ impl DurableRelay {
 
     fn validate_turn_control(&self, command: &RelayCommand) -> Result<(), String> {
         match command {
-            RelayCommand::SetSubagentWait { active_prompt_id, waiting } => {
-                if self.snapshot.active_prompt.as_ref().map(|p| &p.command_id) != Some(active_prompt_id)
-                    || self.turn_cancellation_pending()
-                {
-                    return Err("The parent turn changed; child waiting was not changed".into());
-                }
-                if *waiting && !self.snapshot.queued_prompts.is_empty() {
-                    return Err("New input is already queued; finish this turn and read it".into());
-                }
-            }
             RelayCommand::BeginCheckpoint { .. } if self.snapshot.steering.as_ref().is_some_and(|s| s.holds_queue()) => return Err("Resolve uncertain steering delivery before checkpointing or moving this session".into()),
             RelayCommand::Steer { .. }
             | RelayCommand::ApplyQueuedFor { .. }
@@ -324,7 +314,17 @@ impl DurableRelay {
         };
         if let Some(handled) = self.snapshot.handled_commands.get(command_id) {
             let accepted_ordinal = {
-                if handled.command != command {
+                // Mailbox keys own event identity across protocol translation.
+                // An older worker may have admitted the PlainText rendering
+                // before an upgrade retries the structured event with this ID.
+                let same_mailbox_event = matches!(
+                    (&handled.command, &command),
+                    (
+                        RelayCommand::DeliverMailboxEvent { event: original },
+                        RelayCommand::DeliverMailboxEvent { event: retry }
+                    ) if original.key == retry.key
+                );
+                if handled.command != command && !same_mailbox_event {
                     return Ok(Err(relay_protocol_error(
                         RelayErrorCode::InvalidRequest,
                         "command ID was already used for a different command",
@@ -1988,13 +1988,7 @@ impl DurableRelay {
             .pending_mailbox_events
             .iter()
             .any(|event| event.wake)
-            && (self.activity_is_idle()
-                || (self
-                    .snapshot
-                    .continuation
-                    .awaiting_children_since_ms
-                    .is_some()
-                    && mj_core::activity::is_quiet(&self.activity_facts())))
+            && mj_core::activity::can_submit(&self.activity_facts())
             && !self.turn_cancellation_pending()
     }
 
@@ -2016,17 +2010,6 @@ impl DurableRelay {
             })
     }
 
-    /// Socket liveness does not mean a cancelled tool call can receive output.
-    /// The turn owner decides this under the same lock as cancellation admission.
-    #[cfg(unix)]
-    pub(crate) fn subagent_wait_turn_is_live(&self, command_id: &str) -> bool {
-        self.snapshot
-            .active_prompt
-            .as_ref()
-            .is_some_and(|prompt| prompt.command_id == command_id)
-            && self.snapshot.cancelling_prompt_id.as_deref() != Some(command_id)
-    }
-
     fn enqueue_mailbox_wake(&mut self) -> Result<()> {
         let events = self.snapshot.pending_mailbox_events.clone();
         anyhow::ensure!(
@@ -2046,20 +2029,6 @@ impl DurableRelay {
             },
         )?;
         Ok(())
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<()> {
-        self.changes.subscribe()
-    }
-
-    /// A wait for this turn must yield so the hook can deliver its steer.
-    /// Use the hook's own eligibility decision, including delivery mode and
-    /// prompt shape, rather than treating every queued prompt as steering.
-    #[cfg(unix)]
-    pub(crate) fn boundary_steer_needs_turn(&self, active_prompt_id: &str) -> bool {
-        self.pending_hook_steering("PostToolBatch")
-            .is_some_and(|(steering, _)| steering.active_prompt_id == active_prompt_id)
     }
 
     fn pending_hook_steering(&self, hook_event: &str) -> Option<(MailboxHookSteering, &str)> {
