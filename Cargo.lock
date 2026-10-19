@@ -736,6 +736,7 @@ dependencies = [
  "ring",
  "rusqlite",
  "rustls",
+ "ruzstd",
  "semver",
  "serde",
  "serde_json",
@@ -5180,6 +5181,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruzstd"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5444,15 +5454,16 @@ dependencies = [
 
 [[package]]
 name = "sessionwiki"
-version = "0.34.2"
+version = "0.34.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c87a9c1e4534abe3558ee9bacba3c41b18a246f3eea83b92a5cb3fe0b155c38c"
+checksum = "e6720c0cfc1b27aac4592639652c6948a4ce795c4a4133e09cf6b6ca96f1c9ea"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
  "dirs 7.0.0",
  "rusqlite",
+ "ruzstd",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -6426,6 +6437,12 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "typenum"

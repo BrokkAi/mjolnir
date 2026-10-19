@@ -450,7 +450,16 @@ pub(super) fn codex_session_metadata(path: &Path) -> Result<Option<CodexSessionM
 pub(super) fn codex_session_summary(path: &Path) -> Result<CodexSessionSummary> {
     let file =
         fs::File::open(path).with_context(|| format!("open Codex session {}", path.display()))?;
-    let mut reader = BufReader::new(file);
+    let mut reader: Box<dyn std::io::BufRead> = if path.extension().is_some_and(|ext| ext == "zst")
+    {
+        let decoder =
+            ruzstd::decoding::StreamingDecoder::new(BufReader::new(file)).map_err(|error| {
+                anyhow::anyhow!("decompress Codex session {}: {error}", path.display())
+            })?;
+        Box::new(BufReader::new(decoder))
+    } else {
+        Box::new(BufReader::new(file))
+    };
     let mut line = String::new();
     let mut filtered = false;
     let mut subagent = false;

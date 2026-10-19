@@ -1031,19 +1031,29 @@ fn native_adapters(config: &mj_core::config::Config) -> Vec<Box<dyn Adapter>> {
         if !seen.insert((profile.kind, profile.home.as_path())) {
             continue;
         }
-        let adapter: Box<dyn Adapter> = match profile.kind {
+        let home = profile.home.clone();
+        match profile.kind {
+            // Codex moves an archived thread's rollout to `archived_sessions`,
+            // and may keep a thread only in its history database after the
+            // rollout is gone. Each place needs its own adapter.
             HarnessKind::Codex => {
-                Box::new(sessionwiki::adapters::Codex::in_home(profile.home.clone()))
+                adapters.push(Box::new(sessionwiki::adapters::Codex::in_home(
+                    home.clone(),
+                )));
+                adapters.push(Box::new(sessionwiki::adapters::Codex::archived_in(
+                    home.clone(),
+                )));
+                adapters.push(Box::new(sessionwiki::adapters::CodexHistory::in_home(home)));
             }
-            HarnessKind::Claude => Box::new(sessionwiki::adapters::ClaudeCode::in_home(
-                profile.home.clone(),
-            )),
-            kind => match HarnessAdapter::in_home(kind, profile.home.clone()) {
-                Some(adapter) => Box::new(adapter),
-                None => continue,
-            },
-        };
-        adapters.push(adapter);
+            HarnessKind::Claude => {
+                adapters.push(Box::new(sessionwiki::adapters::ClaudeCode::in_home(home)));
+            }
+            kind => {
+                if let Some(adapter) = HarnessAdapter::in_home(kind, home) {
+                    adapters.push(Box::new(adapter));
+                }
+            }
+        }
     }
     adapters.extend(sessionwiki::adapters::all().into_iter().filter(|adapter| {
         harness_adapters::harness_for_tool(adapter.name()) == Some(HarnessKind::OpenCode)
@@ -2477,13 +2487,16 @@ pub fn wiki_continuation(
     }
     let harness = harness_adapters::harness_for_tool(tool)
         .with_context(|| format!("Mjolnir cannot continue a {tool} session"))?;
-    let native_session_id = crate::import::native_session_id_from_path(harness, path)
-        .with_context(|| {
-            format!(
-                "no {tool} session id in the indexed path {}",
-                path.display()
-            )
-        })?;
+    let native_session_id = match harness {
+        HarnessKind::Codex => sessionwiki::index::native_id_of(&path.to_string_lossy()),
+        _ => crate::import::native_session_id_from_path(harness, path),
+    }
+    .with_context(|| {
+        format!(
+            "no {tool} session id in the indexed path {}",
+            path.display()
+        )
+    })?;
     Ok(WikiContinuation::Import {
         harness,
         native_session_id,
@@ -2604,16 +2617,20 @@ mod tests {
         /// the stem alone is not the id `mj import codex --session` takes.
         #[test]
         fn a_codex_row_is_imported_with_the_uuid_from_its_rollout_name() {
-            let path = Path::new(
+            for path in [
                 "/home/user/.codex/sessions/2026/09/18/rollout-2026-09-18T09-15-00-7f3a1c20-0b11-4a55-9e0d-2c8a5d6f1b44.jsonl",
-            );
-            assert_eq!(
-                wiki_continuation("abc123", "codex", path, false).unwrap(),
-                WikiContinuation::Import {
-                    harness: HarnessKind::Codex,
-                    native_session_id: "7f3a1c20-0b11-4a55-9e0d-2c8a5d6f1b44".to_owned(),
-                }
-            );
+                "/home/user/.codex/sessions/2026/09/18/rollout-2026-09-18T09-15-00-7f3a1c20-0b11-4a55-9e0d-2c8a5d6f1b44.jsonl.zst",
+                "/home/user/.codex/thread_history_1.sqlite\u{1f}7f3a1c20-0b11-4a55-9e0d-2c8a5d6f1b44",
+            ] {
+                assert_eq!(
+                    wiki_continuation("abc123", "codex", Path::new(path), false).unwrap(),
+                    WikiContinuation::Import {
+                        harness: HarnessKind::Codex,
+                        native_session_id: "7f3a1c20-0b11-4a55-9e0d-2c8a5d6f1b44".to_owned(),
+                    },
+                    "{path}"
+                );
+            }
         }
     }
 
@@ -4491,12 +4508,14 @@ mod tests {
             [
                 "claude-code",
                 "codex",
+                "codex",
+                "codex",
                 "grok-build",
                 "kimi-code",
                 "muse",
                 "opencode"
             ],
-            "one adapter per supported harness, none for tools Mjolnir cannot run"
+            "all stores of supported harnesses, none for tools Mjolnir cannot run"
         );
     }
 
