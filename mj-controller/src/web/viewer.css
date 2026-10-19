@@ -822,6 +822,49 @@ details.block-fold > pre {
   margin: 0 10px 10px;
 }
 
+.entry.mailbox-entry {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+details.mailbox-event {
+  border: 0;
+  margin: 0;
+  background: transparent;
+}
+
+details.mailbox-event > summary {
+  padding: 4px 0;
+  gap: 8px;
+}
+
+details.mailbox-event > summary::before {
+  flex: 0 0 auto;
+  margin: 0;
+  transition: none;
+}
+
+details.mailbox-event[open] > summary::before {
+  content: '\25be';
+  transform: none;
+}
+
+.mailbox-event-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mailbox-event .entry-time {
+  flex: 0 0 auto;
+}
+
+.mailbox-event > .entry-body {
+  padding: 0 0 10px 20px;
+}
+
 /* Code tokens. */
 .tok-cmt {
   color: var(--dim);

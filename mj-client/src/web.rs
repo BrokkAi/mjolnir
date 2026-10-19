@@ -37,6 +37,10 @@ pub struct BrowserTranscriptEntry {
     pub label: String,
     pub recorded_at_ms: Option<i64>,
     pub lines: Vec<String>,
+    /// Mailbox events split into a header and report continuation lines, from
+    /// the same bounded text as `lines`. Each event is a separate disclosure.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mailbox_events: Vec<Vec<String>>,
     /// The glyph the terminal draws for this role, so both surfaces read alike
     /// without the browser keeping a second copy of the mapping. Taken from
     /// the same `entry_visual` the terminal renders from.

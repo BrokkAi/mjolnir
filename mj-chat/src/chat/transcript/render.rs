@@ -57,14 +57,14 @@ pub(crate) fn render_transcript(
             "authoritative submission frame prepared");
     }
     if matches!(chat.anchor, TranscriptAnchor::Restoring(_)) {
-        chat.transcript_tool_click_targets.clear();
+        chat.transcript_click_targets.clear();
         chat.transcript_link_frame = None;
         chat.transcript_selection = None;
         chat.transcript_selection_invalid = true;
         chat.transcript_scrollbar.clear_geometry();
         return;
     }
-    chat.rebuild_transcript_tool_click_targets(inner, top, visible_rows);
+    chat.rebuild_transcript_click_targets(inner, top, visible_rows);
     chat.record_transcript_link_frame(inner, top, visible_rows);
     chat.register_transcript_surface(inner, top, visible_rows, at_tail, gesture_active);
     let track = Rect::new(
@@ -246,6 +246,7 @@ pub(crate) fn transcript_lines(chat: &mut ChatState, width: u16) -> Vec<Line<'st
         chat.render_mode,
         chat.tool_display,
         &chat.expanded_tool_calls,
+        &chat.expanded_mailbox_events,
     );
     let mut lines = Vec::new();
     for index in 0..chat.entries.len() {
@@ -338,11 +339,13 @@ pub(crate) fn track_transcript_entry(
 }
 
 /// What a tracking render records about the rows it draws.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct RowTrack {
     pub links: Vec<RowLink>,
     /// One per rendered row.
     pub copies: Vec<RowCopy>,
+    /// Header row and event index for each independently clickable event.
+    pub mailbox_headers: Vec<(usize, usize)>,
 }
 
 /// Cells `start..end` of rendered row `row` draw text of a link to `url`.
@@ -473,6 +476,14 @@ fn render_entry_tracking(
     tool: ToolView,
     mut track: Option<&mut RowTrack>,
 ) -> Vec<Line<'static>> {
+    if mode == TranscriptRenderMode::Rich
+        && let Some((rows, mailbox_track)) = render_mailbox_entry(entry, width, &BTreeSet::new())
+    {
+        if let Some(track) = track {
+            *track = mailbox_track;
+        }
+        return rows;
+    }
     if let ToolView::Inline { output_lines } = tool
         && mode == TranscriptRenderMode::Rich
         && entry.role == ChatRole::Tool
@@ -538,6 +549,56 @@ fn render_entry_tracking(
         track.copies.push(RowCopy::default());
     }
     out
+}
+
+/// Render event headers and report bodies together so clicks and selection
+/// use the exact row positions that were drawn.
+pub(super) fn render_mailbox_entry(
+    entry: &ChatEntry,
+    width: usize,
+    expanded: &BTreeSet<(u64, usize)>,
+) -> Option<(Vec<Line<'static>>, RowTrack)> {
+    let events = mailbox_event_lines(entry.role, entry.text.lines());
+    if events.is_empty() {
+        return None;
+    }
+    let mut rows = Vec::new();
+    let mut track = RowTrack::default();
+    for (index, lines) in events.into_iter().enumerate() {
+        let open = expanded.contains(&(entry.start_seq, index));
+        let arrow = if open {
+            theme::glyphs().dropdown
+        } else {
+            "▸"
+        };
+        let mut header = vec![Span::styled(
+            format!("{arrow} {}", lines[0]),
+            theme::muted(),
+        )];
+        if let Some(time) = format_event_time(entry.recorded_at_ms) {
+            header.push(Span::styled(
+                format!("{}{time}", theme::glyphs().footer_separator),
+                theme::muted(),
+            ));
+        }
+        track.mailbox_headers.push((rows.len(), index));
+        rows.push(truncate_line_to_width(Line::from(header), width));
+        track.copies.push(RowCopy::default());
+        if open {
+            let detail = ChatEntry::plain(entry.start_seq, ChatRole::System, lines.join("\n"));
+            let first_row = rows.len();
+            rows.extend(entry_body_rows_inner(
+                &detail,
+                width,
+                TranscriptRenderMode::Raw,
+                false,
+                Some((&mut track, first_row)),
+            ));
+        }
+    }
+    rows.push(Line::from(""));
+    track.copies.push(RowCopy::default());
+    Some((rows, track))
 }
 
 /// The gutter-prefixed body rows of one entry, shared between the full

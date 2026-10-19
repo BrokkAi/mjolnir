@@ -161,6 +161,136 @@ Tasks 1 · Shells 1 · Queue 1
 Reviewing every completed turn with [review] profile "reviewer"
 controls: [{"id":"conversation-status","text":"Tasks 1 · Shells 1 · Queue 1","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
 action: POST /api/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
+=== mailbox events are one line each on the phone (390x844) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+
+New PR #4623 Model Rust built-in macro values for CQ07
+Comment on your PR #4623 by alice: Please check the ‹macro› case.
+New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)
+Review on your PR #4623 by bob (changes requested): Could you revise the error path?
+Review comment on your PR #4623 by carol: This assertion needs a case.
+Your PR #4623 was merged by dana.
+Your PR #4623 was closed without merging.
+Your PR #4624 was merged.
+Your PR #4623 was reopened.
+External event: A plain event from the CLI.
+Child task Check parser finished: failed
+Child task Check parser finished: failed
+controls: [{"id":"conversation-status","text":"Shell commands\n              \n            \n            \n              Queued prompts\n              \n              Shell commands\n              \n              Background tasks\n              \n            \n          \n          Subagents · 0","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Send","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+mailbox events: [{"header":"New PR #4623 Model Rust built-in macro values for CQ07","open":false,"arrow":"▸"},{"header":"Comment on your PR #4623 by alice: Please check the ‹macro› case.","open":false,"arrow":"▸"},{"header":"New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)","open":false,"arrow":"▸"},{"header":"Review on your PR #4623 by bob (changes requested): Could you revise the error path?","open":false,"arrow":"▸"},{"header":"Review comment on your PR #4623 by carol: This assertion needs a case.","open":false,"arrow":"▸"},{"header":"Your PR #4623 was merged by dana.","open":false,"arrow":"▸"},{"header":"Your PR #4623 was closed without merging.","open":false,"arrow":"▸"},{"header":"Your PR #4624 was merged.","open":false,"arrow":"▸"},{"header":"Your PR #4623 was reopened.","open":false,"arrow":"▸"},{"header":"External event: A plain event from the CLI.","open":false,"arrow":"▸"},{"header":"Child task Check parser finished: failed","open":false,"arrow":"▸"},{"header":"Child task Check parser finished: failed","open":false,"arrow":"▸"}]
+=== click opens only the second repeated mailbox event (390x844) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+
+New PR #4623 Model Rust built-in macro values for CQ07
+Comment on your PR #4623 by alice: Please check the ‹macro› case.
+New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)
+Review on your PR #4623 by bob (changes requested): Could you revise the error path?
+Review comment on your PR #4623 by carol: This assertion needs a case.
+Your PR #4623 was merged by dana.
+Your PR #4623 was closed without merging.
+Your PR #4624 was merged.
+Your PR #4623 was reopened.
+External event: A plain event from the CLI.
+Child task Check parser finished: failed
+Child task Check parser finished: failed
+Child task Check parser finished: failed
+支持 Unicode and <script>literal text</script>.
+- A report bullet stays in this event.
+controls: [{"id":"conversation-status","text":"Shell commands\n              \n            \n            \n              Queued prompts\n              \n              Shell commands\n              \n              Background tasks\n              \n            \n          \n          Subagents · 0","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Send","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+mailbox events: [{"header":"New PR #4623 Model Rust built-in macro values for CQ07","open":false,"arrow":"▸"},{"header":"Comment on your PR #4623 by alice: Please check the ‹macro› case.","open":false,"arrow":"▸"},{"header":"New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)","open":false,"arrow":"▸"},{"header":"Review on your PR #4623 by bob (changes requested): Could you revise the error path?","open":false,"arrow":"▸"},{"header":"Review comment on your PR #4623 by carol: This assertion needs a case.","open":false,"arrow":"▸"},{"header":"Your PR #4623 was merged by dana.","open":false,"arrow":"▸"},{"header":"Your PR #4623 was closed without merging.","open":false,"arrow":"▸"},{"header":"Your PR #4624 was merged.","open":false,"arrow":"▸"},{"header":"Your PR #4623 was reopened.","open":false,"arrow":"▸"},{"header":"External event: A plain event from the CLI.","open":false,"arrow":"▸"},{"header":"Child task Check parser finished: failed","open":false,"arrow":"▸"},{"header":"Child task Check parser finished: failed","open":true,"arrow":"▾"}]
+=== live mailbox update preserves the open report (390x844) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+
+New PR #4623 Model Rust built-in macro values for CQ07
+Comment on your PR #4623 by alice: Please check the ‹macro› case.
+New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)
+Review on your PR #4623 by bob (changes requested): Could you revise the error path?
+Review comment on your PR #4623 by carol: This assertion needs a case.
+Your PR #4623 was merged by dana.
+Your PR #4623 was closed without merging.
+Your PR #4624 was merged.
+Your PR #4623 was reopened.
+External event: A plain event from the CLI.
+Child task Check parser finished: failed
+Child task Check parser finished: failed
+Child task Check parser finished: failed
+支持 Unicode and <script>literal text</script>.
+- A report bullet stays in this event.
+Your PR #4625 was merged.
+controls: [{"id":"conversation-status","text":"Shell commands\n              \n            \n            \n              Queued prompts\n              \n              Shell commands\n              \n              Background tasks\n              \n            \n          \n          Subagents · 0","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Send","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+mailbox events: [{"header":"New PR #4623 Model Rust built-in macro values for CQ07","open":false,"arrow":"▸"},{"header":"Comment on your PR #4623 by alice: Please check the ‹macro› case.","open":false,"arrow":"▸"},{"header":"New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)","open":false,"arrow":"▸"},{"header":"Review on your PR #4623 by bob (changes requested): Could you revise the error path?","open":false,"arrow":"▸"},{"header":"Review comment on your PR #4623 by carol: This assertion needs a case.","open":false,"arrow":"▸"},{"header":"Your PR #4623 was merged by dana.","open":false,"arrow":"▸"},{"header":"Your PR #4623 was closed without merging.","open":false,"arrow":"▸"},{"header":"Your PR #4624 was merged.","open":false,"arrow":"▸"},{"header":"Your PR #4623 was reopened.","open":false,"arrow":"▸"},{"header":"External event: A plain event from the CLI.","open":false,"arrow":"▸"},{"header":"Child task Check parser finished: failed","open":false,"arrow":"▸"},{"header":"Child task Check parser finished: failed","open":true,"arrow":"▾"},{"header":"Your PR #4625 was merged.","open":false,"arrow":"▸"}]
+=== keyboard collapses mailbox detail at narrow phone width (320x568) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+
+New PR #4623 Model Rust built-in macro values for CQ07
+Comment on your PR #4623 by alice: Please check the ‹macro› case.
+New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)
+Review on your PR #4623 by bob (changes requested): Could you revise the error path?
+Review comment on your PR #4623 by carol: This assertion needs a case.
+Your PR #4623 was merged by dana.
+Your PR #4623 was closed without merging.
+Your PR #4624 was merged.
+Your PR #4623 was reopened.
+External event: A plain event from the CLI.
+Child task Check parser finished: failed
+Child task Check parser finished: failed
+Your PR #4625 was merged.
+controls: [{"id":"conversation-status","text":"Shell commands\n              \n            \n            \n              Queued prompts\n              \n              Shell commands\n              \n              Background tasks\n              \n            \n          \n          Subagents · 0","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Send","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+mailbox events: [{"header":"New PR #4623 Model Rust built-in macro values for CQ07","open":false,"arrow":"▸"},{"header":"Comment on your PR #4623 by alice: Please check the ‹macro› case.","open":false,"arrow":"▸"},{"header":"New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)","open":false,"arrow":"▸"},{"header":"Review on your PR #4623 by bob (changes requested): Could you revise the error path?","open":false,"arrow":"▸"},{"header":"Review comment on your PR #4623 by carol: This assertion needs a case.","open":false,"arrow":"▸"},{"header":"Your PR #4623 was merged by dana.","open":false,"arrow":"▸"},{"header":"Your PR #4623 was closed without merging.","open":false,"arrow":"▸"},{"header":"Your PR #4624 was merged.","open":false,"arrow":"▸"},{"header":"Your PR #4623 was reopened.","open":false,"arrow":"▸"},{"header":"External event: A plain event from the CLI.","open":false,"arrow":"▸"},{"header":"Child task Check parser finished: failed","open":false,"arrow":"▸"},{"header":"Child task Check parser finished: failed","open":false,"arrow":"▸"},{"header":"Your PR #4625 was merged.","open":false,"arrow":"▸"}]
+=== desktop mailbox events stay on one line (900x900) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+
+New PR #4623 Model Rust built-in macro values for CQ07
+Comment on your PR #4623 by alice: Please check the ‹macro› case.
+New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)
+Review on your PR #4623 by bob (changes requested): Could you revise the error path?
+Review comment on your PR #4623 by carol: This assertion needs a case.
+Your PR #4623 was merged by dana.
+Your PR #4623 was closed without merging.
+Your PR #4624 was merged.
+Your PR #4623 was reopened.
+External event: A plain event from the CLI.
+Child task Check parser finished: failed
+Child task Check parser finished: failed
+Your PR #4625 was merged.
+Send
+controls: [{"id":"conversation-status","text":null,"value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Send","value":"","checked":null,"visible":true,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+mailbox events: [{"header":"New PR #4623 Model Rust built-in macro values for CQ07","open":false,"arrow":"▸"},{"header":"Comment on your PR #4623 by alice: Please check the ‹macro› case.","open":false,"arrow":"▸"},{"header":"New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)","open":false,"arrow":"▸"},{"header":"Review on your PR #4623 by bob (changes requested): Could you revise the error path?","open":false,"arrow":"▸"},{"header":"Review comment on your PR #4623 by carol: This assertion needs a case.","open":false,"arrow":"▸"},{"header":"Your PR #4623 was merged by dana.","open":false,"arrow":"▸"},{"header":"Your PR #4623 was closed without merging.","open":false,"arrow":"▸"},{"header":"Your PR #4624 was merged.","open":false,"arrow":"▸"},{"header":"Your PR #4623 was reopened.","open":false,"arrow":"▸"},{"header":"External event: A plain event from the CLI.","open":false,"arrow":"▸"},{"header":"Child task Check parser finished: failed","open":false,"arrow":"▸"},{"header":"Child task Check parser finished: failed","open":false,"arrow":"▸"},{"header":"Your PR #4625 was merged.","open":false,"arrow":"▸"}]
 === long phone elicitation form (320x568) ===
 Plan mode browser test
 Live

@@ -997,6 +997,7 @@ fn golden_phone_session_snapshot() {
             label: "label".into(),
             recorded_at_ms,
             lines: vec!["line".into()],
+            mailbox_events: Vec::new(),
             glyph: "●",
             tone: "agent",
             tool_status: None,

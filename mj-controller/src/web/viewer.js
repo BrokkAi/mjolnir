@@ -7104,13 +7104,13 @@ function entryTimestamp(entry) {
 
 /// Rewrite one entry's row.
 ///
-/// Thinking and tool detail are collapsed by default, and which folds the
+/// Thinking and mailbox events are collapsed by default, and which folds the
 /// reader had opened is recorded and restored, so an update does not snap shut
 /// something they were part way through reading.
 function paintEntry(node, entry, unansweredPrompt) {
   const openFolds = new Set(
     [...node.querySelectorAll('details.block-fold[open] > summary')].map(
-      summary => summary.textContent,
+      summary => summary.parentElement.dataset.foldKey || summary.textContent,
     ),
   );
   node.className = `entry tone-${entry.tone}`;
@@ -7121,16 +7121,30 @@ function paintEntry(node, entry, unansweredPrompt) {
   const time = entryTimestamp(entry);
   if (time) heading.append(time);
 
-  const body = entryBody(entry);
+  const events = entry.mailbox_events || [];
   // Thinking is background: it is there for someone who wants it, and closed
   // for everyone else.
-  if (entry.role === 'thought') {
+  if (events.length) {
+    node.classList.add('mailbox-entry');
+    node.replaceChildren(...events.map((lines, index) => {
+      const fold = el('details', 'block-fold mailbox-event');
+      fold.dataset.foldKey = `mailbox-${index}`;
+      const summary = el('summary');
+      summary.append(el('span', 'mailbox-event-label', lines[0]));
+      const time = entryTimestamp(entry);
+      if (time) summary.append(time);
+      const body = el('div', 'entry-body');
+      body.append(renderToolOutput(lines.join('\n')));
+      fold.append(summary, body);
+      return fold;
+    }));
+  } else if (entry.role === 'thought') {
     const fold = el('details', 'block-fold');
     const summary = el('summary', '', entry.label);
-    fold.append(summary, body);
+    fold.append(summary, entryBody(entry));
     node.replaceChildren(heading, fold);
   } else {
-    node.replaceChildren(heading, body);
+    node.replaceChildren(heading, entryBody(entry));
   }
   if (unansweredPrompt) {
     const controls = el('div', 'row');
@@ -7140,7 +7154,7 @@ function paintEntry(node, entry, unansweredPrompt) {
     node.append(controls);
   }
   for (const summary of node.querySelectorAll('details.block-fold > summary')) {
-    if (openFolds.has(summary.textContent)) summary.parentElement.open = true;
+    if (openFolds.has(summary.parentElement.dataset.foldKey || summary.textContent)) summary.parentElement.open = true;
   }
 }
 

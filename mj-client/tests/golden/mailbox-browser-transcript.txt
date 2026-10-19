@@ -1,0 +1,86 @@
+{
+  "latest_seq": 2,
+  "presentation_key": "ace38fc96afe09945e0114da8cfe161a6feec9650be615c23d4b43021889d15a",
+  "window_start_seq": 2,
+  "reset": false,
+  "entries": [
+    {
+      "id": 2,
+      "updated_seq": 2,
+      "role": "system",
+      "label": "Mjolnir",
+      "recorded_at_ms": null,
+      "lines": [
+        "Mailbox events:",
+        "  - New PR #4623 Model Rust built-in macro values for CQ07",
+        "  - Comment on your PR #4623 by alice: Please check the ‹macro› case.",
+        "  - New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)",
+        "  - Review on your PR #4623 by bob (changes requested): Could you revise the error path?",
+        "  - Review comment on your PR #4623 by carol: This assertion needs a case.",
+        "  - Your PR #4623 was merged by dana.",
+        "  - Your PR #4623 was closed without merging.",
+        "  - Your PR #4624 was merged.",
+        "  - Your PR #4623 was reopened.",
+        "  - External event: A plain event from the CLI.",
+        "  - Child task Check parser finished: failed",
+        "    State: failed",
+        "    Failure: verification timed out",
+        "    Report directory: /reports/child-1",
+        "    Report truncated; see the report directory for details.",
+        "    Fixed ‹parser›.",
+        "    Tests passed: \"parser\".",
+        "  - Child task Check parser finished: failed",
+        "    支持 Unicode and <script>literal text</script>.",
+        "    - A report bullet stays in this event."
+      ],
+      "mailbox_events": [
+        [
+          "New PR #4623 Model Rust built-in macro values for CQ07"
+        ],
+        [
+          "Comment on your PR #4623 by alice: Please check the ‹macro› case."
+        ],
+        [
+          "New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)"
+        ],
+        [
+          "Review on your PR #4623 by bob (changes requested): Could you revise the error path?"
+        ],
+        [
+          "Review comment on your PR #4623 by carol: This assertion needs a case."
+        ],
+        [
+          "Your PR #4623 was merged by dana."
+        ],
+        [
+          "Your PR #4623 was closed without merging."
+        ],
+        [
+          "Your PR #4624 was merged."
+        ],
+        [
+          "Your PR #4623 was reopened."
+        ],
+        [
+          "External event: A plain event from the CLI."
+        ],
+        [
+          "Child task Check parser finished: failed",
+          "State: failed",
+          "Failure: verification timed out",
+          "Report directory: /reports/child-1",
+          "Report truncated; see the report directory for details.",
+          "Fixed ‹parser›.",
+          "Tests passed: \"parser\"."
+        ],
+        [
+          "Child task Check parser finished: failed",
+          "支持 Unicode and <script>literal text</script>.",
+          "- A report bullet stays in this event."
+        ]
+      ],
+      "glyph": "─",
+      "tone": "system"
+    }
+  ]
+}

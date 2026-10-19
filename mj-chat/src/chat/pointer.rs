@@ -362,7 +362,7 @@ impl ChatState {
             };
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && self.toggle_tool_at(mouse.column, mouse.row)
+            && self.toggle_transcript_at(mouse.column, mouse.row)
         {
             return ChatAction::None;
         }
