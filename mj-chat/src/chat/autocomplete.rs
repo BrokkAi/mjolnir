@@ -179,7 +179,9 @@ impl ChatState {
         if self.clear_context_supported {
             commands.push(CommandChoice {
                 name: "clear".into(),
-                description: "start a new conversation, keeping workspace and history".into(),
+                description:
+                    "start a new conversation and clear pending mail, keeping workspace and history"
+                        .into(),
                 input_hint: None,
                 source: CommandSource::Hel,
             });

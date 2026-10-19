@@ -5313,6 +5313,92 @@ fn interrupted_clear_keeps_the_original_native_conversation() {
     );
 }
 
+// Hard-won: 2b74434f9: /clear left pending and leased messages available to the fresh conversation.
+#[test]
+fn clear_discards_mailbox_only_on_success_and_survives_journal_replay() {
+    for outcome in ["success", "rejected", "interrupted"] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = clearable_relay(temp.path());
+        let leased = mailbox_fixture_event("before-clear-lease", false);
+        let pending = mailbox_fixture_event("before-clear-pending", false);
+        submit_relay(
+            &mut relay,
+            "lease-event",
+            RelayCommand::DeliverMailboxEvent {
+                event: leased.clone(),
+            },
+        );
+        let (_, _, lease_id) = request_mailbox_drain_for_test(&mut relay, "old-drain");
+        let lease_id = lease_id.unwrap();
+        submit_relay(
+            &mut relay,
+            "pending-event",
+            RelayCommand::DeliverMailboxEvent {
+                event: pending.clone(),
+            },
+        );
+        submit_relay(&mut relay, "clear-mailbox", RelayCommand::ClearContext);
+        relay.claim_pending_commands(true).unwrap();
+        match outcome {
+            "success" => {
+                relay
+                    .record_command_completed(
+                        "clear-mailbox",
+                        RelayCommandOutcome::ContextCleared {
+                            native_session_id: "fresh".into(),
+                            memory: None,
+                        },
+                    )
+                    .unwrap();
+            }
+            "rejected" => {
+                relay
+                    .record_command_rejected(
+                        "clear-mailbox",
+                        mj_core::event_outcome::OutcomeReason::AdmissionRejected,
+                        "reset failed",
+                    )
+                    .unwrap();
+            }
+            _ => {}
+        }
+        drop(relay);
+        if outcome != "interrupted" {
+            std::fs::remove_file(temp.path().join(mj_core::relay::RELAY_STATE_FILE)).unwrap();
+        }
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        if outcome == "success" {
+            assert!(matches!(
+                relay.ack_mailbox(&lease_id).unwrap(),
+                RelayResponsePayload::MailboxAcknowledged {
+                    acknowledged: false
+                }
+            ));
+            for (id, event) in [
+                ("lease-event", leased.clone()),
+                ("lease-retry", leased),
+                ("pending-retry", pending),
+            ] {
+                submit_relay(&mut relay, id, RelayCommand::DeliverMailboxEvent { event });
+            }
+            assert_eq!(drain_mailbox_for_test(&mut relay, "after-clear").1, 0);
+        } else {
+            assert_eq!(
+                drain_mailbox_for_test(&mut relay, "after-failed-clear").1,
+                2
+            );
+        }
+        submit_relay(
+            &mut relay,
+            "fresh-event",
+            RelayCommand::DeliverMailboxEvent {
+                event: mailbox_fixture_event("after-clear-new", false),
+            },
+        );
+        assert_eq!(drain_mailbox_for_test(&mut relay, "fresh-drain").1, 1);
+    }
+}
+
 #[test]
 fn clear_refuses_pending_work_and_invalid_input_without_changing_identity() {
     for input in ["/clear extra", "/compact ignored-instructions"] {

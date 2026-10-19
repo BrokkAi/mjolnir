@@ -114,6 +114,8 @@ pub struct MaterializedSessionMutation {
     pub active_turn: Option<Option<MaterializedTurn>>,
     /// Explicit context resets retire the last turn without deleting its history.
     pub clear_turn_outcome: bool,
+    /// Discard pending mailbox delivery when a new conversation is adopted.
+    pub clear_mailbox: bool,
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
     pub config_results: Vec<(String, Option<String>)>,
     pub provider_cost: Option<crate::usage::ProviderCost>,

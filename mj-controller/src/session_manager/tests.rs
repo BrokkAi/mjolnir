@@ -1250,6 +1250,7 @@ const LEASED_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 const RELAY_REQUEST_LOG: &str = "requests.log";
 /// Makes the stdio relay child report an open harness session.
 const RELAY_SESSION_CONFIGURED: &str = "MJ_TEST_RELAY_SESSION_CONFIGURED";
+const CLEAR_MAILBOX_CONTROL: &str = "MJ_TEST_CLEAR_MAILBOX_CONTROL";
 
 /// Relay server half of the leased-submission tests. It does nothing unless
 /// a parent test points it at a relay journal root.
@@ -1452,6 +1453,19 @@ fn leased_relay_child_serves_stdio() {
                     "1.0.0",
                 )
                 .expect("open the test relay journal");
+                if std::env::var_os(CLEAR_MAILBOX_CONTROL).is_some() {
+                    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Codex);
+                    if relay.operational_state().native_session_id.is_none() {
+                        relay
+                            .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+                                native_session_id: "original".into(),
+                                resumed: false,
+                                native_continuity_lost: false,
+                                replaced_unused_native_session_id: None,
+                            })
+                            .unwrap();
+                    }
+                }
                 if PathBuf::from(&root)
                     .join("disconnect-subagent-queue")
                     .exists()
@@ -1469,6 +1483,26 @@ fn leased_relay_child_serves_stdio() {
                 }
                 relay
             });
+            let complete_clear = PathBuf::from(&root).join("complete-clear");
+            if std::env::var_os(CLEAR_MAILBOX_CONTROL).is_some() && complete_clear.exists() {
+                std::fs::remove_file(complete_clear).unwrap();
+                relay
+                    .record_command_completed(
+                        "clear-request",
+                        mj_core::relay::RelayCommandOutcome::ContextCleared {
+                            native_session_id: "replacement".into(),
+                            memory: None,
+                        },
+                    )
+                    .unwrap();
+            }
+            let starts_clear = matches!(
+                &request.request,
+                RelayRequest::Submit {
+                    command: RelayCommand::ClearContext,
+                    ..
+                }
+            );
             let mut response =
                 if let mj_core::relay::RelayRequest::Reviewer { role, .. } = &request.request {
                     if let Some(marker) = &marker
@@ -1489,6 +1523,9 @@ fn leased_relay_child_serves_stdio() {
                 } else {
                     relay.handle(request)
                 };
+            if starts_clear && std::env::var_os(CLEAR_MAILBOX_CONTROL).is_some() {
+                relay.claim_pending_commands(true).unwrap();
+            }
             if let Some(preparation) = preparation {
                 relay.dispatch_preparation_lifecycle().unwrap();
                 if let RelayResponseBody::Ok {
@@ -2264,6 +2301,139 @@ fn leased_relay_target(relay_root: &std::path::Path) -> RelaySessionTarget {
 }
 
 const DROP_ADMISSION_OPEN_REPLY: &str = "MJ_TEST_DROP_ADMISSION_OPEN_REPLY";
+
+#[cfg(unix)]
+// Hard-won: 2b74434f9: stale delivery batches and reconnects could restore pre-clear mailbox messages.
+#[tokio::test]
+async fn mailbox_delivery_serializes_clear_completion_and_rechecks_stale_batches() {
+    const CHILD: &str = "MJ_TEST_CLEAR_MAILBOX_ACTOR";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "mailbox_delivery_serializes_clear_completion_and_rechecks_stale_batches",
+        );
+        return;
+    }
+    use crate::mailbox_outbox::MailboxEventDelivery;
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let root = tempfile::tempdir().unwrap();
+    let mut target = leased_relay_target(root.path());
+    target
+        .spec
+        .env
+        .insert(RELAY_SESSION_CONFIGURED.into(), "1".into());
+    target
+        .spec
+        .env
+        .insert(CLEAR_MAILBOX_CONTROL.into(), "1".into());
+    let (commands, commands_rx) = mpsc::channel(8);
+    let (releases, releases_rx) = mpsc::unbounded_channel();
+    let (_retirement, retirement_rx) = watch::channel(false);
+    let (view_tx, view) = watch::channel(ManagedSessionView::default());
+    let (updates, _updates_rx) = coalesced_update_channel();
+    let actor = tokio::spawn(run_session_actor(
+        target.clone(),
+        commands_rx,
+        releases_rx,
+        retirement_rx,
+        view_tx,
+        updates,
+    ));
+    let handle = ManagedSessionHandle {
+        session_id: LEASED_RELAY_SESSION.into(),
+        commands,
+        releases,
+        view,
+    };
+    handle.sync_now().await.unwrap();
+    let enqueue = |key: &str| {
+        let event = mj_core::mailbox::MailboxEvent {
+            key: key.into(),
+            source: "test".into(),
+            wake: false,
+            created_at_ms: 1,
+            body: mj_core::mailbox::MailboxEventBody::PlainText { text: key.into() },
+        };
+        crate::database::enqueue_mailbox_event(
+            key,
+            LEASED_RELAY_SESSION,
+            &serde_json::to_string(&event).unwrap(),
+            false,
+            false,
+        )
+        .unwrap();
+        event
+    };
+    let before = enqueue("actor-before-clear");
+    handle
+        .submit("clear-request".into(), RelayCommand::ClearContext)
+        .await
+        .unwrap();
+    let during = enqueue("actor-during-clear");
+    assert_eq!(
+        handle.deliver_mailbox_event(during.clone()).await.unwrap(),
+        MailboxEventDelivery::Pending
+    );
+    std::fs::write(root.path().join("complete-clear"), b"complete").unwrap();
+    handle.sync_now().await.unwrap();
+    for event in [before.clone(), during] {
+        assert_eq!(
+            handle.deliver_mailbox_event(event).await.unwrap(),
+            MailboxEventDelivery::Discarded
+        );
+    }
+    let after = enqueue("actor-after-clear");
+    let MailboxEventDelivery::Accepted(ordinal) =
+        handle.deliver_mailbox_event(after.clone()).await.unwrap()
+    else {
+        panic!("fresh event was not delivered")
+    };
+    crate::database::mark_mailbox_event_accepted(
+        &after.key,
+        &crate::mailbox_outbox::mailbox_command_id(&after.key),
+        ordinal,
+    )
+    .unwrap();
+    drop(handle);
+    tokio::time::timeout(Duration::from_secs(5), actor)
+        .await
+        .unwrap()
+        .unwrap();
+    // A fresh controller connection replays the same worker journal and must
+    // still skip the old batch and return the original accepted receipt.
+    let mut connection = None;
+    assert!(
+        submit_actor_command(
+            &target,
+            &mut connection,
+            &crate::mailbox_outbox::mailbox_command_id(&before.key),
+            &RelayCommand::DeliverMailboxEvent { event: before }
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        submit_actor_command(
+            &target,
+            &mut connection,
+            &crate::mailbox_outbox::mailbox_command_id(&after.key),
+            &RelayCommand::DeliverMailboxEvent { event: after }
+        )
+        .await
+        .unwrap(),
+        ordinal
+    );
+    connection.unwrap().detach().await.unwrap();
+    let mut relay =
+        mj_worker::relay::DurableRelay::open(root.path(), LEASED_RELAY_SESSION, "test").unwrap();
+    let (text, count) = match relay.drain_mailbox("PostToolUse").unwrap() {
+        mj_core::relay::RelayResponsePayload::MailboxDrained { text, count, .. } => (text, count),
+        other => panic!("unexpected drain: {other:?}"),
+    };
+    assert_eq!(count, 1);
+    assert!(text.unwrap().contains("actor-after-clear"));
+}
 
 // Hard-won: 82e4c8a44: an oversized delegation reply also prevented idle worker replacement.
 #[cfg(unix)]

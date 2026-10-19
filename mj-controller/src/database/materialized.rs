@@ -1632,6 +1632,9 @@ impl ProjectionPage<'_> {
         if let Some(event) = &mutation.native_agent {
             native_agents::apply_native_agent_event(&self.transaction, session_id, event)?;
         }
+        if mutation.clear_mailbox {
+            mailbox::clear_mailbox_with(&self.transaction, session_id, event_ordinal)?;
+        }
         if let Some(activity_at_ms) = mutation.last_activity_at_ms {
             self.pending.last_activity_at_ms = Some(
                 self.pending

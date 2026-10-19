@@ -357,7 +357,7 @@ pub(super) fn phone_commands(
     if session.capabilities.clear_context {
         commands.push(command(
             "clear",
-            "start a new conversation, keeping workspace and history",
+            "start a new conversation and clear pending mail, keeping workspace and history",
             None,
         ));
     }

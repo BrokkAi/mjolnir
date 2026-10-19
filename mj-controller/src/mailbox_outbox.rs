@@ -5,7 +5,6 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use mj_core::relay::RelayCommand;
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
@@ -188,6 +187,9 @@ pub(crate) async fn deliver_session_events(
                 }
             }
             Ok(MailboxEventDelivery::Pending) => return,
+            Ok(MailboxEventDelivery::Discarded) => {
+                tracing::debug!(%session_id, event_key = %entry.event_key, "mailbox event was discarded by /clear");
+            }
             Ok(MailboxEventDelivery::Failed(reason)) => {
                 let key = entry.event_key.clone();
                 let persisted_reason = reason.clone();
@@ -224,6 +226,7 @@ pub(crate) async fn deliver_session_events(
 pub(crate) enum MailboxEventDelivery {
     Pending,
     Accepted(u64),
+    Discarded,
     Failed(String),
 }
 
@@ -309,16 +312,8 @@ pub(crate) async fn deliver_mailbox_event(
             text: mj_core::mailbox::render_mailbox_event(&event),
         };
     }
-    let command_id = mailbox_command_id(&event.key);
-    match tokio::time::timeout(
-        DELIVERY_TIMEOUT,
-        handle
-            .client()
-            .submit(command_id, RelayCommand::DeliverMailboxEvent { event }),
-    )
-    .await
-    {
-        Ok(result) => result.map(MailboxEventDelivery::Accepted),
+    match tokio::time::timeout(DELIVERY_TIMEOUT, handle.deliver_mailbox_event(event)).await {
+        Ok(result) => result,
         Err(_) => anyhow::bail!("mailbox command acknowledgement timed out"),
     }
 }

@@ -981,6 +981,20 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                             attached_command_id: None,
                         });
                     snapshot.pending_user_shell_contexts.clear();
+                    let discarded_keys = snapshot
+                        .pending_mailbox_events
+                        .drain(..)
+                        .chain(
+                            snapshot
+                                .mailbox_hook_lease
+                                .take()
+                                .into_iter()
+                                .flat_map(|lease| lease.events),
+                        )
+                        .map(|event| event.key)
+                        .collect::<Vec<_>>();
+                    retain_delivered_mailbox_event_keys(snapshot, discarded_keys, event.ordinal);
+                    snapshot.mailbox_prompt_contexts.clear();
                     snapshot.activity_turn_started_at_ms = None;
                     snapshot.harness_turn = None;
                     snapshot.capacity_retry = None;

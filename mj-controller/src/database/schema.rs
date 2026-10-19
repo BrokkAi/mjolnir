@@ -1516,6 +1516,25 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Compatible: older readers and writers leave this independent receipt
+    // table intact; no existing JSON, enum, or update contract changes.
+    if version < 85 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS mailbox_reset_frontiers (
+                 session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 through_ordinal INTEGER NOT NULL CHECK(through_ordinal >= 0)
+             ) STRICT;
+             INSERT OR IGNORE INTO mailbox_reset_frontiers(session_id, through_ordinal)
+                 SELECT session_id, applied_event_ordinal FROM materialized_sessions
+                 WHERE session_id IN (SELECT session_id FROM sessions);
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (85, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 85;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -1848,7 +1867,10 @@ mod reader_tests {
         assert!(migrate_schema(&upgraded).is_ok());
 
         let upgraded_schema = read_schema_state(&upgraded).unwrap();
-        assert_eq!(upgraded_schema.minimum_compatible, Some(SCHEMA_VERSION));
+        assert_eq!(
+            upgraded_schema.minimum_compatible,
+            Some(MINIMUM_COMPATIBLE_VERSION)
+        );
         assert!(upgraded_schema.ensure_supported_by(82).is_err());
         upgraded.execute("UPDATE session_restart_intents SET phase='recreating_container' WHERE session_id='kept'", []).unwrap();
         let retained: (String, String, bool) = upgraded.query_row(
@@ -2415,6 +2437,11 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 85 {
+            connection
+                .execute_batch("DROP TABLE IF EXISTS mailbox_reset_frontiers;")
+                .unwrap();
+        }
         if version < 67 {
             connection.execute_batch("DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET;").unwrap();
         }
@@ -2651,6 +2678,57 @@ mod reader_tests {
         let state = read_schema_state(&writer).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION + 1);
         assert_eq!(state.minimum_compatible, Some(SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn mailbox_reset_migration_seeds_existing_frontiers_and_preserves_compatibility() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let record = super::super::tests::session("mailbox-upgrade", "project");
+        save_session_to(&path, &record).unwrap();
+        stamp_schema_version(&path, 84);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE materialized_sessions SET applied_event_ordinal=42 WHERE session_id=?1",
+                [&record.id],
+            )
+            .unwrap();
+        drop(connection);
+        let connection = open_writer(&path).unwrap();
+        read_schema_state(&connection)
+            .unwrap()
+            .ensure_supported_by(84)
+            .unwrap();
+        let frontier: u64 = connection
+            .query_row(
+                "SELECT through_ordinal FROM mailbox_reset_frontiers WHERE session_id=?1",
+                [&record.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(frontier, 42);
+        drop(connection);
+        save_session_to(&path, &record).unwrap();
+        let connection = open_writer(&path).unwrap();
+        let preserved: u64 = connection
+            .query_row(
+                "SELECT through_ordinal FROM mailbox_reset_frontiers WHERE session_id=?1",
+                [&record.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved, frontier);
+        connection
+            .execute("DELETE FROM sessions WHERE session_id=?1", [&record.id])
+            .unwrap();
+        assert!(
+            !connection
+                .prepare("SELECT 1 FROM mailbox_reset_frontiers WHERE session_id=?1")
+                .unwrap()
+                .exists([&record.id])
+                .unwrap()
+        );
     }
 
     #[test]

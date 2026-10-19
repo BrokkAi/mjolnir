@@ -1152,7 +1152,9 @@ pub(super) async fn deliver_submit(
     tracing::debug!(target: "mj_controller::latency", session_id = %target.session_id,
         %command_id, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
         accepted_ordinal = ?result.as_ref().ok(), "submission answered");
-    if let Err(error) = result.as_ref() {
+    if let Err(error) = result.as_ref()
+        && error.downcast_ref::<MailboxAdmissionDeferred>().is_none()
+    {
         tracing::warn!(
             session_id = %target.session_id,
             operation = "submit",
@@ -1164,6 +1166,7 @@ pub(super) async fn deliver_submit(
     }
     if let Err(error) = result.as_ref()
         && !is_final_rejection(error)
+        && error.downcast_ref::<MailboxAdmissionDeferred>().is_none()
     {
         *connection = None;
     }
@@ -1237,8 +1240,21 @@ impl std::fmt::Display for NotSent {
 
 impl std::error::Error for NotSent {}
 
+#[derive(Debug)]
+struct MailboxAdmissionDeferred;
+
+impl std::fmt::Display for MailboxAdmissionDeferred {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("mailbox delivery is deferred or already terminal")
+    }
+}
+
+impl std::error::Error for MailboxAdmissionDeferred {}
+
 pub(super) fn submit_failure(error: &anyhow::Error) -> mj_client::session::SubmitFailure {
-    if error.downcast_ref::<NotSent>().is_some() {
+    if error.downcast_ref::<NotSent>().is_some()
+        || error.downcast_ref::<MailboxAdmissionDeferred>().is_some()
+    {
         return mj_client::session::SubmitFailure {
             unconfirmed: false,
             refused: false,
@@ -1276,6 +1292,36 @@ pub(super) async fn submit_actor_command(
 ) -> Result<u64> {
     let mut first_error = None;
     for attempt in 1..=2 {
+        if let RelayCommand::DeliverMailboxEvent { event } = command {
+            // Synchronize and decide inside the serialized session owner on
+            // every attempt. A clear completion must retire its outbox rows
+            // before a stale batch can reach the fresh native conversation.
+            sync_actor_connection(target, connection).await?;
+            let session_id = target.session_id.clone();
+            let event_key = event.key.clone();
+            let status = tokio::task::spawn_blocking(move || {
+                crate::database::mailbox_delivery_state(&session_id, &event_key)
+            })
+            .await
+            .context("mailbox admission reader failed")??;
+            match status {
+                crate::database::MailboxDeliveryState::Accepted(ordinal) => return Ok(ordinal),
+                crate::database::MailboxDeliveryState::Discarded
+                | crate::database::MailboxDeliveryState::Failed(_) => {
+                    return Err(MailboxAdmissionDeferred.into());
+                }
+                crate::database::MailboxDeliveryState::Pending => {}
+            }
+            if connection
+                .as_ref()
+                .expect("synchronized relay connection")
+                .operational
+                .clear_context_started_at_ms
+                .is_some()
+            {
+                return Err(MailboxAdmissionDeferred.into());
+            }
+        }
         if connection.is_none()
             && let Err(error) = sync_actor_connection(target, connection).await
         {

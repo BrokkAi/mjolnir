@@ -427,7 +427,8 @@ mod tests {
         let connection = open(&path)?;
         let state = super::super::schema::read_schema_state(&connection)?;
         assert_eq!(state.revision, super::super::SCHEMA_VERSION);
-        assert_eq!(state.minimum_compatible, Some(super::super::SCHEMA_VERSION));
+        // Migration 85 preserves revision-84 read/write compatibility.
+        assert_eq!(state.minimum_compatible, Some(84));
         assert!(state.ensure_supported_by(81).is_err());
         for (turn, before) in turns.iter().zip(before) {
             assert_eq!(session_summary(&connection, &turn.command_id)?, before);

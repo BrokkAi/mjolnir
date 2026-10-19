@@ -179,6 +179,48 @@ impl ManagedSessionHandle {
             .await
     }
 
+    /// Mailbox submissions share ordinary actor admission and command-ID
+    /// retries, but expose terminal outbox disposition to their delivery owner.
+    pub(crate) async fn deliver_mailbox_event(
+        &self,
+        event: mj_core::mailbox::MailboxEvent,
+    ) -> Result<crate::mailbox_outbox::MailboxEventDelivery> {
+        use crate::database::MailboxDeliveryState;
+        use crate::mailbox_outbox::MailboxEventDelivery;
+
+        let event_key = event.key.clone();
+        let pending = self
+            .enqueue_submit(
+                crate::mailbox_outbox::mailbox_command_id(&event_key),
+                RelayCommand::DeliverMailboxEvent { event },
+            )
+            .await?;
+        match pending.response.await.context("session manager stopped")? {
+            Ok(ordinal) => Ok(MailboxEventDelivery::Accepted(ordinal)),
+            Err(failure) => {
+                let session_id = self.session_id.clone();
+                let status = tokio::task::spawn_blocking(move || {
+                    crate::database::mailbox_delivery_state(&session_id, &event_key)
+                })
+                .await
+                .context("mailbox disposition reader failed")??;
+                match status {
+                    MailboxDeliveryState::Discarded => Ok(MailboxEventDelivery::Discarded),
+                    MailboxDeliveryState::Failed(reason) => {
+                        Ok(MailboxEventDelivery::Failed(reason))
+                    }
+                    MailboxDeliveryState::Accepted(ordinal) => {
+                        Ok(MailboxEventDelivery::Accepted(ordinal))
+                    }
+                    MailboxDeliveryState::Pending if !failure.unconfirmed && !failure.refused => {
+                        Ok(MailboxEventDelivery::Pending)
+                    }
+                    MailboxDeliveryState::Pending => Err(anyhow::anyhow!(failure.message)),
+                }
+            }
+        }
+    }
+
     pub(super) async fn enqueue_submit_with_admission(
         &self,
         command_id: String,

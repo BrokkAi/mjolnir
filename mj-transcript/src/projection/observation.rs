@@ -323,6 +323,7 @@ pub(super) fn project_observation(
             match outcome {
                 mj_core::relay::RelayCommandOutcome::ContextCleared { .. } => {
                     mutation.clear_turn_outcome = true;
+                    mutation.clear_mailbox = true;
                     close_streams(index, mutation, event.recorded_at_ms);
                     mutation.execution = Some(MaterializedExecutionState::Idle);
                     mutation.active_turn = Some(None);
