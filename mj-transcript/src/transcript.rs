@@ -10,7 +10,7 @@ use serde_json::Value;
 use tree_sitter::{Node, Parser};
 const TOOL_SUMMARY_SOURCE_BYTES: usize = 64 * 1024;
 /// Parser-rule version stored with cached tool summaries.
-pub const TOOL_SUMMARY_VERSION: u8 = 4;
+pub const TOOL_SUMMARY_VERSION: u8 = 5;
 
 /// Reduce a tool call to what a reader still needs, once a verified checkpoint
 /// holds the whole of it.
@@ -608,62 +608,96 @@ fn summarize_invocation_with_literals(
     executable: &str,
     arguments: &[InvocationArgument],
 ) -> Option<String> {
-    let executable = normalize_command_name(executable)?;
-    let basename = executable
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(&executable)
-        .to_owned();
-    if is_shell_interpreter(&basename) {
-        return Some(summarize_shell_invocation(&basename, arguments));
-    }
-    let mut words = vec![executable];
-    if !is_summary_executable(&basename) {
-        return Some(words.remove(0));
-    }
-    let mut index = 0;
-
-    if matches!(basename.as_str(), "cargo" | "mbx")
-        && arguments.first().is_some_and(|argument| {
-            argument.literal && argument.value.starts_with('+') && argument.value.len() > 1
-        })
-    {
-        index += 1;
-    }
-
-    let first_verb = loop {
-        let Some(argument) = arguments.get(index) else {
-            return Some(words.remove(0));
-        };
-        if !argument.literal {
-            return Some(words.remove(0));
+    let mut executable = normalize_command_name(executable)?;
+    let mut arguments = arguments;
+    let mut words = Vec::new();
+    // Reuse the invocation rules at each wrapper, consuming arguments rather
+    // than growing the call stack for long chains of nested commands.
+    'invocations: loop {
+        let basename = executable
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(&executable)
+            .to_owned();
+        if is_shell_interpreter(&basename) {
+            words.push(summarize_shell_invocation(&basename, arguments));
+            break;
         }
-        if argument.value == "--" || argument.value.starts_with('-') {
-            if let Some(consumed) = known_leading_option_arguments(&basename, arguments, index) {
-                index += consumed;
-                continue;
+        words.push(executable);
+        if !is_summary_executable(&basename) {
+            break;
+        }
+        let mut index = 0;
+
+        if matches!(basename.as_str(), "cargo" | "mbx")
+            && arguments.first().is_some_and(|argument| {
+                argument.literal && argument.value.starts_with('+') && argument.value.len() > 1
+            })
+        {
+            index += 1;
+        }
+
+        let mut first_verb = loop {
+            let Some(argument) = arguments.get(index) else {
+                break 'invocations;
+            };
+            if !argument.literal {
+                break 'invocations;
             }
-            return Some(words.remove(0));
-        }
-        break argument.value.clone();
-    };
-    words.push(first_verb.clone());
+            if argument.value == "--" || argument.value.starts_with('-') {
+                if let Some(consumed) = known_leading_option_arguments(&basename, arguments, index)
+                {
+                    index += consumed;
+                    continue;
+                }
+                break 'invocations;
+            }
+            break argument.value.as_str();
+        };
 
-    if allows_second_verb(&basename, &first_verb) {
-        let first = index + 1;
-        if let Some(argument) = arguments.get(first)
+        if basename == "timeout" {
+            let duration = first_verb
+                .strip_suffix(['s', 'm', 'h', 'd'])
+                .unwrap_or(first_verb);
+            if duration.parse::<f64>().is_ok() {
+                index += 1;
+                let Some(argument) = arguments.get(index).filter(|argument| argument.literal)
+                else {
+                    break;
+                };
+                first_verb = &argument.value;
+            }
+        }
+
+        if matches!(basename.as_str(), "nice" | "timeout") {
+            let Some(inner) = normalize_command_name(first_verb) else {
+                break;
+            };
+            executable = inner;
+            arguments = &arguments[index + 1..];
+            continue;
+        }
+        words.push(first_verb.to_owned());
+
+        if allows_second_verb(&basename, first_verb)
+            && let Some(argument) = arguments.get(index + 1)
             && argument.literal
             && !argument.value.starts_with('-')
             && argument.value != "--"
         {
             // `uv run` is followed by a program, which may be given as a path.
-            let verb = if basename == "uv" && first_verb == "run" {
-                argument.value.rsplit('/').next().unwrap_or(&argument.value)
-            } else {
-                &argument.value
-            };
-            words.push(verb.to_owned());
+            if basename == "uv" && first_verb == "run" {
+                let name = argument.value.rsplit('/').next().unwrap_or(&argument.value);
+                let Some(inner) = normalize_command_name(name) else {
+                    break;
+                };
+                executable = inner;
+                arguments = &arguments[index + 2..];
+                continue;
+            }
+            words.push(argument.value.clone());
         }
+        break;
     }
     Some(words.join(" "))
 }
@@ -703,6 +737,7 @@ fn is_summary_executable(basename: &str) -> bool {
             | "docker"
             | "podman"
             | "nice"
+            | "timeout"
             | "mbx"
             | "mj"
             | "tmux"
@@ -811,7 +846,7 @@ fn known_leading_option_arguments(
 ) -> Option<usize> {
     let option = arguments.get(index)?.value.as_str();
     if option == "--" {
-        if basename == "nice" {
+        if matches!(basename, "nice" | "timeout") {
             return Some(1);
         }
         return None;
@@ -838,6 +873,7 @@ fn known_leading_option_arguments(
         "gh" => option.starts_with("-R"),
         "docker" | "podman" => option.starts_with("-H"),
         "mj" => option.starts_with("-i"),
+        "timeout" => option.starts_with("-s") || option.starts_with("-k"),
         "tmux" => ["-L", "-S", "-f", "-c", "-T"]
             .iter()
             .any(|prefix| option.starts_with(prefix)),
@@ -875,6 +911,7 @@ fn known_leading_option_arguments(
         "nice" => {
             matches!(option_name, "-n" | "--adjustment")
         }
+        "timeout" => matches!(option_name, "-s" | "--signal" | "-k" | "--kill-after"),
         "docker" | "podman" => matches!(
             option_name,
             "-H" | "--config" | "--connection" | "--context" | "--host" | "--log-level"
@@ -926,6 +963,10 @@ fn known_leading_option_arguments(
             "-2" | "-C" | "-CC" | "-D" | "-l" | "-N" | "-u" | "-v"
         ),
         "nice" => false,
+        "timeout" => matches!(
+            option_name,
+            "-f" | "--foreground" | "-p" | "--preserve-status" | "-v" | "--verbose"
+        ),
         _ => false,
     };
     known_flag.then_some(1)
@@ -2109,6 +2150,104 @@ mod tests {
                 .kind(ToolKind::Execute)
                 .raw_input(json!({"command": "nice -n 10 python3 script.py"})),
         );
+        for (label, command) in [
+            ("timeout shell command", json!("timeout git status")),
+            (
+                "timeout argv command",
+                json!(["timeout", "30s", "git", "-C", "repo", "worktree", "list"]),
+            ),
+            (
+                "timeout command options",
+                json!([
+                    "timeout",
+                    "--foreground",
+                    "--preserve-status",
+                    "--verbose",
+                    "--signal",
+                    "TERM",
+                    "--kill-after=5s",
+                    "1.5m",
+                    "git",
+                    "status"
+                ]),
+            ),
+            (
+                "timeout attached short options",
+                json!("timeout -sTERM -k5s -- 30 git status"),
+            ),
+            (
+                "nested command wrappers",
+                json!("nice -n 10 timeout 5m nice -- cargo +nightly test -q"),
+            ),
+            (
+                "recursive script runner",
+                json!("uv run /usr/bin/timeout 5m git status"),
+            ),
+            (
+                "wrapped shell command",
+                json!("timeout 1h /bin/bash -lc 'git status && cargo test'"),
+            ),
+            (
+                "timeout in a pipeline",
+                json!("timeout 10 git status | cat && timeout 2m gh pr list"),
+            ),
+            (
+                "timeout unknown option",
+                json!("nice timeout --mystery 10 git status"),
+            ),
+            (
+                "timeout dynamic duration",
+                json!("timeout \"$duration\" git status"),
+            ),
+            (
+                "timeout dynamic command",
+                json!("timeout 30 \"$command\" status"),
+            ),
+            ("wrapped dynamic verb", json!("timeout 30 git \"$verb\"")),
+            ("timeout without command", json!(["timeout", "30"])),
+            (
+                "script name is not an invocation",
+                json!("timeout 30 npm run git status"),
+            ),
+            (
+                "ordinary command arguments are not invocations",
+                json!("timeout 30 python git status"),
+            ),
+        ] {
+            append_tool_row(
+                &mut output,
+                label,
+                &ToolCall::new("recursive", "Bash")
+                    .kind(ToolKind::Execute)
+                    .raw_input(json!({"command": command})),
+            );
+        }
+        let cached = ToolCall::new("cached-wrapper", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({"command": "nice -n 10 timeout 30 git status"}));
+        let item = TranscriptItem {
+            stable_id: "tool:cached-wrapper".into(),
+            position: 1,
+            latest_content_event_ordinal: None,
+            created_at_ms: 1,
+            last_changed_at_ms: 1,
+            body: TranscriptBody::Tool {
+                call: serde_json::to_value(&cached).expect("serialize tool call"),
+                terminal_outputs: Vec::new(),
+                terminal_refs: Vec::new(),
+                presentation: Some(Box::new(ToolCallPresentation {
+                    summary: "nice timeout".into(),
+                    summary_version: 4,
+                    ..tool_call_presentation(&cached)
+                })),
+            },
+        };
+        writeln!(
+            output,
+            "\n=== cached wrapper summary (transcript row) ===\n{}",
+            transcript_item_text(&item)
+        )
+        .unwrap();
         append_tool_row(
             &mut output,
             "non-execute tool title",

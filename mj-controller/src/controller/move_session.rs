@@ -986,17 +986,22 @@ impl Controller {
             .profile_id
             .as_deref()
             .context("move profile is unresolved")?;
-        let profile = self
-            .config
-            .profiles
-            .get(profile_id)
-            .context("move profile no longer exists")?;
+        ensure!(
+            self.config.profiles.contains_key(profile_id),
+            "move profile no longer exists"
+        );
         let source = self
             .state
             .sessions
             .get(&selection.session_id)
             .context("unknown move session")?;
-        if profile.kind != source_harness || profile_id == source.last_profile {
+        // A destination that cannot continue the native conversation starts a
+        // fresh one on its own default model, so there is no model to keep.
+        if profile_id == source.last_profile
+            || !self
+                .config
+                .native_continuity(source_harness, &source.last_profile, profile_id)?
+        {
             return Ok(());
         }
         let accepted = mj_core::acp::AcceptedSessionConfig::from_configuration(
@@ -1205,14 +1210,18 @@ impl Controller {
         );
         super::worker_binary::preflight_worker_binary(target, executor)?;
         super::backend::preflight_target(target, executor, super::backend::TargetCheck::Launch)?;
-        let source_harness = previous
+        let source_record = previous
             .as_ref()
             .filter(|operation| {
                 !operation.queue_admission_started && operation.phase != MovePhase::Completed
             })
             .and_then(|operation| operation.recovery_session.as_ref())
-            .map_or(source.harness_kind, |record| record.harness_kind);
-        let cross_harness = profile.kind != source_harness;
+            .unwrap_or(source);
+        let cross_harness = !self.config.native_continuity(
+            source_record.harness_kind,
+            &source_record.last_profile,
+            profile_id,
+        )?;
         if cross_harness {
             let cancel = tokio_util::sync::CancellationToken::new();
             let resolve =

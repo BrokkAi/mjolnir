@@ -1147,7 +1147,9 @@ async fn prompt_move_confirmation(
             session_id
         );
         if cross_harness {
-            eprintln!("This changes harnesses; the transcript handoff is text-only.");
+            eprintln!(
+                "This changes the harness or model service; the transcript handoff is text-only."
+            );
         }
         if in_place {
             eprintln!(

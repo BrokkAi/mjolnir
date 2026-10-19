@@ -125,5 +125,53 @@ nice python3
 === nice shell command (transcript row) ===
 nice python3
 
+=== timeout shell command (transcript row) ===
+timeout git status
+
+=== timeout argv command (transcript row) ===
+timeout git worktree list
+
+=== timeout command options (transcript row) ===
+timeout git status
+
+=== timeout attached short options (transcript row) ===
+timeout git status
+
+=== nested command wrappers (transcript row) ===
+nice timeout nice cargo test
+
+=== recursive script runner (transcript row) ===
+uv run timeout git status
+
+=== wrapped shell command (transcript row) ===
+timeout bash -c git status && cargo test
+
+=== timeout in a pipeline (transcript row) ===
+timeout git status | cat && timeout gh pr list
+
+=== timeout unknown option (transcript row) ===
+nice timeout
+
+=== timeout dynamic duration (transcript row) ===
+timeout
+
+=== timeout dynamic command (transcript row) ===
+timeout
+
+=== wrapped dynamic verb (transcript row) ===
+timeout git
+
+=== timeout without command (transcript row) ===
+timeout
+
+=== script name is not an invocation (transcript row) ===
+timeout npm run git
+
+=== ordinary command arguments are not invocations (transcript row) ===
+timeout python
+
+=== cached wrapper summary (transcript row) ===
+nice timeout git status
+
 === non-execute tool title (transcript row) ===
 Read
