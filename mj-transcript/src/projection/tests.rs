@@ -664,6 +664,24 @@ fn golden_mailbox_delivery_transcript() {
                 text: "A plain event from the CLI.".into(),
             },
         ),
+        mailbox_event(
+            "subagent-finished:child-1",
+            "subagent",
+            false,
+            512,
+            MailboxEventBody::SubagentFinished {
+                report: Box::new(
+                    serde_json::from_value(serde_json::json!({
+                        "child_session_id": "child-1", "task_name": "Check parser",
+                        "state": "failed", "finished": true,
+                        "output": "Fixed <parser>.\nTests passed: \"parser\".",
+                        "report_dir": "/reports/child-1", "report_source": "handback",
+                        "failure": {"summary": "verification timed out"}, "truncated": true
+                    }))
+                    .unwrap(),
+                ),
+            },
+        ),
     ];
     for (index, mailbox_event) in events.iter().enumerate() {
         apply_observation(
