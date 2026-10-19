@@ -178,7 +178,7 @@ impl DurableRelay {
         crate::acp::verdict_client::bound_authorization(
             &mut evidence,
             self.snapshot.assessment_context.clone(),
-        )?;
+        );
         a.evidence = Some(evidence);
         self.store_assessment(a)
     }
@@ -357,7 +357,14 @@ impl DurableRelay {
         {
             return None;
         }
-        let evidence = a.evidence.clone()?;
+        let mut evidence = a.evidence.clone()?;
+        // Evidence is stored with the assessment and retried as stored. Fit it
+        // again so evidence an older build sized without the questions, or
+        // sized before the questions grew, does not fail every retry.
+        if !mj_core::activity::verdict::request_fits(&evidence) {
+            let authorization = evidence.authorization.take();
+            crate::acp::verdict_client::bound_authorization(&mut evidence, authorization);
+        }
         self.replied_verdict.last_generation = Some(a.revision);
         self.replied_verdict.asked_turn = Some((a.turn_id.clone(), a.completed_ordinal));
         Some((
