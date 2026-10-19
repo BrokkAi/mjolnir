@@ -417,7 +417,7 @@ fn golden_session_title_projection() {
     );
 }
 
-// Hard-won: #4625: one queued notice must omit the by-clause when a merge actor is unavailable.
+// Hard-won: #4625: an external-events row must omit the by-clause when a merge actor is unavailable.
 #[test]
 fn golden_mailbox_delivery_transcript() {
     let mut session = MaterializedSession::empty("session-mailbox");
@@ -727,6 +727,20 @@ fn golden_mailbox_delivery_transcript() {
                 text: "The second item arrives in the same acknowledgment.".into(),
             },
         ),
+        mailbox_event(
+            "github:repo#4623:review-comment:9",
+            "github",
+            false,
+            712,
+            MailboxEventBody::GithubReviewComment {
+                item_kind: GithubItemKind::PullRequest,
+                number: 4623,
+                title: "Model Rust built-in macro values for CQ07".into(),
+                author: "gina".into(),
+                body: "A late review note arrives mid-turn.".into(),
+                repo: None,
+            },
+        ),
     ];
     let delivered = RelayObservation::MailboxEventsDelivered {
         event_keys: hook_messages
@@ -752,6 +766,95 @@ fn golden_mailbox_delivery_transcript() {
         "mailbox-delivery-transcript",
         &rendered_materialized_transcript(&session),
     );
+}
+
+// Session 3c3f7e29: a week of GitHub events accumulated in one row at the
+// first event's position, so each wake read "Agent continued on its own" with
+// no visible cause. A replayed delivery must also find its row when the row
+// is older than the live window, or the projector adds a second copy.
+#[test]
+fn mailbox_deliveries_reference_their_external_events_row() {
+    use mj_core::github_item::GithubItemKind;
+    use mj_core::mailbox::{MailboxDeliveryPath, MailboxEvent, MailboxEventBody};
+
+    let github = MailboxEvent {
+        key: "github:repo#7:review:1".into(),
+        source: "github".into(),
+        wake: true,
+        created_at_ms: 1,
+        body: MailboxEventBody::GithubReview {
+            item_kind: GithubItemKind::PullRequest,
+            number: 7,
+            title: "Delivery rows".into(),
+            author: "coderabbitai[bot]".into(),
+            body: String::new(),
+            review_state: Some("commented".into()),
+            repo: None,
+        },
+    };
+    let message = MailboxEvent {
+        key: "parent:message:1".into(),
+        source: "parent".into(),
+        wake: true,
+        created_at_ms: 2,
+        body: MailboxEventBody::ParentMessage {
+            text: "Check the review.".into(),
+        },
+    };
+    let row_id = "system:mailbox:delivered:github:repo#7:review:1".to_owned();
+    let hook_delivery = |events: Vec<MailboxEvent>| RelayObservation::MailboxEventsDelivered {
+        event_keys: events.iter().map(|event| event.key.clone()).collect(),
+        path: MailboxDeliveryPath::ToolHook,
+        prompt_command_id: None,
+        hook_event: Some("PostToolBatch".into()),
+        events,
+        lease_id: Some("lease".into()),
+        steering: None,
+    };
+    let session = MaterializedSession::empty("references");
+    for (observation, expected) in [
+        (
+            RelayObservation::CommandQueued {
+                command_id: "mailbox-wake-1".into(),
+                command: RelayCommand::MailboxWake {
+                    events: vec![message.clone(), github.clone()],
+                },
+                created_at_ms: 3,
+            },
+            true,
+        ),
+        (hook_delivery(vec![github.clone()]), true),
+        (hook_delivery(vec![message.clone()]), false),
+        // A queued event has not reached the agent and makes no row.
+        (
+            RelayObservation::CommandQueued {
+                command_id: "queued".into(),
+                command: RelayCommand::DeliverMailboxEvent {
+                    event: github.clone(),
+                },
+                created_at_ms: 4,
+            },
+            false,
+        ),
+    ] {
+        let (ids, _) = historical_references(&[event(&session, observation.clone())]).unwrap();
+        assert_eq!(ids.contains(&row_id), expected, "{observation:?}");
+        assert!(
+            ids.iter().all(|id| id != "system:mailbox:external-events"),
+            "{observation:?}"
+        );
+    }
+
+    let mut queued_only = MaterializedSession::empty("queued-only");
+    apply_observation(
+        &mut queued_only,
+        RelayObservation::CommandQueued {
+            command_id: "queued".into(),
+            command: RelayCommand::DeliverMailboxEvent { event: github },
+            created_at_ms: 4,
+        },
+    );
+    assert!(queued_only.transcript.is_empty());
 }
 
 // Hard-won: 60145fdb: leaving Claude Plan mode selected default Manual permissions instead of the saved policy.

@@ -199,8 +199,8 @@ and its parent has been told, Mjolnir parks it:
 
 - Its worker and harness stop, so it holds no processes.
 - Its conversation, its report, and the files on its target stay. Its row
-  shows the idle symbol and reads "Parked". The parent's `wait` and
-  `list_agents` report it as finished, as before, with `"parked": true`.
+  shows the idle symbol and reads "Parked". The report message the parent
+  receives and `list_agents` show it as finished, with `"parked": true`.
 - Mjolnir parks a sub-agent only when nothing is queued for it. A sub-agent
   that Mjolnir reminded to hand back its report is parked after the reminder
   turn ends.
@@ -225,7 +225,7 @@ the parent is told that plainly, with the container's `pids.current` and
 longer needs.
 
 Closing a parked sub-agent does not start it: it ends the same way as closing
-an idle one, and the parent's `wait` then reports it as `"stopped"`.
+an idle one, and `list_agents` then reports it as `"stopped"`.
 
 ### Sub-agents and suspend
 

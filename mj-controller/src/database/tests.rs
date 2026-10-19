@@ -5894,11 +5894,8 @@ fn history_pages_have_no_gaps_across_position_ties_and_concurrent_appends() {
 }
 
 #[test]
-fn history_window_deduplicates_deliveries_after_the_message_leaves_the_live_tail() {
+fn history_window_deduplicates_deliveries_after_their_row_leaves_the_live_tail() {
     use mj_core::relay::{RELAY_EVENT_FORMAT_V1, RelayCommand, RelayEvent, RelayObservation};
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("message-history.sqlite3");
-    let mut full = long_conversation();
     let message = mj_core::mailbox::MailboxEvent {
         key: "old-delivery".into(),
         source: "session_message".into(),
@@ -5908,82 +5905,121 @@ fn history_window_deduplicates_deliveries_after_the_message_leaves_the_live_tail
             text: "The original message.\nStill complete.".into(),
         },
     };
-    let original = Arc::new(TranscriptItem {
-        stable_id: mj_core::transcript::message_item_id(&message.key),
-        position: 3,
-        latest_content_event_ordinal: None,
-        created_at_ms: 300,
-        last_changed_at_ms: 300,
-        body: TranscriptBody::Message {
-            event: Box::new(message.clone()),
+    let review = mj_core::mailbox::MailboxEvent {
+        key: "github:repo#7:review:1".into(),
+        source: "github".into(),
+        wake: true,
+        created_at_ms: 200,
+        body: mj_core::mailbox::MailboxEventBody::GithubReview {
+            item_kind: mj_core::github_item::GithubItemKind::PullRequest,
+            number: 7,
+            title: "Delivery rows".into(),
+            author: "coderabbitai[bot]".into(),
+            body: String::new(),
+            review_state: Some("commented".into()),
+            repo: None,
         },
-    });
-    full.transcript[2] = original.clone();
-    save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
-    save_materialized_session_to(&path, &full).unwrap();
-    let (mut live, mut window) = load_materialized_actor_projection_from(&path, &full.session_id)
-        .unwrap()
-        .unwrap();
-    for observation in [
-        RelayObservation::MailboxEventsDelivered {
-            event_keys: vec![message.key.clone()],
-            path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
-            prompt_command_id: None,
-            hook_event: Some("PostToolUse".into()),
-            events: vec![message.clone()],
-            lease_id: Some("replayed-lease".into()),
-            steering: None,
-        },
-        RelayObservation::CommandQueued {
-            command_id: "mailbox-wake-replayed".into(),
-            command: RelayCommand::MailboxWake {
-                events: vec![message.clone()],
+    };
+    // A message has a row of its own; external events share one row per
+    // delivery. Both must be found again when a replay names them.
+    for (message, stable_id, body) in [
+        (
+            message.clone(),
+            mj_core::transcript::message_item_id(&message.key),
+            TranscriptBody::Message {
+                event: Box::new(message.clone()),
             },
-            created_at_ms: 5000,
-        },
+        ),
+        (
+            review,
+            "system:mailbox:delivered:github:repo#7:review:1".to_owned(),
+            TranscriptBody::System {
+                text: "Mailbox events:\n  - Review on your PR #7".into(),
+            },
+        ),
     ] {
-        assert!(
-            !live
-                .transcript
-                .iter()
-                .any(|item| item.stable_id == original.stable_id)
-        );
-        let mut event = RelayEvent {
-            format: RELAY_EVENT_FORMAT_V1,
-            ordinal: live.applied_event_ordinal + 1,
-            previous_digest: live.applied_event_digest.clone(),
-            digest: String::new(),
-            recorded_at_ms: 5000,
-            command_id: None,
-            observation,
-        };
-        event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
-        let restored =
-            load_projection_references_from(&path, &live, std::slice::from_ref(&event)).unwrap();
-        assert_eq!(restored, vec![original.clone()]);
-        window.omitted_items -= restored.len();
-        live.transcript.splice(0..0, restored);
-        let mutation = mj_transcript::projection::project_relay_event(&live, &event)
-            .unwrap()
-            .mutation;
-        assert!(mutation.transcript.is_empty());
-        apply_projection_page_to(&path, &full.session_id, |page| {
-            page.apply(
-                event.ordinal,
-                &event.previous_digest,
-                &event.digest,
-                &mutation,
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("message-history.sqlite3");
+        let mut full = long_conversation();
+        let original = Arc::new(TranscriptItem {
+            stable_id,
+            position: 3,
+            latest_content_event_ordinal: None,
+            created_at_ms: 300,
+            last_changed_at_ms: 300,
+            body,
+        });
+        full.transcript[2] = original.clone();
+        save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
+        save_materialized_session_to(&path, &full).unwrap();
+        let (mut live, mut window) =
+            load_materialized_actor_projection_from(&path, &full.session_id)
+                .unwrap()
+                .unwrap();
+        for observation in [
+            RelayObservation::MailboxEventsDelivered {
+                event_keys: vec![message.key.clone()],
+                path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
+                prompt_command_id: None,
+                hook_event: Some("PostToolUse".into()),
+                events: vec![message.clone()],
+                lease_id: Some("replayed-lease".into()),
+                steering: None,
+            },
+            RelayObservation::CommandQueued {
+                command_id: "mailbox-wake-replayed".into(),
+                command: RelayCommand::MailboxWake {
+                    events: vec![message.clone()],
+                },
+                created_at_ms: 5000,
+            },
+        ] {
+            assert!(
+                !live
+                    .transcript
+                    .iter()
+                    .any(|item| item.stable_id == original.stable_id)
+            );
+            let mut event = RelayEvent {
+                format: RELAY_EVENT_FORMAT_V1,
+                ordinal: live.applied_event_ordinal + 1,
+                previous_digest: live.applied_event_digest.clone(),
+                digest: String::new(),
+                recorded_at_ms: 5000,
+                command_id: None,
+                observation,
+            };
+            event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
+            let restored =
+                load_projection_references_from(&path, &live, std::slice::from_ref(&event))
+                    .unwrap();
+            assert_eq!(restored, vec![original.clone()]);
+            window.omitted_items -= restored.len();
+            live.transcript.splice(0..0, restored);
+            let mutation = mj_transcript::projection::project_relay_event(&live, &event)
+                .unwrap()
+                .mutation;
+            assert!(mutation.transcript.is_empty());
+            apply_projection_page_to(&path, &full.session_id, |page| {
+                page.apply(
+                    event.ordinal,
+                    &event.previous_digest,
+                    &event.digest,
+                    &mutation,
+                )
+            })
+            .unwrap();
+            mj_transcript::projection::apply_committed_projection_event(
+                &mut live, &event, mutation,
             )
-        })
-        .unwrap();
-        mj_transcript::projection::apply_committed_projection_event(&mut live, &event, mutation)
             .unwrap();
-        window.trim(&mut live, PROJECTION_TAIL_ITEMS);
-        let saved = load_materialized_session_from(&path, &full.session_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(saved.transcript.len(), full.transcript.len());
-        assert_eq!(saved.transcript[2], original);
+            window.trim(&mut live, PROJECTION_TAIL_ITEMS);
+            let saved = load_materialized_session_from(&path, &full.session_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.transcript.len(), full.transcript.len());
+            assert_eq!(saved.transcript[2], original);
+        }
     }
 }
 

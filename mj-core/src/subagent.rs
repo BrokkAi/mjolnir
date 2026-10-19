@@ -238,9 +238,14 @@ diagnosis, design choices, and work with a high risk of subtle bugs. A subtle
 task gets a smarter, more expensive agent. Judge difficulty, not brief length.";
 
 /// The same description when only the straightforward type is configured.
-/// There is no choice to make, so task types are not mentioned.
+/// There is no type to choose, so the parent delegates only straightforward
+/// work and keeps work that needs judgment.
 const ONE_TASK_TYPE: &str = "Mjolnir supplies the configured
-child model and effort.";
+child model and effort. Delegate only straightforward work: work with a clear
+method, including locating code, running commands or test suites, and
+implementing a settled design. Do work that needs judgment yourself, including
+ambiguous diagnosis, design choices, and changes with a high risk of subtle
+bugs. Judge difficulty, not brief length.";
 
 /// The parent's delegation policy. `offers_subtle` is false when only the
 /// straightforward task type is configured.
@@ -2283,19 +2288,29 @@ mod tests {
         }
     }
     #[test]
-    fn delegation_policy_mentions_task_types_only_when_subtle_is_offered() {
+    fn delegation_policy_offers_a_task_type_only_when_subtle_is_configured() {
         let both = delegation_policy(4, true);
         assert!(
             both.contains("Set `task_type` to `straightforward`"),
             "{both}"
         );
         assert!(both.contains("A subtle\ntask gets a smarter, more expensive agent."));
+        // With only straightforward, there is no choice: the parent delegates
+        // straightforward work and keeps work that needs judgment.
         let one = delegation_policy(4, false);
         assert!(
-            one.contains("`close` tools; Mjolnir supplies the configured\nchild model and effort.\nUp to 4 children"),
+            one.contains("`close` tools; Mjolnir supplies the configured\nchild model and effort. Delegate only straightforward work: "),
             "{one}"
         );
-        for text in ["task_type", "task type", "subtle", "$TASK_TYPES", "$N"] {
+        assert!(
+            one.contains("Do work that needs judgment yourself"),
+            "{one}"
+        );
+        assert!(
+            one.contains("Judge difficulty, not brief length.\nUp to 4 children"),
+            "{one}"
+        );
+        for text in ["task_type", "task type", "`subtle`", "$TASK_TYPES", "$N"] {
             assert!(!one.contains(text), "{text}: {one}");
         }
         assert!(!both.contains("$TASK_TYPES"));

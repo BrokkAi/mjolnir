@@ -115,17 +115,6 @@ pub fn historical_references(events: &[RelayEvent]) -> Result<(Vec<String>, Vec<
                     ids.insert(format!("system:notice:{id}"));
                 }
             }
-            RelayObservation::CommandQueued {
-                command:
-                    RelayCommand::DeliverMailboxEvent {
-                        event: mailbox_event,
-                    },
-                ..
-            } => {
-                if mailbox_event.message_text().is_none() {
-                    ids.insert(observation::MAILBOX_EVENTS_NOTICE_ID.to_owned());
-                }
-            }
             RelayObservation::MailboxEventsDelivered {
                 event_keys,
                 events,
@@ -138,6 +127,7 @@ pub fn historical_references(events: &[RelayEvent]) -> Result<(Vec<String>, Vec<
                         .chain(events.iter().map(|event| &event.key))
                         .map(|key| mj_core::transcript::message_item_id(key)),
                 );
+                ids.extend(observation::external_events_item_id(events));
                 if let Some(steering) = steering {
                     ids.insert(format!("user:{}", steering.queued_prompt_id));
                     ids.insert(format!("user:{}", steering.command_id));
@@ -152,6 +142,7 @@ pub fn historical_references(events: &[RelayEvent]) -> Result<(Vec<String>, Vec<
                         .iter()
                         .map(|event| mj_core::transcript::message_item_id(&event.key)),
                 );
+                ids.extend(observation::external_events_item_id(events));
             }
             _ => {}
         }

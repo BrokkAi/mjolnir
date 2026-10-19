@@ -504,8 +504,9 @@ work with a clear method, such as locating code, running commands or tests, or
 implementing a settled design; `subtle` for judgment, ambiguous diagnosis,
 design choices, or risk of subtle bugs. A subtle task gets a smarter, more
 expensive agent. Judge difficulty, not brief length. With only straightforward
-configured, `spawn` and the parent's delegation instructions do not mention task
-types, and every child uses the straightforward choice. Mjolnir chooses the eligible profile offering that task type's
+configured, `spawn` has no `task_type` and every child uses the straightforward
+choice. The parent is told to delegate only straightforward work and to do work
+that needs judgment itself. Mjolnir chooses the eligible profile offering that task type's
 model and effort with the most quota. The agent cannot override the selection.
 Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to
 Native; `mj move --subagents native|mjolnir|none` retains the recorded policy when

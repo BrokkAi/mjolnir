@@ -1,6 +1,9 @@
 use super::*;
 
-pub(super) const MAILBOX_EVENTS_NOTICE_ID: &str = "system:mailbox:external-events";
+/// Sessions projected before delivery rows existed keep one accumulated row
+/// under `system:mailbox:external-events`. Delivery rows use this prefix and
+/// an event key, so the two can never share an identity.
+const EXTERNAL_EVENTS_ITEM_PREFIX: &str = "system:mailbox:delivered:";
 
 fn project_steered_prompt(
     current: &MaterializedSession,
@@ -172,6 +175,7 @@ pub(super) fn project_observation(
                 let mailbox_wake = matches!(command, RelayCommand::MailboxWake { .. });
                 if let RelayCommand::MailboxWake { events } = command {
                     delivered_messages(index, event, events, mutation);
+                    delivered_external_events(index, event, events, mutation);
                 }
                 let content = if mailbox_wake {
                     Vec::new()
@@ -233,9 +237,10 @@ pub(super) fn project_observation(
                     },
                 },
             ),
-            RelayCommand::DeliverMailboxEvent {
-                event: mailbox_event,
-            } => mailbox_queued_notice(index, event, mailbox_event, mutation),
+            // A queued event is not yet something the agent has seen. It
+            // appears in the transcript when a wake, prompt, or tool hook
+            // delivers it, next to the work it caused.
+            RelayCommand::DeliverMailboxEvent { .. } => {}
             RelayCommand::RemoveQueuedPrompt { .. } | RelayCommand::ClearQueuedPrompts => {}
             RelayCommand::Close { .. } => {
                 close_streams(index, mutation, event.recorded_at_ms);
@@ -800,6 +805,7 @@ pub(super) fn project_observation(
             events, steering, ..
         } => {
             delivered_messages(index, event, events, mutation);
+            delivered_external_events(index, event, events, mutation);
             if let Some(steering) = steering {
                 let mut queue = current.queued_prompts.clone();
                 project_steered_prompt(
@@ -830,32 +836,62 @@ pub(super) fn project_observation(
     Ok(())
 }
 
-fn mailbox_queued_notice(
+/// The row that lists one delivery's external events, such as GitHub activity.
+/// It is keyed on the delivery's first external event, as a message row is
+/// keyed on its event, so a replayed delivery finds the row it already made.
+/// The relay claims each event key for exactly one wake, prompt, or hook
+/// delivery (`claim_wake_mailbox_events` and the delivered-key check in
+/// mj-core's relay apply), so no two deliveries share a row identity.
+/// `None` when the delivery carried only messages, or carried no bodies
+/// because an older worker recorded it.
+pub(super) fn external_events_item_id(events: &[mj_core::mailbox::MailboxEvent]) -> Option<String> {
+    events
+        .iter()
+        .find(|event| event.message_text().is_none())
+        .map(|event| format!("{EXTERNAL_EVENTS_ITEM_PREFIX}{}", event.key))
+}
+
+/// A replayed delivery leaves the rows it made where they are, whether they
+/// are in the projection already or earlier in this mutation.
+fn delivery_row_exists(
     index: &ProjectionIndex,
-    event: &RelayEvent,
-    mailbox_event: &mj_core::mailbox::MailboxEvent,
+    mutation: &MaterializedSessionMutation,
+    stable_id: &str,
+) -> bool {
+    index.get(stable_id).is_some()
+        || mutation.transcript.iter().any(|change| {
+            matches!(change, TranscriptMutation::Upsert(item) if item.stable_id == stable_id)
+        })
+}
+
+/// Show external events where the agent received them: just before the turn
+/// a wake started, before the prompt they were attached to, or between the
+/// tool calls a hook delivered them after. Messages get rows of their own in
+/// `delivered_messages`; this row lists everything else in the delivery.
+fn delivered_external_events(
+    index: &ProjectionIndex,
+    delivery: &RelayEvent,
+    events: &[mj_core::mailbox::MailboxEvent],
     mutation: &mut MaterializedSessionMutation,
 ) {
-    if mailbox_event.message_text().is_some() {
+    let Some(stable_id) = external_events_item_id(events) else {
+        return;
+    };
+    if delivery_row_exists(index, mutation, &stable_id) {
         return;
     }
-    let description = mj_core::mailbox::describe_mailbox_event(mailbox_event);
-    if let Some(existing) = index.get(MAILBOX_EVENTS_NOTICE_ID) {
-        let mut item = existing.as_ref().clone();
-        if let TranscriptBody::System { text } = &mut item.body {
-            text.push_str("\n  - ");
-            text.push_str(&description.transcript_line);
-            item.last_changed_at_ms = item.last_changed_at_ms.max(event.recorded_at_ms);
-            upsert(mutation, item);
-        }
-    } else {
-        push_system_with_id(
-            mutation,
-            event,
-            MAILBOX_EVENTS_NOTICE_ID.to_owned(),
-            format!("Mailbox events:\n  - {}", description.transcript_line),
-        );
-    }
+    let lines = events
+        .iter()
+        .filter(|event| event.message_text().is_none())
+        .map(|event| mj_core::mailbox::describe_mailbox_event(event).transcript_line)
+        .collect::<Vec<_>>();
+    close_streams(index, mutation, delivery.recorded_at_ms);
+    push_system_with_id(
+        mutation,
+        delivery,
+        stable_id,
+        format!("Mailbox events:\n  - {}", lines.join("\n  - ")),
+    );
 }
 
 fn delivered_messages(
@@ -873,9 +909,7 @@ fn delivered_messages(
     messages.sort_by(|left, right| left.key.cmp(&right.key));
     for event in messages {
         let stable_id = mj_core::transcript::message_item_id(&event.key);
-        if index.get(&stable_id).is_some()
-            || mutation.transcript.iter().any(|change| matches!(change, TranscriptMutation::Upsert(item) if item.stable_id == stable_id))
-        {
+        if delivery_row_exists(index, mutation, &stable_id) {
             continue;
         }
         close_streams(index, mutation, delivery.recorded_at_ms);

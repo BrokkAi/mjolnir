@@ -306,8 +306,9 @@ cannot be combined with a session that runs directly in the selected directory.
   `--subagent-effort` flags fail with guidance to use the four per-type flags.
   `single-model` and `all-models` remain rejected.
   When both types are configured, each spawn selects `straightforward` or
-  `subtle`. With only straightforward, the spawn tool has no task type and
-  every child uses the straightforward choice.
+  `subtle`. With only straightforward, the spawn tool has no task type,
+  every child uses the straightforward choice, and the parent is told to
+  delegate only straightforward work.
   Mjolnir chooses an eligible profile offering its model and effort by quota.
 - `mj new --review-model <name>`, `--review-effort <name>` and
   `--review-tier quick|extended` review every turn of the new session with

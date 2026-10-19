@@ -294,7 +294,7 @@ fn a_session_created_with_subagents_shows_a_dimmed_entry_before_the_first_child(
 
     chat.set_subagent_count(1);
     let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
-    assert!(screen.contains("Subagents · 0/1"), "{screen}");
+    assert!(screen.contains("Subagents · 0 ›"), "{screen}");
     assert!(chat.subagent_control_area.is_some());
 }
 
@@ -2370,6 +2370,7 @@ mod golden_cases {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.set_input("keep this draft".into());
         chat.set_subagent_count(2);
+        chat.set_subagent_working_count(1);
         state(
             &mut output,
             "active subagent count and preserved draft",
