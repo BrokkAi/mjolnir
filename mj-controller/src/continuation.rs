@@ -179,9 +179,23 @@ mod tests {
     }
 
     #[test]
-    fn continuation_never_clips_user_consent_and_marks_omitted_assistant_context() {
+    fn continuation_keeps_the_newest_user_window_and_marks_omitted_assistant_context() {
+        // A pasted document is kept by its head and tail, as the worker keeps it.
         let oversized = "x".repeat(mj_core::continuation::USER_BYTES + 1);
-        assert!(evidence(&session(&[("user", &oversized), ("assistant", "Done")])).is_err());
+        let e = evidence(&session(&[("user", &oversized), ("assistant", "Done")])).unwrap();
+        assert!(e.messages[0].text.contains("bytes omitted from the middle"));
+        // A long session keeps the newest whole user messages that fit.
+        let mut long = Vec::new();
+        for i in 0..40 {
+            long.push(("user", format!("step {i} {}", "u".repeat(1024))));
+            long.push(("assistant", format!("done {i}")));
+        }
+        let long: Vec<(&str, &str)> = long.iter().map(|(r, t)| (*r, t.as_str())).collect();
+        let e = evidence(&session(&long)).unwrap();
+        let users: Vec<_> = e.messages.iter().filter(|m| m.role == "user").collect();
+        assert!(users.len() < 40);
+        assert!(users.last().unwrap().text.starts_with("step 39 "));
+        assert!(e.messages.first().unwrap().role == "user");
         let long_reply = "x".repeat(ASSISTANT_BYTES);
         let e = evidence(&session(&[
             ("user", "Implement and test"),
