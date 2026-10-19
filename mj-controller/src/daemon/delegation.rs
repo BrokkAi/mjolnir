@@ -50,10 +50,11 @@ async fn run(
     {
         tracing::warn!(%error, "could not prune acknowledged delegation records");
     }
-    let parents = tokio::task::spawn_blocking(crate::database::list_subagent_parent_ids).await??;
-    for parent in parents {
-        backend.reconcile_parent_reports(&parent).await?;
-    }
+    // Finished children whose reports are not yet in the mailbox are
+    // rebuilt by the mailbox outbox, on its first sweep at startup and on
+    // every sweep after it. It retries a parent whose delegation queue is
+    // still connecting. A pass here would duplicate that work, and a failure
+    // in it would stop this coordinator and so the daemon.
     let mut revisions = state.revisions();
     let mut dispatch = SubagentDispatch::default();
     let mut jobs = tokio::task::JoinSet::new();
