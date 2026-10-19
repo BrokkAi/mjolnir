@@ -1522,19 +1522,21 @@ impl ChatState {
                 continue;
             }
             if let Some(mailbox) = &cached.mailbox {
-                for &(line, event) in &mailbox.mailbox_headers {
-                    if line < skip || line - skip >= visible_line_count {
+                for (rows, event) in &mailbox.mailbox_events {
+                    let start = rows.start.max(skip);
+                    let end = rows.end.min(skip + visible_line_count);
+                    if start >= end {
                         continue;
                     }
                     targets.push(TranscriptClickTarget {
                         rect: Rect::new(
                             inner.x,
-                            inner.y + (entry_start + line - skip) as u16,
+                            inner.y + (entry_start + start - skip) as u16,
                             inner.width,
-                            1,
+                            (end - start) as u16,
                         ),
                         start_seq: entries[index].start_seq,
-                        mailbox_event: Some(event),
+                        mailbox_event: Some(*event),
                     });
                 }
             } else {
@@ -1665,14 +1667,34 @@ impl ChatState {
             let key = (target.start_seq, event);
             if !self.expanded_mailbox_events.insert(key) {
                 self.expanded_mailbox_events.remove(&key);
+                // A body click can collapse the event containing the viewport
+                // top. Keep its header visible instead of skipping later text.
+                if let TranscriptAnchor::Row { entry, row } = self.anchor
+                    && self
+                        .entries
+                        .get(entry)
+                        .is_some_and(|entry| entry.start_seq == target.start_seq)
+                    && let Some(mailbox) = self
+                        .render_cache
+                        .entries
+                        .get(entry)
+                        .and_then(Option::as_ref)
+                        .and_then(|cached| cached.mailbox.as_ref())
+                    && let Some((rows, _)) = mailbox.mailbox_events.get(event)
+                    && rows.contains(&row)
+                {
+                    self.anchor = TranscriptAnchor::Row {
+                        entry,
+                        row: rows.start,
+                    };
+                }
             }
         } else if !self.expanded_tool_calls.insert(target.start_seq) {
             self.expanded_tool_calls.remove(&target.start_seq);
         }
 
-        // A mailbox toggle changes only rows below its clicked header, so
-        // the viewport top stays valid. A tool toggle can replace its whole
-        // layout; reset an anchor inside that tool to its header.
+        // A tool toggle can replace its whole layout; reset an anchor inside
+        // that tool to its header.
         if target.mailbox_event.is_none()
             && let TranscriptAnchor::Row { entry, .. } = self.anchor
             && self

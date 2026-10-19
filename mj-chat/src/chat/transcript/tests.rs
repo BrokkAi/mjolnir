@@ -4471,7 +4471,7 @@ fn golden_rich_transcript_tool_presentation() {
         .unwrap();
     mailbox.handle_mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: second_child.rect.x,
+        column: second_child.rect.x + 10,
         row: second_child.rect.y,
         modifiers: KeyModifiers::NONE,
     });
@@ -4486,7 +4486,7 @@ fn golden_rich_transcript_tool_presentation() {
     );
     assert_eq!(mailbox.expanded_mailbox_events, BTreeSet::from([(2, 11)]));
     let cached = mailbox.render_cache.entries[0].as_ref().unwrap();
-    let report_start = cached.mailbox.as_ref().unwrap().mailbox_headers[11].0 + 1;
+    let report_start = cached.mailbox.as_ref().unwrap().mailbox_events[11].0.start + 1;
     let report_end = cached.lines.len() - 2;
     let pane = transcript_pane(&mailbox);
     let copied_report = mailbox
@@ -4544,28 +4544,66 @@ fn golden_rich_transcript_tool_presentation() {
         &rows,
         &[],
     );
-    let second_child = mailbox
-        .transcript_click_targets
-        .iter()
-        .find(|target| target.mailbox_event == Some(11))
-        .copied()
-        .unwrap();
-    mailbox.handle_mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: second_child.rect.x,
-        row: second_child.rect.y,
-        modifiers: KeyModifiers::NONE,
-    });
+    // Hard-won: d453f1142: delivered-message bodies had no collapse target.
+    click_rendered_text(&mut mailbox, &rows, "text</script>.");
+    assert_eq!(mailbox.expanded_mailbox_events, BTreeSet::from([(2, 10)]));
     assert_eq!(mailbox.anchor, TranscriptAnchor::Row { entry: 0, row: 9 });
     let rows = crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
         crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 48))
     });
     append_transcript_golden_state(
         &mut output,
-        "one report collapsed with ASCII arrows",
+        "one report collapsed from wrapped body with ASCII arrows",
         44,
         48,
         &rows,
+        &[],
+    );
+
+    let first_report = mailbox.render_cache.entries[0]
+        .as_ref()
+        .unwrap()
+        .mailbox
+        .as_ref()
+        .unwrap()
+        .mailbox_events[10]
+        .0
+        .start;
+    mailbox.anchor = TranscriptAnchor::Row {
+        entry: 0,
+        row: first_report + 3,
+    };
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 16));
+    assert_eq!(
+        mailbox.anchor,
+        TranscriptAnchor::Row {
+            entry: 0,
+            row: first_report + 3,
+        }
+    );
+    append_transcript_golden_state(
+        &mut output,
+        "mailbox header scrolled out of view",
+        44,
+        16,
+        &rows,
+        &[],
+    );
+    click_rendered_text(&mut mailbox, &rows, "verification timed out");
+    assert!(mailbox.expanded_mailbox_events.is_empty());
+    assert_eq!(
+        mailbox.anchor,
+        TranscriptAnchor::Row {
+            entry: 0,
+            row: first_report,
+        }
+    );
+    append_transcript_golden_state(
+        &mut output,
+        "body click collapses the report and restores its header",
+        44,
+        16,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 16)),
         &[],
     );
     mailbox.render_mode = TranscriptRenderMode::Raw;

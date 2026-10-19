@@ -352,8 +352,8 @@ pub(crate) struct RowTrack {
     pub links: Vec<RowLink>,
     /// One per rendered row.
     pub copies: Vec<RowCopy>,
-    /// Header row and event index for each independently clickable event.
-    pub mailbox_headers: Vec<(usize, usize)>,
+    /// Rendered row range and event index for each independently clickable event.
+    pub mailbox_events: Vec<(std::ops::Range<usize>, usize)>,
 }
 
 /// Cells `start..end` of rendered row `row` draw text of a link to `url`.
@@ -648,7 +648,7 @@ pub(super) fn render_mailbox_entry(
                 theme::muted(),
             ));
         }
-        track.mailbox_headers.push((rows.len(), index));
+        let event_start = rows.len();
         rows.push(truncate_line_to_width(Line::from(header), width));
         track.copies.push(RowCopy::default());
         if open {
@@ -662,6 +662,7 @@ pub(super) fn render_mailbox_entry(
                 Some((&mut track, first_row)),
             ));
         }
+        track.mailbox_events.push((event_start..rows.len(), index));
     }
     rows.push(Line::from(""));
     track.copies.push(RowCopy::default());
