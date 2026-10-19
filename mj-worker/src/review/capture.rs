@@ -2,9 +2,9 @@
 
 use anyhow::{Context, Result};
 use mj_checkpoint::archive::{
-    GitCommand, GitCommandRunner, GitOutput, REVIEW_BASELINE_REF, capture_paths,
-    diff_between_trees, merge_trees, numstat_between_trees, pin_review_tree, read_review_point,
-    record_review_point,
+    GitCommand, GitCommandRunner, GitOutput, ReviewPoint, capture_paths, diff_between_trees,
+    merge_trees, numstat_between_trees, pin_review_tree, read_review_point, record_review_point,
+    remove_departed_worktree_pins, review_baseline_ref,
 };
 use mj_core::refusal::Refusal;
 use mj_core::relay::{FileLineChange, RepoDelta};
@@ -16,7 +16,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Captures every repository in `repositories` against `baselines`.
+/// Captures every repository in `repositories` against `baselines`, recording
+/// each capture as `session`'s.
 ///
 /// Runs Git commands only; nothing here modifies an index, a working tree, or
 /// any ref other than the capture pin. A repository whose capture fails is
@@ -27,6 +28,7 @@ pub fn capture_repository_deltas(
     repositories: &[PathBuf],
     baselines: &BTreeMap<PathBuf, String>,
     untracked_at_start: &BTreeMap<PathBuf, Vec<UntrackedEntry>>,
+    session: &str,
 ) -> Result<Vec<RepoDelta>> {
     let mut deltas = Vec::new();
     for root in repositories {
@@ -34,12 +36,23 @@ pub fn capture_repository_deltas(
         // review recorded. The worker pin covers a new session before that
         // first review has a controller baseline, and also a fresh target
         // after a resume. Both are usable only while their tree object is
-        // still in this repository.
-        let baseline = baselines
+        // still in this repository, and the pin only while no other session
+        // has taken this worktree's pin over. A pin with no recorded owner
+        // predates owners and is used as it was before.
+        let baseline = match baselines
             .get(root)
             .filter(|tree| tree_exists(git, root, tree))
-            .cloned()
-            .or_else(|| pinned_review_baseline(git, root));
+        {
+            Some(baseline) => Some(baseline.clone()),
+            None => pinned_baseline(git, root, &review_baseline_ref(git, root)?)
+                .filter(|(_, point)| {
+                    point
+                        .session
+                        .as_deref()
+                        .is_none_or(|owner| owner == session)
+                })
+                .map(|(id, _)| id),
+        };
         // One HEAD for the whole capture: the tree starts from it and the
         // review point records it, so the two cannot disagree.
         let head = resolve_head(git, root)?;
@@ -71,7 +84,7 @@ pub fn capture_repository_deltas(
         // that `git status` no longer calls dirty.
         let tree = capture_paths(git, root, head.as_deref(), &changed)
             .with_context(|| format!("capture the changed paths of {}", root.display()))?;
-        let current = record_review_point(git, root, &tree, head.as_deref())
+        let current = record_review_point(git, root, &tree, head.as_deref(), session)
             .with_context(|| format!("record the capture of {}", root.display()))?;
         let (base, patch, files) = match &baseline {
             Some(baseline) => {
@@ -346,16 +359,21 @@ fn parse_numstat(output: &[u8]) -> Vec<FileLineChange> {
     files
 }
 
-/// Pins the current worktree as the baseline for a fresh worker workspace.
+/// Pins the current worktree as `session`'s baseline for a fresh worker
+/// workspace.
 ///
 /// This is deliberately separate from [`capture_repository_deltas`]: startup
 /// must establish the point before the primary harness can edit anything, but
 /// a daemon restart must not replace a baseline that may have unreviewed work
 /// after it. The caller decides whether this is a fresh startup; this function
-/// is idempotent and preserves every valid existing pin.
+/// is idempotent and preserves a valid pin `session` already holds. A pin
+/// another session left in this worktree is replaced: its baseline is that
+/// session's reviewed state, and adopting it would review everything since
+/// then as this session's first turn.
 pub fn initialize_review_baselines(
     git: &dyn GitCommandRunner,
     repositories: &[PathBuf],
+    session: &str,
 ) -> Result<BTreeMap<PathBuf, Vec<UntrackedEntry>>> {
     let mut untracked_at_start = BTreeMap::new();
     for root in repositories {
@@ -373,7 +391,19 @@ pub fn initialize_review_baselines(
         })?;
         refuse_unreviewable_workspace(root, &state)?;
         untracked_at_start.insert(root.clone(), state.untracked);
-        if pinned_review_baseline(git, root).is_some() {
+        // Housekeeping for the whole repository; a failure leaves stale refs
+        // behind but does not touch this session's pin.
+        if let Err(error) = remove_departed_worktree_pins(git, root) {
+            tracing::warn!(
+                repository = %root.display(),
+                error = format!("{error:#}"),
+                "could not remove review pins of removed worktrees"
+            );
+        }
+        let reference = review_baseline_ref(git, root)?;
+        if pinned_baseline(git, root, &reference)
+            .is_some_and(|(_, point)| point.session.as_deref() == Some(session))
+        {
             continue;
         }
         // The baseline is HEAD plus what the checkout was already dirty with.
@@ -382,9 +412,9 @@ pub fn initialize_review_baselines(
         let head = resolve_head(git, root)?;
         let tree = capture_paths(git, root, head.as_deref(), &state.dirty_tracked)
             .with_context(|| format!("capture the startup baseline of {}", root.display()))?;
-        let point = record_review_point(git, root, &tree, head.as_deref())
+        let point = record_review_point(git, root, &tree, head.as_deref(), session)
             .with_context(|| format!("record the startup baseline of {}", root.display()))?;
-        pin_review_tree(git, root, REVIEW_BASELINE_REF, &point)
+        pin_review_tree(git, root, &reference, &point)
             .with_context(|| format!("pin the startup review baseline of {}", root.display()))?;
     }
     Ok(untracked_at_start)
@@ -408,21 +438,29 @@ fn refuse_unreviewable_workspace(repository: &Path, state: &WorkspaceState) -> R
     ))))
 }
 
-/// Returns the review point held by the worker's durable baseline ref, if it
-/// still resolves to a tree in this repository.
-fn pinned_review_baseline(git: &dyn GitCommandRunner, repository: &Path) -> Option<String> {
+/// The review point a worktree's baseline pin holds, with its id, if it still
+/// resolves to a tree in this repository. A pin from a release that did not
+/// record its session reads with no owner.
+fn pinned_baseline(
+    git: &dyn GitCommandRunner,
+    repository: &Path,
+    reference: &str,
+) -> Option<(String, ReviewPoint)> {
     let output = run(
         git,
         repository,
-        &["rev-parse", "--verify", "--quiet", REVIEW_BASELINE_REF],
+        &["rev-parse", "--verify", "--quiet", reference],
     )
     .ok()?;
     if output.status != 0 {
         return None;
     }
-    let point = String::from_utf8(output.stdout).ok()?;
-    let point = point.trim();
-    (!point.is_empty() && tree_exists(git, repository, point)).then(|| point.to_owned())
+    let id = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    if id.is_empty() || !tree_exists(git, repository, &id) {
+        return None;
+    }
+    let point = read_review_point(git, repository, &id).ok()?;
+    Some((id, point))
 }
 
 /// Whether this repository still holds the tree a baseline names.
@@ -446,13 +484,14 @@ pub fn read_untracked_at_start(
         .collect()
 }
 
-/// Pins each named review point as that repository's review baseline.
+/// Pins each named review point as its worktree's review baseline.
 pub fn advance_baselines(
     git: &dyn GitCommandRunner,
     trees: &BTreeMap<PathBuf, String>,
 ) -> Result<()> {
     for (root, tree) in trees {
-        pin_review_tree(git, root, REVIEW_BASELINE_REF, tree)
+        let reference = review_baseline_ref(git, root)?;
+        pin_review_tree(git, root, &reference, tree)
             .with_context(|| format!("pin the review baseline of {}", root.display()))?;
     }
     Ok(())
@@ -492,7 +531,15 @@ fn repository_root(git: &dyn GitCommandRunner, directory: &Path) -> Option<PathB
 mod capture_tests {
     use super::*;
     use crate::test_support::git;
-    use mj_checkpoint::archive::SystemGit;
+    use mj_checkpoint::archive::{REVIEW_BASELINE_REF, SystemGit};
+
+    const SESSION: &str = "session-a";
+
+    /// The review point this worktree's pin holds.
+    fn pinned(repository: &Path) -> Option<String> {
+        let reference = review_baseline_ref(&SystemGit, repository).unwrap();
+        pinned_baseline(&SystemGit, repository, &reference).map(|(id, _)| id)
+    }
 
     fn repository() -> tempfile::TempDir {
         let temp = tempfile::tempdir().unwrap();
@@ -509,9 +556,14 @@ mod capture_tests {
     fn a_capture_reports_what_changed_since_the_baseline() {
         let temp = repository();
         let roots = vec![temp.path().to_path_buf()];
-        let first =
-            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &BTreeMap::new())
-                .unwrap();
+        let first = capture_repository_deltas(
+            &SystemGit,
+            &roots,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            SESSION,
+        )
+        .unwrap();
         assert!(
             !has_changes(&first),
             "a repository with no baseline starts coverage rather than reviewing its whole history"
@@ -520,7 +572,8 @@ mod capture_tests {
 
         std::fs::write(temp.path().join("tracked.rs"), "fn main() { retry(); }\n").unwrap();
         let second =
-            capture_repository_deltas(&SystemGit, &roots, &baselines, &BTreeMap::new()).unwrap();
+            capture_repository_deltas(&SystemGit, &roots, &baselines, &BTreeMap::new(), SESSION)
+                .unwrap();
         assert!(has_changes(&second));
         assert!(second[0].patch.contains("+fn main() { retry(); }"));
         assert_eq!(
@@ -556,15 +609,22 @@ mod capture_tests {
         git(temp.path(), &["commit", "-qm", "more"]);
         let roots = vec![temp.path().to_path_buf()];
         let baselines = captured_trees(
-            &capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &BTreeMap::new())
-                .unwrap(),
+            &capture_repository_deltas(
+                &SystemGit,
+                &roots,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                SESSION,
+            )
+            .unwrap(),
         );
         git(temp.path(), &["mv", "moved.rs", "renamed.rs"]);
         git(temp.path(), &["mv", "old name.rs", "new name.rs"]);
         std::fs::write(temp.path().join("logo.bin"), [0u8, 1, 2, 0, 255]).unwrap();
         std::fs::write(temp.path().join("new.rs"), "fn new() {}\nfn other() {}\n").unwrap();
         let deltas =
-            capture_repository_deltas(&SystemGit, &roots, &baselines, &BTreeMap::new()).unwrap();
+            capture_repository_deltas(&SystemGit, &roots, &baselines, &BTreeMap::new(), SESSION)
+                .unwrap();
         let mut files = deltas[0].files.clone();
         files.sort_by(|left, right| left.path.cmp(&right.path));
         assert_eq!(
@@ -600,15 +660,20 @@ mod capture_tests {
     fn startup_baseline_makes_the_first_edits_reviewable() {
         let temp = repository();
         let roots = vec![temp.path().to_path_buf()];
-        initialize_review_baselines(&SystemGit, &roots).unwrap();
-        let startup = pinned_review_baseline(&SystemGit, temp.path()).unwrap();
+        initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
+        let startup = pinned(temp.path()).unwrap();
 
         std::fs::write(temp.path().join("tracked.rs"), "fn main() { first(); }\n").unwrap();
         std::fs::write(temp.path().join("new.rs"), "fn new() {}\n").unwrap();
 
-        let deltas =
-            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &BTreeMap::new())
-                .unwrap();
+        let deltas = capture_repository_deltas(
+            &SystemGit,
+            &roots,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            SESSION,
+        )
+        .unwrap();
         assert!(has_changes(&deltas));
         assert_eq!(deltas[0].baseline_tree.as_deref(), Some(startup.as_str()));
         assert!(deltas[0].patch.contains("+fn main() { first(); }"));
@@ -619,7 +684,7 @@ mod capture_tests {
     fn startup_baseline_reviews_edits_committed_during_the_turn() {
         let temp = repository();
         let roots = vec![temp.path().to_path_buf()];
-        initialize_review_baselines(&SystemGit, &roots).unwrap();
+        initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
 
         std::fs::write(
             temp.path().join("tracked.rs"),
@@ -629,9 +694,14 @@ mod capture_tests {
         git(temp.path(), &["add", "tracked.rs"]);
         git(temp.path(), &["commit", "-qm", "turn change"]);
 
-        let deltas =
-            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &BTreeMap::new())
-                .unwrap();
+        let deltas = capture_repository_deltas(
+            &SystemGit,
+            &roots,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            SESSION,
+        )
+        .unwrap();
         assert!(has_changes(&deltas));
         assert!(deltas[0].patch.contains("+fn main() { committed(); }"));
     }
@@ -699,7 +769,7 @@ mod capture_tests {
         git(root, &["branch", "old-upstream"]);
         edit(&[(30, "line 30 reviewed")]);
         commit("reviewed before the session");
-        let untracked_at_start = initialize_review_baselines(&SystemGit, &roots).unwrap();
+        let untracked_at_start = initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
 
         edit(&[(10, "line 10 turn")]);
         commit("turn, later pushed");
@@ -717,9 +787,14 @@ mod capture_tests {
         merge("old-upstream", "line 30 resolved");
         std::fs::write(root.join("tracked.rs"), "fn main() { edited(); }\n").unwrap();
 
-        let deltas =
-            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &untracked_at_start)
-                .unwrap();
+        let deltas = capture_repository_deltas(
+            &SystemGit,
+            &roots,
+            &BTreeMap::new(),
+            &untracked_at_start,
+            SESSION,
+        )
+        .unwrap();
 
         let patch = &deltas[0].patch;
         for wanted in [
@@ -760,7 +835,8 @@ mod capture_tests {
         let baselines = captured_trees(&deltas);
         advance_baselines(&SystemGit, &baselines).unwrap();
         let next_start = read_untracked_at_start(&SystemGit, &roots).unwrap();
-        let next = capture_repository_deltas(&SystemGit, &roots, &baselines, &next_start).unwrap();
+        let next = capture_repository_deltas(&SystemGit, &roots, &baselines, &next_start, SESSION)
+            .unwrap();
         assert!(!has_changes(&next), "{}", next[0].patch);
     }
 
@@ -781,29 +857,147 @@ mod capture_tests {
 
         let recorded = BTreeMap::from([(temp.path().to_path_buf(), tree.clone())]);
         for baselines in [BTreeMap::new(), recorded] {
-            let deltas =
-                capture_repository_deltas(&SystemGit, &roots, &baselines, &BTreeMap::new())
-                    .unwrap();
+            let deltas = capture_repository_deltas(
+                &SystemGit,
+                &roots,
+                &baselines,
+                &BTreeMap::new(),
+                SESSION,
+            )
+            .unwrap();
             assert_eq!(deltas[0].baseline_tree.as_deref(), Some(tree.as_str()));
             assert!(deltas[0].patch.contains("+fn main() { upgraded(); }"));
         }
+    }
+
+    /// Every linked worktree shares its repository's refs, and a managed
+    /// worktree is how a session usually checks a repository out. Each
+    /// worktree session keeps a pin of its own: it neither starts from another
+    /// session's baseline nor moves one, and the next session to start in the
+    /// repository deletes the pin of a worktree that was removed.
+    // Hard-won: #1307: a new worktree session took another session's review baseline as its own.
+    #[test]
+    fn each_worktree_session_keeps_its_own_baseline() {
+        let temp = repository();
+        let main = temp.path().to_path_buf();
+        let outside = tempfile::tempdir().unwrap();
+        let linked = outside.path().join("feature");
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let capture =
+            |root: &Path, session: &str, start: &BTreeMap<PathBuf, Vec<UntrackedEntry>>| {
+                capture_repository_deltas(
+                    &SystemGit,
+                    &[root.to_path_buf()],
+                    &BTreeMap::new(),
+                    start,
+                    session,
+                )
+                .unwrap()
+            };
+
+        initialize_review_baselines(&SystemGit, std::slice::from_ref(&main), "session-a").unwrap();
+        std::fs::write(main.join("tracked.rs"), "fn main() { a(); }\n").unwrap();
+        let a = capture(&main, "session-a", &BTreeMap::new());
+        advance_baselines(&SystemGit, &captured_trees(&a)).unwrap();
+
+        let b_start =
+            initialize_review_baselines(&SystemGit, std::slice::from_ref(&linked), "session-b")
+                .unwrap();
+        std::fs::write(linked.join("b.rs"), "fn b() {}\n").unwrap();
+        let b = capture(&linked, "session-b", &b_start);
+        assert!(b[0].patch.contains("b.rs"), "{}", b[0].patch);
+        assert!(
+            !b[0].patch.contains("a();"),
+            "the worktree session started from another session's baseline: {}",
+            b[0].patch
+        );
+        advance_baselines(&SystemGit, &captured_trees(&b)).unwrap();
+
+        let a_again = capture(&main, "session-a", &BTreeMap::new());
+        assert!(
+            a_again[0].baseline_tree.is_some(),
+            "this session lost its pin"
+        );
+        assert!(
+            !has_changes(&a_again),
+            "another session's review moved this one's baseline: {}",
+            a_again[0].patch
+        );
+
+        assert!(
+            git(&main, &["for-each-ref", "refs/hel/worktrees/feature"]).contains("review-baseline")
+        );
+        git(
+            &main,
+            &["worktree", "remove", "--force", linked.to_str().unwrap()],
+        );
+        initialize_review_baselines(&SystemGit, std::slice::from_ref(&main), "session-c").unwrap();
+        assert_eq!(git(&main, &["for-each-ref", "refs/hel/worktrees"]), "");
+    }
+
+    /// A checkout an earlier session worked in still holds that session's
+    /// pin. A new session starts from its own baseline; adopting the old pin
+    /// would review everything changed since that session's last review as the
+    /// new session's first turn.
+    // Hard-won: #1307: a new session in a reused checkout took the previous session's baseline.
+    #[test]
+    fn a_new_session_in_a_used_checkout_starts_from_its_own_baseline() {
+        let temp = repository();
+        let roots = vec![temp.path().to_path_buf()];
+        initialize_review_baselines(&SystemGit, &roots, "earlier").unwrap();
+        std::fs::write(temp.path().join("tracked.rs"), "fn main() { by_hand(); }\n").unwrap();
+        git(temp.path(), &["commit", "-qam", "between sessions"]);
+
+        let start = initialize_review_baselines(&SystemGit, &roots, "later").unwrap();
+        std::fs::write(temp.path().join("later.rs"), "fn later() {}\n").unwrap();
+        let deltas =
+            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &start, "later")
+                .unwrap();
+
+        assert!(deltas[0].patch.contains("later.rs"), "{}", deltas[0].patch);
+        assert!(
+            !deltas[0].patch.contains("by_hand"),
+            "the new session started from the earlier session's baseline: {}",
+            deltas[0].patch
+        );
+        // The earlier session's pin is no longer anyone's fallback.
+        let earlier_capture =
+            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &start, "earlier")
+                .unwrap();
+        assert_eq!(earlier_capture[0].baseline_tree, None);
     }
 
     #[test]
     fn persisted_review_baseline_takes_precedence_over_the_startup_pin() {
         let temp = repository();
         let roots = vec![temp.path().to_path_buf()];
-        initialize_review_baselines(&SystemGit, &roots).unwrap();
+        initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
 
         std::fs::write(temp.path().join("tracked.rs"), "fn main() { first(); }\n").unwrap();
-        let first =
-            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &BTreeMap::new())
-                .unwrap();
+        let first = capture_repository_deltas(
+            &SystemGit,
+            &roots,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            SESSION,
+        )
+        .unwrap();
         let persisted = captured_trees(&first);
 
         std::fs::write(temp.path().join("tracked.rs"), "fn main() { second(); }\n").unwrap();
         let second =
-            capture_repository_deltas(&SystemGit, &roots, &persisted, &BTreeMap::new()).unwrap();
+            capture_repository_deltas(&SystemGit, &roots, &persisted, &BTreeMap::new(), SESSION)
+                .unwrap();
         assert!(has_changes(&second));
         assert_eq!(second[0].baseline_tree, persisted.values().next().cloned());
         assert!(second[0].patch.contains("+fn main() { second(); }"));
@@ -816,14 +1010,19 @@ mod capture_tests {
         let roots = vec![temp.path().to_path_buf()];
         std::fs::write(temp.path().join("tracked.rs"), "base\nbefore\n").unwrap();
         std::fs::write(temp.path().join("preexisting.rs"), "already here\n").unwrap();
-        let untracked_at_start = initialize_review_baselines(&SystemGit, &roots).unwrap();
+        let untracked_at_start = initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
 
         std::fs::write(temp.path().join("tracked.rs"), "base\nbefore\nafter\n").unwrap();
         std::fs::write(temp.path().join("agent.rs"), "new work\n").unwrap();
 
-        let deltas =
-            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &untracked_at_start)
-                .unwrap();
+        let deltas = capture_repository_deltas(
+            &SystemGit,
+            &roots,
+            &BTreeMap::new(),
+            &untracked_at_start,
+            SESSION,
+        )
+        .unwrap();
         assert!(has_changes(&deltas));
         assert!(deltas[0].patch.contains("+after"));
         assert!(!deltas[0].patch.contains("+before"));
@@ -835,19 +1034,21 @@ mod capture_tests {
     fn restarting_preserves_the_startup_baseline_and_pending_changes() {
         let temp = repository();
         let roots = vec![temp.path().to_path_buf()];
-        initialize_review_baselines(&SystemGit, &roots).unwrap();
-        let startup = pinned_review_baseline(&SystemGit, temp.path()).unwrap();
+        initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
+        let startup = pinned(temp.path()).unwrap();
 
         std::fs::write(temp.path().join("tracked.rs"), "fn main() { pending(); }\n").unwrap();
-        initialize_review_baselines(&SystemGit, &roots).unwrap();
-        assert_eq!(
-            pinned_review_baseline(&SystemGit, temp.path()).as_deref(),
-            Some(startup.as_str())
-        );
+        initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
+        assert_eq!(pinned(temp.path()).as_deref(), Some(startup.as_str()));
 
-        let deltas =
-            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &BTreeMap::new())
-                .unwrap();
+        let deltas = capture_repository_deltas(
+            &SystemGit,
+            &roots,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            SESSION,
+        )
+        .unwrap();
         assert!(has_changes(&deltas));
         assert!(deltas[0].patch.contains("+fn main() { pending(); }"));
     }
@@ -864,7 +1065,8 @@ mod capture_tests {
             "0123456789abcdef0123456789abcdef01234567".to_string(),
         )]);
         let deltas =
-            capture_repository_deltas(&SystemGit, &roots, &stale, &BTreeMap::new()).unwrap();
+            capture_repository_deltas(&SystemGit, &roots, &stale, &BTreeMap::new(), SESSION)
+                .unwrap();
         assert!(!has_changes(&deltas));
         assert_eq!(deltas[0].baseline_tree, None);
         assert!(!deltas[0].current_tree.is_empty());
@@ -962,7 +1164,7 @@ mod capture_tests {
         }
         let before = loose_objects(temp.path());
 
-        initialize_review_baselines(&SystemGit, &roots).unwrap();
+        initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
 
         // At most a tree and the review point naming it. Two hundred
         // untracked files cost nothing, because nothing opened them.
@@ -987,13 +1189,18 @@ mod capture_tests {
             )
             .unwrap();
         }
-        let untracked_at_start = initialize_review_baselines(&SystemGit, &roots).unwrap();
+        let untracked_at_start = initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
         let before = loose_objects(temp.path());
 
         std::fs::write(temp.path().join("tracked.rs"), "fn main() { changed(); }\n").unwrap();
-        let deltas =
-            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &untracked_at_start)
-                .unwrap();
+        let deltas = capture_repository_deltas(
+            &SystemGit,
+            &roots,
+            &BTreeMap::new(),
+            &untracked_at_start,
+            SESSION,
+        )
+        .unwrap();
 
         assert!(has_changes(&deltas));
         assert!(deltas[0].patch.contains("+fn main() { changed(); }"));
@@ -1018,12 +1225,17 @@ mod capture_tests {
         let temp = repository();
         let roots = vec![temp.path().to_path_buf()];
         std::fs::write(temp.path().join("already.txt"), "was here\n").unwrap();
-        let untracked_at_start = initialize_review_baselines(&SystemGit, &roots).unwrap();
+        let untracked_at_start = initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
 
         std::fs::write(temp.path().join("made.txt"), "the agent made this\n").unwrap();
-        let deltas =
-            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &untracked_at_start)
-                .unwrap();
+        let deltas = capture_repository_deltas(
+            &SystemGit,
+            &roots,
+            &BTreeMap::new(),
+            &untracked_at_start,
+            SESSION,
+        )
+        .unwrap();
 
         assert!(deltas[0].patch.contains("made.txt"), "{}", deltas[0].patch);
         assert!(
@@ -1037,12 +1249,13 @@ mod capture_tests {
     fn a_review_carries_unchanged_untracked_files_from_its_baseline() {
         let temp = repository();
         let roots = vec![temp.path().to_path_buf()];
-        let first_start = initialize_review_baselines(&SystemGit, &roots).unwrap();
+        let first_start = initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
 
         std::fs::write(temp.path().join("a.py"), "first version\n").unwrap();
         std::fs::write(temp.path().join("b.py"), "unchanged\n").unwrap();
         let first =
-            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &first_start).unwrap();
+            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &first_start, SESSION)
+                .unwrap();
         assert!(first[0].patch.contains("a.py"), "{}", first[0].patch);
         assert!(first[0].patch.contains("b.py"), "{}", first[0].patch);
         let baselines = captured_trees(&first);
@@ -1051,7 +1264,8 @@ mod capture_tests {
 
         std::fs::write(temp.path().join("a.py"), "a revised version\n").unwrap();
         let second =
-            capture_repository_deltas(&SystemGit, &roots, &baselines, &second_start).unwrap();
+            capture_repository_deltas(&SystemGit, &roots, &baselines, &second_start, SESSION)
+                .unwrap();
 
         assert!(second[0].patch.contains("a revised version"));
         assert!(!second[0].patch.contains("b.py"), "{}", second[0].patch);
@@ -1069,19 +1283,21 @@ mod capture_tests {
     fn a_review_reports_an_untracked_file_removed_since_its_baseline() {
         let temp = repository();
         let roots = vec![temp.path().to_path_buf()];
-        let first_start = initialize_review_baselines(&SystemGit, &roots).unwrap();
+        let first_start = initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
 
         std::fs::write(temp.path().join("a.py"), "unchanged\n").unwrap();
         std::fs::write(temp.path().join("b.py"), "to be removed\n").unwrap();
         let first =
-            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &first_start).unwrap();
+            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &first_start, SESSION)
+                .unwrap();
         let baselines = captured_trees(&first);
         advance_baselines(&SystemGit, &baselines).unwrap();
         let second_start = read_untracked_at_start(&SystemGit, &roots).unwrap();
 
         std::fs::remove_file(temp.path().join("b.py")).unwrap();
         let second =
-            capture_repository_deltas(&SystemGit, &roots, &baselines, &second_start).unwrap();
+            capture_repository_deltas(&SystemGit, &roots, &baselines, &second_start, SESSION)
+                .unwrap();
 
         assert!(second[0].patch.contains("b.py"), "{}", second[0].patch);
         assert!(!second[0].patch.contains("a.py"), "{}", second[0].patch);

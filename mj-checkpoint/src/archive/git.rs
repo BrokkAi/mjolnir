@@ -381,10 +381,12 @@ pub fn has_origin_refs(runner: &dyn GitCommandRunner, repository: &Path) -> Resu
     Ok(!refs.is_empty())
 }
 
-/// Ref pinning the review point a completed review advanced its baseline to.
+/// Ref pinning the review point a completed review advanced its baseline to,
+/// for a repository's main worktree; a linked worktree has its own (see
+/// [`review_baseline_ref`]).
 ///
-/// This is the one ref Mjolnir writes into a user's repository, and it earns
-/// its place. A baseline is HEAD's tree plus one blob for each file the
+/// This is the one kind of ref Mjolnir writes into a user's repository, and it
+/// earns its place. A baseline is HEAD's tree plus one blob for each file the
 /// checkout was already dirty with; HEAD's own objects are reachable from the
 /// branch, but those few blobs are reachable from nothing else. A session can
 /// run for days between reviews, so without this ref an ordinary `git gc`
@@ -399,6 +401,117 @@ pub fn has_origin_refs(runner: &dyn GitCommandRunner, repository: &Path) -> Resu
 /// inside that review, and if the review completes it is pinned here as the
 /// new baseline.
 pub const REVIEW_BASELINE_REF: &str = "refs/hel/review-baseline";
+
+/// Where linked worktrees pin their review baselines, as
+/// `refs/hel/worktrees/<name>/review-baseline`.
+const WORKTREE_REVIEW_PINS: &str = "refs/hel/worktrees/";
+
+/// The ref that pins the review baseline of the worktree `repository` is.
+///
+/// Every linked worktree shares its repository's refs, so a single name would
+/// give every session on a repository one pin: a new session would take
+/// another's baseline as its own, and each completed review would unpin the
+/// others'. The main worktree keeps [`REVIEW_BASELINE_REF`]; a linked worktree
+/// pins under its name in the repository's `worktrees` directory, which Git
+/// keeps a valid ref component. The pins stay in the shared namespace because
+/// `git gc` keeps only the objects that the worktree it runs in reaches through
+/// `refs/worktree/`; a pin there would protect nothing from a gc run elsewhere.
+pub fn review_baseline_ref(runner: &dyn GitCommandRunner, repository: &Path) -> Result<String> {
+    let (git_dir, common_dir) = git_directories(runner, repository)?;
+    if same_directory(&git_dir, &common_dir)? {
+        return Ok(REVIEW_BASELINE_REF.to_owned());
+    }
+    let name = git_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("name the worktree of {}", git_dir.display()))?;
+    Ok(format!("{WORKTREE_REVIEW_PINS}{name}/review-baseline"))
+}
+
+/// Deletes the review pins of linked worktrees the repository no longer has,
+/// and returns the refs it deleted.
+///
+/// A pin outlives its worktree, so without this every session in a managed
+/// worktree would leave a ref behind in the user's repository. The pins are
+/// listed before the worktrees, and each is deleted only while it still holds
+/// the listed value. A worktree exists before anything can pin for it, so a
+/// pin that was listed belongs to a worktree that the later listing still
+/// shows unless it was removed; a pin rewritten in between is left alone.
+pub fn remove_departed_worktree_pins(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+) -> Result<Vec<String>> {
+    let pins = git_text(
+        runner,
+        repository,
+        [
+            "for-each-ref",
+            "--format=%(objectname) %(refname)",
+            WORKTREE_REVIEW_PINS,
+        ],
+    )
+    .context("list the worktree review pins")?;
+    if pins.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (_, common_dir) = git_directories(runner, repository)?;
+    let worktrees = match std::fs::read_dir(common_dir.join("worktrees")) {
+        Ok(entries) => entries
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<BTreeSet<_>>>()
+            .context("list the repository's worktrees")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+        Err(error) => return Err(error).context("list the repository's worktrees"),
+    };
+    let mut removed = Vec::new();
+    for line in pins.lines() {
+        let Some((object, reference)) = line.split_once(' ') else {
+            continue;
+        };
+        let Some(name) = reference
+            .strip_prefix(WORKTREE_REVIEW_PINS)
+            .and_then(|rest| rest.strip_suffix("/review-baseline"))
+        else {
+            continue;
+        };
+        if worktrees.contains(std::ffi::OsStr::new(name)) {
+            continue;
+        }
+        git_bytes(
+            runner,
+            repository,
+            ["update-ref", "-d", reference, object],
+            &[],
+            "delete a departed worktree's review pin",
+        )?;
+        removed.push(reference.to_owned());
+    }
+    Ok(removed)
+}
+
+/// The worktree's own Git directory and the repository's common one, which
+/// are the same directory in the main worktree.
+fn git_directories(runner: &dyn GitCommandRunner, repository: &Path) -> Result<(PathBuf, PathBuf)> {
+    let output = git_text(
+        runner,
+        repository,
+        ["rev-parse", "--absolute-git-dir", "--git-common-dir"],
+    )
+    .context("locate the Git directories")?;
+    let mut lines = output.lines();
+    let (Some(git_dir), Some(common_dir)) = (lines.next(), lines.next()) else {
+        bail!("git rev-parse named no common directory: {output}");
+    };
+    // `--git-common-dir` may be relative to the directory Git ran in.
+    Ok((PathBuf::from(git_dir), repository.join(common_dir)))
+}
+
+fn same_directory(left: &Path, right: &Path) -> Result<bool> {
+    let canonical = |path: &Path| {
+        std::fs::canonicalize(path).with_context(|| format!("resolve {}", path.display()))
+    };
+    Ok(canonical(left)? == canonical(right)?)
+}
 
 /// A scratch index of its own for one capture or merge, named to Git through
 /// `GIT_INDEX_FILE`, so the repository's real index, working tree and HEAD are
@@ -512,31 +625,36 @@ pub fn capture_paths(
     scratch.write_tree(runner, repository)
 }
 
-/// The tree a review point names and the commit HEAD was at when it was taken.
+/// The tree a review point names, the commit HEAD was at when it was taken,
+/// and the session that took it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewPoint {
     pub tree: String,
     /// `None` for an unborn branch, and for a bare tree id pinned by a release
     /// that did not record HEAD.
     pub head: Option<String>,
+    /// `None` for a point recorded by a release that did not record it.
+    pub session: Option<String>,
 }
 
-/// Records `tree` and the HEAD it was captured at as one Git object, and
-/// returns its id: the id a review hands on as its capture and later pins as
-/// a baseline.
+/// Records `tree`, the HEAD it was captured at, and the session that captured
+/// it as one Git object, and returns its id: the id a review hands on as its
+/// capture and later pins as a baseline.
 ///
 /// The object is an annotated tag pointing at the tree, with `head <commit>`
-/// as its message. The tree and its commit are one fact, so they travel as one
-/// id; and a tag is still a tree-ish, so `git diff`, `git ls-tree` and
-/// `^{tree}` read it exactly as they read the bare tree ids earlier releases
-/// stored, with no change to the controller's records or the relay protocol.
-/// Unlike a commit, a tag pointing at a tree does not appear in `git log
-/// --all`. The fixed tagger and date make equal captures equal ids.
+/// and `session <id>` as its message. The tree and its commit are one fact, so
+/// they travel as one id, and the session lets a pin say whose it is. A tag is
+/// still a tree-ish, so `git diff`, `git ls-tree` and `^{tree}` read it exactly
+/// as they read the bare tree ids earlier releases stored, with no change to
+/// the controller's records or the relay protocol. Unlike a commit, a tag
+/// pointing at a tree does not appear in `git log --all`. The fixed tagger and
+/// date make equal captures equal ids.
 pub fn record_review_point(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     tree: &str,
     head: Option<&str>,
+    session: &str,
 ) -> Result<String> {
     let mut tag = format!(
         "object {tree}\ntype tree\ntag mjolnir-review-point\n\
@@ -545,6 +663,7 @@ pub fn record_review_point(
     if let Some(head) = head {
         tag.push_str(&format!("head {head}\n"));
     }
+    tag.push_str(&format!("session {session}\n"));
     let output = git_bytes(
         runner,
         repository,
@@ -573,6 +692,7 @@ pub fn read_review_point(
         "tree" => Ok(ReviewPoint {
             tree: id.to_owned(),
             head: None,
+            session: None,
         }),
         "tag" => {
             let tag = git_bytes(
@@ -598,6 +718,7 @@ pub fn read_review_point(
             Ok(ReviewPoint {
                 tree,
                 head: field(message, "head "),
+                session: field(message, "session "),
             })
         }
         other => bail!("review point {id} is a {other}, not a tag or tree"),

@@ -33,7 +33,7 @@ After this change the review diff contains the turn's own commits, the way it re
 - Observation: `BoundedGit` in `mj-worker/src/review/capture.rs`, which runs the startup baseline under a deadline, dropped `GitCommand.stdin`, so the first command that needed input (`git mktag`) failed and the startup pin was never written.
   Evidence: `worker_runtime::relay_tests::first_daemon_start_pins_the_worktree_before_the_primary_harness` failed with `assertion failed: baseline.status.success()` until the input was attached with `CommandSpec::with_sensitive_stdin`, the executor's concurrent pipe path, which also honours the deadline.
 
-- Observation: `refs/hel/review-baseline` is shared by every linked worktree of a repository, because only `refs/worktree/`, `refs/bisect/` and `refs/rewritten/` are per-worktree. A second worktree session finds the first one's pin at startup and keeps it. This predates and is independent of this plan; it is not changed here.
+- Observation: `refs/hel/review-baseline` is shared by every linked worktree of a repository, because only `refs/worktree/`, `refs/bisect/` and `refs/rewritten/` are per-worktree. A second worktree session finds the first one's pin at startup and keeps it. This predates and is independent of this plan; it was fixed separately under #1307, which pins each linked worktree at `refs/hel/worktrees/<name>/review-baseline`, records the owning session in the review point, and deletes the pins of removed worktrees.
   Evidence: `git update-ref refs/hel/review-baseline HEAD^{tree}` in a linked worktree is visible from the main worktree with `git rev-parse --verify refs/hel/review-baseline`.
 
 ## Decision Log

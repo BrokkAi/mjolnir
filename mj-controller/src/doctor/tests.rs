@@ -1382,8 +1382,13 @@ fn setup_instructions_name_mjolnir_and_the_local_bare_prerequisites() {
 fn review_leftovers_are_reported_and_left_alone() {
     let repository = tempfile::tempdir().unwrap();
     let git_dir = repository.path().join(".git");
-    std::fs::create_dir_all(git_dir.join("refs/hel")).unwrap();
+    std::fs::create_dir_all(git_dir.join("refs/hel/worktrees/gone")).unwrap();
     std::fs::write(git_dir.join("refs/hel/review-capture"), "a".repeat(41)).unwrap();
+    std::fs::write(
+        git_dir.join("refs/hel/worktrees/gone/review-baseline"),
+        "c".repeat(41),
+    )
+    .unwrap();
     std::fs::write(
         git_dir.join("packed-refs"),
         format!("{} refs/hel/review-baseline\n", "b".repeat(40)),
@@ -1396,7 +1401,11 @@ fn review_leftovers_are_reported_and_left_alone() {
 
     assert_eq!(
         residue.refs,
-        ["refs/hel/review-baseline", "refs/hel/review-capture"]
+        [
+            "refs/hel/review-baseline",
+            "refs/hel/review-capture",
+            "refs/hel/worktrees/gone/review-baseline"
+        ]
     );
     assert_eq!(residue.scratch_indexes, std::slice::from_ref(&scratch));
     assert!(
