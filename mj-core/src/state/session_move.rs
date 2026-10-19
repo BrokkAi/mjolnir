@@ -226,6 +226,10 @@ pub struct MovePreparation {
     pub selection: MoveSelection,
     pub source_profile_id: String,
     pub source_target_template_id: String,
+    /// The destination cannot continue the native conversation, because its
+    /// harness or model service differs (see `Config::native_continuity`), so
+    /// the transcript is handed over as compacted text. Stored move records
+    /// keep this name.
     pub cross_harness: bool,
     pub active: bool,
     pub queued_commands: Vec<MaterializedQueuedPrompt>,

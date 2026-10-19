@@ -1728,15 +1728,17 @@ impl Controller {
         // that could never install a worker fails here rather than after all
         // that work has been thrown away.
         super::worker_binary::preflight_worker_binary(&target_template, executor)?;
-        let same_harness = profile.kind == archive_manifest.session.harness_kind;
-        let native_continuity =
-            native_continuity_preserved(profile.kind, archive_manifest.session.harness_kind);
+        let native_continuity = self.config.native_continuity(
+            archive_manifest.session.harness_kind,
+            &archive_manifest.session.profile_id,
+            profile_id,
+        )?;
         let context_bytes = crate::handoff::profile_handoff_bytes(Some(&profile));
         // Cross-harness compaction is started alongside destination
         // provisioning below. Clone only the configuration it reads so the
         // controller can continue owning and mutating its session record.
         let utility_config = (!native_continuity).then(|| self.config.clone());
-        let discard_queued_prompts = discard_queue || !same_harness;
+        let discard_queued_prompts = discard_queue || !native_continuity;
         // When this controller archived the session, its durable projection is
         // already the archive's content. Reading one row decides that; a read
         // failure or any mismatch rebuilds as before.
@@ -2625,13 +2627,6 @@ fn execute_joined_cross_harness_work<A: Send, B: Send>(
             (Ok(first), Ok(second)) => Ok((first, second)),
         }
     })
-}
-
-/// Whether the restored native session can carry the conversation into the
-/// resumed session.
-///
-fn native_continuity_preserved(profile_kind: HarnessKind, archived_kind: HarnessKind) -> bool {
-    profile_kind == archived_kind
 }
 
 /// Discover a utility model and compact the cross-harness handoff while still

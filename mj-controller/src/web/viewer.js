@@ -4012,7 +4012,7 @@ function renderMoveForm() {
     moveStep.append(el('p', 'dim', preparation.selection.clear_resource_allocation
       ? 'Resource sizing: use destination defaults. Attached directories remain fixed to this workspace.'
       : 'Resource sizing and attached directories: retain the source workspace settings.'));
-    moveStep.append(el('p', 'dim', preparation.cross_harness ? 'This is a cross-harness handoff. Harness-private state is rebuilt from the canonical transcript.' : 'The same harness session state will be restored when supported.'));
+    moveStep.append(el('p', 'dim', preparation.cross_harness ? 'The destination uses a different harness or model service. Harness-private state is rebuilt from the canonical transcript.' : 'The same harness session state will be restored when supported.'));
     moveStep.append(el('p', 'dim', preparation.in_place
       ? 'Only the harness and profile are replaced; the environment and workspace are kept.'
       : 'The session is restored into a fresh environment.'));

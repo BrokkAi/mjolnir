@@ -2509,3 +2509,79 @@ fn subtle_subagents_are_optional_but_never_configured_alone() {
         "{error}"
     );
 }
+
+/// Codex profiles can point at different providers, so a native Codex thread
+/// continues only on a profile that sends requests to the same service. Each
+/// profile's provider comes from its own Codex files, overlay included, and a
+/// source profile that is gone leaves no evidence of its service.
+#[test]
+fn native_continuity_follows_the_codex_model_service_not_only_the_harness() {
+    let openai = tempfile::tempdir().expect("temporary home");
+    let deepseek = tempfile::tempdir().expect("temporary home");
+    fs::write(
+        deepseek.path().join("config.toml"),
+        "model = \"deepseek-v4-pro\"\n\
+         model_provider = \"deepseek\"\n\
+         [model_providers.deepseek]\n\
+         base_url = \"https://api.deepseek.com/v1\"\n\
+         env_key = \"DEEPSEEK_API_KEY\"\n\
+         wire_api = \"responses\"\n",
+    )
+    .expect("write Codex configuration");
+    fs::write(
+        deepseek.path().join("c245.config.toml"),
+        "model_reasoning_effort = \"max\"\n",
+    )
+    .expect("write Codex overlay");
+    // The same service under another table name and spelling.
+    let renamed = tempfile::tempdir().expect("temporary home");
+    fs::write(
+        renamed.path().join("config.toml"),
+        "model_provider = \"ds\"\n\
+         [model_providers.ds]\n\
+         base_url = \"https://API.DeepSeek.com/v1/\"\n\
+         env_key = \"DEEPSEEK_API_KEY\"\n\
+         wire_api = \"responses\"\n",
+    )
+    .expect("write Codex configuration");
+    let profile = |kind: HarnessKind, home: &Path, codex_profile: Option<&str>| HarnessProfile {
+        enabled: true,
+        kind,
+        home: home.to_path_buf(),
+        environment: Default::default(),
+        context_window_bytes: None,
+        legacy_subagents: Default::default(),
+        guardian_review_model: None,
+        codex_profile: codex_profile.map(str::to_owned),
+    };
+    let mut config = Config::default();
+    for (id, profile) in [
+        ("codex3", profile(HarnessKind::Codex, openai.path(), None)),
+        ("codex4", profile(HarnessKind::Codex, openai.path(), None)),
+        (
+            "deepseek245",
+            profile(HarnessKind::Codex, deepseek.path(), Some("c245")),
+        ),
+        ("ds", profile(HarnessKind::Codex, renamed.path(), None)),
+        ("claude1", profile(HarnessKind::Claude, openai.path(), None)),
+        ("claude2", profile(HarnessKind::Claude, openai.path(), None)),
+    ] {
+        config.profiles.insert(id.into(), profile);
+    }
+    let continues = |kind, source: &str, destination: &str| {
+        config
+            .native_continuity(kind, source, destination)
+            .unwrap_or_else(|error| panic!("{source} -> {destination}: {error:#}"))
+    };
+
+    assert!(continues(HarnessKind::Codex, "codex3", "codex4"));
+    assert!(!continues(HarnessKind::Codex, "codex3", "deepseek245"));
+    assert!(!continues(HarnessKind::Codex, "deepseek245", "codex3"));
+    assert!(continues(HarnessKind::Codex, "deepseek245", "ds"));
+    assert!(!continues(HarnessKind::Codex, "codex3", "claude1"));
+    assert!(continues(HarnessKind::Claude, "claude1", "claude2"));
+    // "Unknown" is not "the same": a removed Codex profile could have named
+    // any provider, while every Claude profile uses Claude's own service.
+    assert!(!continues(HarnessKind::Codex, "removed", "codex4"));
+    assert!(continues(HarnessKind::Claude, "removed", "claude2"));
+}
