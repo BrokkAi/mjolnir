@@ -221,15 +221,18 @@ Include a screenshot or terminal recording for visible rendering changes.
 
 CI runs workspace lint/tests, portable Linux musl worker checks, and desktop
 checks in independent jobs. On every check-in, Linux executes the workspace
-tests and Windows compiles them. The macOS lane
-(`.github/workflows/macos.yml`) runs the workspace tests, the desktop
-application, and the voice worker on macOS. It runs nightly and on manual
-dispatch (`.github/workflows/macos-nightly.yml`), and on check-in only when a
-change touches a path in `.github/macos-ci-paths.txt` or a file with a macOS
-cfg gate, such as `target_os = "macos"`. When you add a macOS-specific module, or code that
-wraps macOS behavior without such a gate, add its path to that list in the same
-change. A failing nightly run opens or reopens one tracking issue, and the next
-passing run closes it. Separate jobs check formatting, older GNU/Linux
+tests. The macOS lane (`.github/workflows/macos.yml`) runs the workspace
+tests, the desktop application, and the voice worker on macOS. The Windows
+lane (`.github/workflows/windows.yml`) compiles the workspace tests, runs the
+controller-side suites and the installer test, and builds the desktop
+application on Windows. Both lanes run nightly and on manual dispatch
+(`.github/workflows/nightly.yml`) and for every release tag, and on check-in
+only when a change touches a path in `.github/macos-ci-paths.txt` or
+`.github/windows-ci-paths.txt`, or a file with that platform's cfg gate, such
+as `target_os = "macos"` or `cfg(windows)`. When you add a platform-specific
+module, or code that wraps platform behavior without such a gate, add its path
+to that list in the same change. A failing nightly lane opens or reopens its
+own tracking issue, and that lane's next passing run closes it. Separate jobs check formatting, older GNU/Linux
 compatibility, a deterministic multi-client reliability scenario,
 the Linux voice worker, dependency licenses, and packaged legal files.
 Build caches are isolated by job, OS, architecture, and configuration, with
