@@ -15,7 +15,6 @@ use sha2::{Digest, Sha256};
 use similar::{DiffTag, TextDiff};
 
 pub const MEMORY_INDEX: &str = "MEMORY.md";
-pub const MAX_DOCUMENT_BYTES: usize = 100 * 1024;
 pub const MAX_VIRTUAL_PATH_BYTES: usize = 1024;
 pub const STARTUP_INDEX_LINES: usize = 200;
 pub const STARTUP_INDEX_BYTES: usize = 25 * 1024;
@@ -761,11 +760,6 @@ impl ProjectMemoryStore {
         let mut files = BTreeMap::new();
         let mut total = 0_usize;
         for entry in entries {
-            anyhow::ensure!(
-                entry.bytes <= MAX_DOCUMENT_BYTES,
-                "project memory snapshot document {} exceeds {MAX_DOCUMENT_BYTES} bytes",
-                entry.path
-            );
             ensure_snapshot_budget(&mut total, entry.bytes)?;
             let relative = validate_virtual_path(&entry.path)?;
             let content = fs::read_to_string(self.root.join(relative))
@@ -943,10 +937,6 @@ fn ensure_snapshot_budget(total: &mut usize, bytes: usize) -> Result<()> {
 }
 
 fn ensure_snapshot_document(content: &str) -> Result<()> {
-    anyhow::ensure!(
-        content.len() <= MAX_DOCUMENT_BYTES,
-        "project memory snapshot document exceeds {MAX_DOCUMENT_BYTES} bytes"
-    );
     anyhow::ensure!(
         !content.trim().is_empty(),
         "project memory snapshot contains an empty document"
