@@ -12,6 +12,26 @@ import uuid
 
 import reliability_lab
 
+# Every polling wait below detects a hang, not a slow host. The test host's
+# shared ZFS pool can hold an ordinary write for several seconds while other
+# builds flush, which stalls the daemon's database and a worker's journal, so
+# a deadline sized for a quiet machine fails a correct run.
+WAIT_SECONDS = 120
+
+# The scenario acts on these turns while they run: it hands a report back,
+# changes the parent's settings, or replaces the daemon. The fake agent holds
+# each one until the scenario releases or cancels it. A timer instead ends a
+# turn too early on a slow host, or leaves too little time for what follows.
+HELD_PROMPTS = (
+    "Return a short fixture report.",
+    "Hold the parent turn for queued settings.",
+    "Run after the pending settings.",
+    "second turn",
+    "Return the legacy attachment evidence.",
+    "Return a judgment report.",
+    "Report the session override.",
+)
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -93,17 +113,31 @@ def main():
             '        report_execution("running")',
             '        report_execution("running")\n        with open(os.path.join(os.environ["CODEX_HOME"], "fixture-prompt.txt"), "a") as marker:\n            marker.write(text + "\\n")',
         )
-        script = script.replace(
-            "        if wait_for_prompt_cancel():",
-            '        if "second turn" in text:\n            os.environ["MJ_FAKE_ACP_PROMPT_DELAY_MS"] = "15000"\n        if wait_for_prompt_cancel():',
+        # A held prompt ends with end_turn once `release` writes its file into
+        # the session's private CODEX_HOME, or as cancelled on session/cancel.
+        held = (
+            "HELD_PROMPTS = " + repr(HELD_PROMPTS) + "\n\n"
+            "def hold_until_released():\n"
+            '    release = os.path.join(os.environ["CODEX_HOME"], "fixture-release")\n'
+            "    deadline = time.monotonic() + 900\n"
+            "    while time.monotonic() < deadline:\n"
+            "        if os.path.exists(release):\n"
+            "            os.unlink(release)\n"
+            "            return False\n"
+            "        ready, _, _ = select.select([sys.stdin], [], [], 0.05)\n"
+            "        if ready:\n"
+            "            cancellation = json.loads(sys.stdin.readline())\n"
+            "            log(cancellation)\n"
+            '            if cancellation.get("method") != "session/cancel":\n'
+            '                raise RuntimeError("expected session/cancel while prompt was held")\n'
+            "            return True\n"
+            '    raise RuntimeError("held prompt was never released")\n\n'
+            "def wait_for_prompt_cancel():\n"
+            '    if any(marker in globals().get("text", "") for marker in HELD_PROMPTS):\n'
+            "        return hold_until_released()\n"
         )
-        # Leave enough headroom to check parent-only control under a loaded test host.
-        script = script.replace(
-            '    delay_ms = int(os.environ.get("MJ_FAKE_ACP_PROMPT_DELAY_MS", "0"))',
-            '    delay_ms = int(os.environ.get("MJ_FAKE_ACP_PROMPT_DELAY_MS", "0"))\n'
-            '    if "Return a short fixture report." in globals().get("text", ""):\n'
-            '        delay_ms = 30000',
-        )
+        assert script.count("def wait_for_prompt_cancel():\n") == 1
+        script = script.replace("def wait_for_prompt_cancel():\n", held)
         compile(script, str(bridge), "exec")
         bridge.write_text(script)
         env = lab.environment()
@@ -118,7 +152,7 @@ def main():
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=90,
+                timeout=WAIT_SECONDS,
             )
             with (lab.root / "cli.log").open("a") as log:
                 log.write(
@@ -156,7 +190,7 @@ def main():
         parent = created["session_id"]
 
         def endpoint(session):
-            deadline = time.monotonic() + 30
+            deadline = time.monotonic() + WAIT_SECONDS
             while time.monotonic() < deadline:
                 paths = [
                     p for p in lab.data.rglob("subagents.sock") if session in p.parts
@@ -176,7 +210,7 @@ def main():
                 request["action"]["params"] = params
             started = time.monotonic()
             with socket.socket(socket.AF_UNIX) as connection:
-                connection.settimeout(60)
+                connection.settimeout(WAIT_SECONDS)
                 connection.connect(str(endpoint(session)))
                 connection.sendall(json.dumps(request).encode() + b"\n")
                 reply = json.loads(connection.makefile("rb").readline())
@@ -200,7 +234,7 @@ def main():
         def worker_status(session):
             # Ask the worker that owns the turn, independently of projection lag.
             with socket.socket(socket.AF_UNIX) as connection:
-                connection.settimeout(15)
+                connection.settimeout(WAIT_SECONDS)
                 connection.connect(str(endpoint(session).with_name("control.sock")))
                 with connection.makefile("rb") as reader:
                     hello = {
@@ -227,7 +261,7 @@ def main():
         def wait_recorded_parent_turn():
             # The fake agent has already observed the user message. A missing
             # selection row is still unknown, rather than an empty work queue.
-            deadline = time.monotonic() + 30
+            deadline = time.monotonic() + WAIT_SECONDS
             command = None
             while time.monotonic() < deadline:
                 if command is None:
@@ -267,7 +301,7 @@ def main():
                 input="{}\n",
                 capture_output=True,
                 text=True,
-                timeout=20,
+                timeout=WAIT_SECONDS,
             )
             if result.returncode:
                 raise RuntimeError(
@@ -276,7 +310,7 @@ def main():
             return json.loads(result.stdout)
 
         endpoint(parent)
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + WAIT_SECONDS
         while time.monotonic() < deadline:
             sessions = json.loads(cli("sessions", "--json"))
             rows = (
@@ -317,19 +351,33 @@ def main():
             return {row.get("id", row.get("session_id")) for row in rows}
 
         def wait_prompt(session, text):
-            deadline = time.monotonic() + 30
+            deadline = time.monotonic() + WAIT_SECONDS
             while time.monotonic() < deadline:
                 # The fake ACP agent appends each prompt to a file in its
                 # session-private CODEX_HOME, which lies under the session id.
                 for marker in lab.runtime_root.rglob("fixture-prompt.txt"):
                     if session in marker.parts and text in marker.read_text():
-                        return
+                        return marker
                 time.sleep(0.05)
             raise RuntimeError(f"worker did not begin prompt: {text}")
 
+        def release(session, text):
+            # End a held turn as the agent would on its own, and wait until the
+            # fake agent has taken the release, so it cannot end a later turn.
+            assert any(marker in text for marker in HELD_PROMPTS), text
+            marker = wait_prompt(session, text)
+            staged = marker.with_name("fixture-release.tmp")
+            staged.write_text(text)
+            staged.replace(marker.with_name("fixture-release"))
+            deadline = time.monotonic() + WAIT_SECONDS
+            while marker.with_name("fixture-release").exists():
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"held prompt did not take its release: {text}")
+                time.sleep(0.05)
+
         def wait_report(session, finished_child, text):
             wait_prompt(session, text)
-            deadline = time.monotonic() + 15
+            deadline = time.monotonic() + WAIT_SECONDS
             while time.monotonic() < deadline:
                 with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
                     rows = database.execute(
@@ -355,7 +403,7 @@ def main():
             return lab.daemon_request({
                 "action": "submit_session_command",
                 "arguments": {"session_id": parent, "command_id": command_id, "command": command},
-            })
+            }, timeout=WAIT_SECONDS)
 
         submit_parent("hold-parent-settings", {"type": "prompt", "data": {
             "prompt": [{"type": "text", "text": "Hold the parent turn for queued settings."}],
@@ -375,7 +423,7 @@ def main():
         applied = lab.daemon_request({
             "action": "submit_session_command",
             "arguments": {"session_id": parent, "command_id": "apply-queued-settings-regression", "command": command},
-        })
+        }, timeout=WAIT_SECONDS)
         assert applied["reply"] == "ordinal", applied
         wait_prompt(parent, "Run after the pending settings.")
         parent_after = worker_status(parent)
@@ -389,7 +437,7 @@ def main():
             lab.daemon_request({
                 "action": "submit_session_command",
                 "arguments": {"session_id": parent, "command_id": "stale-apply-settings-regression", "command": command},
-            })
+            }, timeout=WAIT_SECONDS)
         except reliability_lab.ScenarioFailure as error:
             assert "changed" in str(error).lower(), error
         else:
@@ -399,7 +447,7 @@ def main():
         # A wait attached to this fixture turn would correctly be interrupted
         # when the fixture finishes, rather than consuming the child's report.
         submit_parent("settle-parent-settings-case", parent_after["turn_controls"]["interrupt"])
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + WAIT_SECONDS
         while worker_status(parent)["active_prompt"] is not None:
             if time.monotonic() >= deadline:
                 raise RuntimeError("parent settings fixture did not settle after interruption")
@@ -407,6 +455,7 @@ def main():
         assert worker_status(child)["active_prompt"] == child_before
         # Handback travels through the child's durable queue while its turn runs.
         tool(child, "handback", {"message": "first report without a dashboard"})
+        release(child, "Return a short fixture report.")
         wait_report(parent, child, "first report without a dashboard")
         # Older workers receive immediate guidance without collecting reports.
         for action in ("wait_agents", "await_children"):
@@ -415,9 +464,9 @@ def main():
             assert "end your turn" in legacy_reply["next_action"], legacy_reply
 
         def wait_parked(session):
-            # Match the park lifecycle's existing 120-second deadline. Cleanup
+            # At least the park lifecycle's own 120-second deadline. Cleanup
             # kills the worker, so a shorter wait aborts a still-valid park.
-            deadline = time.monotonic() + 120
+            deadline = time.monotonic() + max(WAIT_SECONDS, 120)
             while time.monotonic() < deadline:
                 with sqlite3.connect(
                     f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True
@@ -461,7 +510,7 @@ def main():
             "additionalContext", ""
         )
         assert "after daemon replacement" in additional_context, hook
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + WAIT_SECONDS
         while time.monotonic() < deadline:
             listed = tool(parent, "list_agents")
             deliveries = listed["agents"][0].get("message_deliveries", [])
@@ -482,6 +531,7 @@ def main():
             "handback",
             {"message": "second report across daemon replacement"},
         )
+        release(child, "second turn")
         wait_report(parent, child, "second report across daemon replacement")
         tool(parent, "list_agents")
         wait_parked(child)
@@ -489,7 +539,7 @@ def main():
         # command, so enable its API for the accounting checks below.
         config.write_text(config.read_text().replace("[phone]\nenabled = false", "[phone]\nenabled = true"))
         cli("daemon", "restart")
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + WAIT_SECONDS
         while time.monotonic() < deadline:
             all_session_ids = listed_session_ids("--all")
             if child in all_session_ids:
@@ -509,7 +559,7 @@ def main():
         # The old worker wire shape remains supported for requests accepted
         # before an upgrade, including exact source ranges and parent context.
         (lab.project / "legacy.rs").write_text("excluded\nlegacy source evidence\nexcluded\n")
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + WAIT_SECONDS
         while time.monotonic() < deadline:
             sessions = json.loads(cli("sessions", "--json"))
             rows = sessions if isinstance(sessions, list) else sessions.get("sessions", [])
@@ -529,6 +579,7 @@ def main():
         wait_prompt(legacy, "legacy source evidence")
         wait_prompt(legacy, "retained parent context")
         tool(legacy, "handback", {"message": "legacy content retained"})
+        release(legacy, "Return the legacy attachment evidence.")
         wait_report(parent, legacy, "legacy content retained")
         wait_parked(legacy)
 
@@ -540,6 +591,7 @@ def main():
                 row = database.execute("SELECT json_extract(record_json, '$.model'), json_extract(record_json, '$.effort') FROM subagent_sessions WHERE child_session_id=?", (session,)).fetchone()
                 assert row == (model, effort), (session, row)
         tool(subtle, "handback", {"message": "subtle configured selection verified"})
+        release(subtle, "Return a judgment report.")
         wait_report(parent, subtle, "subtle configured selection verified")
         wait_parked(subtle)
 
@@ -549,7 +601,7 @@ def main():
         with sqlite3.connect(lab.data / "mj.sqlite3") as database:
             database.execute("UPDATE sessions SET state='startup-cleanup', last_error='fixture startup failure' WHERE session_id=?", (child,))
         cli("daemon", "restart")
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + WAIT_SECONDS
         while time.monotonic() < deadline:
             with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
                 row = database.execute("SELECT state, archived FROM sessions WHERE session_id=?", (child,)).fetchone()
@@ -576,7 +628,7 @@ def main():
         retained = json.loads(cli("usage", "--parent", parent, "--json"))
         for session in [child, legacy, subtle, parent]:
             cli("destroy", "--session", session)
-            deadline = time.monotonic() + 30
+            deadline = time.monotonic() + WAIT_SECONDS
             while time.monotonic() < deadline:
                 with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
                     exists = database.execute("SELECT 1 FROM sessions WHERE session_id=?", (session,)).fetchone()
@@ -609,6 +661,7 @@ def main():
                 expected = ("tiny", "high") if task_type == "straightforward" else ("tiny", "low")
                 assert row == expected, (task_type, expected, row)
             tool(override_child, "handback", {"message": f"session override verified for {task_type}"})
+            release(override_child, "Report the session override.")
             wait_report(overridden, override_child, f"session override verified for {task_type}")
             wait_parked(override_child)
             cli("destroy", "--session", override_child)

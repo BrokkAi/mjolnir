@@ -139,8 +139,13 @@ class ScenarioFailure(RuntimeError):
     pass
 
 
-def daemon_request(data: pathlib.Path, action: dict[str, object], request_id: int = 99) -> object:
-    """Send one authenticated request to a daemon in an isolated data directory."""
+def daemon_request(
+    data: pathlib.Path, action: dict[str, object], request_id: int = 99, timeout: float = 5
+) -> object:
+    """Send one authenticated request to a daemon in an isolated data directory.
+
+    `timeout` bounds connecting and each read of the reply, in seconds.
+    """
     metadata = json.loads((data / "daemon.json").read_text())
     envelope = {
         "protocol_version": metadata["protocol_version"],
@@ -150,7 +155,7 @@ def daemon_request(data: pathlib.Path, action: dict[str, object], request_id: in
     }
     body = json.dumps(envelope, separators=(",", ":")).encode()
     host, port_text = str(metadata["address"]).rsplit(":", 1)
-    with socket.create_connection((host, int(port_text)), timeout=5) as stream:
+    with socket.create_connection((host, int(port_text)), timeout=timeout) as stream:
         stream.sendall(struct.pack(">I", len(body)) + body)
 
         def receive_exact(length):
@@ -857,8 +862,10 @@ pull_policy = "never"
             time.sleep(0.1)
         raise ScenarioFailure(f"daemon/web viewer did not become ready: {last[-4000:]}")
 
-    def daemon_request(self, action: dict[str, object], request_id: int = 99) -> object:
-        return daemon_request(self.data, action, request_id)
+    def daemon_request(
+        self, action: dict[str, object], request_id: int = 99, timeout: float = 5
+    ) -> object:
+        return daemon_request(self.data, action, request_id, timeout)
 
     def request(self, method: str, path: str, body: object | None = None) -> tuple[int, object | None]:
         data = None if body is None else json.dumps(body).encode()
