@@ -1185,7 +1185,7 @@ Tab pane │ ctrl+b then : palette · ? keys
 ╰──────────────────────────────────────────╯
 Tab pane │ ctrl+b then : palette · ? keys
 
-=== one report collapsed with ASCII arrows (44x48) ===
+=== one report collapsed from wrapped body with ASCII arrows (44x48) ===
 + Conversation ----------------------------+
 | ▸ New PR #4623 Model Rust built-in macr.#|
 | ▸ Comment on your PR #4623 by alice: Pl.#|
@@ -1234,6 +1234,42 @@ Tab pane │ ctrl+b then : palette · ? keys
 |                                          |
 +------------------------------------------+
 Tab pane | ctrl+b then : palette - ? keys
+
+=== mailbox header scrolled out of view (44x16) ===
+╭ Conversation · message 1 of 1 · End to f…╮
+│ │ State: failed                         ││
+│ │ Failure: verification timed out       ││
+│ │ Report directory: /reports/child-1    ││
+│ │ Report truncated; see the report      ││
+│ │ directory for details.                ││
+│ │ Fixed ‹parser›.                       ▐│
+│ │ Tests passed: "parser".               ▐│
+│ ▸ Child task Check parser finished: fai…▐│
+│ ▸ Your PR #4625 was merged.             ││
+╰──────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+╰──────────────────────────────────────────╯
+Tab pane │ ctrl+b then : palette · ? keys
+
+=== body click collapses the report and restores its header (44x16) ===
+╭ Conversation ────────────────────────────╮
+│ ▸ Your PR #4623 was merged by dana.     ││
+│ ▸ Your PR #4623 was closed without merg…││
+│ ▸ Your PR #4624 was merged.             ││
+│ ▸ Your PR #4623 was reopened.           ││
+│ ▸ External event: A plain event from th…▐│
+│ ▸ Child task Check parser finished: fai…▐│
+│ ▸ Child task Check parser finished: fai…▐│
+│ ▸ Your PR #4625 was merged.             ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+╰──────────────────────────────────────────╯
+Tab pane │ ctrl+b then : palette · ? keys
 
 === raw mailbox text remains complete (60x48) ===
 ╭ Conversation · raw source ───────────────────────────────╮
