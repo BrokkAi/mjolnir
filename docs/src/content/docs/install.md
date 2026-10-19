@@ -86,7 +86,7 @@ The package includes the native bundle for the selected platform; it does not do
 
 ## Cargo
 
-Mjolnir requires Rust 1.96 or newer. Install the headless controller from crates.io with:
+Mjolnir requires Rust 1.99 or newer. Install the headless controller from crates.io with:
 
 ```sh
 cargo install --locked brokk-mjolnir

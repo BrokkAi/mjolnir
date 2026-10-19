@@ -1,9 +1,11 @@
 ARG NODE_IMAGE=docker.io/library/node:24-trixie
-# Bifrost sessions use 1.97.1. Keep Mjolnir's rust-toolchain.toml compiler
-# installed alongside it below, so neither repository downloads a toolchain
-# during a turn (concurrent first-use rustup installs can corrupt components).
-ARG RUST_IMAGE=docker.io/library/rust:1.97.1-trixie
-ARG MJ_RUST_TOOLCHAIN=1.96.0
+# The base image's default toolchain serves Bifrost sessions and projects
+# without a toolchain file. MJ_RUST_TOOLCHAIN is Mjolnir's rust-toolchain.toml
+# compiler, installed below even when it matches the default, so neither
+# repository downloads a toolchain during a turn (concurrent first-use rustup
+# installs can corrupt components).
+ARG RUST_IMAGE=docker.io/library/rust:1.99.1-trixie
+ARG MJ_RUST_TOOLCHAIN=1.99.1
 # Bifrost is the semantic-analysis tool every turn review depends on: the
 # review's `analyze_diff` pre-pass and the analyzer/navigation MCP servers the
 # reviewing agents call are both this one binary. Baking a pinned crates.io

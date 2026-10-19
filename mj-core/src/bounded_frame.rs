@@ -68,7 +68,7 @@ mod tests {
         const FRAME: usize = 200 * 1024;
         let (mut writer, reader) = tokio::io::duplex(64 * 1024);
         let producer = tokio::spawn(async move {
-            for byte in [b'a', b'b'] {
+            for byte in *b"ab" {
                 writer.write_all(&vec![byte; FRAME]).await.unwrap();
                 writer.write_all(b"\n").await.unwrap();
             }
@@ -76,7 +76,7 @@ mod tests {
         });
         let mut reader = BufReader::new(reader);
 
-        for byte in [b'a', b'b'] {
+        for byte in *b"ab" {
             assert_eq!(
                 read_bounded_frame(&mut reader, FRAME).await.unwrap(),
                 BoundedFrame::Line(vec![byte; FRAME])
