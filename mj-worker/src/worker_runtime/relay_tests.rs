@@ -6272,9 +6272,11 @@ fn acp_workspace_roots_add_the_memory_replica_outside_controller_attachments() {
     }
 }
 
+// Hard-won: #1305: one file over 100 KiB blocked every memory snapshot and checkpoint.
 #[test]
 fn project_memory_connection_requests_round_trip_replica_and_baseline() {
     let directory = tempfile::tempdir().unwrap();
+    let large_memory = "hourly CI check\n".repeat(16_384);
     let memory = ProjectMemoryLaunchConfig {
         history_socket: None,
         project_key: "project".into(),
@@ -6296,7 +6298,7 @@ fn project_memory_connection_requests_round_trip_replica_and_baseline() {
     replica
         .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
             files: BTreeMap::from([
-                ("/MEMORY.md".into(), "changed".into()),
+                ("/MEMORY.md".into(), large_memory.clone()),
                 ("/replica-only.md".into(), "keep replica".into()),
             ]),
         })
@@ -6312,28 +6314,29 @@ fn project_memory_connection_requests_round_trip_replica_and_baseline() {
         panic!("unexpected project-memory payload")
     };
     assert_eq!(captured_baseline.files["/MEMORY.md"], "base");
-    assert_eq!(captured_replica.files["/MEMORY.md"], "changed");
+    assert_eq!(captured_replica.files["/MEMORY.md"], large_memory);
 
     unix::apply_project_memory_request(
         &memory,
         &RelayRequest::InstallProjectMemorySnapshot {
             snapshot: mj_core::project_memory::ProjectMemorySnapshot {
-                files: BTreeMap::from([("/MEMORY.md".into(), "installed".into())]),
+                files: BTreeMap::from([("/MEMORY.md".into(), large_memory.clone())]),
             },
         },
     )
     .unwrap();
     let installed_baseline = baseline.snapshot().unwrap();
     let installed_replica = replica.snapshot().unwrap();
-    assert_eq!(installed_baseline.files["/MEMORY.md"], "installed");
+    assert_eq!(installed_baseline.files["/MEMORY.md"], large_memory);
     assert_eq!(
         installed_baseline.files["/baseline-only.md"],
         "keep baseline"
     );
-    assert_eq!(installed_replica.files["/MEMORY.md"], "installed");
+    assert_eq!(installed_replica.files["/MEMORY.md"], large_memory);
     assert_eq!(installed_replica.files["/replica-only.md"], "keep replica");
 }
 
+// Hard-won: #1305: the document cap also prevented installing large merged files.
 #[test]
 fn project_memory_replace_deletes_files_omitted_from_tree_in_replica_and_baseline() {
     let directory = tempfile::tempdir().unwrap();
@@ -6365,7 +6368,7 @@ fn project_memory_replace_deletes_files_omitted_from_tree_in_replica_and_baselin
         .unwrap();
     let expected_replica = replica.snapshot().unwrap().version();
     let tree = mj_core::project_memory::ProjectMemorySnapshot {
-        files: BTreeMap::from([("/MEMORY.md".into(), "reconciled".into())]),
+        files: BTreeMap::from([("/MEMORY.md".into(), "reconciled\n".repeat(24_576))]),
     };
 
     let payload = unix::apply_project_memory_request(

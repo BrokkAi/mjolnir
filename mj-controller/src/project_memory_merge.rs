@@ -8,8 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use mj_core::config::Config;
 use mj_core::project_memory::{
-    ConflictedFile, MAX_DOCUMENT_BYTES, ProjectMemorySnapshot, ReplicaReplaceOutcome, SwapOutcome,
-    TreeVersion,
+    ConflictedFile, ProjectMemorySnapshot, ReplicaReplaceOutcome, SwapOutcome, TreeVersion,
 };
 use tokio::sync::OnceCell;
 use tokio::time::{Instant, timeout_at};
@@ -263,9 +262,6 @@ fn set_file_content(tree: &mut ProjectMemorySnapshot, path: &str, content: &str)
 fn validate_model_output(content: &str) -> Result<()> {
     if content.trim().is_empty() {
         bail!("model returned an empty file");
-    }
-    if content.len() > MAX_DOCUMENT_BYTES {
-        bail!("model output exceeds the project-memory document limit");
     }
     if content.lines().any(is_conflict_marker_line) {
         bail!("model output contains a conflict-marker line");
