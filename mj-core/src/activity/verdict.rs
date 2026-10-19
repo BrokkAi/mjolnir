@@ -113,8 +113,48 @@ impl CompletionEvidence {
 }
 
 pub fn questions() -> Value {
+    QUESTIONS.clone()
+}
+
+static QUESTIONS: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
     serde_json::from_str(include_str!("verdict_questions.json"))
         .expect("bundled turn verdict questions are valid JSON")
+});
+
+/// The largest turn-verdict request body the proxy and the direct client accept.
+pub const REQUEST_BYTES: usize = 64 * 1024;
+
+/// The direct TypeSafe request: the evidence with the bundled questions. The
+/// hosted proxy receives the evidence alone and adds the same questions before
+/// calling TypeSafe, so this is the largest body either path produces.
+#[derive(Serialize)]
+pub struct DirectRequest<'a> {
+    model: &'static str,
+    state: &'a TurnEvidence,
+    questions: &'static Value,
+}
+
+impl<'a> DirectRequest<'a> {
+    pub fn new(evidence: &'a TurnEvidence) -> Self {
+        Self {
+            model: "jev-latest",
+            state: evidence,
+            questions: &QUESTIONS,
+        }
+    }
+}
+
+/// Serialized size of [`DirectRequest`] for this evidence. Evidence builders
+/// budget against this, not the evidence alone: the questions are about 12 KB.
+pub fn request_bytes(evidence: &TurnEvidence) -> usize {
+    serde_json::to_vec(&DirectRequest::new(evidence))
+        .expect("turn evidence serializes")
+        .len()
+}
+
+/// Whether the request for this evidence is within [`REQUEST_BYTES`].
+pub fn request_fits(evidence: &TurnEvidence) -> bool {
+    request_bytes(evidence) <= REQUEST_BYTES
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -429,6 +429,59 @@ fn uncertain_assessment_is_cached_and_pending_completion_recovers() {
     assert!(relay.pending_replied_verdict().is_none());
 }
 
+// Hard-won: 295a3f85c: evidence sized without the questions exceeded the request limit on every retry.
+#[test]
+fn stored_evidence_is_refit_to_the_request_limit_before_sending() {
+    use mj_core::activity::verdict::{REQUEST_BYTES, request_bytes, request_fits};
+    use mj_core::assessment::ContextHistory;
+    use mj_core::continuation::EvidenceMessage;
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = open(root.path());
+    start(&mut relay, "request-one");
+    finish(&mut relay, "request-one", "Done.", "EndTurn");
+    relay.prepare_pending_assessment().unwrap();
+    // A full user budget and recent replies, stored by a build that held the
+    // evidence alone to 60 KiB: under that budget, over the limit with the
+    // questions added.
+    let mut messages: Vec<_> = (0..29)
+        .map(|i| EvidenceMessage {
+            id: format!("user:u{i}"),
+            role: "user".into(),
+            text: "u".repeat(1100),
+        })
+        .collect();
+    messages.extend((0..8).map(|i| EvidenceMessage {
+        id: format!("agent:a{i}"),
+        role: "assistant".into(),
+        text: "a".repeat(2700),
+    }));
+    let stored = relay
+        .snapshot
+        .assessment
+        .as_mut()
+        .unwrap()
+        .evidence
+        .as_mut()
+        .unwrap();
+    stored.authorization = Some(ContextHistory {
+        messages,
+        ..Default::default()
+    });
+    stored.transcript_summary.clear();
+    assert!(serde_json::to_vec(&*stored).unwrap().len() <= 60 * 1024);
+    assert!(request_bytes(stored) > REQUEST_BYTES);
+
+    let (_, sent, _) = relay.pending_replied_verdict().unwrap();
+    assert!(request_fits(&sent));
+    let history = sent.authorization.unwrap();
+    assert!(history.assistant_history_omitted);
+    assert_eq!(
+        history.messages.iter().filter(|m| m.role == "user").count(),
+        29
+    );
+    assert_eq!(history.messages.last().unwrap().id, "agent:a7");
+}
+
 // Hard-won: b72adcc6f: a retry stayed failed while a fresh assessment was pending.
 #[test]
 fn classification_transport_backoff_and_diagnostics_survive_restart() {

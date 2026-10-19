@@ -410,6 +410,27 @@ impl ContextHistory {
         true
     }
 
+    /// Drop the oldest user message together with any assistant entries
+    /// before the next user message, which answered it or an earlier one.
+    /// The history becomes incomplete. Returns false when no user entry
+    /// remains.
+    fn evict_oldest_exchange(&mut self) -> bool {
+        let Some(first) = self.messages.iter().position(|m| m.role == "user") else {
+            return false;
+        };
+        // Without a later user message, keep the replies that follow it.
+        let end = self.messages[first + 1..]
+            .iter()
+            .position(|m| m.role == "user")
+            .map_or(first + 1, |next| first + 1 + next);
+        if self.messages[..end].iter().any(|m| m.role == "assistant") {
+            self.assistant_history_omitted = true;
+        }
+        self.messages.drain(..end);
+        self.authorization_complete = false;
+        true
+    }
+
     pub fn user(&mut self, id: &str, prompt: &[agent_client_protocol::schema::v1::ContentBlock]) {
         use agent_client_protocol::schema::v1::ContentBlock;
         self.open_assistant_id = None;
@@ -434,18 +455,15 @@ impl ContextHistory {
             return;
         }
         let text = trim_middle(&text);
-        // The byte budget is for user text alone; a message that would push
-        // it over is the one case that makes the history incomplete.
-        if self.user_bytes() + text.len() > USER_BYTES || self.user_count() >= MAX_MESSAGES {
-            self.authorization_complete = false;
-            return;
-        }
-        // Assistant entries make room; the wire cap counts both roles.
+        // The byte budget is for user text alone. When it is full, the oldest
+        // exchanges give way so the current request is always present; the
+        // history is then incomplete, which already rules out continuation.
+        while (self.user_bytes() + text.len() > USER_BYTES || self.user_count() >= MAX_MESSAGES)
+            && self.evict_oldest_exchange()
+        {}
+        // Assistant entries make room; the wire cap counts both roles. Fewer
+        // than MAX_MESSAGES user entries remain, so this always succeeds.
         while self.messages.len() >= MAX_MESSAGES && self.evict_oldest_assistant() {}
-        if self.messages.len() >= MAX_MESSAGES {
-            self.authorization_complete = false;
-            return;
-        }
         self.messages.push(EvidenceMessage {
             id: format!("user:{id}"),
             role: "user".into(),
@@ -850,7 +868,8 @@ mod tests {
             .expect("kept");
         assert!(pasted.text.len() < MESSAGE_HEAD_BYTES + MESSAGE_TAIL_BYTES + 100);
         assert!(pasted.text.contains("bytes omitted from the middle"));
-        // Only the user byte budget itself makes the history incomplete.
+        // Only the user byte budget itself makes the history incomplete, and
+        // then the oldest exchanges give way, never the current request.
         for i in 0..6 {
             context.user(
                 &format!("paste-{i}"),
@@ -858,11 +877,14 @@ mod tests {
             );
         }
         assert!(!context.authorization_complete);
+        assert!(context.user_bytes() <= USER_BYTES);
+        assert!(!context.messages.iter().any(|m| m.id == "user:user-command"));
+        assert!(context.messages.iter().any(|m| m.id == "user:paste-5"));
     }
 
     // Hard-won: a893e12: recorded Codex goal fixtures failed after the previous total-entry cap rejected long sessions.
     #[test]
-    fn long_sessions_evict_assistant_entries_before_refusing_a_user_message() {
+    fn long_sessions_evict_assistant_entries_before_user_messages() {
         use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
         let mut context = ContextHistory::default();
         // Two hundred exchanges with ten assistant messages each: far past
@@ -886,13 +908,13 @@ mod tests {
         assert_eq!(context.user_count(), 200);
         assert!(
             context.messages.iter().any(|m| m.id == "user:u0"),
-            "user history is never evicted"
+            "user history within budget is never evicted"
         );
         assert_eq!(
             context.messages.last().map(|m| m.role.as_str()),
             Some("assistant")
         );
-        // Only the 257th distinct user message cannot fit.
+        // The 257th distinct user message displaces the oldest one.
         for i in 200..MAX_MESSAGES {
             context.user(
                 &format!("u{i}"),
@@ -905,6 +927,12 @@ mod tests {
             &[ContentBlock::Text(TextContent::new("step 256"))],
         );
         assert!(!context.authorization_complete);
+        assert_eq!(context.user_count(), MAX_MESSAGES);
+        assert!(!context.messages.iter().any(|m| m.id == "user:u0"));
+        assert_eq!(
+            context.messages.last().map(|m| m.id.as_str()),
+            Some("user:u-one-too-many")
+        );
     }
 
     // Hard-won: a893e12: oversized assessment history was dropped instead of evicting old assistant entries to preserve the reply.

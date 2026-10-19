@@ -370,11 +370,7 @@ impl TurnContext {
             completion: None,
         };
         let mut limit = 48 * 1024;
-        while serde_json::to_vec(&evidence)
-            .expect("serialize evidence")
-            .len()
-            > 60 * 1024
-        {
+        while limit > 0 && !mj_core::activity::verdict::request_fits(&evidence) {
             limit /= 2;
             evidence.transcript_summary = summary.render(limit);
         }

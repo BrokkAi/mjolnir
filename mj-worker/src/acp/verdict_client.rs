@@ -1,6 +1,8 @@
 //! Optional, bounded TypeSafe turn classification. Failures leave activity alone.
 use anyhow::{Context, Result, ensure};
-use mj_core::activity::verdict::{TurnEvidence, TurnVerdict, api_key, questions};
+use mj_core::activity::verdict::{
+    DirectRequest, TurnEvidence, TurnVerdict, api_key, questions, request_fits,
+};
 use std::time::Duration;
 
 /// The Unix worker is the only production caller of the classifier client;
@@ -226,9 +228,7 @@ impl VerdictClient {
 
     fn request_body(&self, evidence: &TurnEvidence) -> serde_json::Value {
         match self.source {
-            VerdictSource::Direct { .. } => {
-                serde_json::json!({"model":"jev-latest", "state":evidence, "questions":questions()})
-            }
+            VerdictSource::Direct { .. } => serde_json::json!(DirectRequest::new(evidence)),
             VerdictSource::Hosted { .. } => serde_json::json!(evidence),
         }
     }
@@ -311,12 +311,10 @@ impl VerdictClient {
 
     pub(crate) async fn ask(&self, evidence: &TurnEvidence) -> Result<TurnVerdict> {
         const MAX_RESPONSE_BYTES: usize = 64 * 1024;
-        let request_body = serde_json::to_vec(
-            &serde_json::json!({"model":"jev-latest", "state":evidence, "questions":questions()}),
-        )
-        .context("encode turn evidence")?;
+        // Both sources are held to the direct shape: the proxy adds the same
+        // questions before it calls TypeSafe.
         ensure!(
-            request_body.len() <= 64 * 1024,
+            request_fits(evidence),
             "turn evidence exceeds request byte limit"
         );
         let request = match &self.source {
@@ -361,36 +359,33 @@ impl VerdictClient {
     }
 }
 
-/// Add the relay owner's authorization history and keep it inside the proxy's
-/// 64 KiB request limit. This is shared by running and completed-turn checks.
+/// Add the relay owner's authorization history and keep the whole request,
+/// questions included, inside the 64 KiB limit. This is shared by running and
+/// completed-turn checks, and by evidence stored before the questions grew.
 pub(crate) fn bound_authorization(
     evidence: &mut TurnEvidence,
     authorization: Option<mj_core::assessment::ContextHistory>,
-) -> Result<()> {
-    const WIRE_BUDGET: usize = 60 * 1024;
+) {
     evidence.authorization = authorization;
     // Authorization is historical context. Only the turn owner supplies the
     // current reply; an older question must not become this turn's answer.
     if evidence.authorization.is_some() {
         evidence.transcript_summary.clear();
     }
-    if serde_json::to_vec(evidence)?.len() > WIRE_BUDGET
+    if !request_fits(evidence)
         && let Some(mut context) = evidence.authorization.take()
     {
         let mut probe = evidence.clone();
         let fits = context.shrink_until(|candidate| {
             probe.authorization = Some(candidate.clone());
-            serde_json::to_vec(&probe)
-                .map(|serialized| serialized.len() <= WIRE_BUDGET)
-                .unwrap_or(false)
+            request_fits(&probe)
         });
         evidence.authorization = fits.then_some(context);
     }
-    if serde_json::to_vec(evidence)?.len() > WIRE_BUDGET {
+    if !request_fits(evidence) {
         evidence.authorization = None;
         evidence.transcript_summary.clear();
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -478,7 +473,7 @@ mod tests {
         let mut completed = evidence();
         completed.phase = TurnPhase::Replied;
         completed.assistant_text_tail = "The report is complete.".into();
-        bound_authorization(&mut completed, Some(authorization.clone())).unwrap();
+        bound_authorization(&mut completed, Some(authorization.clone()));
         let (mut attempt, answer) = client.ask_logged("isolated", 1, &completed).await;
         answer.unwrap();
         attempt.finish("applied", "user_input_required");
@@ -508,11 +503,11 @@ mod tests {
         }));
         let mut bounded = evidence();
         bounded.transcript_summary = "duplicate summary".into();
-        bound_authorization(&mut bounded, Some(large)).unwrap();
+        bound_authorization(&mut bounded, Some(large));
         let retained = bounded.authorization.as_ref().unwrap();
         assert!(retained.assistant_history_omitted);
         assert_eq!(retained.messages.last().unwrap().role, "assistant");
-        assert!(serde_json::to_vec(&bounded).unwrap().len() <= 60 * 1024);
+        assert!(request_fits(&bounded));
         assert!(bounded.transcript_summary.is_empty());
 
         let oversized_users = ContextHistory {
@@ -525,7 +520,7 @@ mod tests {
         };
         let mut fallback = evidence();
         fallback.transcript_summary = "duplicate summary".into();
-        bound_authorization(&mut fallback, Some(oversized_users)).unwrap();
+        bound_authorization(&mut fallback, Some(oversized_users));
         assert!(fallback.authorization.is_none());
         assert!(fallback.transcript_summary.is_empty());
     }
