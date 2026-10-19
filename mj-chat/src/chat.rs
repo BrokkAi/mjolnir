@@ -656,8 +656,8 @@ pub struct ChatState {
     /// Completed tool calls the user has opened in the Rich transcript.
     /// Presentation state is local to this chat and keyed by durable entry.
     expanded_tool_calls: BTreeSet<u64>,
-    /// Open mailbox events, keyed by durable entry position and event index.
-    expanded_mailbox_events: BTreeSet<(u64, usize)>,
+    /// Open mailbox events and incoming messages, keyed by durable identity.
+    expanded_mailbox_events: BTreeSet<transcript::MailboxDisclosureId>,
     /// Screen-coordinate targets rebuilt with every transcript frame.
     transcript_click_targets: Vec<TranscriptClickTarget>,
     /// Where the last transcript frame drew its rows, for resolving a click

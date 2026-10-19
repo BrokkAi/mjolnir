@@ -219,17 +219,17 @@ pub(super) struct TranscriptRenderCache {
     entries: Vec<Option<CachedEntry>>,
     collapse: Vec<EntryCollapse>,
     collapse_input_fingerprint: u64,
-    expanded_mailbox_events: BTreeSet<(u64, usize)>,
+    expanded_mailbox_events: BTreeSet<MailboxDisclosureId>,
 }
 
 /// A frame-local target for toggling a tool or mailbox event. The
 /// target is rebuilt with the rows so a click can never address a call that
 /// moved after scrolling or wrapping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TranscriptClickTarget {
     pub rect: Rect,
     pub start_seq: u64,
-    pub mailbox_event: Option<usize>,
+    pub mailbox_event: Option<MailboxDisclosureId>,
 }
 
 /// Where one transcript frame drew its rows. A link click is resolved against
@@ -526,7 +526,7 @@ fn prepare_render_cache(
     mode: TranscriptRenderMode,
     tools: ToolDisplay,
     expanded_tool_calls: &BTreeSet<u64>,
-    expanded_mailbox_events: &BTreeSet<(u64, usize)>,
+    expanded_mailbox_events: &BTreeSet<MailboxDisclosureId>,
 ) {
     let mode_changed = cache.mode != mode || cache.tools != tools;
     let collapse_input_fingerprint = collapse_revision_fingerprint(entries);
@@ -1536,7 +1536,7 @@ impl ChatState {
                             (end - start) as u16,
                         ),
                         start_seq: entries[index].start_seq,
-                        mailbox_event: Some(*event),
+                        mailbox_event: Some(event.clone()),
                     });
                 }
             } else {
@@ -1659,28 +1659,23 @@ impl ChatState {
             .transcript_click_targets
             .iter()
             .find(|target| target.rect.contains(Position::new(column, row)))
-            .copied()
+            .cloned()
         else {
             return false;
         };
-        if let Some(event) = target.mailbox_event {
-            let key = (target.start_seq, event);
-            if !self.expanded_mailbox_events.insert(key) {
-                self.expanded_mailbox_events.remove(&key);
+        if let Some(key) = &target.mailbox_event {
+            if !self.expanded_mailbox_events.insert(key.clone()) {
+                self.expanded_mailbox_events.remove(key);
                 // A body click can collapse the event containing the viewport
                 // top. Keep its header visible instead of skipping later text.
                 if let TranscriptAnchor::Row { entry, row } = self.anchor
-                    && self
-                        .entries
-                        .get(entry)
-                        .is_some_and(|entry| entry.start_seq == target.start_seq)
-                    && let Some(mailbox) = self
+                    && let Some((rows, _)) = self
                         .render_cache
                         .entries
                         .get(entry)
                         .and_then(Option::as_ref)
                         .and_then(|cached| cached.mailbox.as_ref())
-                    && let Some((rows, _)) = mailbox.mailbox_events.get(event)
+                        .and_then(|mailbox| mailbox.mailbox_events.iter().find(|(_, id)| id == key))
                     && rows.contains(&row)
                 {
                     self.anchor = TranscriptAnchor::Row {

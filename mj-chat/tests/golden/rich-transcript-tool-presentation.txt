@@ -1321,16 +1321,168 @@ Tab pane │ ctrl+b then : palette · ? keys
 ╰─────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 
-=== dedicated delivered messages wrap between agent replies (44x36) ===
+=== incoming messages start collapsed between agent replies (44x36) ===
 ╭ Conversation ────────────────────────────╮
+│ ● Agent · 15:00                         ▐│
+│ │ I am checking the report.             ▐│
+│                                         ▐│
+│ ▸ Message from Review agent · 15:00     ▐│
+│                                         ▐│
+│ ▸ Message from Build agent · 15:00      ▐│
+│                                         ▐│
+│ ● Agent · 15:00                         ▐│
+│ │ I will address that item.             ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+╰──────────────────────────────────────────╯
+Tab pane │ ctrl+b then : palette · ? keys
+
+=== header text opens only one message in a shared delivery (44x36) ===
+╭ Conversation ────────────────────────────╮
+│ ● Agent · 15:00                         ▐│
+│ │ I am checking the report.             ▐│
+│                                         ▐│
+│ ▾ Message from Review agent · 15:00     ▐│
+│ │ This report has one item.             ▐│
+│ │ The actual message continues here,    ▐│
+│ │ with markdown and enough words to wrap▐│
+│ │ on a narrow terminal.                 ▐│
+│                                         ▐│
+│ ▸ Message from Build agent · 15:00      ▐│
+│                                         ▐│
+│ ● Agent · 15:00                         ▐│
+│ │ I will address that item.             ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+╰──────────────────────────────────────────╯
+Tab pane │ ctrl+b then : palette · ? keys
+
+=== both incoming messages stay open after update and resize (32x36) ===
+╭ Conversation ────────────────╮
+│ ● Agent · 15:00             ▐│
+│ │ I am checking the report. ▐│
+│                             ▐│
+│ ▾ Message from Review agent…▐│
+│ │ This report has one item. ▐│
+│ │ The actual message        ▐│
+│ │ continues here, with      ▐│
+│ │ markdown and enough words ▐│
+│ │ to wrap on a narrow       ▐│
+│ │ terminal.                 ▐│
+│                             ▐│
+│ ▾ Message from Build agent… ▐│
+│ │ The checks passed.        ▐│
+│ │ Keep this second message  ▐│
+│ │ visible too.              ▐│
+│                             ▐│
+│ ● Agent · 15:00             ▐│
+│ │ I will address that item. ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+╰──────────────────────────────╯
+╭ 🎙︎ ───────────────────────────╮
+│> Message the agent, or / for │
+│  commands                    │
+╰──────────────────────────────╯
+ctrl+b then : palette · ? keys
+
+=== wrapped message body collapses only that message (32x36) ===
+╭ Conversation ────────────────╮
+│ ● Agent · 15:00             ▐│
+│ │ I am checking the report. ▐│
+│                             ▐│
+│ ▸ Message from Review agent…▐│
+│                             ▐│
+│ ▾ Message from Build agent… ▐│
+│ │ The checks passed.        ▐│
+│ │ Keep this second message  ▐│
+│ │ visible too.              ▐│
+│                             ▐│
+│ ● Agent · 15:00             ▐│
+│ │ I will address that item. ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+╰──────────────────────────────╯
+╭ 🎙︎ ───────────────────────────╮
+│> Message the agent, or / for │
+│  commands                    │
+╰──────────────────────────────╯
+ctrl+b then : palette · ? keys
+
+=== raw mode keeps complete incoming messages (44x36) ===
+╭ Conversation · raw source ───────────────╮
 │ ● Agent · 15:00                         ▐│
 │ │ I am checking the report.             ▐│
 │                                         ▐│
 │ ← Message from Review agent · 15:00     ▐│
 │ │ This report has one item.             ▐│
 │ │ The actual message continues here,    ▐│
-│ │ with markdown and enough words to wrap▐│
-│ │ on a narrow terminal.                 ▐│
+│ │ with **markdown** and enough words to ▐│
+│ │ wrap on a narrow terminal.            ▐│
 │                                         ▐│
 │ ← Message from Build agent · 15:00      ▐│
 │ │ The checks passed.                    ▐│
@@ -1364,18 +1516,18 @@ Tab pane │ ctrl+b then : palette · ? keys
 │ ● Agent · 15:00                         ▐│
 │ │ I am checking the report.             ▐│
 │                                         ▐│
-│ ← Message from Review agent · 15:00     ▐│
-│ │ This report has one item.             ▐│
-│ │ The actual message continues here,    ▐│
-│ │ with markdown and enough words to wrap▐│
-│ │ on a narrow terminal.                 ▐│
+│ ▸ Message from Review agent · 15:00     ▐│
 │                                         ▐│
-│ ← Message from Build agent · 15:00      ▐│
-│ │ The checks passed.                    ▐│
-│ │ Keep this second message visible too. ▐│
+│ ▸ Message from Build agent · 15:00      ▐│
 │                                         ▐│
 │ ● Agent · 15:00                         ▐│
 │ │ I will address that item.             ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
 │                                         ▐│
 │                                         ▐│
 ╰──────────────────────────────────────────╯
@@ -1391,18 +1543,18 @@ Tab pane │ ctrl+b then : palette · ? keys
 | * Agent - 15:00                         #|
 | | I am checking the report.             #|
 |                                         #|
-| < Message from Review agent - 15:00     #|
-| | This report has one item.             #|
-| | The actual message continues here,    #|
-| | with markdown and enough words to wrap#|
-| | on a narrow terminal.                 #|
+| ▸ Message from Review agent - 15:00     #|
 |                                         #|
-| < Message from Build agent - 15:00      #|
-| | The checks passed.                    #|
-| | Keep this second message visible too. #|
+| ▸ Message from Build agent - 15:00      #|
 |                                         #|
 | * Agent - 15:00                         #|
 | | I will address that item.             #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
 |                                         #|
 |                                         #|
 |                                         #|

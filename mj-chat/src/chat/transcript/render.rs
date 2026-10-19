@@ -352,8 +352,15 @@ pub(crate) struct RowTrack {
     pub links: Vec<RowLink>,
     /// One per rendered row.
     pub copies: Vec<RowCopy>,
-    /// Rendered row range and event index for each independently clickable event.
-    pub mailbox_events: Vec<(std::ops::Range<usize>, usize)>,
+    /// Rendered row range and durable identity for each independently clickable event.
+    pub mailbox_events: Vec<(std::ops::Range<usize>, MailboxDisclosureId)>,
+}
+
+/// Messages delivered in one batch share an ordinal, so use their durable ID.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum MailboxDisclosureId {
+    Event(u64, usize),
+    Message(String),
 }
 
 /// Cells `start..end` of rendered row `row` draw text of a link to `url`.
@@ -573,6 +580,9 @@ pub(super) fn estimated_entry_rows(
     tool: ToolView,
 ) -> usize {
     if mode == TranscriptRenderMode::Rich {
+        if entry.role == ChatRole::Message {
+            return 2;
+        }
         let events = mailbox_event_lines(entry.role, entry.text.lines());
         if !events.is_empty() {
             // One header per closed event, then the blank row.
@@ -623,25 +633,39 @@ pub(super) fn estimated_entry_rows(
 pub(super) fn render_mailbox_entry(
     entry: &ChatEntry,
     width: usize,
-    expanded: &BTreeSet<(u64, usize)>,
+    expanded: &BTreeSet<MailboxDisclosureId>,
 ) -> Option<(Vec<Line<'static>>, RowTrack)> {
-    let events = mailbox_event_lines(entry.role, entry.text.lines());
+    let message = entry.role == ChatRole::Message;
+    let events = if message {
+        vec![vec![entry_visual(entry).label]]
+    } else {
+        mailbox_event_lines(entry.role, entry.text.lines())
+    };
     if events.is_empty() {
         return None;
     }
     let mut rows = Vec::new();
     let mut track = RowTrack::default();
     for (index, lines) in events.into_iter().enumerate() {
-        let open = expanded.contains(&(entry.start_seq, index));
+        let id = if message {
+            MailboxDisclosureId::Message(entry.message_id.clone().expect("message entry identity"))
+        } else {
+            MailboxDisclosureId::Event(entry.start_seq, index)
+        };
+        let open = expanded.contains(&id);
         let arrow = if open {
             theme::glyphs().dropdown
         } else {
             "▸"
         };
-        let mut header = vec![Span::styled(
-            format!("{arrow} {}", lines[0]),
-            theme::muted(),
-        )];
+        let style = if message {
+            entry_visual(entry)
+                .header_style
+                .add_modifier(Modifier::BOLD)
+        } else {
+            theme::muted()
+        };
+        let mut header = vec![Span::styled(format!("{arrow} {}", lines[0]), style)];
         if let Some(time) = format_event_time(entry.recorded_at_ms) {
             header.push(Span::styled(
                 format!("{}{time}", theme::glyphs().footer_separator),
@@ -652,17 +676,27 @@ pub(super) fn render_mailbox_entry(
         rows.push(truncate_line_to_width(Line::from(header), width));
         track.copies.push(RowCopy::default());
         if open {
-            let detail = ChatEntry::plain(entry.start_seq, ChatRole::System, lines.join("\n"));
             let first_row = rows.len();
-            rows.extend(entry_body_rows_inner(
-                &detail,
-                width,
-                TranscriptRenderMode::Raw,
-                false,
-                Some((&mut track, first_row)),
-            ));
+            if message {
+                rows.extend(entry_body_rows_inner(
+                    entry,
+                    width,
+                    TranscriptRenderMode::Rich,
+                    false,
+                    Some((&mut track, first_row)),
+                ));
+            } else {
+                let detail = ChatEntry::plain(entry.start_seq, ChatRole::System, lines.join("\n"));
+                rows.extend(entry_body_rows_inner(
+                    &detail,
+                    width,
+                    TranscriptRenderMode::Raw,
+                    false,
+                    Some((&mut track, first_row)),
+                ));
+            }
         }
-        track.mailbox_events.push((event_start..rows.len(), index));
+        track.mailbox_events.push((event_start..rows.len(), id));
     }
     rows.push(Line::from(""));
     track.copies.push(RowCopy::default());
