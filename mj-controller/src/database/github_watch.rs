@@ -450,6 +450,46 @@ pub(crate) fn load_github_session_turn_windows(
     Ok(windows)
 }
 
+/// Commands of this session's tool calls that were running within a second
+/// of `at_ms`. GitHub timestamps have one-second precision.
+pub(crate) fn load_github_session_tool_commands_at(
+    session_id: &str,
+    at_ms: i64,
+) -> Result<Vec<String>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT body_json FROM materialized_transcript_items
+         WHERE session_id=?1 AND created_at_ms <= ?2 + 1000
+           AND (last_changed_at_ms >= ?2 - 1000
+                OR json_extract(body_json, '$.call.status') IN ('pending', 'in_progress'))
+           AND json_extract(body_json, '$.kind') = 'tool'",
+    )?;
+    let bodies = statement
+        .query_map(params![session_id, at_ms], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut commands = Vec::new();
+    for body in bodies {
+        let mj_core::transcript::TranscriptBody::Tool {
+            call, presentation, ..
+        } = serde_json::from_str(&body)?
+        else {
+            continue;
+        };
+        let Ok(call) = serde_json::from_value::<agent_client_protocol::schema::v1::ToolCall>(call)
+        else {
+            continue;
+        };
+        commands.push(
+            mj_transcript::transcript::materialized_tool_call_presentation(
+                presentation.as_deref(),
+                &call,
+            )
+            .source,
+        );
+    }
+    Ok(commands)
+}
+
 #[cfg(test)]
 pub(crate) fn seed_github_test_turns(
     session_id: &str,
