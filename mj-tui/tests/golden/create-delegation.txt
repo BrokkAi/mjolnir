@@ -1,8 +1,8 @@
 === configured=false ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ────────────────────────────────────────││                                                                                            │
 │› ■ ACP pretty name                                                                                                                       │
@@ -29,10 +29,10 @@
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Add directory…     Create                                  │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Add directory…     Create                                  │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -41,9 +41,9 @@
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === configured=false, selecting None ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ────────────────────────────────────────││                                                                                            │
 │› ■ ACP pretty name                                                                                                                       │
@@ -70,10 +70,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Add directory…     Create                                  │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Add directory…     Create                                  │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -83,9 +83,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 action: CreateSession { create_managed_worktree: Some(false), subagents: Some(None), review: None, workspace_id: "default", profile_id: "codex-1", bundle_id: "hel", project_directory: None, target_template_id: "podman", additional_mounts: [], resource_allocation: None }
 === configured=true ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ────────────────────────────────────────││                                                                                            │
 │› ■ ACP pretty name                                                                                                                       │
@@ -112,10 +112,10 @@ action: CreateSession { create_managed_worktree: Some(false), subagents: Some(No
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Add directory…     Create                                  │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Add directory…     Create                                  │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -124,9 +124,9 @@ action: CreateSession { create_managed_worktree: Some(false), subagents: Some(No
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === configured=true, selecting None ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ────────────────────────────────────────││                                                                                            │
 │› ■ ACP pretty name                                                                                                                       │
@@ -153,10 +153,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Add directory…     Create                                  │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Add directory…     Create                                  │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │

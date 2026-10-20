@@ -1402,20 +1402,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn microphone_button_uses_text_presentation_and_matches_line_width() {
-        let line = voice_button_line(true, false);
-        assert_eq!(
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>(),
-            format!(" {} ", voice_button_glyph())
-        );
-        assert_eq!(line.width(), 3);
-        assert_eq!(display_width(voice_button_glyph()), display_width("🎙︎"));
-    }
-
     /// The ASCII set reaches the composer's border, where the microphone was
     /// the last glyph a console without UTF-8 could not draw.
     // Hard-won: 57f76ac: ASCII mode still rendered the microphone button as Unicode

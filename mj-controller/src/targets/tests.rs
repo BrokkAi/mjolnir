@@ -3633,6 +3633,71 @@ fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace()
     }
 }
 
+/// An agent walks a build's parent chain and kills it, which reaches the
+/// container's PID 1. The container must survive, and its stop signal must be
+/// one PID 1 cannot ignore, or every stop and removal waits out the grace
+/// period. The stop signal is checked rather than timed: a loaded host makes
+/// removal slow either way.
+// Hard-won: #1303: an agent's kill of PID 1 stopped the session container
+#[cfg(unix)]
+#[test]
+#[ignore = "requires rootless Podman and a cached agent-dev image"]
+fn podman_session_container_survives_signals_sent_to_pid_1() {
+    let session = mj_core::state::new_session_id().unwrap();
+    let name = resource_name(&session).unwrap();
+    let template = ContainerTemplate {
+        image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".to_owned(),
+        pull_policy: ImagePullPolicy::Never,
+        extra_run_args: vec![],
+        workspace_storage: Default::default(),
+        build_cache: None,
+    };
+    let locator = TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: name.clone(),
+        workspace_storage: podman_workspace_locator_named(&template, &name).unwrap(),
+    };
+    let inspect = |name: &str, format: &str| -> String {
+        let output = ProcessExecutor
+            .execute(&CommandSpec::new(
+                "podman",
+                ["inspect", name, "--format", format],
+            ))
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    let result = (|| -> Result<()> {
+        execute_checked(
+            &ProcessExecutor,
+            &podman_container_run(&template, &name, &session, &[], None, "/workspace")?,
+        )?;
+        let stop_signal = inspect(&name, "{{.Config.StopSignal}}");
+        ensure!(
+            matches!(stop_signal.as_str(), "SIGKILL" | "KILL" | "9"),
+            "stop signal is {stop_signal:?}; stop and removal would wait out the grace period"
+        );
+        for signal in ["TERM", "HUP"] {
+            execute_checked(
+                &ProcessExecutor,
+                &container_exec("podman", &name, ["sh", "-c", &format!("kill -{signal} 1")]),
+            )?;
+            std::thread::sleep(Duration::from_secs(2));
+            let state = inspect(&name, "{{.State.Status}}");
+            ensure!(
+                state == "running",
+                "container is {state:?} after kill -{signal} 1"
+            );
+        }
+        Ok(())
+    })();
+    let cleanup = close_plan(&locator, &session).unwrap();
+    for command in &cleanup.commands {
+        execute_checked(&ProcessExecutor, command).unwrap();
+    }
+    result.unwrap();
+    assert!(cleanup_target_is_confirmed_absent(&locator, &session, &ProcessExecutor).unwrap());
+}
+
 #[cfg(unix)]
 fn seed_docker_cleanup_state(environment: &tempfile::TempDir, name: &str) {
     let home = environment.path().join("home");

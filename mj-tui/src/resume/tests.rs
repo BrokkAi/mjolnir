@@ -583,12 +583,12 @@ fn lost_and_destroyed_rows_are_marked_and_refuse_to_resume() {
     for (state, marker, reason) in [
         (
             SessionState::Lost,
-            "⚠ lost",
+            "! lost",
             "lost without a verified checkpoint",
         ),
         (
             SessionState::DestroyedWithDataLoss,
-            "⚠ data lost",
+            "! data lost",
             "force-destroyed",
         ),
     ] {
@@ -601,7 +601,7 @@ fn lost_and_destroyed_rows_are_marked_and_refuse_to_resume() {
 
         let row = &rows(&dashboard)[0];
         assert!(!row.status.is_recoverable());
-        assert_eq!(row.status.warning(), Some(marker));
+        assert_eq!(row.status.warning().as_deref(), Some(marker));
         assert!(row.details.contains(reason), "{}", row.details);
 
         assert_eq!(

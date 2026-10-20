@@ -1,8 +1,8 @@
 === Create and Open remain clickable (80x20) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
-│ default                            ☰ ││                                      │
+│ default                            ≡ ││                                      │
 ╰──────────────────────────────────────╯│                                      │
-╭ Sessions ───────────────────── ▁   ▪ ╮│                                      │
+╭ Sessions ───────────────────── ▁   ▄ ╮│                                      │
 │ Create   Open   Filter: _____________││           ✦  M J O L N I R           │
 │hel ──────────────────────────────────││                                      │
 │› · ACP pretty name               ◇ ⋯ ││Select a session to open its conversat│
@@ -16,8 +16,8 @@
 │                                      ││No conversation open.                 │
 │                                      ││Press Tab for Sessions, then Enter on │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────╯
-─ Targets ── none configured ─────────────────────────────────────────── ▁   ▪ ─
-─ Profiles ── claude-1 unavailable, codex-1 unavailable, … ───────── ▁   ▪   □ ─
+─ Targets ── none configured ─────────────────────────────────────────── ▁   ▄ ─
+─ Profiles ── claude-1 unavailable, codex-1 unavailable, … ───────── ▁   ▄   □ ─
 Background work finished
 
 === Create opens the session wizard (80x20) ===
@@ -45,9 +45,9 @@ action: None; mode: New=true
 
 === Open launches the session picker (80x20) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
-│ default                            ☰ ││                                      │
+│ default                            ≡ ││                                      │
 ╰──────────────────────────────────────╯│                                      │
-╭ Sessions ───────────────────── ▁   ▪ ╮│                                      │
+╭ Sessions ───────────────────── ▁   ▄ ╮│                                      │
 │ Create   Open   Filter: _____________││           ✦  M J O L N I R           │
 │hel ──────────────────────────────────││                                      │
 │› · ACP pretty name               ◇ ⋯ ││Select a session to open its conversat│
@@ -61,16 +61,16 @@ action: None; mode: New=true
 │                                      ││No conversation open.                 │
 │                                      ││Press Tab for Sessions, then Enter on │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────╯
-─ Targets ── none configured ─────────────────────────────────────────── ▁   ▪ ─
-─ Profiles ── claude-1 unavailable, codex-1 unavailable, … ───────── ▁   ▪   □ ─
+─ Targets ── none configured ─────────────────────────────────────────── ▁   ▄ ─
+─ Profiles ── claude-1 unavailable, codex-1 unavailable, … ───────── ▁   ▄   □ ─
 Background work finished
 action: OpenResumeDialog
 
 === Create and Open remain clickable (100x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
 │ Create   Open   Filter: _____________││                                                          │
 │hel ──────────────────────────────────││                                                          │
 │› · ACP pretty name               ◇ ⋯ ││                     ✦  M J O L N I R                     │
@@ -88,8 +88,8 @@ action: OpenResumeDialog
 │                                      ││No conversation open.                                     │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.    │
 │                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │─ Targets ── none configured ─────────────────────── ▁   ▪ ─
-╰──────────────────────────────────────╯─ Profiles ── claude-1 unavailable, … ────────────── ▁   ▪ ─
+│                                      │─ Targets ── none configured ─────────────────────── ▁   ▄ ─
+╰──────────────────────────────────────╯─ Profiles ── claude-1 unavailable, … ────────────── ▁   ▄ ─
 Background work finished
 
 === Create opens the session wizard (100x24) ===
@@ -114,16 +114,16 @@ Background work finished
 │       │                                                                                  │       │
 │       │                                                                                  │  .    │
 │       │   Cancel     Next                                                                │  ─────╯
-│       ╰──────────────────────────────────────────────────────────────────────────────────╯     ▪ ─
-╰─────                                                                                           ▪ ─
+│       ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ─
+╰─────                                                                                           ▄ ─
 Backgr
 action: None; mode: New=true
 
 === Open launches the session picker (100x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
 │ Create   Open   Filter: _____________││                                                          │
 │hel ──────────────────────────────────││                                                          │
 │› · ACP pretty name               ◇ ⋯ ││                     ✦  M J O L N I R                     │
@@ -141,16 +141,16 @@ action: None; mode: New=true
 │                                      ││No conversation open.                                     │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.    │
 │                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │─ Targets ── none configured ─────────────────────── ▁   ▪ ─
-╰──────────────────────────────────────╯─ Profiles ── claude-1 unavailable, … ────────────── ▁   ▪ ─
+│                                      │─ Targets ── none configured ─────────────────────── ▁   ▄ ─
+╰──────────────────────────────────────╯─ Profiles ── claude-1 unavailable, … ────────────── ▁   ▄ ─
 Background work finished
 action: OpenResumeDialog
 
 === Create and Open remain clickable (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -174,8 +174,8 @@ action: OpenResumeDialog
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │─ Targets ── none configured ─────────────────────────────────────────── ▁   ▪ ─
-╰──────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, … ───────────── ▁   ▪ ─
+│                                      │─ Targets ── none configured ─────────────────────────────────────────── ▁   ▄ ─
+╰──────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, … ───────────── ▁   ▄ ─
 Background work finished
 
 === Create opens the session wizard (120x30) ===
@@ -206,16 +206,16 @@ Background work finished
 │                 │                                                                                  │                 │
 │                 │   Cancel     Next                                                                │                 │
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ───────────────╯
-│                                                                                                       ──────── ▁   ▪ ─
-╰───────────────                                                                                        ──────── ▁   ▪ ─
+│                                                                                                       ──────── ▁   ▄ ─
+╰───────────────                                                                                        ──────── ▁   ▄ ─
 Background work finished
 action: None; mode: New=true
 
 === Open launches the session picker (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -239,16 +239,16 @@ action: None; mode: New=true
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │─ Targets ── none configured ─────────────────────────────────────────── ▁   ▪ ─
-╰──────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, … ───────────── ▁   ▪ ─
+│                                      │─ Targets ── none configured ─────────────────────────────────────────── ▁   ▄ ─
+╰──────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, … ───────────── ▁   ▄ ─
 Background work finished
 action: OpenResumeDialog
 
 === Create and Open remain clickable (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
@@ -282,15 +282,15 @@ action: OpenResumeDialog
 │                                            ││No conversation open.                                                                       │
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │─ Targets ── none configured ───────────────────────────────────────────────────────── ▁   ▪ ─
-╰────────────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ───────── ▁   ▪ ─
+│                                            │─ Targets ── none configured ───────────────────────────────────────────────────────── ▁   ▄ ─
+╰────────────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ───────── ▁   ▄ ─
 Background work finished
 
 === Create opens the session wizard (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                                                                                                                       │
@@ -324,16 +324,16 @@ Background work finished
 │                                            ││No conversation open.                                                                       │
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │─ Targets ── none configured ───────────────────────────────────────────────────────── ▁   ▪ ─
-╰────────────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ───────── ▁   ▪ ─
+│                                            │─ Targets ── none configured ───────────────────────────────────────────────────────── ▁   ▄ ─
+╰────────────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ───────── ▁   ▄ ─
 Background work finished
 action: None; mode: New=true
 
 === Open launches the session picker (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
@@ -367,16 +367,16 @@ action: None; mode: New=true
 │                                            ││No conversation open.                                                                       │
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │─ Targets ── none configured ───────────────────────────────────────────────────────── ▁   ▪ ─
-╰────────────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ───────── ▁   ▪ ─
+│                                            │─ Targets ── none configured ───────────────────────────────────────────────────────── ▁   ▄ ─
+╰────────────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ───────── ▁   ▄ ─
 Background work finished
 action: OpenResumeDialog
 
 === Create and Open remain clickable (200x60) ===
 ╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                                      ☰ ││                                                                                                                                    │
+│ default                                                      ≡ ││                                                                                                                                    │
 ╰────────────────────────────────────────────────────────────────╯│                                                                                                                                    │
-╭ Sessions ─────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                    │
+╭ Sessions ─────────────────────────────────────────── ▁   ▄   □ ╮│                                                                                                                                    │
 │ Create   Open   Filter: ________________________               ││                                                                                                                                    │
 │hel ────────────────────────────────────────────────────────────││                                                                                                                                    │
 │› · ACP pretty name                                         ◇ ⋯ ││                                                                                                                                    │
@@ -430,15 +430,15 @@ action: OpenResumeDialog
 │                                                                ││No conversation open.                                                                                                               │
 │                                                                ││Press Tab for Sessions, then Enter on the one to open.                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                                                │─ Targets ── none configured ───────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ─
-╰────────────────────────────────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ───────────────────────────────────────────────── ▁   ▪ ─
+│                                                                │─ Targets ── none configured ───────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ─
+╰────────────────────────────────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ───────────────────────────────────────────────── ▁   ▄ ─
 Background work finished
 
 === Create opens the session wizard (200x60) ===
 ╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                                      ☰ ││                                                                                                                                    │
+│ default                                                      ≡ ││                                                                                                                                    │
 ╰────────────────────────────────────────────────────────────────╯│                                                                                                                                    │
-╭ Sessions ─────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                    │
+╭ Sessions ─────────────────────────────────────────── ▁   ▄   □ ╮│                                                                                                                                    │
 │ Create   Open   Filter: ________________________               ││                                                                                                                                    │
 │hel ────────────────────────────────────────────────────────────││                                                                                                                                    │
 │› · ACP pretty name                                         ◇ ⋯ ││                                                                                                                                    │
@@ -492,16 +492,16 @@ Background work finished
 │                                                                ││No conversation open.                                                                                                               │
 │                                                                ││Press Tab for Sessions, then Enter on the one to open.                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                                                │─ Targets ── none configured ───────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ─
-╰────────────────────────────────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ───────────────────────────────────────────────── ▁   ▪ ─
+│                                                                │─ Targets ── none configured ───────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ─
+╰────────────────────────────────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ───────────────────────────────────────────────── ▁   ▄ ─
 Background work finished
 action: None; mode: New=true
 
 === Open launches the session picker (200x60) ===
 ╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                                      ☰ ││                                                                                                                                    │
+│ default                                                      ≡ ││                                                                                                                                    │
 ╰────────────────────────────────────────────────────────────────╯│                                                                                                                                    │
-╭ Sessions ─────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                    │
+╭ Sessions ─────────────────────────────────────────── ▁   ▄   □ ╮│                                                                                                                                    │
 │ Create   Open   Filter: ________________________               ││                                                                                                                                    │
 │hel ────────────────────────────────────────────────────────────││                                                                                                                                    │
 │› · ACP pretty name                                         ◇ ⋯ ││                                                                                                                                    │
@@ -555,16 +555,16 @@ action: None; mode: New=true
 │                                                                ││No conversation open.                                                                                                               │
 │                                                                ││Press Tab for Sessions, then Enter on the one to open.                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                                                │─ Targets ── none configured ───────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ─
-╰────────────────────────────────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ───────────────────────────────────────────────── ▁   ▪ ─
+│                                                                │─ Targets ── none configured ───────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ─
+╰────────────────────────────────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ───────────────────────────────────────────────── ▁   ▄ ─
 Background work finished
 action: OpenResumeDialog
 
 === action row in the Sessions pane (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -591,10 +591,10 @@ action: OpenResumeDialog
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -607,9 +607,9 @@ button Open: fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43) modifiers=NONE
 
 === keyboard focus on Create (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -636,10 +636,10 @@ button Open: fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43) modifiers=NONE
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -652,9 +652,9 @@ button Open: fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43) modifiers=NONE
 
 === keyboard focus moves to Open (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -681,10 +681,10 @@ button Open: fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43) modifiers=NONE
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -697,9 +697,9 @@ button Open: fg=Rgb(15, 18, 20) bg=Rgb(157, 229, 202) modifiers=BOLD
 
 === Enter activates the focused Open button (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -726,10 +726,10 @@ button Open: fg=Rgb(15, 18, 20) bg=Rgb(157, 229, 202) modifiers=BOLD
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -740,9 +740,9 @@ action: OpenResumeDialog
 
 === monochrome action emphasis at rest (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -769,10 +769,10 @@ action: OpenResumeDialog
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -784,9 +784,9 @@ button Open: fg=Reset bg=Reset modifiers=REVERSED
 
 === monochrome emphasis on Create (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -813,10 +813,10 @@ button Open: fg=Reset bg=Reset modifiers=REVERSED
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -828,9 +828,9 @@ button Open: fg=Reset bg=Reset modifiers=REVERSED
 
 === monochrome emphasis on Open (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -857,10 +857,10 @@ button Open: fg=Reset bg=Reset modifiers=REVERSED
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -873,9 +873,9 @@ monochrome Enter action: OpenResumeDialog
 
 === navigation starts at first session (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -902,10 +902,10 @@ monochrome Enter action: OpenResumeDialog
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -915,9 +915,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 
 === Down selects second session (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │  · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -944,10 +944,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -958,9 +958,9 @@ action focus: None; Create enabled: true; Open enabled: true
 
 === Up returns to first session (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -987,10 +987,10 @@ action focus: None; Create enabled: true; Open enabled: true
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -1001,9 +1001,9 @@ action focus: None; Create enabled: true; Open enabled: true
 
 === Up reaches Create (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -1030,10 +1030,10 @@ action focus: None; Create enabled: true; Open enabled: true
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -1044,9 +1044,9 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 
 === Right reaches Open (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -1073,10 +1073,10 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -1087,9 +1087,9 @@ action focus: Some(ResumeDialog); Create enabled: true; Open enabled: true
 
 === Left returns to Create (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -1116,10 +1116,10 @@ action focus: Some(ResumeDialog); Create enabled: true; Open enabled: true
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -1130,9 +1130,9 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 
 === Down returns to first session (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -1159,10 +1159,10 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -1173,9 +1173,9 @@ action focus: None; Create enabled: true; Open enabled: true
 
 === Enter opens the first session (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -1202,10 +1202,10 @@ action focus: None; Create enabled: true; Open enabled: true
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -1216,9 +1216,9 @@ action: Open { session_id: "another-session" }
 
 === empty list selects Create (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │No sessions yet                       ││                                                                              │
 │Create new work or open a session.    ││                                                                              │
@@ -1245,10 +1245,10 @@ action: Open { session_id: "another-session" }
 │                                      ││No live session in this workspace.                                            │
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -1259,9 +1259,9 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 
 === empty list can select Open (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │No sessions yet                       ││                                                                              │
 │Create new work or open a session.    ││                                                                              │
@@ -1288,10 +1288,10 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 │                                      ││No live session in this workspace.                                            │
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -1301,9 +1301,9 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 
 === empty list opens the picker (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │No sessions yet                       ││                                                                              │
 │Create new work or open a session.    ││                                                                              │
@@ -1330,10 +1330,10 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 │                                      ││No live session in this workspace.                                            │
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -1344,9 +1344,9 @@ action: OpenResumeDialog
 
 === Create disabled without profiles (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -1376,10 +1376,10 @@ action: OpenResumeDialog
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││           Harness  Weekly Resets  5H Resets                                  │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then g sessions · a read · : palette · ? keys
@@ -1388,9 +1388,9 @@ button Open: fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43) modifiers=NONE
 
 === keyboard skips disabled Create (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -1420,10 +1420,10 @@ button Open: fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43) modifiers=NONE
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││           Harness  Weekly Resets  5H Resets                                  │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then g sessions · a read · : palette · ? keys
@@ -1431,9 +1431,9 @@ action focus: Some(ResumeDialog); Create enabled: false; Open enabled: true
 
 === Left stays on enabled Open (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -1463,10 +1463,10 @@ action focus: Some(ResumeDialog); Create enabled: false; Open enabled: true
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││           Harness  Weekly Resets  5H Resets                                  │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then g sessions · a read · : palette · ? keys
@@ -1474,9 +1474,9 @@ action focus: Some(ResumeDialog); Create enabled: false; Open enabled: true
 
 === mouse still activates Open (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -1506,10 +1506,10 @@ action focus: Some(ResumeDialog); Create enabled: false; Open enabled: true
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││           Harness  Weekly Resets  5H Resets                                  │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then g sessions · a read · : palette · ? keys

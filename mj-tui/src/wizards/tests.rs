@@ -1634,7 +1634,10 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
     };
 
     let marked = profile_step(HarnessKind::Kimi);
-    assert!(marked.contains('⚠'), "{marked}");
+    assert!(
+        marked.contains(mj_chat::theme::glyphs().warning),
+        "{marked}"
+    );
     assert!(marked.contains("No guardian approval mode"), "{marked}");
     assert!(
         marked.contains("do not run on a raw, unsandboxed target"),
@@ -1649,7 +1652,10 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
         HarnessKind::OpenCode,
     ] {
         let quiet = profile_step(kind);
-        assert!(!quiet.contains('⚠'), "{kind:?}: {quiet}");
+        assert!(
+            !quiet.contains(mj_chat::theme::glyphs().warning),
+            "{kind:?}: {quiet}"
+        );
         assert!(
             !quiet.contains("No guardian approval mode"),
             "{kind:?}: {quiet}"
@@ -1711,10 +1717,12 @@ fn new_session_profile_step_aligns_its_columns() {
 
     // The triangle occupies the marker column, then the table gap, then the
     // profile id; only the harness without guardian approvals carries it.
-    assert!(!claude.contains('⚠'));
-    assert!(kimi.contains('⚠'));
+    assert!(!claude.contains(mj_chat::theme::glyphs().warning));
+    assert!(kimi.contains(mj_chat::theme::glyphs().warning));
     assert_eq!(
-        cell_column(kimi, "⚠") + 1 + u16::try_from(COLUMN_GAP).unwrap(),
+        cell_column(kimi, mj_chat::theme::glyphs().warning)
+            + 1
+            + u16::try_from(COLUMN_GAP).unwrap(),
         profile_column
     );
 }
@@ -2818,9 +2826,9 @@ fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
 
     // Only the Kimi row lacks guardian approvals, and the row below the table
     // explains the marker it carries.
-    assert!(row("kimi-1").contains('⚠'));
-    assert!(!row("claude-1").contains('⚠'));
-    assert!(!row("codex-1").contains('⚠'));
+    assert!(row("kimi-1").contains(mj_chat::theme::glyphs().warning));
+    assert!(!row("claude-1").contains(mj_chat::theme::glyphs().warning));
+    assert!(!row("codex-1").contains(mj_chat::theme::glyphs().warning));
     assert!(
         lines
             .iter()

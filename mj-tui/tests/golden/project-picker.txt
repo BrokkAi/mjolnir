@@ -49,10 +49,10 @@ action: None
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▪ ╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▪ ╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │   Cancel     Back     Next                                                       │                 │
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
@@ -80,10 +80,10 @@ action: None
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▪ ╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▪ ╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │   Cancel     Back     Next                                                       │                 │
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
@@ -111,10 +111,10 @@ action: None
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▪ ╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▪ ╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │   Cancel     Back     Next                                                       │                 │
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
@@ -142,10 +142,10 @@ action: None
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▪ ╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▪ ╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │   Cancel     Back     Use project                                                │                 │
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
@@ -173,10 +173,10 @@ action: None
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▪ ╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▪ ╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │   Cancel     Back     Next                                                       │                 │
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
@@ -207,10 +207,10 @@ action: None
 │       │                                                                                  │       │
 │       │                                                                                  │  d    │
 │       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▪ ╮
+│       │                                                                                  │     ▄ ╮
 │       │                                                                                  │       │
 │       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▪ ╮
+│       │                                                                                  │     ▄ ╮
 │       │                                                                                  │  s    │
 │       │   Cancel     Back     Add directory…     Create                                  │       │
 │       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
@@ -230,7 +230,7 @@ action: None
 │       │                                                                                  │       │
 │       │                                                                                  │       │
 │       │                                                                                  │       │
-│       │ ☑ Use several repositories together                                              │       │
+│       │ ☒ Use several repositories together                                              │       │
 │       │                                                                                  │       │
 │       │ Main  owner/main                                                                 │       │
 │       │ Also  owner/remove                                                               │       │
@@ -239,10 +239,10 @@ action: None
 │       │   Add repository     Make main     Remove                                        │       │
 │       │                                                                                  │  d    │
 │       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▪ ╮
+│       │                                                                                  │     ▄ ╮
 │       │                                                                                  │       │
 │       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▪ ╮
+│       │                                                                                  │     ▄ ╮
 │       │                                                                                  │  s    │
 │       │   Cancel     Back     Use 3 repositories                                         │       │
 │       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
@@ -261,7 +261,7 @@ action: None
 │       │                                                                                  │       │
 │       │                                                                                  │       │
 │       │                                                                                  │       │
-│       │ ☑ Use several repositories together                                              │       │
+│       │ ☒ Use several repositories together                                              │       │
 │       │                                                                                  │       │
 │       │ Main  owner/main                                                                 │       │
 │       │ Also  owner/shared                                                               │       │
@@ -270,10 +270,10 @@ action: None
 │       │                                                                                  │       │
 │       │                                                                                  │  d    │
 │       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▪ ╮
+│       │                                                                                  │     ▄ ╮
 │       │                                                                                  │       │
 │       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▪ ╮
+│       │                                                                                  │     ▄ ╮
 │       │                                                                                  │  s    │
 │       │   Cancel     Back     Use 2 repositories                                         │       │
 │       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
@@ -363,14 +363,14 @@ project request: Github { query: "" }
 │       │ ✓ app  owner/app                                                                 │       │
 │       │   shared  owner/shared                                                           │       │
 │       │                                                                                  │  ─────╯
-│       │ ☑ Use several repositories together                                              │  ─────╮
+│       │ ☒ Use several repositories together                                              │  ─────╮
 │       │                                                                                  │       │
 │       │ Main  owner/app                                                                  │  d    │
 │       │                                                                                  │  ─────╯
-│       │   Add repository     Make main     Remove                                        │     ▪ ╮
+│       │   Add repository     Make main     Remove                                        │     ▄ ╮
 │       │                                                                                  │       │
 │       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▪ ╮
+│       │                                                                                  │     ▄ ╮
 │       │                                                                                  │  s    │
 │       │   Cancel     Back     Use 1 repository                                           │       │
 │       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
@@ -394,14 +394,14 @@ project request: Github { query: "" }
 │       │ ✓ app  owner/app                                                                 │       │
 │       │ ✓ shared  owner/shared                                                           │       │
 │       │                                                                                  │  ─────╯
-│       │ ☑ Use several repositories together                                              │  ─────╮
+│       │ ☒ Use several repositories together                                              │  ─────╮
 │       │                                                                                  │       │
 │       │ Main  owner/shared                                                               │  d    │
 │       │ Also  owner/app                                                                  │  ─────╯
-│       │                                                                                  │     ▪ ╮
+│       │                                                                                  │     ▄ ╮
 │       │   Add repository     Make main     Remove                                        │       │
 │       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▪ ╮
+│       │                                                                                  │     ▄ ╮
 │       │                                                                                  │  s    │
 │       │   Cancel     Back     Use 2 repositories                                         │       │
 │       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
@@ -1085,7 +1085,7 @@ project request: Github { query: "" }
   │ ✓ docs  owner/docs                                                       │
   │   next  owner/next                                                       │
   │                                                                          │
-  │ ☑ Use several repositories together                                      │
+  │ ☒ Use several repositories together                                      │
   │                                                                          │
   │                                                                          │
   │   Cancel     Back     Use 3 repositories                                 │
@@ -1254,7 +1254,7 @@ action: None
   │                                                                          │
   │                                                                          │
   │                                                                          │
-  │ ☑ Use several repositories together                                      │
+  │ ☒ Use several repositories together                                      │
   │                                                                          │
   │   Add repository     Make main     Remove                                │
   │                                                                          │
@@ -1279,7 +1279,7 @@ action: None
   │                                                                          │
   │ owner/visible                                                            │
   │                                                                          │
-  │ ☑ Use several repositories together                                      │
+  │ ☒ Use several repositories together                                      │
   │                                                                          │
   │   Add repository     Make main     Remove                                │
   │                                                                          │
@@ -1304,7 +1304,7 @@ action: None
   │                                                                          │
   │ owner/visible                                                            │
   │                                                                          │
-  │ ☑ Use several repositories together                                      │
+  │ ☒ Use several repositories together                                      │
   │                                                                          │
   │   Add repository     Make main     Remove                                │
   │                                                                          │
@@ -1329,7 +1329,7 @@ action: None
   │                                                                          │
   │ owner/visible                                                            │
   │                                                                          │
-  │ ☑ Use several repositories together                                      │
+  │ ☒ Use several repositories together                                      │
   │                                                                          │
   │   Add repository     Make main     Remove                                │
   │                                                                          │
@@ -1354,7 +1354,7 @@ action: None
   │                                                                          │
   │                                                                          │
   │                                                                          │
-  │ ☑ Use several repositories together                                      │
+  │ ☒ Use several repositories together                                      │
   │                                                                          │
   │ Main  owner/visible                                                      │
   │                                                                          │
@@ -1379,7 +1379,7 @@ action: None
   │                                                                          │
   │                                                                          │
   │                                                                          │
-  │ ☑ Use several repositories together                                      │
+  │ ☒ Use several repositories together                                      │
   │                                                                          │
   │ Main  owner/visible                                                      │
   │                                                                          │
@@ -1404,7 +1404,7 @@ action: None
   │                                                                          │
   │                                                                          │
   │                                                                          │
-  │ ☑ Use several repositories together                                      │
+  │ ☒ Use several repositories together                                      │
   │                                                                          │
   │ Main  owner/visible                                                      │
   │                                                                          │
@@ -1429,7 +1429,7 @@ action: None
   │                                                                          │
   │                                                                          │
   │                                                                          │
-  │ ☑ Use several repositories together                                      │
+  │ ☒ Use several repositories together                                      │
   │                                                                          │
   │ Main  owner/visible                                                      │
   │                                                                          │
@@ -1454,7 +1454,7 @@ action: None
   │                                                                          │
   │                                                                          │
   │                                                                          │
-  │ ☑ Use several repositories together                                      │
+  │ ☒ Use several repositories together                                      │
   │                                                                          │
   │ Main  owner/visible                                                      │
   │                                                                          │
@@ -1585,7 +1585,7 @@ action: None
   │                                                      │
   │                                                      │
   │                                                      │
-  │ ☑ Use several repositories together                  │
+  │ ☒ Use several repositories together                  │
   │                                                      │
   │   Add repository     Make main     Remove            │
   │                                                      │
@@ -1606,7 +1606,7 @@ action: None
   │                                                      │
   │ owner/visible                                        │
   │                                                      │
-  │ ☑ Use several repositories together                  │
+  │ ☒ Use several repositories together                  │
   │                                                      │
   │   Add repository     Make main     Remove            │
   │                                                      │
@@ -1627,7 +1627,7 @@ action: None
   │                                                      │
   │ owner/visible                                        │
   │                                                      │
-  │ ☑ Use several repositories together                  │
+  │ ☒ Use several repositories together                  │
   │                                                      │
   │   Add repository     Make main     Remove            │
   │                                                      │
@@ -1648,7 +1648,7 @@ action: None
   │                                                      │
   │ owner/visible                                        │
   │                                                      │
-  │ ☑ Use several repositories together                  │
+  │ ☒ Use several repositories together                  │
   │                                                      │
   │   Add repository     Make main     Remove            │
   │                                                      │
@@ -1669,7 +1669,7 @@ action: None
   │                                                      │
   │                                                      │
   │                                                      │
-  │ ☑ Use several repositories together                  │
+  │ ☒ Use several repositories together                  │
   │                                                      │
   │ Main  owner/visible                                  │
   │                                                      │
@@ -1690,7 +1690,7 @@ action: None
   │                                                      │
   │                                                      │
   │                                                      │
-  │ ☑ Use several repositories together                  │
+  │ ☒ Use several repositories together                  │
   │                                                      │
   │ Main  owner/visible                                  │
   │                                                      │
@@ -1711,7 +1711,7 @@ action: None
   │                                                      │
   │                                                      │
   │                                                      │
-  │ ☑ Use several repositories together                  │
+  │ ☒ Use several repositories together                  │
   │                                                      │
   │ Main  owner/visible                                  │
   │                                                      │
@@ -1731,7 +1731,7 @@ action: None
   │                                                      │
   │                                                      │
   │                                                      │
-  │ ☑ Use several repositories together                  │
+  │ ☒ Use several repositories together                  │
   │                                                      │
   │ Main  owner/visible                                  │
   │                                                      │
@@ -1752,7 +1752,7 @@ action: None
   │                                                      │
   │                                                      │
   │                                                      │
-  │ ☑ Use several repositories together                  │
+  │ ☒ Use several repositories together                  │
   │                                                      │
   │ Main  owner/visible                                  │
   │                                                      │
@@ -1784,10 +1784,10 @@ action: None
 │       │           │/opt/directory-6/                                                 │   │       │
 │       │           │/opt/directory-7/                                                 │   │  d    │
 │       │           ╰──────────────────────────────────────────────────────────────────╯   │  ─────╯
-│       │                                                                                  │     ▪ ╮
+│       │                                                                                  │     ▄ ╮
 │       │                                                                                  │       │
 │       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▪ ╮
+│       │                                                                                  │     ▄ ╮
 │       │                                                                                  │  s    │
 │       │   Cancel     Back     Add directory                                              │       │
 │       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
@@ -1815,10 +1815,10 @@ action: None
 │       │                                                                                  │       │
 │       │                                                                                  │  d    │
 │       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▪ ╮
+│       │                                                                                  │     ▄ ╮
 │       │                                                                                  │       │
 │       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▪ ╮
+│       │                                                                                  │     ▄ ╮
 │       │                                                                                  │  s    │
 │       │   Cancel     Back     Add directory                                              │       │
 │       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
@@ -1828,9 +1828,9 @@ action: None
 action: None
 === clicking_a_recent_project_fills_the_field_and_enter_validates_it (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │No sessions yet                             ││                                                                                            │
 │Create new work or open a                                                                                                                 │
@@ -1857,10 +1857,10 @@ action: None
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -1869,9 +1869,9 @@ action: None
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === clicking_a_recent_project_fills_the_field_and_enter_validates_it (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │No sessions yet                             ││                                                                                            │
 │Create new work or open a                                                                                                                 │
@@ -1898,10 +1898,10 @@ action: None
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -1910,9 +1910,9 @@ action: None
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === clicking_a_recent_project_fills_the_field_and_enter_validates_it (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │No sessions yet                             ││                                                                                            │
 │Create new work or open a                                                                                                                 │
@@ -1939,10 +1939,10 @@ action: None
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │

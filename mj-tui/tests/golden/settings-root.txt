@@ -1,6 +1,6 @@
 === grouped Settings root (140x42) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────                                                                                                                       │
 │ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
@@ -31,10 +31,10 @@
 │                     │   Other                                                                                      │                     │
 │                     │   GitHub events                                                        On · GitHub activity  │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Save and Close                                                                             │  ──────────── ▁   ▪ ╮
+│                     │   Save and Close                                                                             │  ──────────── ▁   ▄ ╮
 │                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
 │                                                                                                                                          │
 │                                                                                                                                          │
@@ -474,9 +474,9 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Web access changes take effect when the background server next starts. Remote access         │
   │ requires a certificate and key.                                                              │
   │                                                                                              │
-  │   Enabled                                                                                 ☑  │
+  │   Enabled                                                                                 ☒  │
   │   Listen address and port                                                    127.0.0.1:3765  │
-  │   Detect Tailscale                                                                        ☑  │
+  │   Detect Tailscale                                                                        ☒  │
   │   TLS certificate file                                                     None (HTTP only)  │
   │   TLS private key file                                                     None (HTTP only)  │
   │                                                                                              │
@@ -751,9 +751,9 @@ rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43); accent fg=Rgb(15
 
 === Light theme after save acknowledgement (100x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
 │ Create   Open   Filter: _____________││                                                          │
 │hel ──────────────────────────────────││                     ✦  M J O L N I R                     │
 │› ■ ACP pretty name               ◇ ⋯ ││                                                          │
@@ -770,10 +770,10 @@ rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43); accent fg=Rgb(15
 │                                      ││No conversation open.                                     │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.    │
 │                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                         │
 │                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets    │
 │                                      ││  claude-1  Claude Code  refreshing…                      │
 │                                      ││  codex-1   Codex        refreshing…                      │

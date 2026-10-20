@@ -335,7 +335,7 @@ focus index=0
 │Architecture                                                                                      │
 │                                                                                                  │
 │Choose an architecture                                                                            │
-│☑ Yes                                                                                             │
+│☒ Yes                                                                                             │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
@@ -368,7 +368,7 @@ field value=Boolean(true)
 │Architecture                                                                                      │
 │                                                                                                  │
 │Choose an architecture                                                                            │
-│☑ Yes                                                                                             │
+│☒ Yes                                                                                             │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
