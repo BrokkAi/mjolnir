@@ -1,4 +1,5 @@
 //! Editable defaults and labels for every field in the user configuration.
+use mj_chat::theme;
 use serde_json::{Value, json};
 
 pub(super) fn defaults(path: &[String], value: &Value) -> Value {
@@ -413,10 +414,7 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
     Some(match key {
         "interface" => format!(
             "{} · sidebar {}",
-            theme_report(
-                &choice_label(&["theme".to_owned()], &draft["theme"], draft),
-                crate::no_color_requested()
-            ),
+            draft_theme_report(&draft["theme"], draft),
             choice_label(
                 &["sessions_side".to_owned()],
                 &draft["sessions_side"],
@@ -529,16 +527,41 @@ fn named_entries(value: &Value) -> String {
     format!("{}, +{} more", names[..2].join(", "), names.len() - 2)
 }
 
-/// The theme as Setup reports it. `NO_COLOR` is an override, not a theme:
-/// [`theme::effective_theme`] draws in monochrome whatever is configured, and
-/// the configured choice is kept and comes back once `NO_COLOR` is unset. So
-/// the report says what is on screen and why, and names the configured theme
-/// that is waiting.
-pub(super) fn theme_report(configured_label: &str, no_color: bool) -> String {
-    if no_color {
-        format!("Monochrome (NO_COLOR; configured: {configured_label})")
-    } else {
-        configured_label.to_owned()
+/// The theme as Setup reports it: what is on screen and why. `NO_COLOR` is
+/// an override, not a theme: [`theme::effective_theme`] draws in monochrome
+/// whatever is configured, and the configured choice is kept and comes back
+/// once `NO_COLOR` is unset, so the report names the choice that is waiting.
+/// Auto names the palette it picked and what the terminal reported.
+pub(super) fn theme_report(
+    configured: theme::ThemeChoice,
+    no_color: bool,
+    background: Option<theme::Rgb>,
+) -> String {
+    let resolution = theme::resolve(configured, no_color, background);
+    let label = resolution.theme.label();
+    match resolution.reason {
+        theme::ThemeReason::Configured => label.to_owned(),
+        theme::ThemeReason::NoColor => {
+            format!("Monochrome (NO_COLOR; configured: {})", configured.label())
+        }
+        theme::ThemeReason::TerminalBackground((red, green, blue)) => {
+            format!("Auto: {label} (terminal background #{red:02x}{green:02x}{blue:02x})")
+        }
+        theme::ThemeReason::Unreported => {
+            format!("Auto: {label} (terminal did not report its background)")
+        }
+    }
+}
+
+/// [`theme_report`] for the draft's theme value, as this process sees it.
+pub(super) fn draft_theme_report(value: &Value, draft: &Value) -> String {
+    match serde_json::from_value::<theme::ThemeChoice>(value.clone()) {
+        Ok(configured) => theme_report(
+            configured,
+            crate::no_color_requested(),
+            theme::terminal_background(),
+        ),
+        Err(_) => choice_label(&["theme".to_owned()], value, draft),
     }
 }
 
@@ -550,10 +573,12 @@ pub(super) fn choice_label(path: &[String], value: &Value, draft: &Value) -> Str
             value.to_string()
         };
     };
-    if let Ok(theme) =
-        serde_json::from_value::<mj_core::config::UiTheme>(Value::String(value.into()))
+    // Only the theme field: `auto` is also an image pull policy.
+    if super::storage_path(path) == ["theme"]
+        && let Ok(choice) =
+            serde_json::from_value::<theme::ThemeChoice>(Value::String(value.into()))
     {
-        return theme.label().into();
+        return choice.label().into();
     }
     // A download policy is shown by what it does to this target's own image:
     // `auto` is derived from the image reference, not an alias.
@@ -645,9 +670,8 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         _ => &[],
     };
     if path.len() == 1 && key == "theme" {
-        return mj_core::config::UiTheme::ALL
-            .into_iter()
-            .map(|theme| serde_json::to_value(theme).expect("theme serializes"))
+        return theme::ThemeChoice::all()
+            .map(|choice| serde_json::to_value(choice).expect("theme serializes"))
             .collect();
     }
     if key == "spinner" {
@@ -759,7 +783,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Key pressed before global shortcuts. Use ctrl, alt, or cmd/super with a key, or use a function key."
         }
         "theme" => {
-            "Dashboard and conversation colors. Terminal Dark and Light use the terminal's own colors. Applies after saving."
+            "Auto matches the terminal's background. Terminal Dark and Light use its own colors. Applies after saving."
         }
         "profiles" => {
             "Add a profile for each agent you want to run, or use Detect profiles to find installed agents."

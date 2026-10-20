@@ -88,14 +88,14 @@ root footer alignment: save=(24,35); body=(26,11)
   │   Activity animation                                                                 scan ▾  │
   │   Theme                           Midnight ▾                                                 │
   │                                   ╭ values · ↑/↓ select · Tab/Enter accept ╮                 │
+  │                                   │Auto                                   ▐│                 │
   │                                   │Midnight                               ▐│                 │
   │                                   │Light                                  ▐│                 │
-  │                                   │Darcula                                ▐│                 │
-  │                                   │High Contrast                          ▐│                 │
-  │                                   │Campbell                               ▐│                 │
-  │                                   │One Half Dark                          ││                 │
-  │                                   │One Half Light                         ││                 │
-  │                                   │Solarized Dark                         ││                 │
+  │                                   │Darcula                                ││                 │
+  │                                   │High Contrast                          ││                 │
+  │                                   │High Contrast Light                    ││                 │
+  │                                   │Colorblind Dark                        ││                 │
+  │                                   │Colorblind Light                       ││                 │
   │                                   ╰────────────────────────────────────────╯                 │
   │                                                                                              │
   │                                                                                              │
@@ -219,14 +219,14 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │   Activity animation                                                                 scan ▾  │
   │   Theme                           Midnight ▾                                                 │
   │                                   ╭ values · ↑/↓ select · Tab/Enter accept ╮                 │
+  │                                   │Auto                                   ▐│                 │
   │                                   │Midnight                               ▐│                 │
   │                                   │Light                                  ▐│                 │
-  │                                   │Darcula                                ▐│                 │
-  │                                   │High Contrast                          ▐│                 │
-  │                                   │Campbell                               ▐│                 │
-  │                                   │One Half Dark                          ││                 │
-  │                                   │One Half Light                         ││                 │
-  │                                   │Solarized Dark                         ││                 │
+  │                                   │Darcula                                ││                 │
+  │                                   │High Contrast                          ││                 │
+  │                                   │High Contrast Light                    ││                 │
+  │                                   │Colorblind Dark                        ││                 │
+  │                                   │Colorblind Light                       ││                 │
   │                                   ╰────────────────────────────────────────╯                 │
   │                                                                                              │
   │                                                                                              │
@@ -795,14 +795,14 @@ rendered colors: text fg=Rgb(38, 51, 46) bg=Rgb(251, 250, 247); accent fg=Rgb(35
   │   Activity animation                                                                 scan ▾  │
   │   Theme                           Light ▾                                                    │
   │                                   ╭ values · ↑/↓ select · Tab/Enter accept ╮                 │
+  │                                   │Auto                                   ▐│                 │
   │                                   │Midnight                               ▐│                 │
   │                                   │Light                                  ▐│                 │
-  │                                   │Darcula                                ▐│                 │
-  │                                   │High Contrast                          ▐│                 │
-  │                                   │Campbell                               ▐│                 │
-  │                                   │One Half Dark                          ││                 │
-  │                                   │One Half Light                         ││                 │
-  │                                   │Solarized Dark                         ││                 │
+  │                                   │Darcula                                ││                 │
+  │                                   │High Contrast                          ││                 │
+  │                                   │High Contrast Light                    ││                 │
+  │                                   │Colorblind Dark                        ││                 │
+  │                                   │Colorblind Light                       ││                 │
   │                                   ╰────────────────────────────────────────╯                 │
   │                                                                                              │
   │                                                                                              │
@@ -814,17 +814,29 @@ rendered colors: text fg=Rgb(38, 51, 46) bg=Rgb(251, 250, 247); accent fg=Rgb(35
 
 
 reopened selected theme: "light"
+saved theme: Auto
+Auto after save acknowledgement: rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(22, 27, 30); accent fg=Rgb(157, 229, 202)
+saved theme: High Contrast Light
+High Contrast Light after save acknowledgement: rendered colors: text fg=Rgb(0, 0, 0) bg=Rgb(255, 255, 255); accent fg=Rgb(0, 60, 168)
+saved theme: Colorblind Dark
+Colorblind Dark after save acknowledgement: rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(22, 27, 30); accent fg=Rgb(86, 180, 233)
+saved theme: Colorblind Light
+Colorblind Light after save acknowledgement: rendered colors: text fg=Rgb(38, 51, 46) bg=Rgb(251, 250, 247); accent fg=Rgb(0, 106, 170)
+saved theme: Catppuccin Mocha
+Catppuccin Mocha after save acknowledgement: rendered colors: text fg=Rgb(205, 214, 244) bg=Rgb(30, 30, 46); accent fg=Rgb(203, 166, 247)
+saved theme: Catppuccin Latte
+Catppuccin Latte after save acknowledgement: rendered colors: text fg=Rgb(76, 79, 105) bg=Rgb(239, 241, 245); accent fg=Rgb(128, 45, 229)
 saved theme: Campbell
 Campbell after save acknowledgement: rendered colors: text fg=Rgb(204, 204, 204) bg=Rgb(19, 19, 19); accent fg=Rgb(97, 214, 214)
-saved theme: OneHalfDark
+saved theme: One Half Dark
 One Half Dark after save acknowledgement: rendered colors: text fg=Rgb(220, 223, 228) bg=Rgb(44, 49, 58); accent fg=Rgb(94, 186, 197)
-saved theme: OneHalfLight
+saved theme: One Half Light
 One Half Light after save acknowledgement: rendered colors: text fg=Rgb(56, 58, 66) bg=Rgb(255, 255, 255); accent fg=Rgb(1, 108, 154)
-saved theme: SolarizedDark
+saved theme: Solarized Dark
 Solarized Dark after save acknowledgement: rendered colors: text fg=Rgb(238, 232, 213) bg=Rgb(3, 47, 59); accent fg=Rgb(91, 183, 176)
-saved theme: SolarizedLight
+saved theme: Solarized Light
 Solarized Light after save acknowledgement: rendered colors: text fg=Rgb(7, 54, 66) bg=Rgb(255, 250, 236); accent fg=Rgb(28, 108, 102)
-saved theme: TerminalDark
+saved theme: Terminal Dark
 Terminal Dark after save acknowledgement: rendered colors: text fg=Reset bg=Reset; accent fg=Indexed(6)
-saved theme: TerminalLight
+saved theme: Terminal Light
 Terminal Light after save acknowledgement: rendered colors: text fg=Reset bg=Reset; accent fg=Indexed(4)

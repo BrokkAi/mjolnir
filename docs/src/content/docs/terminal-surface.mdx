@@ -42,11 +42,21 @@ replaces the footer. Each session row has a **⋯** button for its actions.
 Displayed dashboard shortcut hints are clickable, including global shortcuts
 in the composer's footer. Help supports wheel scrolling and a **Close** button.
 
-Open Settings (`prefix+s`) to choose Midnight (the default), Light, Darcula,
-High Contrast, Campbell, One Half Dark, One Half Light, Solarized Dark,
-Solarized Light, Terminal Dark, Terminal Light, or Monochrome. Saving applies
-the palette to the dashboard, conversation, and dialogs and preserves it for
-future launches. Campbell, One Half, and Solarized match the Windows Terminal
+Open Settings (`prefix+s`) to choose Auto, Midnight (the default), Light,
+Darcula, High Contrast, High Contrast Light, Colorblind Dark, Colorblind Light,
+Catppuccin Mocha, Catppuccin Latte, Campbell, One Half Dark, One Half Light,
+Solarized Dark, Solarized Light, Terminal Dark, Terminal Light, or Monochrome.
+Saving applies the palette to the dashboard, conversation, and dialogs and
+preserves it for future launches. Auto asks the terminal for its background
+color when mj starts and draws Midnight on a dark background and Light on a
+light one; Settings names the palette it picked and the color the terminal
+reported. A terminal that does not answer, and Windows outside WSL, get
+Midnight, and Auto does not follow a terminal that changes scheme while mj is
+running. Colorblind Dark and Colorblind Light show success in blue, warnings
+and activity in yellow, and failures in orange or deep crimson, so failures
+stay distinct with red-green or blue-yellow color blindness. High Contrast
+Light is black on white. Catppuccin Mocha and Latte paint the flavor's own base
+color. Campbell, One Half, and Solarized match the Windows Terminal
 schemes of the same name, background included, so the dashboard blends into the
 window under WSL. Terminal Dark and Terminal Light paint no backgrounds and use
 the terminal's own 16 colors, with a neutral gray for secondary text, so they

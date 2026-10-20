@@ -356,7 +356,8 @@ pub(crate) fn render_combined_for_test(
         chats,
         opening_panes,
         transcript_selected,
-        dashboard.config.theme,
+        // Golden output is independent of NO_COLOR and of the terminal.
+        theme::resolve(dashboard.config.theme, false, None).theme,
         symbols,
     )
 }

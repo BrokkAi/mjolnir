@@ -25,6 +25,10 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const TIMEOUT: Duration = Duration::from_secs(5);
 const DEVICE_ATTRIBUTES_QUERY: &[u8] = b"\x1b[?u\x1b[c";
 const DEVICE_ATTRIBUTES_RESPONSE: &[u8] = b"\x1b[?1;2c";
+/// The terminal-background question mj asks first, and this fixture
+/// terminal's answer: a white background, then device attributes.
+const BACKGROUND_QUERY: &[u8] = b"\x1b]11;?\x1b\\\x1b[c";
+const BACKGROUND_RESPONSE: &[u8] = b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\\x1b[?1;2c";
 const ENTER_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
 /// A local-target fixture's launches wait in the daemon until this file
 /// exists.
@@ -228,10 +232,21 @@ fn wait_for_output_until(
     let mut answered_device_query = output
         .windows(ENTER_ALTERNATE_SCREEN.len())
         .any(|window| window == ENTER_ALTERNATE_SCREEN);
+    let mut answered_background_query = answered_device_query;
     loop {
         drain(master, output);
         if expected.matches(output) {
             return;
+        }
+        if !answered_background_query
+            && output
+                .windows(BACKGROUND_QUERY.len())
+                .any(|window| window == BACKGROUND_QUERY)
+        {
+            master
+                .write_all(BACKGROUND_RESPONSE)
+                .expect("answer terminal background query");
+            answered_background_query = true;
         }
         if !answered_device_query
             && output
@@ -422,6 +437,7 @@ fn spawn_dashboard_pty_with_setup(
         pending_session,
         local_target,
         prefix,
+        None,
         first_run,
         &[],
     )
@@ -432,6 +448,7 @@ fn spawn_dashboard_pty_with_setup_and_args(
     pending_session: bool,
     local_target: bool,
     prefix: Option<&str>,
+    theme: Option<mj_core::config::ThemeChoice>,
     first_run: bool,
     args: &[&str],
 ) -> DashboardPty {
@@ -472,6 +489,12 @@ image = "ubuntu:24.04"
         let path = config_root.join("hel/config.toml");
         let mut config = mj_core::config::Config::load_from(&path).unwrap();
         config.keys.prefix = prefix.into();
+        config.save_to(&path).unwrap();
+    }
+    if let Some(theme) = theme {
+        let path = config_root.join("hel/config.toml");
+        let mut config = mj_core::config::Config::load_from(&path).unwrap();
+        config.theme = theme;
         config.save_to(&path).unwrap();
     }
     if local_target {
@@ -722,6 +745,49 @@ fn panicking_dashboard_fixture_reaps_the_dashboard_before_removing_storage() {
     // The owned dashboard child must have been killed and reaped by its guard.
     assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
     assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+}
+
+/// Auto asks the terminal for its background before crossterm reads any
+/// input. The fixture terminal reports white, so the dashboard paints Light's
+/// panels and never Midnight's, and the reply is not typed into the screen.
+#[test]
+fn auto_theme_paints_light_on_a_terminal_that_reports_a_white_background() {
+    let mut fixture = spawn_dashboard_pty_with_setup_and_args(
+        true,
+        false,
+        false,
+        None,
+        Some(mj_core::config::ThemeChoice::Auto),
+        false,
+        &[],
+    );
+    let mut output = PtyOutput::new();
+    wait_for_ready(
+        fixture.child.child_mut(),
+        &mut fixture.master,
+        &mut output,
+        READY_MARKER,
+    );
+    let painted = |background: &[u8]| {
+        output
+            .windows(background.len())
+            .any(|window| window == background)
+    };
+    assert!(
+        painted(b"48;2;251;250;247m"),
+        "Light's panel surface was never painted; output: {:?}",
+        String::from_utf8_lossy(&output)
+    );
+    assert!(
+        !painted(b"48;2;22;27;30m"),
+        "Midnight's panel surface was painted; output: {:?}",
+        String::from_utf8_lossy(&output)
+    );
+    let screen = output.screen.contents();
+    assert!(
+        !screen.contains("rgb:"),
+        "the reply reached the screen: {screen}"
+    );
 }
 
 #[test]
@@ -1009,6 +1075,7 @@ fn simple_mode_detaches_on_direct_ctrl_q_and_never_claims_ctrl_b() {
         true,
         false,
         true,
+        None,
         None,
         false,
         &["simple", env!("CARGO_MANIFEST_DIR")],

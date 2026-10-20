@@ -19,6 +19,7 @@ mod pollers;
 mod session_presentation;
 mod simple;
 mod splash;
+mod terminal_background;
 
 #[cfg(test)]
 mod test_support;
@@ -2183,6 +2184,11 @@ pub(crate) struct TerminalGuard {
 impl TerminalGuard {
     pub(crate) fn enter() -> Result<Self> {
         enable_raw_mode().context("enable terminal raw mode")?;
+        // Auto reads this answer whenever it resolves, including after a
+        // switch to Auto in Settings, when crossterm owns the input and the
+        // terminal can no longer be asked. So the first entry asks, before
+        // crossterm reads anything, whatever theme is configured.
+        mj_chat::theme::terminal_background_or_probe(terminal_background::query);
         let mut stdout = io::stdout();
         // Legacy terminal input encodes Ctrl+I as the same byte as Tab. Ask
         // capable terminals to report them distinctly so both bindings work.

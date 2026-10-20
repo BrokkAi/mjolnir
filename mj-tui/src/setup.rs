@@ -735,10 +735,9 @@ fn value_summary(
         // replaces the number as well as the "Never" placeholder.
         _ => match automatic.filter(|_| key == "archive_after_days") {
             Some(label) => label,
-            None if storage_path(&child_path) == ["theme"] => schema::theme_report(
-                &schema::choice_label(&child_path, value, draft),
-                crate::no_color_requested(),
-            ),
+            None if storage_path(&child_path) == ["theme"] => {
+                schema::draft_theme_report(value, draft)
+            }
             None => schema::choice_label(&child_path, value, draft),
         },
     };

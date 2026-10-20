@@ -97,6 +97,17 @@ pub enum UiTheme {
     #[serde(rename = "darcula", alias = "dracula")]
     Darcula,
     HighContrast,
+    /// Black on white, for readers who need more contrast than Light gives.
+    HighContrastLight,
+    /// Status in blue, yellow, and orange on Midnight's surfaces, chosen to
+    /// stay apart for red-green and blue-yellow color blindness.
+    ColorblindDark,
+    /// As [`Self::ColorblindDark`], on Light's surfaces.
+    ColorblindLight,
+    /// Catppuccin's dark Mocha flavor, painting its own base color.
+    CatppuccinMocha,
+    /// Catppuccin's light Latte flavor, painting its own base color.
+    CatppuccinLatte,
     /// Windows Terminal's default scheme.
     Campbell,
     /// Windows Terminal's One Half Dark scheme.
@@ -119,11 +130,16 @@ pub enum UiTheme {
 }
 
 impl UiTheme {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 17] = [
         Self::Midnight,
         Self::Light,
         Self::Darcula,
         Self::HighContrast,
+        Self::HighContrastLight,
+        Self::ColorblindDark,
+        Self::ColorblindLight,
+        Self::CatppuccinMocha,
+        Self::CatppuccinLatte,
         Self::Campbell,
         Self::OneHalfDark,
         Self::OneHalfLight,
@@ -140,6 +156,11 @@ impl UiTheme {
             Self::Light => "Light",
             Self::Darcula => "Darcula",
             Self::HighContrast => "High Contrast",
+            Self::HighContrastLight => "High Contrast Light",
+            Self::ColorblindDark => "Colorblind Dark",
+            Self::ColorblindLight => "Colorblind Light",
+            Self::CatppuccinMocha => "Catppuccin Mocha",
+            Self::CatppuccinLatte => "Catppuccin Latte",
             Self::Campbell => "Campbell",
             Self::OneHalfDark => "One Half Dark",
             Self::OneHalfLight => "One Half Light",
@@ -150,9 +171,72 @@ impl UiTheme {
             Self::Mono => "Monochrome",
         }
     }
+}
+
+/// The `theme` setting: a palette, or Auto, which picks Midnight or Light
+/// from the background the terminal reports. Only
+/// `mj_chat::theme::effective_theme` turns a choice into a palette, so a
+/// render scope never holds Auto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeChoice {
+    Auto,
+    Fixed(UiTheme),
+}
+
+impl ThemeChoice {
+    /// Auto first, then every palette in [`UiTheme::ALL`] order.
+    pub fn all() -> impl Iterator<Item = Self> {
+        std::iter::once(Self::Auto).chain(UiTheme::ALL.map(Self::Fixed))
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Fixed(theme) => theme.label(),
+        }
+    }
 
     pub(super) fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+}
+
+impl Default for ThemeChoice {
+    fn default() -> Self {
+        Self::Fixed(UiTheme::default())
+    }
+}
+
+impl From<UiTheme> for ThemeChoice {
+    fn from(theme: UiTheme) -> Self {
+        Self::Fixed(theme)
+    }
+}
+
+/// Written as `auto` or the palette's own name, so every file written before
+/// Auto existed, aliases included, reads unchanged.
+impl Serialize for ThemeChoice {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Auto => serializer.serialize_str("auto"),
+            Self::Fixed(theme) => theme.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ThemeChoice {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{Error, IntoDeserializer};
+
+        let name = String::deserialize(deserializer)?;
+        if name == "auto" {
+            return Ok(Self::Auto);
+        }
+        UiTheme::deserialize(name.as_str().into_deserializer())
+            .map(Self::Fixed)
+            .map_err(|error: serde::de::value::Error| {
+                D::Error::custom(format!("{error}, or `auto`"))
+            })
     }
 }
 
