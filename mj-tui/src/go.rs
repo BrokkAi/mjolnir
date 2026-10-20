@@ -81,6 +81,7 @@ impl DashboardState {
                 session.state.is_active()
                     && session.target_template_id == SIMPLE_TARGET_ID
                     && session.create_managed_worktree == Some(true)
+                    && session.review == Some(mj_core::config::SessionReview::Off)
             });
             if let Some(session) = startup {
                 let session_id = session.id.clone();
@@ -447,5 +448,23 @@ mod tests {
             dashboard.remember_go_launch(&action).is_none(),
             "simple mode must not rewrite the normal go-mode recipe"
         );
+    }
+
+    #[test]
+    fn simple_mode_does_not_reuse_a_local_session_that_may_be_reviewed() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let simple = simple_mode();
+        let expected = simple.recipe.clone().unwrap();
+        let mut reviewed = startup(&dashboard).expect("fixture session");
+        reviewed.state = mj_core::state::SessionState::Running;
+        reviewed.target_template_id = SIMPLE_TARGET_ID.into();
+        reviewed.create_managed_worktree = Some(true);
+        reviewed.review = None;
+
+        assert_eq!(
+            dashboard.begin_go(simple, false, Some(reviewed)),
+            DashboardAction::GoLaunch { recipe: expected }
+        );
+        assert!(matches!(dashboard.mode, Mode::Dashboard));
     }
 }

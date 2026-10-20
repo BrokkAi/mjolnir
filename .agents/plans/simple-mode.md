@@ -25,7 +25,9 @@ No profile, target, project, or review wizard appears. The dashboard opens the l
 - [x] (2026-10-20T07:19:47Z) Replaced prefix behavior only in Simple mode with direct Ctrl chords and kept configuration reloads from restoring the normal map.
 - [x] (2026-10-20T07:19:47Z) Added router/state tests and a real-PTY regression proving `Ctrl+B q` does not detach while direct `Ctrl+Q` does.
 - [x] (2026-10-20T07:19:47Z) Passed formatting, the full touched-crate suites, workspace Clippy with warnings denied, and the Simple-mode PTY regression.
-- [ ] Commit the validated change on the current branch.
+- [x] (2026-10-20T07:24:00Z) Restricted remembered-session reuse to active Simple sessions whose own review choice is `Off`, so a normal local isolated session with global review enabled is never attached by mistake.
+- [x] (2026-10-20T07:24:00Z) Repeated the focused tests, full touched-crate suites, Clippy, and the real-PTY regression after the reuse guard. One unrelated daemon-startup fixture hit a transient executable-busy error; its required retry and the full CLI suite passed.
+- [ ] Commit the review-off session reuse guard and plan update on the current branch.
 
 ## Surprises & Discoveries
 
@@ -79,7 +81,7 @@ No profile, target, project, or review wizard appears. The dashboard opens the l
 
 ## Outcomes & Retrospective
 
-The implementation achieves the planned user-visible behavior. `mj simple` resolves a workspace from its folder, reuses only a running local isolated Simple session, or creates one directly with the saved/default enabled profile. It never opens the session wizard, never changes the folder's normal Go recipe, creates no automatic review override other than `SessionReview::Off`, and has no prefix state. The focused key, state, full crate, Clippy, and real-PTY validations pass. The only remaining step is the required commit.
+The implementation achieves the planned user-visible behavior. `mj simple` resolves a workspace from its folder, reuses only a running local isolated session whose review override is off, or creates one directly with the saved/default enabled profile. It never opens the session wizard, never changes the folder's normal Go recipe, creates no automatic review override other than `SessionReview::Off`, and has no prefix state. The focused key, state, full crate, Clippy, and real-PTY validations pass. The only remaining step is the follow-up commit for the final review-off reuse guard.
 
 ## Context and Orientation
 
@@ -220,3 +222,5 @@ In `mj-core/src/config/keys.rs`, expose:
 The function builds a default `KeysConfig`, replaces every default-bound action with a direct Ctrl chord, leaves the now-unused prefix value outside the command map, and resolves it. `DashboardState::route_bound_key` bypasses prefix arming entirely while Simple mode is active. No new external dependency is needed.
 
 Plan revision 2026-10-20T07:19:47Z: Updated progress and outcomes from design to completed validation after the user clarified that Simple mode must remove prefix behavior completely, and after adding the real-PTY regression and final full validation.
+
+Plan revision 2026-10-20T07:24:00Z: Added the final review-off session reuse guard and its regression after recognizing that target and checkout identity alone do not prove a remembered session belongs to Simple mode.
