@@ -62,6 +62,10 @@ struct Cli {
         value_name = "NAME"
     )]
     instance: Option<String>,
+    /// Start the dashboard without the animated startup splash, for example
+    /// over a slow remote connection.
+    #[arg(long, global = true, env = "MJ_NO_SPLASH")]
+    no_splash: bool,
     /// Open the dashboard in this workspace, by name. Given before a command,
     /// it applies to that command when the command works in a workspace.
     #[arg(long, value_name = "NAME")]
@@ -483,7 +487,12 @@ fn run(cli: Cli) -> Result<()> {
         None
     };
     let daemon = matches!(cli.command, Some(Command::DaemonRun));
-    let result = runtime.block_on(run_command(cli.command, cli.workspace, update_notice));
+    let result = runtime.block_on(run_command(
+        cli.command,
+        cli.workspace,
+        update_notice,
+        cli.no_splash,
+    ));
     if daemon {
         shutdown_daemon_runtime(runtime);
     } else if matches!(
@@ -650,11 +659,18 @@ async fn run_command(
     command: Option<Command>,
     requested_workspace: Option<String>,
     update_notice: Option<StartupUpdateNotice>,
+    no_splash: bool,
 ) -> Result<DashboardExit> {
     match command {
         None => {
-            run_workspace_dashboard(requested_workspace.as_deref(), false, None, update_notice)
-                .await
+            run_workspace_dashboard(
+                requested_workspace.as_deref(),
+                false,
+                None,
+                update_notice,
+                no_splash,
+            )
+            .await
         }
         Some(Command::Go(args)) => {
             ensure!(
@@ -666,12 +682,18 @@ async fn run_command(
                 .await
                 .context("prepare fast start")??;
             // `mj go` never runs the startup update check.
-            run_workspace_dashboard(None, false, Some((mode, setup)), None).await
+            run_workspace_dashboard(None, false, Some((mode, setup)), None, no_splash).await
         }
         Some(Command::Workspaces(args)) => match args.command {
             None => {
-                run_workspace_dashboard(requested_workspace.as_deref(), true, None, update_notice)
-                    .await
+                run_workspace_dashboard(
+                    requested_workspace.as_deref(),
+                    true,
+                    None,
+                    update_notice,
+                    no_splash,
+                )
+                .await
             }
             Some(WorkspacesCommand::List(args)) => api_commands::workspaces_list(args)
                 .await
@@ -1278,6 +1300,7 @@ async fn run_workspace_dashboard(
     open_workspace_manager: bool,
     mut go: Option<(mj_tui::GoMode, bool)>,
     update_notice: Option<StartupUpdateNotice>,
+    no_splash: bool,
 ) -> Result<DashboardExit> {
     let resume = dashboard::UpgradeResume::load().await?;
     if resume.is_some() {
@@ -1306,7 +1329,7 @@ async fn run_workspace_dashboard(
     ));
     // The splash takes the terminal first and plays while startup runs. A
     // terminal resuming after an upgrade goes straight back to work.
-    let (startup, screen) = if interactive && resume.is_none() && splash::wanted() {
+    let (startup, screen) = if interactive && !no_splash && resume.is_none() && splash::wanted() {
         let mut screen = dashboard::DashboardScreen::enter()?;
         let outcome =
             splash::play_until_loaded(&mut screen, startup, |startup: &DashboardStartup| {
