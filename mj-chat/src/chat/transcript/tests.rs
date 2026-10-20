@@ -4463,6 +4463,19 @@ fn golden_rich_transcript_tool_presentation() {
     )));
     let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 60, 36));
     append_transcript_golden_state(&mut output, "mailbox events collapsed", 60, 36, &rows, &[]);
+    // Hard-won: 2af612540: expanded events repeated their header in the body.
+    click_rendered_text(&mut mailbox, &rows, "New PR #4623");
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 24));
+    append_transcript_golden_state(
+        &mut output,
+        "an expanded event without a report wraps its header once",
+        44,
+        24,
+        &rows,
+        &[],
+    );
+    click_rendered_text(&mut mailbox, &rows, "CQ07");
+    let _ = golden_chat_buffer(&mut mailbox, 60, 36);
     let second_child = mailbox
         .transcript_click_targets
         .iter()
@@ -4489,7 +4502,11 @@ fn golden_rich_transcript_tool_presentation() {
         BTreeSet::from([MailboxDisclosureId::Event(2, 11)])
     );
     let cached = mailbox.render_cache.entries[0].as_ref().unwrap();
-    let report_start = cached.mailbox.as_ref().unwrap().mailbox_events[11].0.start + 1;
+    let report_start = cached
+        .lines
+        .iter()
+        .position(|line| row_text(line).contains("支持 Unicode"))
+        .unwrap();
     let report_end = cached.lines.len() - 2;
     let pane = transcript_pane(&mailbox);
     let copied_report = mailbox
@@ -4500,7 +4517,7 @@ fn golden_rich_transcript_tool_presentation() {
         .unwrap();
     assert_eq!(
         copied_report,
-        "Child task Check parser finished: failed\n支持 Unicode and <script>literal text</script>.\n- A report bullet stays in this event."
+        "支持 Unicode and <script>literal text</script>.\n- A report bullet stays in this event."
     );
     output.push_str(&format!("copied report: {copied_report:?}\n\n"));
     mailbox.entries[0]
@@ -4538,12 +4555,12 @@ fn golden_rich_transcript_tool_presentation() {
         &[],
     );
     mailbox.anchor = TranscriptAnchor::Row { entry: 0, row: 9 };
-    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 24));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 22));
     append_transcript_golden_state(
         &mut output,
         "mailbox report scrolled before collapse",
         44,
-        24,
+        22,
         &rows,
         &[],
     );
@@ -4579,7 +4596,7 @@ fn golden_rich_transcript_tool_presentation() {
         entry: 0,
         row: first_report + 3,
     };
-    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 16));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 14));
     assert_eq!(
         mailbox.anchor,
         TranscriptAnchor::Row {
@@ -4591,7 +4608,7 @@ fn golden_rich_transcript_tool_presentation() {
         &mut output,
         "mailbox header scrolled out of view",
         44,
-        16,
+        14,
         &rows,
         &[],
     );
@@ -4608,8 +4625,8 @@ fn golden_rich_transcript_tool_presentation() {
         &mut output,
         "body click collapses the report and restores its header",
         44,
-        16,
-        &crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 16)),
+        14,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 14)),
         &[],
     );
     mailbox.render_mode = TranscriptRenderMode::Raw;

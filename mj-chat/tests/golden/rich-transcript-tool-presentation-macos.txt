@@ -1031,6 +1031,32 @@ Tab pane - Cmd-V paste - Enter send | ctrl+b then : palette - ? keys
 ╰─────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 
+=== an expanded event without a report wraps its header once (44x24) ===
+╭ Conversation ────────────────────────────╮
+│ ▾ New PR #4623 Model Rust built-in macro▐│
+│   values for CQ07                       ▐│
+│ ▸ Comment on your PR #4623 by alice: Pl…▐│
+│ ▸ New issue #4624 Per-unit resolution s…▐│
+│ ▸ Review on your PR #4623 by bob (chang…▐│
+│ ▸ Review comment on your PR #4623 by ca…▐│
+│ ▸ Your PR #4623 was merged by dana.     ▐│
+│ ▸ Your PR #4623 was closed without merg…▐│
+│ ▸ Your PR #4624 was merged.             ▐│
+│ ▸ Your PR #4623 was reopened.           ▐│
+│ ▸ External event: A plain event from th…▐│
+│ ▸ Child task Check parser finished: fai…▐│
+│ ▸ Child task Check parser finished: fai…▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+╰──────────────────────────────────────────╯
+Tab pane │ ctrl+b then : palette · ? keys
+
 === only the second repeated event expands after resize (44x36) ===
 ╭ Conversation ────────────────────────────╮
 │ ▸ New PR #4623 Model Rust built-in macr…▐│
@@ -1044,12 +1070,12 @@ Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 │ ▸ Your PR #4623 was reopened.           ▐│
 │ ▸ External event: A plain event from th…▐│
 │ ▸ Child task Check parser finished: fai…▐│
-│ ▾ Child task Check parser finished: fai…▐│
-│ │ Child task Check parser finished:     ▐│
-│ │ failed                                ▐│
+│ ▾ Child task Check parser finished:     ▐│
+│   failed                                ▐│
 │ │ 支 持  Unicode and <script>literal      ▐│
 │ │ text</script>.                        ▐│
 │ │ - A report bullet stays in this event.▐│
+│                                         ▐│
 │                                         ▐│
 │                                         ▐│
 │                                         ▐│
@@ -1068,7 +1094,7 @@ Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 │                                          │
 ╰──────────────────────────────────────────╯
 Tab pane │ ctrl+b then : palette · ? keys
-copied report: "Child task Check parser finished: failed\n支持 Unicode and <script>literal text</script>.\n- A report bullet stays in this event."
+copied report: "支持 Unicode and <script>literal text</script>.\n- A report bullet stays in this event."
 
 
 === mailbox update retains the open event (44x36) ===
@@ -1084,13 +1110,13 @@ copied report: "Child task Check parser finished: failed\n支持 Unicode and <sc
 │ ▸ Your PR #4623 was reopened.           ▐│
 │ ▸ External event: A plain event from th…▐│
 │ ▸ Child task Check parser finished: fai…▐│
-│ ▾ Child task Check parser finished: fai…▐│
-│ │ Child task Check parser finished:     ▐│
-│ │ failed                                ▐│
+│ ▾ Child task Check parser finished:     ▐│
+│   failed                                ▐│
 │ │ 支 持  Unicode and <script>literal      ▐│
 │ │ text</script>.                        ▐│
 │ │ - A report bullet stays in this event.▐│
 │ ▸ Your PR #4625 was merged.             ▐│
+│                                         ▐│
 │                                         ▐│
 │                                         ▐│
 │                                         ▐│
@@ -1121,9 +1147,8 @@ Tab pane │ ctrl+b then : palette · ? keys
 │ ▸ Your PR #4624 was merged.             ▐│
 │ ▸ Your PR #4623 was reopened.           ▐│
 │ ▸ External event: A plain event from th…▐│
-│ ▾ Child task Check parser finished: fai…▐│
-│ │ Child task Check parser finished:     ▐│
-│ │ failed                                ▐│
+│ ▾ Child task Check parser finished:     ▐│
+│   failed                                ▐│
 │ │ State: failed                         ▐│
 │ │ Failure: verification timed out       ▐│
 │ │ Report directory: /reports/child-1    ▐│
@@ -1131,13 +1156,14 @@ Tab pane │ ctrl+b then : palette · ? keys
 │ │ directory for details.                ▐│
 │ │ Fixed ‹parser›.                       ▐│
 │ │ Tests passed: "parser".               ▐│
-│ ▾ Child task Check parser finished: fai…▐│
-│ │ Child task Check parser finished:     ▐│
-│ │ failed                                ▐│
+│ ▾ Child task Check parser finished:     ▐│
+│   failed                                ▐│
 │ │ 支 持  Unicode and <script>literal      ▐│
 │ │ text</script>.                        ▐│
 │ │ - A report bullet stays in this event.▐│
 │ ▸ Your PR #4625 was merged.             ▐│
+│                                         ▐│
+│                                         ▐│
 │                                         ▐│
 │                                         ▐│
 │                                         ▐│
@@ -1159,22 +1185,20 @@ Tab pane │ ctrl+b then : palette · ? keys
 ╰──────────────────────────────────────────╯
 Tab pane │ ctrl+b then : palette · ? keys
 
-=== mailbox report scrolled before collapse (44x24) ===
+=== mailbox report scrolled before collapse (44x22) ===
 ╭ Conversation · message 1 of 1 · End to f…╮
 │ ▸ External event: A plain event from th…││
-│ ▾ Child task Check parser finished: fai…││
-│ │ Child task Check parser finished:     ││
-│ │ failed                                ││
+│ ▾ Child task Check parser finished:     ││
+│   failed                                ││
 │ │ State: failed                         ││
-│ │ Failure: verification timed out       ▐│
+│ │ Failure: verification timed out       ││
 │ │ Report directory: /reports/child-1    ▐│
 │ │ Report truncated; see the report      ▐│
 │ │ directory for details.                ▐│
 │ │ Fixed ‹parser›.                       ▐│
 │ │ Tests passed: "parser".               ▐│
-│ ▾ Child task Check parser finished: fai…▐│
-│ │ Child task Check parser finished:     ▐│
-│ │ failed                                ▐│
+│ ▾ Child task Check parser finished:     ▐│
+│   failed                                ▐│
 │ │ 支 持  Unicode and <script>literal      ▐│
 │ │ text</script>.                        ││
 │ │ - A report bullet stays in this event.││
@@ -1197,9 +1221,8 @@ Tab pane │ ctrl+b then : palette · ? keys
 | ▸ Your PR #4624 was merged.             #|
 | ▸ Your PR #4623 was reopened.           #|
 | ▸ External event: A plain event from th.#|
-| v Child task Check parser finished: fai.#|
-| | Child task Check parser finished:     #|
-| | failed                                #|
+| v Child task Check parser finished:     #|
+|   failed                                #|
 | | State: failed                         #|
 | | Failure: verification timed out       #|
 | | Report directory: /reports/child-1    #|
@@ -1228,6 +1251,7 @@ Tab pane │ ctrl+b then : palette · ? keys
 |                                         #|
 |                                         #|
 |                                         #|
+|                                         #|
 +------------------------------------------+
 + mic -------------------------------------+
 |> Message the agent, or / for commands    |
@@ -1235,17 +1259,15 @@ Tab pane │ ctrl+b then : palette · ? keys
 +------------------------------------------+
 Tab pane | ctrl+b then : palette - ? keys
 
-=== mailbox header scrolled out of view (44x16) ===
+=== mailbox header scrolled out of view (44x14) ===
 ╭ Conversation · message 1 of 1 · End to f…╮
-│ │ State: failed                         ││
 │ │ Failure: verification timed out       ││
 │ │ Report directory: /reports/child-1    ││
 │ │ Report truncated; see the report      ││
 │ │ directory for details.                ││
 │ │ Fixed ‹parser›.                       ▐│
 │ │ Tests passed: "parser".               ▐│
-│ ▸ Child task Check parser finished: fai…▐│
-│ ▸ Your PR #4625 was merged.             ││
+│ ▸ Child task Check parser finished: fai…││
 ╰──────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────╮
 │> Message the agent, or / for commands    │
@@ -1253,14 +1275,12 @@ Tab pane | ctrl+b then : palette - ? keys
 ╰──────────────────────────────────────────╯
 Tab pane │ ctrl+b then : palette · ? keys
 
-=== body click collapses the report and restores its header (44x16) ===
+=== body click collapses the report and restores its header (44x14) ===
 ╭ Conversation ────────────────────────────╮
-│ ▸ Your PR #4623 was merged by dana.     ││
-│ ▸ Your PR #4623 was closed without merg…││
 │ ▸ Your PR #4624 was merged.             ││
 │ ▸ Your PR #4623 was reopened.           ││
-│ ▸ External event: A plain event from th…▐│
-│ ▸ Child task Check parser finished: fai…▐│
+│ ▸ External event: A plain event from th…││
+│ ▸ Child task Check parser finished: fai…││
 │ ▸ Child task Check parser finished: fai…▐│
 │ ▸ Your PR #4625 was merged.             ▐│
 │                                         ▐│
@@ -1402,7 +1422,8 @@ Tab pane │ ctrl+b then : palette · ? keys
 │ ● Agent · 15:00             ▐│
 │ │ I am checking the report. ▐│
 │                             ▐│
-│ ▾ Message from Review agent…▐│
+│ ▾ Message from Review agent ▐│
+│   · 15:00                   ▐│
 │ │ This report has one item. ▐│
 │ │ The actual message        ▐│
 │ │ continues here, with      ▐│
@@ -1410,15 +1431,14 @@ Tab pane │ ctrl+b then : palette · ? keys
 │ │ to wrap on a narrow       ▐│
 │ │ terminal.                 ▐│
 │                             ▐│
-│ ▾ Message from Build agent… ▐│
+│ ▾ Message from Build agent ·▐│
+│   15:00                     ▐│
 │ │ The checks passed.        ▐│
 │ │ Keep this second message  ▐│
 │ │ visible too.              ▐│
 │                             ▐│
 │ ● Agent · 15:00             ▐│
 │ │ I will address that item. ▐│
-│                             ▐│
-│                             ▐│
 │                             ▐│
 │                             ▐│
 │                             ▐│
@@ -1442,14 +1462,14 @@ ctrl+b then : palette · ? keys
 │                             ▐│
 │ ▸ Message from Review agent…▐│
 │                             ▐│
-│ ▾ Message from Build agent… ▐│
+│ ▾ Message from Build agent ·▐│
+│   15:00                     ▐│
 │ │ The checks passed.        ▐│
 │ │ Keep this second message  ▐│
 │ │ visible too.              ▐│
 │                             ▐│
 │ ● Agent · 15:00             ▐│
 │ │ I will address that item. ▐│
-│                             ▐│
 │                             ▐│
 │                             ▐│
 │                             ▐│

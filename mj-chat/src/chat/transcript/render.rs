@@ -673,8 +673,15 @@ pub(super) fn render_mailbox_entry(
             ));
         }
         let event_start = rows.len();
-        rows.push(truncate_line_to_width(Line::from(header), width));
-        track.copies.push(RowCopy::default());
+        if open {
+            let (header_rows, _, copies) =
+                wrap_styled_line_for_copy(Line::from(header), width, ROLE_GUTTER_WIDTH);
+            rows.extend(header_rows);
+            track.copies.extend(copies);
+        } else {
+            rows.push(truncate_line_to_width(Line::from(header), width));
+            track.copies.push(RowCopy::default());
+        }
         if open {
             let first_row = rows.len();
             if message {
@@ -685,8 +692,9 @@ pub(super) fn render_mailbox_entry(
                     false,
                     Some((&mut track, first_row)),
                 ));
-            } else {
-                let detail = ChatEntry::plain(entry.start_seq, ChatRole::System, lines.join("\n"));
+            } else if lines.len() > 1 {
+                let detail =
+                    ChatEntry::plain(entry.start_seq, ChatRole::System, lines[1..].join("\n"));
                 rows.extend(entry_body_rows_inner(
                     &detail,
                     width,
