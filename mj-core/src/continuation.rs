@@ -42,6 +42,7 @@ pub struct ContinuationState {
     /// Legacy protocol-39 snapshot field; no longer affects continuation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting_children_since_ms: Option<i64>,
+    /// Original user request, or an automatic request retained only for quota recovery.
     pub user_command_id: Option<String>,
     pub attempts: u8,
     pub suppressed: bool,
@@ -88,7 +89,9 @@ pub fn is_quota_goal_resume(command_id: &str) -> bool {
 
 impl ContinuationState {
     pub fn eligible(&self) -> bool {
-        self.user_command_id.is_some()
+        self.user_command_id
+            .as_deref()
+            .is_some_and(|id| !is_generated_prompt(id))
             && self.completed_command_id.is_some()
             && !self.suppressed
             && self.attempts < MAX_NUDGES
@@ -235,6 +238,7 @@ pub fn is_generated_prompt(command_id: &str) -> bool {
         "review-forward-",
         "archive-",
         "subagent-",
+        "mailbox-wake-",
     ]
     .iter()
     .any(|prefix| command_id.starts_with(prefix))

@@ -404,6 +404,20 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.continuation.completed_command_id = None;
                     snapshot.continuation.harness_turn = None;
                 }
+                RelayCommand::MailboxWake { .. } => {
+                    let continuation = &mut snapshot.continuation;
+                    // The accepted wake owns a new turn even after restore or
+                    // cancellation. It may recover from quota without granting
+                    // new authorization or renewing the ordinary nudge allowance.
+                    if continuation.user_command_id.is_none() {
+                        continuation.user_command_id = Some(command_id.clone());
+                        continuation.suppressed = true;
+                    }
+                    continuation.completed_command_id = None;
+                    continuation.harness_turn = None;
+                    continuation.quota_suppressed = false;
+                    continuation.quota_recovery = None;
+                }
                 RelayCommand::InstallPromptContext { text } => {
                     match snapshot.pending_prompt_context.as_mut() {
                         Some(context) if context.text != *text => {
