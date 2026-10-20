@@ -816,10 +816,10 @@ fn sample_elicitation() -> ElicitationRequest {
                     "question_0_custom": {
                         "type": "string",
                         "title": "Other",
-                        "_meta": {"_askUserQuestionCustomAnswer": {
+                        "_meta": {"jetbrains": {"air": {"version": 1, "customAnswer": {
                             "questionId": "question_0",
                             "isCustomAnswer": true
-                        }}
+                        }}}}
                     }
                 }
             }
@@ -917,8 +917,8 @@ fn elicitation_answers_are_checked_against_the_request_the_agent_asked() {
     assert!(validate_action(&respond(accept(&[("question_0", "cron")])), &snapshot).is_err());
     assert!(validate_action(&respond(accept(&[("smuggled", "yes")])), &snapshot).is_err());
     assert!(validate_action(&respond(accept(&[])), &snapshot).is_err());
-    // A custom answer stands in for the select it belongs to, exactly as
-    // the chat form submits it.
+    // A free-text answer answers the select it belongs to, exactly as the
+    // chat form submits it; the harness then gets it in the select's field.
     assert!(
         validate_action(
             &respond(accept(&[("question_0_custom", "a monorepo pipeline")])),
