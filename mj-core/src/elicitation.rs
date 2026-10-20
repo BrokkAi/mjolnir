@@ -72,7 +72,6 @@ impl ElicitationRequest {
             .iter()
             .map(|(field_id, schema)| parse_field(field_id, schema, required.contains(field_id)))
             .collect::<Result<Vec<_>>>()?;
-        pair_claude_custom_answers_by_name(&mut fields);
         title_untitled_question_from_message(&message, &mut fields);
         Ok(Self {
             id: id.into(),
@@ -84,56 +83,99 @@ impl ElicitationRequest {
     }
 
     /// Whether a submitted answer satisfies this request's own schema.
-    ///
-    /// Surfaces that answer a form out of band — the phone posts an answer
-    /// over HTTP — can send content for a request the agent has already
-    /// replaced, or content the agent never offered. Checking the answer
-    /// against the fields this request actually published means a stale or
-    /// malformed payload is refused instead of being forwarded as something
-    /// the harness never asked for.
     pub fn validate_response(&self, response: &ElicitationResponse) -> Result<(), String> {
-        let ElicitationResponse::Accept { content } = response else {
-            return Ok(());
-        };
-        for id in content.keys() {
-            if !self.fields.iter().any(|field| field.id == *id) {
-                return Err(format!("{id:?} is not a field of this request"));
-            }
-        }
-        for field in &self.fields {
-            let Some(value) = content.get(&field.id) else {
-                if field.required && !self.custom_answer_present(field, content) {
-                    return Err(format!("{} is required", field.title));
-                }
-                continue;
-            };
-            if field.required
-                && let ElicitationValue::String(text) = value
-                && text.trim().is_empty()
-            {
-                return Err(format!("{} is required", field.title));
-            }
-            validate_field_value(field, value)?;
-        }
-        Ok(())
+        self.harness_response(response.clone()).map(drop)
     }
 
-    /// Whether another field carries a custom "Other" answer for `field`.
+    /// The answer the harness receives for a submitted one, or why the
+    /// submitted answer does not fit this request.
     ///
-    /// A custom answer replaces the select it belongs to, so the select's own
-    /// value may then be absent even when the schema marks it required. This
-    /// is the same pairing the chat form applies when it submits.
-    fn custom_answer_present(
+    /// Every surface (terminal, web, `mj respond`) submits each field's own
+    /// value: a select's picks, and beside them the text of the select's
+    /// free-text choice when the user wrote one. The bridges read the two
+    /// fields together (claude-agent-acp joins a multi-select's picks with
+    /// the text and attaches the text to a single pick as a note; codex-acp
+    /// appends it as a `user_note`), so both are forwarded as submitted.
+    /// The one change is a required select answered only by its free-text
+    /// choice: the text becomes the select's own value, the Air convention
+    /// (codex-acp's `typedChoiceAnswer`), so the harness never receives an
+    /// answer that omits a required field. Only that move puts text outside
+    /// the offered options into a select; a submitted select value must
+    /// still be one of them.
+    ///
+    /// Surfaces that answer out of band — the phone posts an answer over
+    /// HTTP — can send content for a request the agent has already replaced,
+    /// or content the agent never offered. Checking the answer against the
+    /// fields this request actually published means a stale or malformed
+    /// payload is refused instead of being forwarded as something the
+    /// harness never asked for.
+    pub fn harness_response(
         &self,
-        field: &ElicitationField,
-        content: &BTreeMap<String, ElicitationValue>,
-    ) -> bool {
-        self.fields.iter().any(|candidate| {
-            candidate.custom_answer_for.as_deref() == Some(field.id.as_str())
-                && matches!(
-                    content.get(&candidate.id),
-                    Some(ElicitationValue::String(value)) if !value.trim().is_empty()
-                )
+        response: ElicitationResponse,
+    ) -> Result<ElicitationResponse, String> {
+        let ElicitationResponse::Accept { mut content } = response else {
+            return Ok(response);
+        };
+        for (id, value) in &content {
+            let Some(field) = self.fields.iter().find(|field| field.id == *id) else {
+                return Err(format!("{id:?} is not a field of this request"));
+            };
+            validate_field_value(field, value)?;
+        }
+        for field in &self.fields {
+            if !field.required || content.contains_key(&field.id) {
+                continue;
+            }
+            let Some(choice) = self.free_text_choice(field) else {
+                continue;
+            };
+            let Some(ElicitationValue::String(text)) = content.get(&choice.id) else {
+                continue;
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            let Some(ElicitationValue::String(text)) = content.remove(&choice.id) else {
+                unreachable!("the free-text answer was just read as text")
+            };
+            let value = match field.kind {
+                ElicitationFieldKind::MultiSelect { .. } => {
+                    ElicitationValue::StringArray(vec![text])
+                }
+                _ => ElicitationValue::String(text),
+            };
+            content.insert(field.id.clone(), value);
+        }
+        for field in self.fields.iter().filter(|field| field.required) {
+            match content.get(&field.id) {
+                None => return Err(format!("{} is required", field.title)),
+                Some(ElicitationValue::String(text)) if text.trim().is_empty() => {
+                    return Err(format!("{} is required", field.title));
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(ElicitationResponse::Accept { content })
+    }
+
+    /// The text field that is `select`'s free-text choice: the answer the
+    /// user writes in place of, or beside, the offered options. The bridge
+    /// names it with a marker the parser reads into `custom_answer_for`; a
+    /// companion tied to one option (`custom_answer_option`, as Mjolnir's
+    /// plan-review feedback is tied to Revise) is that option's detail
+    /// instead, not a free-text choice.
+    #[must_use]
+    pub fn free_text_choice(&self, select: &ElicitationField) -> Option<&ElicitationField> {
+        if !matches!(
+            select.kind,
+            ElicitationFieldKind::SingleSelect { .. } | ElicitationFieldKind::MultiSelect { .. }
+        ) {
+            return None;
+        }
+        self.fields.iter().find(|field| {
+            field.custom_answer_for.as_deref() == Some(select.id.as_str())
+                && field.custom_answer_option.is_none()
+                && matches!(field.kind, ElicitationFieldKind::Text { .. })
         })
     }
 
@@ -465,40 +507,6 @@ fn title_untitled_question_from_message(message: &str, fields: &mut [Elicitation
     }
 }
 
-/// Pairs each AskUserQuestion "Other" field with its question by name.
-///
-/// claude-agent-acp names the free-text field of question `question_<n>`
-/// `question_<n>_custom` (`dist/elicitation.js`,
-/// `askUserQuestionsToCreateRequest`). Up to 0.81.0 it also marked the field
-/// with `_meta._askUserQuestionCustomAnswer`; from 0.84.0 only JetBrains AIR
-/// clients get a marker, so the name is the only link left for Mjolnir.
-fn pair_claude_custom_answers_by_name(fields: &mut [ElicitationField]) {
-    let selects: Vec<String> = fields
-        .iter()
-        .filter(|field| {
-            field.id.starts_with("question_")
-                && matches!(
-                    field.kind,
-                    ElicitationFieldKind::SingleSelect { .. }
-                        | ElicitationFieldKind::MultiSelect { .. }
-                )
-        })
-        .map(|field| field.id.clone())
-        .collect();
-    for field in fields.iter_mut() {
-        if field.custom_answer_for.is_some()
-            || !matches!(field.kind, ElicitationFieldKind::Text { .. })
-        {
-            continue;
-        }
-        if let Some(question) = field.id.strip_suffix("_custom")
-            && selects.iter().any(|id| id == question)
-        {
-            field.custom_answer_for = Some(question.to_owned());
-        }
-    }
-}
-
 fn parse_field(field_id: &str, value: &Value, required: bool) -> Result<ElicitationField> {
     ensure_text(field_id, "elicitation field id")?;
     let schema = object(value, &format!("schema for field {field_id:?}"))?;
@@ -512,21 +520,21 @@ fn parse_field(field_id: &str, value: &Value, required: bool) -> Result<Elicitat
         .and_then(|meta| meta.get("isSecret"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let claude_custom = meta
-        .and_then(|meta| meta.get("_askUserQuestionCustomAnswer"))
+    // The free-text choice of a select names that select. codex-acp names it
+    // in its own `_meta.codex` (`role: "user_note"`); claude-agent-acp names
+    // it in the Air `customAnswer` key, which it sends because Mjolnir
+    // declares `_meta.jetbrains.air`.
+    let air_custom_answer = meta
+        .and_then(|meta| meta.get("jetbrains"))
+        .and_then(|jetbrains| jetbrains.get("air"))
+        .and_then(|air| air.get("customAnswer"))
         .and_then(Value::as_object);
-    // Codex bridges before 1.13 mark the free-text answer `isOtherAnswer`;
-    // later ones give it `role: "user_note"`. Either way it answers the named
-    // question in place of a listed choice.
     let custom_answer_for = codex
-        .filter(|meta| {
-            meta.get("isOtherAnswer").and_then(Value::as_bool) == Some(true)
-                || meta.get("role").and_then(Value::as_str) == Some("user_note")
-        })
+        .filter(|meta| meta.get("role").and_then(Value::as_str) == Some("user_note"))
         .and_then(|meta| meta.get("questionId"))
         .and_then(Value::as_str)
         .or_else(|| {
-            claude_custom
+            air_custom_answer
                 .filter(|meta| meta.get("isCustomAnswer").and_then(Value::as_bool) == Some(true))
                 .and_then(|meta| meta.get("questionId"))
                 .and_then(Value::as_str)
@@ -787,6 +795,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // Hard-won: dc436f0c: Claude bridge 0.84 moved Other-answer fields and Mjolnir lost their pairing
     #[test]
     fn parses_claude_choices_preview_and_custom_answer_marker() {
         let request = ElicitationRequest::from_acp_params(
@@ -809,13 +818,21 @@ mod tests {
                                 "_meta": {"_claude/askUserQuestionOption": {"preview": "ci.yml -> reusable"}}
                             }]
                         },
+                        // claude-agent-acp 0.90.0 marks the companion of an
+                        // Air client under both keys; Mjolnir reads the Air one.
                         "question_0_custom": {
                             "type": "string",
                             "title": "Other",
-                            "_meta": {"_askUserQuestionCustomAnswer": {
-                                "questionId": "question_0",
-                                "isCustomAnswer": true
-                            }}
+                            "_meta": {
+                                "_askUserQuestionCustomAnswer": {
+                                    "questionId": "question_0",
+                                    "isCustomAnswer": true
+                                },
+                                "jetbrains": {"air": {"version": 1, "customAnswer": {
+                                    "questionId": "question_0",
+                                    "isCustomAnswer": true
+                                }}}
+                            }
                         }
                     }
                 }
@@ -865,53 +882,6 @@ mod tests {
         assert_eq!(request("Which colour?", None).fields[0].title, "q0");
     }
 
-    // Hard-won: dc436f0c: Claude bridge 0.84 moved Other-answer fields and Mjolnir lost their pairing
-    #[test]
-    fn pairs_claude_other_fields_by_name_without_the_marker() {
-        // The form claude-agent-acp 0.84.0 sends a client that is not
-        // JetBrains AIR: the "Other" fields carry no `_meta` marker.
-        let request = ElicitationRequest::from_acp_params(
-            "elicit-claude-084",
-            json!({
-                "sessionId": "session-1",
-                "mode": "form",
-                "message": "Please answer the following questions.",
-                "requestedSchema": {
-                    "type": "object",
-                    "properties": {
-                        "question_0": {
-                            "type": "string",
-                            "title": "Cache",
-                            "oneOf": [{"const": "Redis", "title": "Redis"}]
-                        },
-                        "question_0_custom": {"type": "string", "title": "Other"},
-                        "question_1": {
-                            "type": "array",
-                            "title": "Targets",
-                            "items": {"anyOf": [{"const": "linux", "title": "linux"}]}
-                        },
-                        "question_1_custom": {"type": "string", "title": "Other"},
-                        "notes_custom": {"type": "string", "title": "Notes"}
-                    }
-                }
-            }),
-        )
-        .unwrap();
-        let paired = |id: &str| {
-            request
-                .fields
-                .iter()
-                .find(|field| field.id == id)
-                .unwrap()
-                .custom_answer_for
-                .clone()
-        };
-        assert_eq!(paired("question_0_custom").as_deref(), Some("question_0"));
-        assert_eq!(paired("question_1_custom").as_deref(), Some("question_1"));
-        // A `_custom` field with no select of that name stays unpaired.
-        assert_eq!(paired("notes_custom"), None);
-    }
-
     #[test]
     fn parses_codex_secret_other_field() {
         let request = ElicitationRequest::from_acp_params(
@@ -926,7 +896,7 @@ mod tests {
                             "type": "string",
                             "_meta": {"codex": {
                                 "questionId": "token",
-                                "isOtherAnswer": true,
+                                "role": "user_note",
                                 "isSecret": true
                             }}
                         }
@@ -942,16 +912,18 @@ mod tests {
         );
     }
 
+    // Hard-won: #1312: a required Codex question answered in its note reached the harness without its own field
     #[test]
     fn pairs_codex_user_note_with_its_question() {
-        // The form shape @brokkai/codex-acp 1.13 sends for a question that
-        // accepts an answer outside its listed options.
+        // The form @brokkai/codex-acp 1.13.7 sends an Air client for a
+        // question that accepts an answer outside its listed options: no
+        // "None of the above" choice, and Air markers on the note.
         let request = ElicitationRequest::from_acp_params(
             "elicit-note",
             json!({
                 "sessionId": "session-1",
                 "mode": "form",
-                "message": "Input requested",
+                "message": "Codex needs your input to continue.",
                 "requestedSchema": {
                     "type": "object",
                     "required": ["scope"],
@@ -962,18 +934,22 @@ mod tests {
                             "description": "Scope",
                             "oneOf": [
                                 {"const": "Narrow", "title": "Narrow"},
-                                {"const": "None of the above", "title": "None of the above"}
+                                {"const": "Wide", "title": "Wide"}
                             ],
                             "_meta": {"codex": {"isOther": true, "isSecret": false}}
                         },
                         "scope_note": {
                             "type": "string",
                             "title": "Additional answer or note",
-                            "_meta": {"codex": {
-                                "questionId": "scope",
-                                "role": "user_note",
-                                "isSecret": false
-                            }}
+                            "_meta": {
+                                "codex": {
+                                    "questionId": "scope",
+                                    "role": "user_note",
+                                    "isSecret": false
+                                },
+                                "_askUserQuestionCustomAnswer": true,
+                                "jetbrains": {"air": {"version": 1, "customAnswer": true}}
+                            }
                         }
                     }
                 }
@@ -987,15 +963,46 @@ mod tests {
             .unwrap();
         assert_eq!(note.custom_answer_for.as_deref(), Some("scope"));
         assert_eq!(note.custom_answer_option, None);
-        let mut content = BTreeMap::new();
-        content.insert(
-            "scope_note".to_owned(),
-            ElicitationValue::String("Only the parser".into()),
-        );
-        // The note answers the required question on its own.
+        let answer = |pairs: &[(&str, &str)]| ElicitationResponse::Accept {
+            content: pairs
+                .iter()
+                .map(|(id, value)| {
+                    (
+                        (*id).to_owned(),
+                        ElicitationValue::String((*value).to_owned()),
+                    )
+                })
+                .collect(),
+        };
+        // An answer written in the note is the question's own answer. The
+        // harness gets it in the question field, where codex-acp reads an Air
+        // client's typed answer, so the required field is never missing.
         assert_eq!(
-            request.validate_response(&ElicitationResponse::Accept { content }),
-            Ok(())
+            request.harness_response(answer(&[("scope_note", "Only the parser")])),
+            Ok(answer(&[("scope", "Only the parser")]))
+        );
+        // A note beside a pick travels with it as codex-acp's `user_note`.
+        assert_eq!(
+            request.harness_response(answer(&[
+                ("scope", "Narrow"),
+                ("scope_note", "Parser first")
+            ])),
+            Ok(answer(&[
+                ("scope", "Narrow"),
+                ("scope_note", "Parser first")
+            ]))
+        );
+        // Neither a pick nor text leaves the required question unanswered,
+        // and a submitted pick must still be an offered option.
+        assert!(
+            request
+                .validate_response(&answer(&[("scope_note", "  ")]))
+                .is_err()
+        );
+        assert!(
+            request
+                .validate_response(&answer(&[("scope", "Only the parser")]))
+                .is_err()
         );
     }
 

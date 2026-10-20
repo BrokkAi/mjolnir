@@ -42,6 +42,120 @@
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 
+=== Codex question with a pick and a note (100x20) ===
+╭ × Question 2/3 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
+│Which fallback account? (required)                                                                │
+│                                                                                                  │
+│Codex has questions for you. Work can continue while you answer.                                  │
+│○ Main                                                                                            │
+│● CI                                                                                              │
+│+ Additional answer or note                                                                       │
+│    only until March                                                                              │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== Codex answers as submitted and as the harness receives them (100x20) ===
+╭ × Question 3/3 · 0 unanswered ───────────────────────────────────────────────────────────────────╮
+│Which role name? (required)                                                                       │
+│                                                                                                  │
+│Codex has questions for you. Work can continue while you answer.                                  │
+│                                                                                                  │
+│> BedrockCI                                                                                       │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Submit all     Previous     Next     Skip     Cancel                                            │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+submitted: Accept { content: {"question_01_note": String("Use a third AWS billing account"), "question_02": String("CI"), "question_02_note": String("only until March"), "question_03": String("BedrockCI")} }
+harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing account"), "question_02": String("CI"), "question_02_note": String("only until March"), "question_03": String("BedrockCI")} })
+
+=== Claude single-select pick with an Other note (100x20) ===
+╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
+│Cache                                                                                             │
+│Which cache should the service use?                                                               │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│● Redis                                                                                           │
+│    In-memory store with persistence                                                              │
+│    maxmemory-policy allkeys-lru                                                                  │
+│○ Memcached                                                                                       │
+│+ Other                                                                                           │
+│    Keep TTLs short                                                                               │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== Claude multi-select picks with Other text (100x20) ===
+╭ × Question 2/2 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Targets                                                                                           │
+│Which platforms should CI cover?                                                                  │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│☑ linux                                                                                           │
+│☑ macos                                                                                           │
+│☐ windows                                                                                         │
+│☑ Other                                                                                           │
+│    Type your own answer to add to your selection above (optional).                               │
+│> freebsd                                                                                         │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Submit all     Previous     Next     Skip     Cancel                                            │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== Claude answers as submitted and as the harness receives them (100x20) ===
+╭ × Question 2/2 · 0 unanswered ───────────────────────────────────────────────────────────────────╮
+│Targets                                                                                           │
+│Which platforms should CI cover?                                                                  │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│☑ linux                                                                                           │
+│☑ macos                                                                                           │
+│☐ windows                                                                                         │
+│☑ Other                                                                                           │
+│    Type your own answer to add to your selection above (optional).                               │
+│> freebsd                                                                                         │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Submit all     Previous     Next     Skip     Cancel                                            │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+submitted: Accept { content: {"question_0": String("Redis"), "question_0_custom": String("Keep TTLs short"), "question_1": StringArray(["linux", "macos"]), "question_1_custom": String("freebsd")} }
+harness: Ok(Accept { content: {"question_0": String("Redis"), "question_0_custom": String("Keep TTLs short"), "question_1": StringArray(["linux", "macos"]), "question_1_custom": String("freebsd")} })
+
 === small question pane keeps the focused custom answer and actions (60x6) ===
 ╭ × Question 1/1 · 1 unanswered ───────────────────────────╮
 │Question 1                                                │

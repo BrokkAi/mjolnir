@@ -907,30 +907,28 @@ test('multi-select choices use full-row phone taps, survive refresh, and retry a
   await expect(page.locator('#elicitations .elicitation')).toHaveCount(0);
 });
 
-test('custom multi-select answers bypass owner constraints until cleared', async ({ page }) => {
-  const state = await mockViewerApi(page, [multiQuestion('custom-regions-question', 'Which regions should it cover?')]);
-  const card = page.locator('#elicitations .elicitation');
+// Hard-won: #1312: an Other answer replaced the picks of a multi-select instead of joining them.
+test('custom multi-select text answers alone or joins picks that keep their limits', async ({ page }) => {
+  const state = await mockViewerApi(page, [
+    multiQuestion('custom-regions-question', 'Which regions should it cover?'),
+    multiQuestion('joined-regions-question', 'Which regions, and anything else?'),
+  ]);
+  const card = page.locator('#elicitations .elicitation').filter({ hasText: 'Which regions should it cover?' });
   const ownerInput = card.locator('label.choice-option input').first();
   const options = card.locator('label.choice-option');
   const custom = card.locator('input[type="text"]');
 
   await expect(ownerInput).toHaveJSProperty('validationMessage', 'Select at least 2 option(s).');
-  await options.nth(0).click();
-  await options.nth(1).click();
-  await options.nth(2).click();
-  await expect(ownerInput).toHaveJSProperty('validationMessage', 'Select at most 2 option(s).');
+  // Free text with nothing picked answers the required question on its own.
   await custom.fill('Worldwide');
   await expect(ownerInput).toHaveJSProperty('validationMessage', '');
-
-  // Clearing the replacement restores the required owner validation.
-  await custom.fill('');
-  await expect(ownerInput).toHaveJSProperty('validationMessage', 'Select at most 2 option(s).');
+  // Picks beside the text are sent with it, so they keep their own limits.
   for (let index = 0; index < 3; index += 1) await options.nth(index).click();
-  await expect(ownerInput).toHaveJSProperty('validationMessage', 'Select at least 2 option(s).');
+  await expect(ownerInput).toHaveJSProperty('validationMessage', 'Select at most 2 option(s).');
   await card.getByRole('button', { name: 'Submit all' }).click();
   await expect.poll(() => state.actions.length).toBe(0);
-
-  await custom.fill('Worldwide');
+  for (let index = 0; index < 3; index += 1) await options.nth(index).click();
+  await expect(ownerInput).toHaveJSProperty('validationMessage', '');
   await card.getByRole('button', { name: 'Submit all' }).click();
   await waitForActionCount(state, 1);
   expect(state.actions[0]).toEqual({
@@ -938,6 +936,36 @@ test('custom multi-select answers bypass owner constraints until cleared', async
     session_id: SESSION_ID,
     elicitation_id: 'custom-regions-question',
     response: { action: 'accept', content: { regions_custom: 'Worldwide' } },
+  });
+
+  const joined = page.locator('#elicitations .elicitation').filter({ hasText: 'Which regions, and anything else?' });
+  const joinedOptions = joined.locator('label.choice-option');
+  await joinedOptions.nth(0).click();
+  await joinedOptions.nth(1).click();
+  await joined.locator('input[type="text"]').fill('Mars');
+  await joined.getByRole('button', { name: 'Submit all' }).click();
+  await waitForActionCount(state, 2);
+  expect(state.actions[1].response).toEqual({
+    action: 'accept',
+    content: { regions: ['us-east', 'eu-west'], regions_custom: 'Mars' },
+  });
+});
+
+// Hard-won: #1312: a note typed under a chosen option was dropped instead of sent with the pick.
+test('free text written before a pick is sent beside it as the pick note', async ({ page }) => {
+  const state = await mockViewerApi(page, [question('noted-question', 'Which architecture, with a note?')]);
+  const card = page.locator('#elicitations .elicitation');
+  const freeText = card.getByRole('radio', { name: 'Other', exact: true });
+  // Starting to write makes the free-text choice the answer.
+  await card.locator('input[type="text"]').fill('Canary first');
+  await expect(freeText).toBeChecked();
+  // Picking an option afterwards keeps the text as that pick's note.
+  await card.getByRole('radio', { name: /^Green/ }).check();
+  await card.getByRole('button', { name: 'Submit all' }).click();
+  await waitForActionCount(state, 1);
+  expect(state.actions[0].response).toEqual({
+    action: 'accept',
+    content: { question_0: 'green', question_0_custom: 'Canary first' },
   });
 });
 

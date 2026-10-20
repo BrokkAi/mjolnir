@@ -5689,14 +5689,34 @@ function elicitationFieldValue(field, control) {
   if (field.kind === 'number') return Number(control.value);
   return control.value;
 }
+// The radio value of a single-select's free-text choice. It picks no option:
+// the companion text is the answer. The unit separator keeps it apart from
+// any option value an agent sends.
+const FREE_TEXT_CHOICE = '\u001ffree-text';
 // Build logical question pages and collect only the requested pages as ACP
-// content. A custom answer replaces its choice group unless the request pairs
-// it with one specific option, matching the terminal form's response shape.
+// content. Every field sends its own value: a select's picks, and beside them
+// the text of its free-text choice. The daemon and worker decide how the
+// harness reads the two together (`ElicitationRequest::harness_response`).
 function buildElicitationForm(form, request, register, onEdit) {
+  const fields = request.fields || [];
+  // A select's companion text field, named by the bridge's marker. One tied
+  // to a single option (plan-review feedback on Revise) is that option's
+  // detail; one with no option is the select's free-text choice.
+  const companions = new Map();
+  for (const field of fields) {
+    const owner = field.custom_answer_for;
+    if (!owner || field.kind !== 'text' || companions.has(owner)) continue;
+    const target = fields.find(candidate => candidate.id === owner);
+    if (!target || !Array.isArray(target.options)) continue;
+    companions.set(owner, field);
+  }
   const entries = [],
     customByOwner = new Map();
-  for (const field of request.fields || []) {
+  for (const field of fields) {
     const isChoice = field.kind === 'single_select' || field.kind === 'multi_select';
+    const companion = companions.get(field.id);
+    const freeTextRadio =
+      field.kind === 'single_select' && companion && companion.custom_answer_option == null;
     // A fieldset contains its own option labels. Keeping its outer wrapper a
     // div avoids invalid nested labels and preserves one target per option.
     const wrapper = document.createElement(isChoice ? 'div' : 'label');
@@ -5706,9 +5726,13 @@ function buildElicitationForm(form, request, register, onEdit) {
     if (isChoice) {
       control = choiceControl({
         label: `${field.title}${field.required ? ' *' : ''}`,
-        options: (field.kind === 'single_select' && !field.required
-          ? [{ value: '', title: 'No answer' }, ...(field.options || [])]
-          : field.options || []).map(option => ({
+        options: [
+          ...(field.kind === 'single_select' && !field.required
+            ? [{ value: '', title: 'No answer' }]
+            : []),
+          ...(field.options || []),
+          ...(freeTextRadio ? [{ value: FREE_TEXT_CHOICE, title: companion.title }] : []),
+        ].map(option => ({
           value: option.value,
           title: elicitationOptionLabel(option),
           description: option.description,
@@ -5727,16 +5751,26 @@ function buildElicitationForm(form, request, register, onEdit) {
       });
       const validateTarget = control.querySelector('input');
       validateChoices = () => {
-        if (field.kind !== 'multi_select' || !validateTarget) return;
         const custom = customByOwner.get(field.id);
-        // An unpaired free-text answer replaces this choice field. Its value
-        // must be able to satisfy a required group without a phantom native
-        // selection, while a cleared value puts the constraints back.
-        if (custom && custom.control.value.trim() !== '' && custom.field.custom_answer_option == null) {
+        const freeText =
+          custom && custom.field.custom_answer_option == null ? custom : undefined;
+        if (field.kind === 'single_select') {
+          // The free-text choice of a required question needs its text.
+          if (freeText) {
+            freeText.control.required =
+              Boolean(field.required) &&
+              control.querySelector('input:checked')?.value === FREE_TEXT_CHOICE;
+          }
+          return;
+        }
+        if (field.kind !== 'multi_select' || !validateTarget) return;
+        const count = control.querySelectorAll('input:checked').length;
+        // Free text with nothing picked answers the question on its own. Picks
+        // beside it are sent with it, so they keep their own limits.
+        if (freeText && count === 0 && freeText.control.value.trim() !== '') {
           validateTarget.setCustomValidity('');
           return;
         }
-        const count = control.querySelectorAll('input:checked').length;
         const minimum = field.required ? Math.max(1, field.min_items ?? 1) : field.min_items;
         const few = minimum != null && (field.required || count > 0) && count < minimum;
         const many = field.max_items != null && count > field.max_items;
@@ -5771,23 +5805,30 @@ function buildElicitationForm(form, request, register, onEdit) {
     entries.push({ field, control, wrapper, validateChoices });
   }
   for (const entry of entries) {
-    const owner = entry.field.custom_answer_for;
-    if (!owner || entry.field.kind !== 'text' || customByOwner.has(owner)) continue;
-    const target = entries.find(candidate => candidate.field.id === owner);
-    if (!target || !Array.isArray(target.field.options)) continue;
-    customByOwner.set(owner, entry);
+    if (companions.get(entry.field.custom_answer_for) === entry.field)
+      customByOwner.set(entry.field.custom_answer_for, entry);
   }
   // Custom text changes can make the owner group valid or invalid before the
   // user submits it. Keep browser validity and the visible choices in sync.
   for (const entry of entries) {
-    if (entry.field.kind === 'multi_select') entry.validateChoices();
+    entry.validateChoices();
     const owner = entry.field.custom_answer_for;
-    if (!owner || entry.field.kind !== 'text') continue;
+    if (customByOwner.get(owner) !== entry) continue;
     const target = entries.find(candidate => candidate.field.id === owner);
-    if (target?.field.kind === 'multi_select') {
-      entry.control.addEventListener('input', target.validateChoices);
-      entry.control.addEventListener('change', target.validateChoices);
-    }
+    // Starting to write in an empty free-text box makes it the answer, as
+    // the terminal's free-text row does; picking an option afterwards keeps
+    // the text as that pick's note.
+    const freeTextInput = [...target.control.querySelectorAll('input')].find(
+      input => input.value === FREE_TEXT_CHOICE,
+    );
+    let previous = entry.control.value;
+    entry.control.addEventListener('input', () => {
+      if (freeTextInput && previous.trim() === '' && entry.control.value.trim() !== '')
+        freeTextInput.checked = true;
+      previous = entry.control.value;
+      target.validateChoices();
+    });
+    entry.control.addEventListener('change', target.validateChoices);
   }
   const questions = entries
     .filter(entry => customByOwner.get(entry.field.custom_answer_for) !== entry)
@@ -5809,18 +5850,13 @@ function buildElicitationForm(form, request, register, onEdit) {
       if (entry.field.kind === 'text') entry.control.value = entry.control.value.trim();
       entry.validateChoices();
     }
-    const active = new Map();
-    for (const [owner, entry] of customByOwner)
-      if (included.has(entry) && entry.control.value !== '') active.set(owner, entry);
     const restored = [];
     for (const entry of entries) {
-      const custom = active.get(entry.field.id);
-      const omit = !included.has(entry) || (custom && custom.field.custom_answer_option == null);
       const controls = entry.control.matches('input')
         ? [entry.control] : [...entry.control.querySelectorAll('input')];
       for (const input of controls) {
         restored.push([input, input.disabled]);
-        if (omit) input.disabled = true;
+        if (!included.has(entry)) input.disabled = true;
       }
     }
     const valid = form.reportValidity();
@@ -5830,11 +5866,21 @@ function buildElicitationForm(form, request, register, onEdit) {
     for (const entry of included) {
       const { field, control } = entry;
       if (customByOwner.get(field.custom_answer_for) === entry) {
-        if (active.has(field.custom_answer_for)) content[field.id] = control.value;
+        if (control.value !== '') content[field.id] = control.value;
         continue;
       }
-      const custom = active.get(field.id);
-      if (custom && custom.field.custom_answer_option == null) continue;
+      const custom = customByOwner.get(field.id);
+      const freeTextAnswered =
+        custom && custom.field.custom_answer_option == null && custom.control.value !== '';
+      // The free-text choice picks no option.
+      if (control.querySelector('input:checked')?.value === FREE_TEXT_CHOICE) continue;
+      // Free text with nothing picked is the whole answer.
+      if (
+        field.kind === 'multi_select' &&
+        freeTextAnswered &&
+        !control.querySelector('input:checked')
+      )
+        continue;
       const value = elicitationFieldValue(field, control);
       if (value !== undefined) content[field.id] = value;
     }
