@@ -116,8 +116,8 @@ harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing ac
 │Which platforms should CI cover?                                                                  │
 │                                                                                                  │
 │Please answer the following questions.                                                            │
-│☑ linux                                                                                           │
-│☑ macos                                                                                           │
+│☒ linux                                                                                           │
+│☒ macos                                                                                           │
 │☐ windows                                                                                         │
 │✎ Other                                                                                           │
 │    Type your own answer to add to your selection above (optional).                               │
@@ -138,8 +138,8 @@ harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing ac
 │Which platforms should CI cover?                                                                  │
 │                                                                                                  │
 │Please answer the following questions.                                                            │
-│☑ linux                                                                                           │
-│☑ macos                                                                                           │
+│☒ linux                                                                                           │
+│☒ macos                                                                                           │
 │☐ windows                                                                                         │
 │✎ Other                                                                                           │
 │    Type your own answer to add to your selection above (optional).                               │
