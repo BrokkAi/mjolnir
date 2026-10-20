@@ -258,10 +258,6 @@ async fn complete_child(
         return Ok(ChildCompletion::Settled);
     }
     if relation.noticed_turn != Some(outcome.completed_ordinal) {
-        let title = state.session_record(&child_id).map_or_else(
-            || relation.task_name.clone(),
-            |session| session.listed_title().to_owned(),
-        );
         let reminded = backend
             .remind_subagent_to_hand_back(
                 &child_id,
@@ -270,16 +266,6 @@ async fn complete_child(
                 &observation.in_flight,
             )
             .await?;
-        if !reminded {
-            backend
-                .record_subagent_completion_notice(
-                    relation.parent_session_id.clone(),
-                    &child_id,
-                    &title,
-                    &outcome,
-                )
-                .await?;
-        }
         let id = child_id.clone();
         tokio::task::spawn_blocking(move || {
             crate::database::mark_subagent_turn_noticed(&id, outcome.completed_ordinal)
@@ -381,14 +367,15 @@ mod tests {
         }
     }
 
+    // Hard-won: 5bb43721a: child completion wrote a redundant notice to the parent.
     #[tokio::test]
-    async fn a_reported_child_retries_busy_parking_without_repeating_its_notice() {
+    async fn a_finished_child_retries_busy_parking_without_a_parent_notice() {
         const CHILD: &str = "MJ_TEST_DELEGATION_PARK_RETRY";
         if std::env::var_os(CHILD).is_none() {
             let root = tempfile::tempdir().unwrap();
             IsolatedTest::new(test_name(
                 module_path!(),
-                "a_reported_child_retries_busy_parking_without_repeating_its_notice",
+                "a_finished_child_retries_busy_parking_without_a_parent_notice",
             ))
             .env(CHILD, "1")
             .env("MJ_INSTANCE", "delegation-1171-park")
@@ -409,8 +396,7 @@ mod tests {
             mj_core::state::SessionState::Running,
         );
         crate::database::save_session(&parent).unwrap();
-        let mut relation = crate::daemon::tests::runtime_test_subagent("child", "parent");
-        relation.noticed_turn = Some(10);
+        let relation = crate::daemon::tests::runtime_test_subagent("child", "parent");
         crate::database::save_subagent_session(&child, &relation).unwrap();
         let state = crate::daemon::tests::test_runtime_state();
         let parks = Arc::new(BusyThenParked(AtomicUsize::new(0)));

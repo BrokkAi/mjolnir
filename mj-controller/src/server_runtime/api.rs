@@ -1356,50 +1356,9 @@ impl ApiBackend {
         Ok(())
     }
 
-    /// Record that a child finished a turn as a one-line notice in the
-    /// parent's conversation. The mailbox outbox delivers the report separately.
-    ///
-    /// `child_title` is the child's listed title. The turn is named by the
-    /// number the child's own `mj wait` and `mj prompt` print (its accepted
-    /// ordinal), and the outcome in words (R11-3).
-    pub async fn record_subagent_completion_notice(
-        &self,
-        parent_session_id: String,
-        child_session_id: &str,
-        child_title: &str,
-        outcome: &mj_core::state::MaterializedTurnOutcome,
-    ) -> Result<()> {
-        ensure!(
-            !matches!(
-                self.start_status(parent_session_id.clone()).await?,
-                Some(StartStatus::Pending)
-            ),
-            "session initialization is still running"
-        );
-        let handle = self
-            .sessions
-            .session(parent_session_id.clone())
-            .await
-            .with_context(|| format!("session {parent_session_id} is not running"))?;
-        let turn = match outcome.accepted_ordinal {
-            Some(turn) => format!("turn {turn}"),
-            None => "a turn".to_owned(),
-        };
-        submit_notice(
-            &handle,
-            format!(
-                "Subagent \"{child_title}\" ({}) finished {turn} ({}).",
-                mj_core::state::short_id(child_session_id),
-                outcome.outcome
-            ),
-        )
-        .await?;
-        Ok(())
-    }
-
     /// Remind a child that ended its turn without handing back a report,
     /// once, and say whether its reminder is pending. The parent's completion
-    /// notice waits for that reminder turn, including after daemon recovery.
+    /// report waits for that reminder turn, including after daemon recovery.
     ///
     /// The caller passes the turn and what is queued or running from the live
     /// snapshot it just saw: the store's copy can lag it, and deciding from an
@@ -1982,18 +1941,6 @@ async fn submit_prompt_with_id(
             RelayCommand::Prompt {
                 prompt: vec![ContentBlock::Text(TextContent::new(text))],
             },
-        )
-        .await
-}
-
-/// Record one Mjolnir notice line in a session's conversation. Unlike a
-/// prompt, a notice never starts a turn, so it is how the daemon tells a
-/// parent that a sub-agent finished without acting as that parent's user.
-async fn submit_notice(handle: &SessionHandle, text: String) -> Result<u64> {
-    handle
-        .submit(
-            new_command_id("subagent")?,
-            RelayCommand::RecordNotice { text },
         )
         .await
 }

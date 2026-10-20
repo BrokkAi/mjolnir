@@ -813,65 +813,6 @@ async fn spawn_over_a_cold_catalogue_waits_for_the_background_discovery() {
     );
 }
 
-// Hard-won: 131223a9: a child-finish notice was forged into a user turn instead of returned as a tool result.
-#[tokio::test]
-async fn a_finished_subagent_is_recorded_as_a_notice_not_a_prompt() {
-    let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
-    let backend = ApiBackend::new(
-        SessionControl::new(FakeControl(FakeSession {
-            session_id: "parent-1".into(),
-            accepted_ordinal: 7,
-            submitted: submitted_tx,
-            view: None,
-        })),
-        running_states(),
-        Arc::new(NoExports),
-    );
-
-    // Launch finding R11-3: the notice read `finished turn 46 (completed {
-    // stop_reason: "endturn" })`, Rust's debug form of the outcome and the
-    // turn's completion ordinal, where the child's own `mj wait` said turn
-    // 16. It names the turn as `mj wait` does, and the outcome in words.
-    let outcome = mj_core::state::MaterializedTurnOutcome {
-        diagnostic: None,
-        usage: None,
-        command_id: "prompt-1".into(),
-        accepted_ordinal: Some(16),
-        turn_start_position: Some(17),
-        completed_ordinal: 46,
-        completed_at_ms: 0,
-        outcome: mj_core::state::TurnOutcomeKind::Completed {
-            stop_reason: "EndTurn".into(),
-        },
-    };
-    backend
-        .record_subagent_completion_notice(
-            "parent-1".into(),
-            "child-abcdef012345",
-            "Answer project codename",
-            &outcome,
-        )
-        .await
-        .unwrap();
-
-    let (command_id, command) = submitted.recv().await.unwrap();
-    assert!(
-        command_id.starts_with("subagent-"),
-        "notice command id {command_id} should name the sub-agent path"
-    );
-    let RelayCommand::RecordNotice { text } = command else {
-        panic!("a finished sub-agent must be a notice, not {command:?}");
-    };
-    assert_eq!(
-        text,
-        "Subagent \"Answer project codename\" (child-ab) finished turn 16 (completed, end of turn)."
-    );
-    assert!(
-        !text.contains("full child output"),
-        "the notice must stay terse, not paste the child output: {text}"
-    );
-}
-
 #[derive(Clone)]
 struct ConfigSession {
     inner: FakeSession,

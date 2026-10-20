@@ -962,7 +962,7 @@ fn clicking_a_collapsed_member_expands_only_that_call_and_splits_the_run() {
         .transcript_click_targets
         .iter()
         .find(|target| target.start_seq == 2)
-        .copied()
+        .cloned()
         .expect("the second summary segment is clickable");
     let transcript_inner = Rect::new(1, 1, 78, 22);
     assert!(chat.transcript_click_targets.iter().all(|target| {
@@ -995,7 +995,7 @@ fn clicking_a_collapsed_member_expands_only_that_call_and_splits_the_run() {
         .transcript_click_targets
         .iter()
         .find(|target| target.start_seq == 2)
-        .copied()
+        .cloned()
         .expect("the expanded call remains clickable");
     chat.handle_mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
@@ -3988,13 +3988,13 @@ fn golden_rich_transcript_tool_presentation() {
         .transcript_click_targets
         .iter()
         .find(|target| target.start_seq == 2)
-        .copied()
+        .cloned()
         .expect("completed tool is clickable");
     let running_target = chat
         .transcript_click_targets
         .iter()
         .find(|target| target.start_seq == 1)
-        .copied()
+        .cloned()
         .expect("running tool is clickable");
     let targets = chat
         .transcript_click_targets
@@ -4305,9 +4305,9 @@ fn golden_rich_transcript_tool_presentation() {
         .transcript_click_targets
         .iter()
         .filter(|target| target.start_seq == 2)
-        .copied()
+        .cloned()
         .collect::<Vec<_>>();
-    let target = second_targets[1];
+    let target = &second_targets[1];
     chat.handle_mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: target.rect.x,
@@ -4463,11 +4463,24 @@ fn golden_rich_transcript_tool_presentation() {
     )));
     let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 60, 36));
     append_transcript_golden_state(&mut output, "mailbox events collapsed", 60, 36, &rows, &[]);
+    // Hard-won: 2af612540: expanded events repeated their header in the body.
+    click_rendered_text(&mut mailbox, &rows, "New PR #4623");
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 24));
+    append_transcript_golden_state(
+        &mut output,
+        "an expanded event without a report wraps its header once",
+        44,
+        24,
+        &rows,
+        &[],
+    );
+    click_rendered_text(&mut mailbox, &rows, "CQ07");
+    let _ = golden_chat_buffer(&mut mailbox, 60, 36);
     let second_child = mailbox
         .transcript_click_targets
         .iter()
-        .find(|target| target.mailbox_event == Some(11))
-        .copied()
+        .find(|target| target.mailbox_event == Some(MailboxDisclosureId::Event(2, 11)))
+        .cloned()
         .unwrap();
     mailbox.handle_mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
@@ -4484,9 +4497,16 @@ fn golden_rich_transcript_tool_presentation() {
         &rows,
         &[],
     );
-    assert_eq!(mailbox.expanded_mailbox_events, BTreeSet::from([(2, 11)]));
+    assert_eq!(
+        mailbox.expanded_mailbox_events,
+        BTreeSet::from([MailboxDisclosureId::Event(2, 11)])
+    );
     let cached = mailbox.render_cache.entries[0].as_ref().unwrap();
-    let report_start = cached.mailbox.as_ref().unwrap().mailbox_events[11].0.start + 1;
+    let report_start = cached
+        .lines
+        .iter()
+        .position(|line| row_text(line).contains("支持 Unicode"))
+        .unwrap();
     let report_end = cached.lines.len() - 2;
     let pane = transcript_pane(&mailbox);
     let copied_report = mailbox
@@ -4497,7 +4517,7 @@ fn golden_rich_transcript_tool_presentation() {
         .unwrap();
     assert_eq!(
         copied_report,
-        "Child task Check parser finished: failed\n支持 Unicode and <script>literal text</script>.\n- A report bullet stays in this event."
+        "支持 Unicode and <script>literal text</script>.\n- A report bullet stays in this event."
     );
     output.push_str(&format!("copied report: {copied_report:?}\n\n"));
     mailbox.entries[0]
@@ -4516,8 +4536,8 @@ fn golden_rich_transcript_tool_presentation() {
     let first_child = mailbox
         .transcript_click_targets
         .iter()
-        .find(|target| target.mailbox_event == Some(10))
-        .copied()
+        .find(|target| target.mailbox_event == Some(MailboxDisclosureId::Event(2, 10)))
+        .cloned()
         .unwrap();
     mailbox.handle_mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
@@ -4535,18 +4555,21 @@ fn golden_rich_transcript_tool_presentation() {
         &[],
     );
     mailbox.anchor = TranscriptAnchor::Row { entry: 0, row: 9 };
-    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 24));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 22));
     append_transcript_golden_state(
         &mut output,
         "mailbox report scrolled before collapse",
         44,
-        24,
+        22,
         &rows,
         &[],
     );
     // Hard-won: d453f1142: delivered-message bodies had no collapse target.
     click_rendered_text(&mut mailbox, &rows, "text</script>.");
-    assert_eq!(mailbox.expanded_mailbox_events, BTreeSet::from([(2, 10)]));
+    assert_eq!(
+        mailbox.expanded_mailbox_events,
+        BTreeSet::from([MailboxDisclosureId::Event(2, 10)])
+    );
     assert_eq!(mailbox.anchor, TranscriptAnchor::Row { entry: 0, row: 9 });
     let rows = crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
         crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 48))
@@ -4573,7 +4596,7 @@ fn golden_rich_transcript_tool_presentation() {
         entry: 0,
         row: first_report + 3,
     };
-    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 16));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 14));
     assert_eq!(
         mailbox.anchor,
         TranscriptAnchor::Row {
@@ -4585,7 +4608,7 @@ fn golden_rich_transcript_tool_presentation() {
         &mut output,
         "mailbox header scrolled out of view",
         44,
-        16,
+        14,
         &rows,
         &[],
     );
@@ -4602,8 +4625,8 @@ fn golden_rich_transcript_tool_presentation() {
         &mut output,
         "body click collapses the report and restores its header",
         44,
-        16,
-        &crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 16)),
+        14,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 14)),
         &[],
     );
     mailbox.render_mode = TranscriptRenderMode::Raw;
@@ -4662,14 +4685,68 @@ fn golden_rich_transcript_tool_presentation() {
             .with_recorded_at(Some(delivery_time)),
     );
     incoming.latest_seq = 3;
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut incoming, 44, 36));
     append_transcript_golden_state(
         &mut output,
-        "dedicated delivered messages wrap between agent replies",
+        "incoming messages start collapsed between agent replies",
+        44,
+        36,
+        &rows,
+        &[],
+    );
+    click_rendered_text(&mut incoming, &rows, "Message from Review agent");
+    assert_eq!(
+        incoming.expanded_mailbox_events,
+        BTreeSet::from([MailboxDisclosureId::Message(
+            incoming.entries[1].message_id.clone().unwrap(),
+        )])
+    );
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut incoming, 44, 36));
+    append_transcript_golden_state(
+        &mut output,
+        "header text opens only one message in a shared delivery",
+        44,
+        36,
+        &rows,
+        &[],
+    );
+    click_rendered_text(&mut incoming, &rows, "Message from Build agent");
+    incoming.entries[1].revision += 1;
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut incoming, 32, 36));
+    append_transcript_golden_state(
+        &mut output,
+        "both incoming messages stay open after update and resize",
+        32,
+        36,
+        &rows,
+        &[],
+    );
+    click_rendered_text(&mut incoming, &rows, "terminal.");
+    assert_eq!(
+        incoming.expanded_mailbox_events,
+        BTreeSet::from([MailboxDisclosureId::Message(
+            incoming.entries[2].message_id.clone().unwrap(),
+        )])
+    );
+    append_transcript_golden_state(
+        &mut output,
+        "wrapped message body collapses only that message",
+        32,
+        36,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut incoming, 32, 36)),
+        &[],
+    );
+    incoming.render_mode = TranscriptRenderMode::Raw;
+    append_transcript_golden_state(
+        &mut output,
+        "raw mode keeps complete incoming messages",
         44,
         36,
         &crate::golden::buffer_lines(&golden_chat_buffer(&mut incoming, 44, 36)),
         &[],
     );
+    assert!(incoming.transcript_click_targets.is_empty());
+    incoming.render_mode = TranscriptRenderMode::Rich;
     incoming.anchor = TranscriptAnchor::Row { entry: 2, row: 0 };
     let position = incoming.transcript_position();
     let encoded = serde_json::to_string(&position).unwrap();
