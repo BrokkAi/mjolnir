@@ -213,7 +213,7 @@ impl ManagedSessionHandle {
                         Ok(MailboxEventDelivery::Accepted(ordinal))
                     }
                     MailboxDeliveryState::Pending if !failure.unconfirmed && !failure.refused => {
-                        Ok(MailboxEventDelivery::Pending)
+                        Ok(MailboxEventDelivery::Pending(failure.message))
                     }
                     MailboxDeliveryState::Pending => Err(anyhow::anyhow!(failure.message)),
                 }

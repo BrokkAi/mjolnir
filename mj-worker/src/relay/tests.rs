@@ -5597,7 +5597,7 @@ fn a_rejected_clear_does_not_block_later_prompts() {
         )
         .unwrap();
     assert!(relay.snapshot.dispatches.contains_key("clear-request"));
-    assert_eq!(relay.clear_context_started_at_ms(), None);
+    assert_eq!(relay.operational_state().clear_context_started_at_ms, None);
     let accepted = relay
         .submit_command("after-clear", prompt("still usable"))
         .unwrap();
@@ -5615,6 +5615,37 @@ fn clear_is_refused_while_a_turn_is_running() {
         .submit_command("clear-request", RelayCommand::ClearContext)
         .unwrap();
     assert!(refused.is_err());
+}
+
+/// The daemon holds mailbox events while the published state reports a
+/// `/clear` in progress. A finished clear stays in the ledger, so a later turn
+/// must not republish it as running.
+// Hard-won: 29a80b2d: a finished /clear was published as in progress during every later turn, so mailbox events waited until the session was fully idle.
+#[test]
+fn a_finished_clear_is_not_published_as_in_progress_during_a_later_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = clearable_relay(temp.path());
+    assert!(
+        relay
+            .submit_command("clear-request", RelayCommand::ClearContext)
+            .unwrap()
+            .is_ok()
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            "clear-request",
+            RelayCommandOutcome::ContextCleared {
+                native_session_id: "replacement".into(),
+                memory: None,
+            },
+        )
+        .unwrap();
+    submit_relay(&mut relay, "later-turn", prompt("Write a story"));
+    relay.claim_pending_commands(true).unwrap();
+    assert!(relay.snapshot.dispatches.contains_key("clear-request"));
+    assert!(relay.snapshot.activity_turn_started_at_ms.is_some());
+    assert_eq!(relay.operational_state().clear_context_started_at_ms, None);
 }
 
 /// The transcript a relay's events project to.
