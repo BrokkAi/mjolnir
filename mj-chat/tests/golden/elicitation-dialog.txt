@@ -202,10 +202,34 @@ submitted: Accept { content: {"question_0_custom": String("Valkey")} }
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 click Redis: Ok({"question_0": String("Redis")})
 click Memcached: Ok({"question_0": String("Memcached")})
-click Memcached again: Ok({})
+click Memcached again, later: Ok({})
 Space on Redis: Ok({"question_0": String("Redis")})
 Space on Redis again: Ok({})
 click Other, write Valkey: Ok({"question_0_custom": String("Valkey")})
+
+=== Claude double-click picks the option and answers (100x20) ===
+╭ × Question 2/2 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Targets                                                                                           │
+│Which platforms should CI cover?                                                                  │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│☐ linux                                                                                           │
+│☐ macos                                                                                           │
+│☐ windows                                                                                         │
+│✎ Other                                                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Submit all     Previous     Next     Skip     Cancel                                            │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+double-click Memcached: Ok({"question_0": String("Memcached")}), answered=true, now on question 2, response=None
+double-click Memcached, already picked: Ok({"question_0": String("Memcached")}), answered=true, now on question 2, response=None
 
 === Claude Enter on an option answers with what is there (100x20) ===
 ╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮

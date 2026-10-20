@@ -2,6 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 use crate::theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
@@ -13,7 +14,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Widget, Wrap};
 
 use crate::components::{
-    ButtonRow, Checkbox, ChoiceList, ControlKind, FieldEdit, Form, Interaction, TextField,
+    ButtonRow, Checkbox, ChoiceList, ControlKind, DOUBLE_CLICK_INTERVAL, FieldEdit, Form,
+    Interaction, TextField,
 };
 use crate::selection::{
     ContentPos, FrameSurfaces, SelectionRange, SurfaceFrame, SurfaceId, extract_rows,
@@ -149,6 +151,11 @@ pub(super) struct ElicitationDialog {
     /// Wrapped rows to skip in the form body when a long option list is
     /// taller than the space left above the answer controls.
     focus_scroll: Cell<u16>,
+    /// The last click on an option of a page that picks on purpose:
+    /// `(display field, option, when)`. The list cannot see a double-click
+    /// there, because the first click changes the row's marker and the list
+    /// treats changed rows as new contents.
+    last_option_click: Option<(usize, usize, Instant)>,
 }
 
 impl ElicitationDialog {
@@ -211,6 +218,7 @@ impl ElicitationDialog {
             message_anchor_width: Cell::new(0),
             rendered_area: Cell::new(None),
             focus_scroll: Cell::new(0),
+            last_option_click: None,
         };
         dialog.reset_controls();
         dialog
@@ -438,26 +446,51 @@ impl ElicitationDialog {
     }
 
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<ElicitationResponse> {
+        self.handle_mouse_at(mouse, Instant::now())
+    }
+
+    /// Handles a mouse event at an explicit monotonic time, so the
+    /// double-click interval is deterministic in tests.
+    pub(super) fn handle_mouse_at(
+        &mut self,
+        mouse: MouseEvent,
+        now: Instant,
+    ) -> Option<ElicitationResponse> {
         let event = crossterm::event::Event::Mouse(mouse);
-        let result = self.form.borrow_mut().handle(&event);
+        let result = self.form.borrow_mut().handle_at(&event, now);
         if let Some(interaction) = result.action {
             let click = matches!(
                 mouse.kind,
                 MouseEventKind::Up(crossterm::event::MouseButton::Left)
             );
+            let clicked_row = match interaction {
+                Interaction::Select(ElicitationControl::Field(index), row) if click => {
+                    Some((index, row))
+                }
+                Interaction::Activate(ElicitationControl::Field(index)) if click => self
+                    .form
+                    .borrow()
+                    .selected(ElicitationControl::Field(index))
+                    .map(|row| (index, row)),
+                _ => None,
+            };
+            if let Some((index, row)) = clicked_row
+                && self
+                    .display_fields
+                    .get(index)
+                    .is_some_and(|display| self.picks_on_purpose(*display))
+            {
+                return self.click_option_on_purpose(index, row, now);
+            }
             let clicked = match interaction {
                 Interaction::Select(ElicitationControl::Field(index), _) if click => {
                     self.display_fields.get(index).copied()
                 }
                 _ => None,
             };
-            // A click toggles an option as Space does: in a multi-select, and
-            // in a single-select beside its own text field, where moving the
-            // cursor does not pick.
-            let toggle = clicked.is_some_and(|display| {
-                matches!(self.values[display.field], FieldValue::Multi(_))
-                    || self.picks_on_purpose(display)
-            });
+            // A click on a multi-select option toggles it, as Space does.
+            let toggle = clicked
+                .is_some_and(|display| matches!(self.values[display.field], FieldValue::Multi(_)));
             let response = self.apply_interaction(interaction);
             if toggle {
                 if let Some((custom, true)) = self.editable_field() {
@@ -761,6 +794,48 @@ impl ElicitationDialog {
                 next,
             )));
         }
+    }
+
+    /// A click on row `row` of a page that picks on purpose. On an option, a
+    /// click toggles it as Space does, and a double-click, two clicks on the
+    /// same option within the double-click interval, picks it and answers,
+    /// as a double-click does on any other list. On the text row it starts
+    /// writing.
+    fn click_option_on_purpose(
+        &mut self,
+        index: usize,
+        row: usize,
+        now: Instant,
+    ) -> Option<ElicitationResponse> {
+        self.focus_control(index);
+        self.select_option(row);
+        let display = self.display_fields[index];
+        let option_count = select_option_count(&self.request.fields[display.field]).unwrap_or(0);
+        if row >= option_count {
+            self.last_option_click = None;
+            if let Some((custom, true)) = self.editable_field() {
+                self.active_custom_fields.insert(custom);
+            }
+            return None;
+        }
+        let double = self.last_option_click.is_some_and(|(field, option, at)| {
+            field == index
+                && option == row
+                && now.saturating_duration_since(at) <= DOUBLE_CLICK_INTERVAL
+        });
+        if double {
+            self.last_option_click = None;
+            if let FieldValue::Single(selected) = &mut self.values[display.field]
+                && *selected != Some(row)
+            {
+                *selected = Some(row);
+                self.confirmed.remove(&self.current_question);
+            }
+            return self.answer_and_next();
+        }
+        self.last_option_click = Some((index, row, now));
+        self.toggle_current();
+        None
     }
 
     /// Whether `display` is a single-select beside its own text field, where

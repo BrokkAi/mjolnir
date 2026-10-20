@@ -618,14 +618,20 @@ fn golden_elicitation_dialog() {
     // pick, and takes back the option already picked. A mouse-only answer
     // can therefore still end with nothing picked.
     let page_answer = |dialog: &ElicitationDialog| format!("{:?}", dialog.question_content(0));
+    // Clicks on a fixed clock, each well past the double-click interval.
+    let start = std::time::Instant::now();
+    let later = |clicks: u32| start + crate::components::DOUBLE_CLICK_INTERVAL * 3 * clicks;
     let mut toggles = ElicitationDialog::new(claude.request.clone());
     let mut steps = Vec::new();
-    for (label, step) in [
+    for (click, (label, step)) in [
         ("click Redis", "Redis"),
         ("click Memcached", "Memcached"),
-        ("click Memcached again", "Memcached"),
-    ] {
-        click_question_button(&mut toggles, step);
+        ("click Memcached again, later", "Memcached"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        click_question_button_at(&mut toggles, step, later(click as u32));
         steps.push(format!("{label}: {}", page_answer(&toggles)));
     }
     toggles.handle_key(KeyCode::Up, KeyModifiers::NONE);
@@ -633,7 +639,7 @@ fn golden_elicitation_dialog() {
     steps.push(format!("Space on Redis: {}", page_answer(&toggles)));
     toggles.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
     steps.push(format!("Space on Redis again: {}", page_answer(&toggles)));
-    click_question_button(&mut toggles, "Other");
+    click_question_button_at(&mut toggles, "Other", later(3));
     toggles.paste("Valkey");
     steps.push(format!(
         "click Other, write Valkey: {}",
@@ -643,6 +649,40 @@ fn golden_elicitation_dialog() {
         &mut output,
         "Claude clicks and Space toggle the pick",
         &rendered_in_pane(&toggles, 100, 20),
+        &steps,
+    );
+
+    // A double-click on an option is an activation, as on any other list:
+    // the option ends picked and the question is answered, whether it was
+    // picked before or not.
+    let mut steps = Vec::new();
+    let mut double = ElicitationDialog::new(claude.request.clone());
+    for (label, picked_first) in [
+        ("double-click Memcached", false),
+        ("double-click Memcached, already picked", true),
+    ] {
+        double = ElicitationDialog::new(claude.request.clone());
+        if picked_first {
+            click_question_button_at(&mut double, "Memcached", start);
+        }
+        let first = start + crate::components::DOUBLE_CLICK_INTERVAL * 3;
+        click_question_button_at(&mut double, "Memcached", first);
+        let response = click_question_button_at(
+            &mut double,
+            "Memcached",
+            first + crate::components::DOUBLE_CLICK_INTERVAL / 2,
+        );
+        steps.push(format!(
+            "{label}: {}, answered={}, now on question {}, response={response:?}",
+            page_answer(&double),
+            double.confirmed.contains(&0),
+            double.current_question + 1,
+        ));
+    }
+    append_elicitation_golden_state(
+        &mut output,
+        "Claude double-click picks the option and answers",
+        &rendered_in_pane(&double, 100, 20),
         &steps,
     );
 
@@ -1170,6 +1210,16 @@ fn click_question_button(
     dialog: &mut ElicitationDialog,
     label: &str,
 ) -> Option<ElicitationResponse> {
+    click_question_button_at(dialog, label, std::time::Instant::now())
+}
+
+/// Clicks `label` at an explicit time, so two clicks are a double-click
+/// exactly when the test places them within the interval.
+fn click_question_button_at(
+    dialog: &mut ElicitationDialog,
+    label: &str,
+    now: std::time::Instant,
+) -> Option<ElicitationResponse> {
     let buffer = rendered_in_pane(dialog, 110, 22);
     let (column, row) = (0..buffer.area.height)
         .find_map(|row| {
@@ -1183,12 +1233,15 @@ fn click_question_button(
         MouseEventKind::Down(MouseButton::Left),
         MouseEventKind::Up(MouseButton::Left),
     ] {
-        response = dialog.handle_mouse(MouseEvent {
-            kind,
-            column,
-            row,
-            modifiers: KeyModifiers::NONE,
-        });
+        response = dialog.handle_mouse_at(
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            now,
+        );
     }
     response
 }
