@@ -1999,7 +1999,7 @@ mod tests {
             state: State::default(),
         };
         assert!(completion.awaiting_runtime(&controller));
-        controller.config.theme = mj_core::config::UiTheme::Light;
+        controller.config.theme = mj_core::config::UiTheme::Light.into();
         controller.config.bundles.insert(
             "created".into(),
             ProjectBundle {
@@ -2008,7 +2008,10 @@ mod tests {
             },
         );
         assert!(!completion.awaiting_runtime(&controller));
-        assert_eq!(controller.config.theme, mj_core::config::UiTheme::Light);
+        assert_eq!(
+            controller.config.theme,
+            mj_core::config::UiTheme::Light.into()
+        );
         controller
             .config
             .bundles
@@ -2346,7 +2349,7 @@ mod tests {
         original.save_to(&path).unwrap();
         let mut edited = original.clone();
         edited.sessions_side = mj_core::config::SessionsSide::Right;
-        edited.theme = mj_core::config::UiTheme::Light;
+        edited.theme = mj_core::config::UiTheme::Light.into();
         Config::update_to(&path, |current| {
             current.advanced.detailed_activity_clocks = true;
             Ok(())
@@ -2361,7 +2364,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(saved.sessions_side, mj_core::config::SessionsSide::Right);
-        assert_eq!(saved.theme, mj_core::config::UiTheme::Light);
+        assert_eq!(saved.theme, mj_core::config::UiTheme::Light.into());
         assert!(saved.advanced.detailed_activity_clocks);
         assert_eq!(Config::load_from(&path).unwrap(), saved);
 

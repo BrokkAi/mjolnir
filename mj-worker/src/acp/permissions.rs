@@ -438,9 +438,10 @@ pub(super) fn resolve_pending_elicitation(
             "elicitation {elicitation_id:?} is no longer pending"
         ));
     };
-    // The worker accepts only an answer to the question it published. A
-    // refused answer leaves the question pending for a valid one.
-    question.question.validate_response(&response)?;
+    // The worker accepts only an answer to the question it published, and
+    // forwards it in the shape the harness reads. A refused answer leaves
+    // the question pending for a valid one.
+    let response = question.question.harness_response(response)?;
     let PendingElicitation { answer, .. } = pending
         .remove(elicitation_id)
         .expect("the pending entry was just found");

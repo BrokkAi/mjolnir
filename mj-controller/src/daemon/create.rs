@@ -8,7 +8,7 @@ impl RuntimeState {
         self: &Arc<Self>,
         request: CreateSessionRequest,
     ) -> Result<RegisteredSession> {
-        self.start_create_session_inner(request, CreateSessionControl::default(), None)
+        self.start_create_session_inner(request, LifecycleControl::default(), None)
             .await
     }
 
@@ -123,7 +123,7 @@ impl RuntimeState {
     pub async fn start_create_session_controlled(
         self: &Arc<Self>,
         request: CreateSessionRequest,
-        control: CreateSessionControl,
+        control: LifecycleControl,
         publication: tokio::sync::oneshot::Receiver<std::result::Result<(), String>>,
     ) -> Result<RegisteredSession> {
         self.start_create_session_inner(request, control, Some(publication))
@@ -133,7 +133,7 @@ impl RuntimeState {
     pub(super) async fn start_create_session_inner(
         self: &Arc<Self>,
         request: CreateSessionRequest,
-        control: CreateSessionControl,
+        control: LifecycleControl,
         publication: Option<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>>,
     ) -> Result<RegisteredSession> {
         let mut request = request;

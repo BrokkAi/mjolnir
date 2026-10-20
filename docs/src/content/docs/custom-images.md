@@ -12,8 +12,8 @@ under its own immutable version tag.
 
 ## The entrypoint
 
-mj starts a session's container detached, running `sleep infinity` as its
-command, and runs every later command — the worker upload, Git, the harness,
+mj starts a session's container detached, running `sh -c 'trap "" ...; exec sleep infinity'`
+as its command (the trap makes signals sent to the container's main process do nothing), and runs every later command — the worker upload, Git, the harness,
 and the ACP bridge — with `exec` against that running container. Your image
 needs a POSIX shell and a `sleep` binary on `PATH`. It does not need any
 particular process supervisor or init system beyond that.

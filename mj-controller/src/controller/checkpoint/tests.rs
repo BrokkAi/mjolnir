@@ -901,10 +901,19 @@ const LATCH_RELAY_STARTUP_DELAY_MS: &str = "MJ_TEST_LATCH_STARTUP_DELAY_MS";
 /// worker does. The value names the write: [`LATE_HARNESS_NOTIFICATION`] or
 /// [`LATE_HARNESS_QUESTION`].
 #[cfg(unix)]
-const LATCH_RELAY_JOURNALS_BEFORE_CLOSE: &str = "MJ_TEST_LATCH_JOURNALS_BEFORE_CLOSE";
+pub(crate) const LATCH_RELAY_JOURNALS_BEFORE_CLOSE: &str = "MJ_TEST_LATCH_JOURNALS_BEFORE_CLOSE";
 /// A harness notification that changes no work, which waits behind the cut.
 #[cfg(unix)]
-const LATE_HARNESS_NOTIFICATION: &str = "notification";
+pub(crate) const LATE_HARNESS_NOTIFICATION: &str = "notification";
+/// Hold the first request that submits this relay command (`begin_checkpoint`
+/// or `close`) until the parent test lets it go: the worker creates
+/// `<LATCH_RELAY_HOLD_PATH>.reached` and waits for
+/// `<LATCH_RELAY_HOLD_PATH>.release`. A test uses it to act at an exact point
+/// of a close.
+#[cfg(unix)]
+pub(crate) const LATCH_RELAY_HOLD_COMMAND: &str = "MJ_TEST_LATCH_HOLD_COMMAND";
+#[cfg(unix)]
+pub(crate) const LATCH_RELAY_HOLD_PATH: &str = "MJ_TEST_LATCH_HOLD_PATH";
 /// A question for a person, which cannot wait and spoils the cut.
 #[cfg(unix)]
 const LATE_HARNESS_QUESTION: &str = "question";
@@ -1114,6 +1123,8 @@ fn latch_relay_child_serves_stdio() {
                 "checkpoint submitted before current ACP startup finished"
             );
         }
+        #[cfg(unix)]
+        hold_named_relay_command(&request.request);
         // The harness keeps talking while a checkpoint barrier holds: this
         // lands one write of its own after the daemon's last look and before
         // its Close, through the same relay calls the worker runtime uses.
@@ -1257,6 +1268,43 @@ fn latch_relay_child_serves_stdio() {
                 _ => {}
             }
         }
+    }
+}
+
+/// See [`LATCH_RELAY_HOLD_COMMAND`]. Only the first matching request waits.
+#[cfg(unix)]
+fn hold_named_relay_command(request: &mj_core::relay::RelayRequest) {
+    let (Ok(command), Some(path)) = (
+        std::env::var(LATCH_RELAY_HOLD_COMMAND),
+        std::env::var_os(LATCH_RELAY_HOLD_PATH),
+    ) else {
+        return;
+    };
+    let matches = match request {
+        mj_core::relay::RelayRequest::Submit {
+            command: RelayCommand::BeginCheckpoint { .. },
+            ..
+        } => command == "begin_checkpoint",
+        mj_core::relay::RelayRequest::Submit {
+            command: RelayCommand::Close { .. },
+            ..
+        } => command == "close",
+        _ => false,
+    };
+    let path = PathBuf::from(path);
+    let reached = path.with_extension("reached");
+    if !matches || reached.exists() {
+        return;
+    }
+    std::fs::write(&reached, b"held").expect("record the held relay command");
+    let release = path.with_extension("release");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !release.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the parent test never released the held {command}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -1767,7 +1815,7 @@ async fn a_close_checkpoint_cancels_a_running_turn_without_restarting_the_worker
 /// The session actor absorbs a returned connection on its own task, so the
 /// first command after a latch ends may still be refused.
 #[cfg(unix)]
-async fn wait_until_the_actor_serves_again(handle: &ManagedSessionHandle) {
+pub(crate) async fn wait_until_the_actor_serves_again(handle: &ManagedSessionHandle) {
     for attempt in 0.. {
         if handle.sync_now().await.is_ok() {
             return;
@@ -3368,7 +3416,7 @@ impl CommandExecutor for RestartCheckpointExecutor {
 /// archive holds exactly what that relay journals at startup, so a close
 /// reuses the archive and nothing but the scripted write moves the cut.
 #[cfg(unix)]
-async fn close_cut_controller(
+pub(crate) async fn close_cut_controller(
     state: SessionState,
 ) -> (
     Controller,

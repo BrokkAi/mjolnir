@@ -39,10 +39,10 @@
 │         │  ctrl+b shift+x           Suspend session…                                                                                                                                       │         │
 │         │    Save a recovery copy and release the environment. Resume this session later.                                                                                                  │         │
 │         │  —                        Restart session                                                                                                                                        │  ───────╯
-│         │    Restart with the same profile, target, and mounts, without confirmation.                                                                                                      │   ▁   ▪ ╮
+│         │    Restart with the same profile, target, and mounts, without confirmation.                                                                                                      │   ▁   ▄ ╮
 │         │  ctrl+b a                 Mark all read                                                                                                                                          │         │
 │         │    Clear the unread marker on every session in this workspace at once; questions, failures, and unreachable sessions stay flagged.                                               │  ───────╯
-│         │  /                        Search sessions                                                                                                                                        │   ▁   ▪ ╮
+│         │  /                        Search sessions                                                                                                                                        │   ▁   ▄ ╮
 │         │    Type to keep only the sessions whose name, project, profile, or target matches. The letters b, w, i, d, and a keep only blocked, working, idle, or done sessions, or all of   │         │
 │         │    them.                                                                                                                                                                         │         │
 │         │  ctrl+b o                 Next session needing you                                                                                                                               │         │
@@ -91,10 +91,10 @@ Enter op
 │         │    Jump to the session that most needs a person: a question first, then a failure, then unread activity, in any workspace.                                                       │         │
 │         │  ctrl+b shift+o           Previous session needing you                                                                                                                           │         │
 │         │    Walk the sessions that need a person in the other direction.                                                                                                                  │  ───────╯
-│         │  ctrl+b shift+c           Cancel operation                                                                                                                                       │   ▁   ▪ ╮
+│         │  ctrl+b shift+c           Cancel operation                                                                                                                                       │   ▁   ▄ ╮
 │         │    Stop the launch, resume, or stop the selected session is in the middle of. — Not available here.                                                                              │         │
 │         │  Space                    Fold project                                                                                                                                           │  ───────╯
-│         │    Space folds the selected session's project; 1 to 9 fold by number.                                                                                                            │   ▁   ▪ ╮
+│         │    Space folds the selected session's project; 1 to 9 fold by number.                                                                                                            │   ▁   ▄ ╮
 │         │  ctrl+b shift+t           Rename session                                                                                                                                         │         │
 │         │    Give the selected session your own title.                                                                                                                                     │         │
 │         │  ctrl+b d                 Changed files                                                                                                                                          │         │
@@ -143,10 +143,10 @@ Enter op
 │         │    List the files the selected session's checkout has changed, with the branch and its distance from upstream. — The session's target is not running.                            │         │
 │         │  ctrl+b i                 Interrupt turn                                                                                                                                         │         │
 │         │    Stop the agent's running turn, as Esc does in the composer. The session keeps running. — No turn is running.                                                                  │  ───────╯
-│         │  —                        Interrupt all                                                                                                                                          │   ▁   ▪ ╮
+│         │  —                        Interrupt all                                                                                                                                          │   ▁   ▄ ╮
 │         │    Stop the running turn of the selected session and of every sub-agent under it, after you confirm. The sessions keep running. — No turn is running here or in its sub-agents.  │         │
 │         │  . / ctrl+b .             Session actions…                                                                                                                                       │  ───────╯
-│         │    Open the selected session's actions menu, the same one the ⋯ on its row opens.                                                                                                │   ▁   ▪ ╮
+│         │    Open the selected session's actions menu, the same one the ⋯ on its row opens.                                                                                                │   ▁   ▄ ╮
 │         │  ctrl+b shift+a           Sub-agents                                                                                                                                             │         │
 │         │    Open the sub-agents of this session in their own list. Esc or the X on the workspace strip returns to the parent. — This session has no sub-agents.                           │         │
 │         │  —                        Container settings                                                                                                                                     │         │
@@ -195,10 +195,10 @@ Enter op
 │         │    Edit CPU, memory, and mounts for the next time the container is created.                                                                                                      │         │
 │         │  —                        Change workspace…                                                                                                                                      │         │
 │         │    Move the selected session, and its sub-agents, to another workspace, after you confirm. — There is no other workspace.                                                        │  ───────╯
-│         │  —                        Move session…                                                                                                                                          │   ▁   ▪ ╮
+│         │  —                        Move session…                                                                                                                                          │   ▁   ▄ ╮
 │         │    Restore the selected session on another profile and/or target.                                                                                                                │         │
 │         │  —                        Copy session ID                                                                                                                                        │  ───────╯
-│         │    Copy the selected session's full ID to the clipboard.                                                                                                                         │   ▁   ▪ ╮
+│         │    Copy the selected session's full ID to the clipboard.                                                                                                                         │   ▁   ▄ ╮
 │         │  —                        Destroy session…                                                                                                                                       │         │
 │         │    Permanently remove the selected session, its target, and its recovery archive.                                                                                                │         │
 │         │                                                                                                                                                                                  │         │
@@ -247,10 +247,10 @@ Enter op
 │         │Panes                                                                                                                                                                             │         │
 │         │  —                        Pin session…                                                                                                                                           │         │
 │         │    Keep a session visible while browsing others.                                                                                                                                 │  ───────╯
-│         │  —                        Unpin session                                                                                                                                          │   ▁   ▪ ╮
+│         │  —                        Unpin session                                                                                                                                          │   ▁   ▄ ╮
 │         │    Leave this pane empty without stopping its session. — This session is not pinned.                                                                                             │         │
 │         │  ctrl+b v                 Split right                                                                                                                                            │  ───────╯
-│         │    Split this pane right; keep the old Browse session pinned and browse in the new pane.                                                                                         │   ▁   ▪ ╮
+│         │    Split this pane right; keep the old Browse session pinned and browse in the new pane.                                                                                         │   ▁   ▄ ╮
 │         │  ctrl+b -                 Split down                                                                                                                                             │         │
 │         │    Split this pane down; keep the old Browse session pinned and browse in the new pane.                                                                                          │         │
 │         │  ctrl+b x                 Close pane                                                                                                                                             │         │
@@ -299,10 +299,10 @@ Enter op
 │         │    Remove the conversation pane you are in; the last one is emptied instead. The Browse pane cannot be closed; move it with Swap pane.                                           │         │
 │         │  ctrl+b h                 Focus pane left                                                                                                                                        │         │
 │         │    Move the keyboard to the conversation pane left of this one.                                                                                                                  │  ───────╯
-│         │  ctrl+b j                 Focus pane down                                                                                                                                        │   ▁   ▪ ╮
+│         │  ctrl+b j                 Focus pane down                                                                                                                                        │   ▁   ▄ ╮
 │         │    Move the keyboard to the conversation pane below this one.                                                                                                                    │         │
 │         │  ctrl+b k                 Focus pane up                                                                                                                                          │  ───────╯
-│         │    Move the keyboard to the conversation pane above this one.                                                                                                                    │   ▁   ▪ ╮
+│         │    Move the keyboard to the conversation pane above this one.                                                                                                                    │   ▁   ▄ ╮
 │         │  ctrl+b l                 Focus pane right                                                                                                                                       │         │
 │         │    Move the keyboard to the conversation pane right of this one.                                                                                                                 │         │
 │         │  ctrl+b ;                 Focus last pane                                                                                                                                        │         │
@@ -351,10 +351,10 @@ Enter op
 │         │    Move the keyboard back to the conversation pane it was in before.                                                                                                             │         │
 │         │  ctrl+b z                 Zoom pane                                                                                                                                              │         │
 │         │    Fill the conversation area with the pane you are in, or put the others back.                                                                                                  │  ───────╯
-│         │  ctrl+b r                 Resize panes                                                                                                                                           │   ▁   ▪ ╮
+│         │  ctrl+b r                 Resize panes                                                                                                                                           │   ▁   ▄ ╮
 │         │    Resize conversation panes with h/j/k/l or arrows until Escape.                                                                                                                │         │
 │         │  ctrl+b shift+h           Swap pane left                                                                                                                                         │  ───────╯
-│         │    Move the focused conversation pane left, exchanging places with its neighbor.                                                                                                 │   ▁   ▪ ╮
+│         │    Move the focused conversation pane left, exchanging places with its neighbor.                                                                                                 │   ▁   ▄ ╮
 │         │  ctrl+b shift+j           Swap pane down                                                                                                                                         │         │
 │         │    Move the focused conversation pane down, exchanging places with its neighbor.                                                                                                 │         │
 │         │  ctrl+b shift+k           Swap pane up                                                                                                                                           │         │
@@ -403,10 +403,10 @@ Enter op
 │         │    Move the focused conversation pane up, exchanging places with its neighbor.                                                                                                   │         │
 │         │  ctrl+b shift+l           Swap pane right                                                                                                                                        │         │
 │         │    Move the focused conversation pane right, exchanging places with its neighbor.                                                                                                │  ───────╯
-│         │  —                        Resize pane left                                                                                                                                       │   ▁   ▪ ╮
+│         │  —                        Resize pane left                                                                                                                                       │   ▁   ▄ ╮
 │         │    Move the border of the conversation pane you are in left one step.                                                                                                            │         │
 │         │  —                        Resize pane down                                                                                                                                       │  ───────╯
-│         │    Move the border of the conversation pane you are in down one step.                                                                                                            │   ▁   ▪ ╮
+│         │    Move the border of the conversation pane you are in down one step.                                                                                                            │   ▁   ▄ ╮
 │         │  —                        Resize pane up                                                                                                                                         │         │
 │         │    Move the border of the conversation pane you are in up one step.                                                                                                              │         │
 │         │  —                        Resize pane right                                                                                                                                      │         │
@@ -455,10 +455,10 @@ Enter op
 │         │    Move the border of the conversation pane you are in right one step.                                                                                                           │         │
 │         │  Tab / ctrl+b tab         Next pane                                                                                                                                              │         │
 │         │    Move the keyboard down the layout; Shift-Tab reverses it.                                                                                                                     │  ───────╯
-│         │  ctrl+b shift+tab         Previous pane                                                                                                                                          │   ▁   ▪ ╮
+│         │  ctrl+b shift+tab         Previous pane                                                                                                                                          │   ▁   ▄ ╮
 │         │    Move the keyboard up the layout.                                                                                                                                              │         │
 │         │  ctrl+b shift+z           Pane size                                                                                                                                              │  ───────╯
-│         │    Cycle the focused pane through minimized, standard, and maximized.                                                                                                            │   ▁   ▪ ╮
+│         │    Cycle the focused pane through minimized, standard, and maximized.                                                                                                            │   ▁   ▄ ╮
 │         │  .                        Targets pane menu                                                                                                                                      │         │
 │         │    Open the menu under the Targets title: refresh targets and quotas, or open the runtime or machine settings. Clicking the title opens it too.                                  │         │
 │         │  .                        Profiles pane menu                                                                                                                                     │         │
@@ -507,10 +507,10 @@ Enter op
 │         │    Open the menu under the Profiles title: refresh targets and quotas, or open the profile settings. Clicking the title opens it too.                                            │         │
 │         │  ctrl+b b                 Pane preset                                                                                                                                            │         │
 │         │    Restore standard panes, or minimize all three for the conversation.                                                                                                           │  ───────╯
-│         │                                                                                                                                                                                  │   ▁   ▪ ╮
+│         │                                                                                                                                                                                  │   ▁   ▄ ╮
 │         │Composer                                                                                                                                                                          │         │
 │         │  ctrl+b t                 Toggle transcript rendering                                                                                                                            │  ───────╯
-│         │    Switch the conversation between rendered Markdown and raw text.                                                                                                               │   ▁   ▪ ╮
+│         │    Switch the conversation between rendered Markdown and raw text.                                                                                                               │   ▁   ▄ ╮
 │         │  ctrl+b m                 Dictation                                                                                                                                              │         │
 │         │    Start or stop dictating into the composer.                                                                                                                                    │         │
 │         │  Enter                    send the prompt, or queue it while a turn is running                                                                                                   │         │
@@ -559,10 +559,10 @@ Enter op
 │         │  Shift-Enter / Alt-Enter  start a new line                                                                                                                                       │         │
 │         │  Tab                      accept a completion, or move to the next pane                                                                                                          │         │
 │         │  Esc                      interrupt the running turn or shell command                                                                                                            │  ───────╯
-│         │  PgUp / PgDn              scroll the transcript                                                                                                                                  │   ▁   ▪ ╮
+│         │  PgUp / PgDn              scroll the transcript                                                                                                                                  │   ▁   ▄ ╮
 │         │  Alt+PgUp / Alt+PgDn      previous or next message you sent                                                                                                                      │         │
 │         │  Ctrl+Home / Ctrl+End     top of the conversation, or follow the tail                                                                                                            │  ───────╯
-│         │  Ctrl+PgUp                browse earlier conversation pages                                                                                                                      │   ▁   ▪ ╮
+│         │  Ctrl+PgUp                browse earlier conversation pages                                                                                                                      │   ▁   ▄ ╮
 │         │  Up / Down                walk prompt history, or move within the prompt                                                                                                         │         │
 │         │  Ctrl-R                   search prompt history                                                                                                                                  │         │
 │         │  Ctrl-V                   paste from the system clipboard                                                                                                                        │         │
@@ -611,10 +611,10 @@ Enter op
 │         │  Ctrl-A / Ctrl-E          start or end of the line                                                                                                                               │         │
 │         │  Ctrl-B / Ctrl-F          back or forward one character                                                                                                                          │         │
 │         │  Alt-B / Alt-F            back or forward one word                                                                                                                               │  ───────╯
-│         │  Ctrl-H / Ctrl-D          delete before or after the cursor                                                                                                                      │   ▁   ▪ ╮
+│         │  Ctrl-H / Ctrl-D          delete before or after the cursor                                                                                                                      │   ▁   ▄ ╮
 │         │  Alt-D                    delete the word after the cursor                                                                                                                       │         │
 │         │  Ctrl-W                   delete the word before the cursor                                                                                                                      │  ───────╯
-│         │  Ctrl-U / Ctrl-K          kill to the start or end of the line                                                                                                                   │   ▁   ▪ ╮
+│         │  Ctrl-U / Ctrl-K          kill to the start or end of the line                                                                                                                   │   ▁   ▄ ╮
 │         │  Ctrl-Y                   yank what was killed                                                                                                                                   │         │
 │         │  Ctrl-C                   stash the prompt into history and clear it                                                                                                             │         │
 │         │  Ctrl-P / Ctrl-N          previous or next line, or history                                                                                                                      │         │
@@ -663,10 +663,10 @@ Enter op
 │         │  ctrl+b ctrl+b            send a literal ctrl+b to the composer                                                                                                                  │         │
 │         │                                                                                                                                                                                  │         │
 │         │Settings & Diagnostics                                                                                                                                                            │  ───────╯
-│         │  —                        Change fast-start setup                                                                                                                                │   ▁   ▪ ╮
+│         │  —                        Change fast-start setup                                                                                                                                │   ▁   ▄ ╮
 │         │    Choose and remember a new account, target, or isolation for this project. — Not available here.                                                                               │         │
 │         │  Enter / e                Target actions                                                                                                                                         │  ───────╯
-│         │    Test or rename the selected target.                                                                                                                                           │   ▁   ▪ ╮
+│         │    Test or rename the selected target.                                                                                                                                           │   ▁   ▄ ╮
 │         │  d                        Show disks                                                                                                                                             │         │
 │         │    Open the selected target's filesystems, free space, and status. Clicking the Disks cell does the same.                                                                        │         │
 │         │  Enter / e                Rename profile                                                                                                                                         │         │
@@ -715,10 +715,10 @@ Enter op
 │         │    Rename the selected profile's configuration id.                                                                                                                               │         │
 │         │  —                        Manage agent profiles                                                                                                                                  │         │
 │         │    Add or edit agent accounts, harnesses, and environment settings.                                                                                                              │  ───────╯
-│         │  —                        Manage machines                                                                                                                                        │   ▁   ▪ ╮
+│         │  —                        Manage machines                                                                                                                                        │   ▁   ▄ ╮
 │         │    Add SSH hosts or EC2 launch templates and edit their shared settings.                                                                                                         │         │
 │         │  —                        Manage runtimes                                                                                                                                        │  ───────╯
-│         │    Add a runtime (the engine or directory a target runs in) and choose the machine it runs on.                                                                                   │   ▁   ▪ ╮
+│         │    Add a runtime (the engine or directory a target runs in) and choose the machine it runs on.                                                                                   │   ▁   ▄ ╮
 │         │  ctrl+b s                 Open settings                                                                                                                                          │         │
 │         │    Edit all configuration in the Settings modal.                                                                                                                                 │         │
 │         │  ctrl+b u                 Web viewer                                                                                                                                             │         │
@@ -767,10 +767,10 @@ Enter op
 │         │    Show the address and code for the browser and phone viewer.                                                                                                                   │         │
 │         │  —                        Restart the Mjolnir daemon                                                                                                                             │         │
 │         │    Stop the background daemon and start one from this build, then report which build came up.                                                                                    │  ───────╯
-│         │  ctrl+b shift+r           Refresh targets and quotas                                                                                                                             │   ▁   ▪ ╮
+│         │  ctrl+b shift+r           Refresh targets and quotas                                                                                                                             │   ▁   ▄ ╮
 │         │    Re-probe every target's capacity and ask every profile for its quota again.                                                                                                   │         │
 │         │  —                        CPU by session                                                                                                                                         │  ───────╯
-│         │    Show live sessions grouped by machine, with each session's CPU share over about the last hour, highest first.                                                                 │   ▁   ▪ ╮
+│         │    Show live sessions grouped by machine, with each session's CPU share over about the last hour, highest first.                                                                 │   ▁   ▄ ╮
 │         │  —                        Usage by session                                                                                                                                       │         │
 │         │    Compare each parent session and its sub-agents by model and estimated API cost, highest total first; filter by parent profile and trailing hour, week or month.               │         │
 │         │  —                        Recent messages                                                                                                                                        │         │
@@ -819,10 +819,10 @@ Enter op
 │         │  ctrl+b shift+r           Refresh targets and quotas                                                                                                                             │         │
 │         │    Re-probe every target's capacity and ask every profile for its quota again.                                                                                                   │         │
 │         │  —                        CPU by session                                                                                                                                         │  ───────╯
-│         │    Show live sessions grouped by machine, with each session's CPU share over about the last hour, highest first.                                                                 │   ▁   ▪ ╮
+│         │    Show live sessions grouped by machine, with each session's CPU share over about the last hour, highest first.                                                                 │   ▁   ▄ ╮
 │         │  —                        Usage by session                                                                                                                                       │         │
 │         │    Compare each parent session and its sub-agents by model and estimated API cost, highest total first; filter by parent profile and trailing hour, week or month.               │  ───────╯
-│         │  —                        Recent messages                                                                                                                                        │   ▁   ▪ ╮
+│         │  —                        Recent messages                                                                                                                                        │   ▁   ▄ ╮
 │         │    Show the last notices the footer reported, newest first, including failures that replaced each other.                                                                         │         │
 │         │  —                        Next spinner style                                                                                                                                     │         │
 │         │    Cycle activity animations: scan, pulse, wave, bars, shimmer, globe.                                                                                                           │         │
@@ -1003,10 +1003,10 @@ workspace manager: available=true, prefix-key=ctrl+b shift+n, palette-hidden=fal
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
 │     │                                                                                                          │  ───╯
-│     │                                                                                                          │   ▪ ╮
+│     │                                                                                                          │   ▄ ╮
 │     │                                                                                                          │     │
 │     │                                                                                                          │  ───╯
-│     │                                                                                                          │   ▪ ╮
+│     │                                                                                                          │   ▄ ╮
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
@@ -1040,10 +1040,10 @@ Ente                                                                            
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
 │     │                                                                                                          │  ───╯
-│     │                                                                                                          │   ▪ ╮
+│     │                                                                                                          │   ▄ ╮
 │     │                                                                                                          │     │
 │     │                                                                                                          │  ───╯
-│     │                                                                                                          │   ▪ ╮
+│     │                                                                                                          │   ▄ ╮
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
@@ -1073,10 +1073,10 @@ web viewer bound keys: []
 │                │  Move session…                                                                    ││                │
 │                │  Copy session ID                                                                  ││                │
 │                │  Destroy session…                                                                 ││  ──────────────╯
-│                │  Sessions pane  ───────────────────────────────────────────────────────────────── ││  ─────── ▁   ▪ ╮
+│                │  Sessions pane  ───────────────────────────────────────────────────────────────── ││  ─────── ▁   ▄ ╮
 │                │  Open session                                                               Enter ││                │
 │                │  Create session                                                  n / N / ctrl+b c ││  ──────────────╯
-│                │  Mark all read                                                           ctrl+b a ││  ─────── ▁   ▪ ╮
+│                │  Mark all read                                                           ctrl+b a ││  ─────── ▁   ▄ ╮
 │                │  Search sessions                                                                /  │                │
 │                │Keep a session visible while browsing others.                                       │                │
 │                │  Run                                                                               │                │
@@ -1116,10 +1116,10 @@ palette entries: 66
 │     │    Put the keyboard on the workspace tabs.                                                               │     │
 │     │  ctrl+b p                 Previous workspace                                                             │     │
 │     │    Select the previous workspace tab.                                                                    │  ───╯
-│     │  ctrl+b n                 Next workspace                                                                 │   ▪ ╮
+│     │  ctrl+b n                 Next workspace                                                                 │   ▄ ╮
 │     │    Select the next workspace tab.                                                                        │     │
 │     │  ctrl+b 1-9               Switch to workspace by number                                                  │  ───╯
-│     │    Select the first to ninth workspace tab directly.                                                     │   ▪ ╮
+│     │    Select the first to ninth workspace tab directly.                                                     │   ▄ ╮
 │     │                                                                                                          │     │
 │     │Sessions                                                                                                  │     │
 │     │  Enter                    Open session                                                                   │     │
@@ -1129,9 +1129,9 @@ Ente                                                                            
 
 === wizard restored after help (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty                                                                                                        │
@@ -1158,10 +1158,10 @@ Ente                                                                            
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │   Cancel     Next                                                                │  ──────── ▁   ▪ ╮
+│                 │   Cancel     Next                                                                │  ──────── ▁   ▄ ╮
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                       ───────────────╯
-│                                                                                                       ──────── ▁   ▪ ╮
+│                                                                                                       ──────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -1210,10 +1210,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │  ───────╯
-│         │                                                                                                                                                                                  │   ▁   ▪ ╮
+│         │                                                                                                                                                                                  │   ▁   ▄ ╮
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │  ───────╯
-│         │                                                                                                                                                                                  │   ▁   ▪ ╮
+│         │                                                                                                                                                                                  │   ▁   ▄ ╮
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │         │
@@ -1262,10 +1262,10 @@ Enter op
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │  ───────╯
-│         │                                                                                                                                                                                  │   ▁   ▪ ╮
+│         │                                                                                                                                                                                  │   ▁   ▄ ╮
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │  ───────╯
-│         │                                                                                                                                                                                  │   ▁   ▪ ╮
+│         │                                                                                                                                                                                  │   ▁   ▄ ╮
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │         │
@@ -1314,10 +1314,10 @@ Enter op
 │         │  ctrl+b shift+x           Suspend session…                                                                                                                                       │         │
 │         │    Save a recovery copy and release the environment. Resume this session later.                                                                                                  │         │
 │         │  —                        Restart session                                                                                                                                        │  ───────╯
-│         │    Restart with the same profile, target, and mounts, without confirmation.                                                                                                      │   ▁   ▪ ╮
+│         │    Restart with the same profile, target, and mounts, without confirmation.                                                                                                      │   ▁   ▄ ╮
 │         │  ctrl+b a                 Mark all read                                                                                                                                          │         │
 │         │    Clear the unread marker on every session in this workspace at once; questions, failures, and unreachable sessions stay flagged.                                               │  ───────╯
-│         │  /                        Search sessions                                                                                                                                        │   ▁   ▪ ╮
+│         │  /                        Search sessions                                                                                                                                        │   ▁   ▄ ╮
 │         │    Type to keep only the sessions whose name, project, profile, or target matches. The letters b, w, i, d, and a keep only blocked, working, idle, or done sessions, or all of   │         │
 │         │    them.                                                                                                                                                                         │         │
 │         │  ctrl+b o                 Next session needing you                                                                                                                               │         │
@@ -1327,9 +1327,9 @@ Enter op
 
 === dashboard restored after help (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -1356,10 +1356,10 @@ Enter op
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -1408,10 +1408,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │  ───────╯
-│         │                                                                                                                                                                                  │   ▁   ▪ ╮
+│         │                                                                                                                                                                                  │   ▁   ▄ ╮
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │  ───────╯
-│         │                                                                                                                                                                                  │   ▁   ▪ ╮
+│         │                                                                                                                                                                                  │   ▁   ▄ ╮
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │         │
@@ -1422,9 +1422,9 @@ help filter state: query=TextInput { value: "np", cursor: 2, kill_buffer: "", ch
 
 === Enter closes empty help (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -1451,10 +1451,10 @@ help filter state: query=TextInput { value: "np", cursor: 2, kill_buffer: "", ch
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -1483,10 +1483,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │  ───────╯
-│         │                                                                                                                                                                                  │   ▁   ▪ ╮
+│         │                                                                                                                                                                                  │   ▁   ▄ ╮
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │  ───────╯
-│         │                                                                                                                                                                                  │   ▁   ▪ ╮
+│         │                                                                                                                                                                                  │   ▁   ▄ ╮
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │         │
 │         │                                                                                                                                                                                  │         │
@@ -1506,10 +1506,10 @@ Enter op
 │  │ No   │  ctrl+b g                 Sessions                                                                                                                                               │         │
 │  │      │    Open every running session, in every workspace, on one list. The tabs to its right list the sessions that can be resumed, imported, or restored from the search index.        │         │
 │         │  ctrl+b q                 Detach from this terminal                                                                                                                              │  ───────╯
-│         │    Leave this terminal client; the daemon and its sessions keep running.                                                                                                         │   ▁   ▪ ╮
+│         │    Leave this terminal client; the daemon and its sessions keep running.                                                                                                         │   ▁   ▄ ╮
 │         │  ctrl+b :                 Command palette                                                                                                                                        │         │
 │         │    Search every command that applies right now and run one.                                                                                                                      │  ───────╯
-│         │  ? / ctrl+b ?             Help                                                                                                                                                   │   ▪   □ ╮
+│         │  ? / ctrl+b ?             Help                                                                                                                                                   │   ▄   □ ╮
 │         │    List every key this surface answers.                                                                                                                                          │         ▐
 │         │                                                                                                                                                                                  │         ▐
 │         ╰ ↑↓ scroll · Type to filter · Esc / Enter closes ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯         │
@@ -1518,9 +1518,9 @@ Enter op
 
 === Enter closes filtered help (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -1547,10 +1547,10 @@ Enter op
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -1584,10 +1584,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
 │     │                                                                                                          │  ───╯
-│     │                                                                                                          │   ▪ ╮
+│     │                                                                                                          │   ▄ ╮
 │     │                                                                                                          │     │
 │     │                                                                                                          │  ───╯
-│     │                                                                                                          │   ▪ ╮
+│     │                                                                                                          │   ▄ ╮
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
@@ -1621,10 +1621,10 @@ Ente                                                                            
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
 │     │                                                                                                          │  ───╯
-│     │                                                                                                          │   ▪ ╮
+│     │                                                                                                          │   ▄ ╮
 │     │                                                                                                          │     │
 │     │                                                                                                          │  ───╯
-│     │                                                                                                          │   ▪ ╮
+│     │                                                                                                          │   ▄ ╮
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
@@ -1658,10 +1658,10 @@ Ente
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
 │     │                                                                                                          │  ───╯
-│     │                                                                                                          │   ▪ ╮
+│     │                                                                                                          │   ▄ ╮
 │     │                                                                                                          │     │
 │     │                                                                                                          │  ───╯
-│     │                                                                                                          │   ▪ ╮
+│     │                                                                                                          │   ▄ ╮
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
@@ -1695,10 +1695,10 @@ Ente
 │     │  ctrl+b shift+d           Delete workspace…                                                              │     │
 │     │    Confirm suspending workspace sessions, preserving history, and discarding drafts.                     │     │
 │     │  ctrl+b shift+n           Workspaces                                                                     │  ───╯
-│     │    Open the workspace manager to add, rename, or delete a workspace.                                     │   ▪ ╮
+│     │    Open the workspace manager to add, rename, or delete a workspace.                                     │   ▄ ╮
 │     │  ctrl+b w                 Focus the workspace strip                                                      │     │
 │     │    Put the keyboard on the workspace tabs.                                                               │  ───╯
-│     │  ctrl+b p                 Previous workspace                                                             │   ▪ ╮
+│     │  ctrl+b p                 Previous workspace                                                             │   ▄ ╮
 │     │    Select the previous workspace tab.                                                                    │     │
 │     │  ctrl+b n                 Next workspace                                                                 │     │
 │     │    Select the next workspace tab.                                                                        │     │
@@ -1733,10 +1733,10 @@ dialog interaction: confirmation-open=false; text-input-focused=true; help owns 
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
 │     │                                                                                                          │  ───╯
-│     │                                                                                                          │   ▪ ╮
+│     │                                                                                                          │   ▄ ╮
 │     │                                                                                                          │     │
 │     │                                                                                                          │  ───╯
-│     │                                                                                                          │   ▪ ╮
+│     │                                                                                                          │   ▄ ╮
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
@@ -1770,10 +1770,10 @@ Ente                                                                            
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
 │     │                                                                                                          │  ───╯
-│     │                                                                                                          │   ▪ ╮
+│     │                                                                                                          │   ▄ ╮
 │     │                                                                                                          │     │
 │     │                                                                                                          │  ───╯
-│     │                                                                                                          │   ▪ ╮
+│     │                                                                                                          │   ▄ ╮
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
 │     │                                                                                                          │     │
@@ -1784,9 +1784,9 @@ help search focus after row click: true
 
 === palette result opens rename (120x35) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -1808,10 +1808,10 @@ help search focus after row click: true
 │                                                                                                                      │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -1821,9 +1821,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 
 === outside click dismisses palette (120x35) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -1845,10 +1845,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │

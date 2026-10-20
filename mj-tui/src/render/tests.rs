@@ -363,7 +363,7 @@ fn pane_size_controls_are_styled_registered_and_clickable_without_moving_focus()
             let cell = &buffer[(area.x + 1, area.y)];
             let glyph = match size {
                 PaneSize::Minimized => "▁",
-                PaneSize::Standard => "▪",
+                PaneSize::Standard => "▄",
                 PaneSize::Maximized => "□",
             };
             assert_eq!(cell.symbol(), glyph);
@@ -392,7 +392,7 @@ fn pane_size_controls_are_styled_registered_and_clickable_without_moving_focus()
     assert_eq!(target_controls.len(), 2);
     for ((_, size, area), (glyph, expected_size)) in target_controls
         .into_iter()
-        .zip([("▁", PaneSize::Minimized), ("▪", PaneSize::Standard)])
+        .zip([("▁", PaneSize::Minimized), ("▄", PaneSize::Standard)])
     {
         assert_eq!(size, expected_size);
         assert_eq!(buffer[(area.x + 1, area.y)].symbol(), glyph);

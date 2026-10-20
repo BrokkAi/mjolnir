@@ -72,18 +72,37 @@ const SHUTDOWN_FORCE_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// way destruction must not paper over.
 const FORCE_DESTROY_PREEMPT_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// Cancellation and committing a newly started session are one atomic decision.
+/// Whether a running lifecycle operation can still be cancelled: open, then
+/// either cancelled or committed, and exactly one of those two wins.
+///
+/// An operation commits at the first step a cancel could no longer undo: a
+/// create once its new session is published, a graceful close once its
+/// verified checkpoint is installed and it starts stopping the session. This
+/// is the one owner of whether the operation itself can still be cancelled,
+/// and the operation's executor reads [`Self::cancelled`], which is set only
+/// when a cancel is accepted, so a committed operation never sees its
+/// commands fail as cancelled (#1218). Daemon shutdown is the one exception
+/// ([`Self::interrupt`]).
 #[derive(Clone, Default)]
-pub struct CreateSessionControl {
+pub struct LifecycleControl {
     state: Arc<AtomicU8>,
     pub cancelled: Arc<AtomicBool>,
 }
 
-impl CreateSessionControl {
+const LIFECYCLE_OPEN: u8 = 0;
+const LIFECYCLE_CANCELLED: u8 = 1;
+const LIFECYCLE_COMMITTED: u8 = 2;
+
+impl LifecycleControl {
     pub fn request_cancel(&self) -> bool {
         let accepted = self
             .state
-            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(
+                LIFECYCLE_OPEN,
+                LIFECYCLE_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
             .is_ok();
         if accepted {
             self.cancelled.store(true, Ordering::Release);
@@ -91,14 +110,36 @@ impl CreateSessionControl {
         accepted
     }
 
+    /// Commit the operation, unless a cancel was accepted first. Only the
+    /// first commit is granted.
     pub fn grant_commit(&self) -> bool {
         self.state
-            .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(
+                LIFECYCLE_OPEN,
+                LIFECYCLE_COMMITTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
             .is_ok()
     }
 
     fn is_cancellable(&self) -> bool {
-        self.state.load(Ordering::Acquire) == 0
+        self.state.load(Ordering::Acquire) == LIFECYCLE_OPEN
+    }
+
+    fn is_committed(&self) -> bool {
+        self.state.load(Ordering::Acquire) == LIFECYCLE_COMMITTED
+    }
+
+    fn cancel_accepted(&self) -> bool {
+        self.state.load(Ordering::Acquire) == LIFECYCLE_CANCELLED
+    }
+
+    /// Stop the operation's commands because the daemon is exiting, whether
+    /// or not it committed. This is not a cancel: the operation fails where it
+    /// is, and the next daemon finishes it from its durable record.
+    fn interrupt(&self) {
+        self.cancelled.store(true, Ordering::Release);
     }
 }
 
@@ -270,6 +311,18 @@ impl LifecycleKind {
         )
     }
 
+    /// Whether only the operation that started this one may cancel it, never a
+    /// person directly. A sub-agent's stop belongs to its parent's suspend,
+    /// which is what a person cancels. A park and an unpark belong to the
+    /// parent's sub-agent tools: a person ends either by closing the child,
+    /// whose close cancels or waits for them.
+    fn cancelled_only_by_its_owner(self) -> bool {
+        matches!(
+            self,
+            LifecycleKind::StopSubagent | LifecycleKind::Park | LifecycleKind::Unpark
+        )
+    }
+
     /// What a refusal calls this operation, so a person told that a session is
     /// busy learns which operation is holding it (#1010).
     fn label(self) -> &'static str {
@@ -320,24 +373,17 @@ fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>
     }
 }
 
-/// Whether a running lifecycle can still be cancelled. A graceful close has a
-/// point of no return: once the durable state says `Destroying`, the verified
-/// checkpoint is sealed and the record has already committed to losing its
-/// target, so stopping the teardown only strands the target. A sub-agent's
-/// stop belongs to its parent's suspend, which is what a person cancels.
-/// Every other lifecycle stays cancellable while it runs.
+/// Whether an operation admitted on a record in this durable state starts
+/// committed, so that nothing can cancel it ([`LifecycleControl`]).
 ///
-/// A park and an unpark belong to the parent's sub-agent tools: a person ends
-/// either by closing the child, which waits for them.
-fn lifecycle_cancellable(kind: LifecycleKind, state: Option<SessionState>) -> bool {
-    !(state == Some(SessionState::StartupCleanup)
-        || kind == LifecycleKind::StartupCleanup
+/// A failed startup's teardown must finish. A close or a Restart admitted on a
+/// record that already says `Destroying` was past its point of no return
+/// before this daemon started: the verified checkpoint is sealed and the
+/// target is being removed, so stopping now only strands the target.
+fn lifecycle_starts_committed(kind: LifecycleKind, state: Option<SessionState>) -> bool {
+    kind == LifecycleKind::StartupCleanup
         || matches!(kind, LifecycleKind::Suspend | LifecycleKind::Restart)
             && state == Some(SessionState::Destroying)
-        || matches!(
-            kind,
-            LifecycleKind::StopSubagent | LifecycleKind::Park | LifecycleKind::Unpark
-        ))
 }
 
 /// How a stop request has to be carried out, given the durable record.
@@ -427,9 +473,9 @@ struct ActiveLifecycle {
     upgrade_work: Arc<Mutex<Option<crate::upgrade::Work>>>,
     phase: LifecyclePhase,
     operation_id: String,
-    create_control: Option<CreateSessionControl>,
+    /// The one owner of whether this operation may still be cancelled.
+    control: LifecycleControl,
     kind: LifecycleKind,
-    cancelled: Arc<AtomicBool>,
     started_at_epoch_seconds: u64,
     active_stages: BTreeMap<ProvisionStage, (usize, u64)>,
     /// The workspace a resume is claiming before its durable record changes.
@@ -473,11 +519,7 @@ impl ActiveLifecycle {
         ) {
             return false;
         }
-        let accepted = if let Some(control) = &self.create_control {
-            control.request_cancel()
-        } else {
-            !self.cancelled.swap(true, Ordering::AcqRel)
-        };
+        let accepted = self.control.request_cancel();
         if accepted {
             self.phase = match self.phase {
                 LifecyclePhase::MovingDestination => LifecyclePhase::CancellingMoveDestination,
@@ -491,10 +533,42 @@ impl ActiveLifecycle {
         matches!(
             self.phase,
             LifecyclePhase::Executing | LifecyclePhase::MovingDestination
-        ) && self.create_control.as_ref().map_or_else(
-            || !self.cancelled.load(Ordering::Acquire),
-            CreateSessionControl::is_cancellable,
-        )
+        ) && self.control.is_cancellable()
+    }
+
+    /// Whether a person may cancel this operation now. The dashboard offers a
+    /// cancel, and a person's cancel is accepted, only when this holds.
+    ///
+    /// Besides the operation's own control, a failed startup's cleanup keeps
+    /// a person from cancelling whatever operation runs it: create, resume and
+    /// unpark move their record to `StartupCleanup` in code that does not hold
+    /// the control, and that cleanup ignores cancellation anyway.
+    fn cancellable_by_person(&self, durable: Option<SessionState>) -> bool {
+        self.person_may_cancel_kind(durable) && self.is_cancellable()
+    }
+
+    fn person_may_cancel_kind(&self, durable: Option<SessionState>) -> bool {
+        !self.kind.cancelled_only_by_its_owner() && durable != Some(SessionState::StartupCleanup)
+    }
+
+    /// Stop this operation for daemon shutdown. An operation that can still be
+    /// cancelled is cancelled. A committed one is interrupted, because the
+    /// next daemon finishes it from its record, except a committed create,
+    /// whose caller now owns the new session and which no daemon resumes.
+    fn interrupt_for_shutdown(&mut self) -> bool {
+        if self.request_cancel() {
+            return true;
+        }
+        let interruptible = self.kind != LifecycleKind::Create
+            && self.control.is_committed()
+            && matches!(
+                self.phase,
+                LifecyclePhase::Executing | LifecyclePhase::MovingDestination
+            );
+        if interruptible {
+            self.control.interrupt();
+        }
+        interruptible
     }
 }
 

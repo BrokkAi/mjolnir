@@ -1,6 +1,6 @@
 === focused replacement source (100x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
 ╭ Sessions                                                                                         │
 │ Create                                                                                  .        │
@@ -13,10 +13,10 @@
 │           │                                                                          │           │
 │           │Enter a GitHub origin or absolute local path that contains this history:  │  open.    │
 │           │Source:                                                                   │  ─────────╯
-│           │                                                                          │  ── ▁   ▪ ╮
+│           │                                                                          │  ── ▁   ▄ ╮
 │           │Type or paste into Source · Tab moves · Enter checks                      │           │
 │           │                                                                          │  ─────────╯
-│           │  Cancel     Check origin                                                 │  ── ▁   ▪ ╮
+│           │  Cancel     Check origin                                                 │  ── ▁   ▄ ╮
 │           ╰──────────────────────────────────────────────────────────────────────────╯  esets    │
 │                                                                                                  │
 │                                                                                                  │
@@ -30,7 +30,7 @@ Cancel action focused: false
 
 === focus moves to origin actions (100x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
 ╭ Sessions                                                                                         │
 │ Create                                                                                  .        │
@@ -43,10 +43,10 @@ Cancel action focused: false
 │           │                                                                          │           │
 │           │Enter a GitHub origin or absolute local path that contains this history:  │  open.    │
 │           │Source:                                                                   │  ─────────╯
-│           │                                                                          │  ── ▁   ▪ ╮
+│           │                                                                          │  ── ▁   ▄ ╮
 │           │Type or paste into Source · Tab moves · Enter checks                      │           │
 │           │                                                                          │  ─────────╯
-│           │  Cancel     Check origin                                                 │  ── ▁   ▪ ╮
+│           │  Cancel     Check origin                                                 │  ── ▁   ▄ ╮
 │           ╰──────────────────────────────────────────────────────────────────────────╯  esets    │
 │                                                                                                  │
 │                                                                                                  │

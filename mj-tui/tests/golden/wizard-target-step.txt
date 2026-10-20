@@ -1,8 +1,8 @@
 === new_session_wizard_keeps_its_frame_across_steps (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ────────────────────────────────────────││                                                                                            │
 │› ■ ACP pretty name                                                                                                                       │
@@ -29,10 +29,10 @@
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Next                                                                │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Next                                                                │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -41,9 +41,9 @@
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === new_session_wizard_keeps_its_frame_across_steps (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ────────────────────────────────────────││                                                                                            │
 │› ■ ACP pretty name                                                                                                                       │
@@ -70,10 +70,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -82,9 +82,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === new_session_wizard_keeps_its_frame_across_steps (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ────────────────────────────────────────││                                                                                            │
 │› ■ ACP pretty name                                                                                                                       │
@@ -111,10 +111,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -123,9 +123,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === new_session_wizard_keeps_its_frame_across_steps (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ────────────────────────────────────────││                                                                                            │
 │› ■ ACP pretty name                                                                                                                       │
@@ -152,10 +152,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Back     Cancel     Use project                                                │  ────────────────── ▁   ▪ ╮
+│                           │   Back     Cancel     Use project                                                │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -164,9 +164,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === new_session_wizard_keeps_its_frame_across_steps (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ────────────────────────────────────────││                                                                                            │
 │› ■ ACP pretty name                                                                                                                       │
@@ -193,10 +193,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -205,9 +205,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === new_session_wizard_keeps_its_frame_across_steps (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ────────────────────────────────────────││                                                                                            │
 │› ■ ACP pretty name                                                                                                                       │
@@ -234,10 +234,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Add directory…     Create                                  │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Add directory…     Create                                  │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -246,9 +246,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === new_session_wizard_keeps_its_frame_across_steps (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ────────────────────────────────────────││                                                                                            │
 │› ■ ACP pretty name                                                                                                                       │
@@ -275,10 +275,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Add directory                                              │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Add directory                                              │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -287,9 +287,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === new_session_wizard_keeps_its_frame_across_steps (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ────────────────────────────────────────││                                                                                            │
 │› ■ ACP pretty name                                                                                                                       │
@@ -316,10 +316,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel                                                                         │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel                                                                         │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -512,9 +512,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 
 === new_session_skips_the_target_step_when_only_one_target_is_offered (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │No sessions yet                             ││                                                                                            │
 │Create new work or open a                                                                                                                 │
@@ -541,10 +541,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Next                                                                │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Next                                                                │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -553,9 +553,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === new_session_skips_the_target_step_when_only_one_target_is_offered (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │No sessions yet                             ││                                                                                            │
 │Create new work or open a                                                                                                                 │
@@ -582,10 +582,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -595,9 +595,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 action: ValidateProjectDirectory { target_template_id: "localhost", directory: "/work/project" }
 === new_session_skips_the_target_step_when_only_one_target_is_offered (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │No sessions yet                             ││                                                                                            │
 │Create new work or open a                                                                                                                 │
@@ -624,10 +624,10 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Create                                                     │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Create                                                     │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -636,9 +636,9 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === new_session_shows_the_target_step_when_a_second_target_may_be_chosen (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │No sessions yet                             ││                                                                                            │
 │Create new work or open a                                                                                                                 │
@@ -665,10 +665,10 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Next                                                                │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Next                                                                │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -677,9 +677,9 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === new_session_shows_the_target_step_when_a_second_target_may_be_chosen (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │No sessions yet                             ││                                                                                            │
 │Create new work or open a                                                                                                                 │
@@ -706,10 +706,10 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -718,9 +718,9 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === new_session_shows_the_target_step_when_a_second_target_may_be_chosen (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │No sessions yet                             ││                                                                                            │
 │Create new work or open a                                                                                                                 │
@@ -747,10 +747,10 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Next                                                                │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Next                                                                │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -759,9 +759,9 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === new_session_shows_the_target_step_when_a_second_target_may_be_chosen (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │No sessions yet                             ││                                                                                            │
 │Create new work or open a                                                                                                                 │
@@ -788,10 +788,10 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -800,9 +800,9 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === a_lone_container_target_keeps_its_step_for_sizing (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │No sessions yet                             ││                                                                                            │
 │Create new work or open a                                                                                                                 │
@@ -829,10 +829,10 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -842,9 +842,9 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 action: None
 === resume_skips_the_target_step_when_only_one_target_suits_the_session (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │project ────────────────────────────────────││                                                                                            │
 │› ■ ACP pretty name                                                                                                                       │
@@ -871,10 +871,10 @@ action: None
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Next                                                                │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Next                                                                │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -883,9 +883,9 @@ action: None
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === resume_skips_the_target_step_when_only_one_target_suits_the_session (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │project ────────────────────────────────────││                                                                                            │
 │› ■ ACP pretty name                                                                                                                       │
@@ -912,10 +912,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Resume                                                     │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Resume                                                     │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -926,9 +926,9 @@ action: PreflightResumeRepositories { launch: ResumeSession { workspace_id: "def
 action: None
 === resume_shows_the_target_step_when_two_targets_suit_the_session (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │project ────────────────────────────────────││                                                                                            │
 │› ■ ACP pretty name                                                                                                                       │
@@ -955,10 +955,10 @@ action: None
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Next                                                                │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Next                                                                │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -967,9 +967,9 @@ action: None
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === resume_shows_the_target_step_when_two_targets_suit_the_session (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │project ────────────────────────────────────││                                                                                            │
 │› ■ ACP pretty name                                                                                                                       │
@@ -996,10 +996,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -1009,9 +1009,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 action: None
 === move_skips_the_target_step_when_only_one_target_suits_the_session (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │project ────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                                                                                                                       │
@@ -1038,10 +1038,10 @@ action: None
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Next                                                                │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Next                                                                │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -1051,9 +1051,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 action: MoveSession { subagents: None, workspace_selection: WorkspaceSelection { exclusions: [], acknowledge_large_transfer: false }, session_id: "session-1", profile_id: "codex-1", target_template_id: "machine", additional_mounts: [], resource_allocation: None, clear_resource_allocation: true, preparation_request_id: Some(1), queue: Some(Discard) }
 === move_skips_the_target_step_when_only_one_target_suits_the_session (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │project ────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                                                                                                                       │
@@ -1080,10 +1080,10 @@ action: MoveSession { subagents: None, workspace_selection: WorkspaceSelection {
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Choose files…     Move                                     │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Choose files…     Move                                     │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -1093,9 +1093,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 action: None
 === move_shows_the_target_step_when_two_targets_suit_the_session (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │project ────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                                                                                                                       │
@@ -1122,10 +1122,10 @@ action: None
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Next                                                                │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Next                                                                │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -1134,9 +1134,9 @@ action: None
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === move_shows_the_target_step_when_two_targets_suit_the_session (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │project ────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                                                                                                                       │
@@ -1163,10 +1163,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -1175,9 +1175,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === selecting_a_row_skips_the_hidden_target (160x40) ===
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                         ☰ ││                                                                                                         │
+│ default                                         ≡ ││                                                                                                         │
 ╰───────────────────────────────────────────────────╯│                                                                                                         │
-╭ Sessions ────────────────────────────── ▁   ▪   □ ╮│                                                                                                         │
+╭ Sessions ────────────────────────────── ▁   ▄   □ ╮│                                                                                                         │
 │ Create   Open   Filter: ________________________  ││                                                                                                         │
 │No sessions yet                                    ││                                                                                                         │
 │Create new work or open a session.                                                                                                                            │
@@ -1204,10 +1204,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                     │                                                                                  │                                     │
 │                                     │                                                                                  │                                     │
 │                                     │                                                                                  │  ───────────────────────────────────╯
-│                                     │   Cancel     Back     Next                                                       │  ──────────────────────────── ▁   ▪ ╮
+│                                     │   Cancel     Back     Next                                                       │  ──────────────────────────── ▁   ▄ ╮
 │                                     ╰──────────────────────────────────────────────────────────────────────────────────╯                                     │
 │                                                                                                                           ───────────────────────────────────╯
-│                                                                                                                           ──────────────────────────── ▁   ▪ ╮
+│                                                                                                                           ──────────────────────────── ▁   ▄ ╮
 │                                                   ││            Harness      Weekly      Resets  5H Resets                                                   │
 │                                                   ││  claude-1  Claude Code  refreshing…                                                                     │
 │                                                   ││  codex-1   Codex        refreshing…                                                                     │
@@ -1217,9 +1217,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 selection: podman (the next visible row; docker is hidden)
 === selecting_a_row_skips_the_hidden_target (160x40) ===
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                         ☰ ││                                                                                                         │
+│ default                                         ≡ ││                                                                                                         │
 ╰───────────────────────────────────────────────────╯│                                                                                                         │
-╭ Sessions ────────────────────────────── ▁   ▪   □ ╮│                                                                                                         │
+╭ Sessions ────────────────────────────── ▁   ▄   □ ╮│                                                                                                         │
 │ Create   Open   Filter: ________________________  ││                                                                                                         │
 │No sessions yet                                    ││                                                                                                         │
 │Create new work or open a session.                                                                                                                            │
@@ -1246,10 +1246,10 @@ selection: podman (the next visible row; docker is hidden)
 │                                     │                                                                                  │                                     │
 │                                     │                                                                                  │                                     │
 │                                     │                                                                                  │  ───────────────────────────────────╯
-│                                     │   Cancel     Back     Next                                                       │  ──────────────────────────── ▁   ▪ ╮
+│                                     │   Cancel     Back     Next                                                       │  ──────────────────────────── ▁   ▄ ╮
 │                                     ╰──────────────────────────────────────────────────────────────────────────────────╯                                     │
 │                                                                                                                           ───────────────────────────────────╯
-│                                                                                                                           ──────────────────────────── ▁   ▪ ╮
+│                                                                                                                           ──────────────────────────── ▁   ▄ ╮
 │                                                   ││            Harness      Weekly      Resets  5H Resets                                                   │
 │                                                   ││  claude-1  Claude Code  refreshing…                                                                     │
 │                                                   ││  codex-1   Codex        refreshing…                                                                     │
@@ -1258,7 +1258,7 @@ selection: podman (the next visible row; docker is hidden)
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · : palette · ? keys
 === target_step_draws_a_table_and_offers_resize_keys_only_for_sized_targets (140x32) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰─────────────────────────                                                                                                                 │
 ╭ Sessions ───────────────                                                                                                                 │
 │ Create   Open   Filter:   ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
@@ -1279,10 +1279,10 @@ selection: podman (the next visible row; docker is hidden)
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │                                                                                  │  ────────────────── ▁   ▪ ╮
+│                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │                                                                                  │  ────────────────── ▁   ▪ ╮
+│                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │   Cancel     Back     Next                                                       │                           │
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                                          │
@@ -1291,7 +1291,7 @@ selection: podman (the next visible row; docker is hidden)
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === target_step_draws_a_table_and_offers_resize_keys_only_for_sized_targets (140x32) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰─────────────────────────                                                                                                                 │
 ╭ Sessions ───────────────                                                                                                                 │
 │ Create   Open   Filter:   ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
@@ -1312,10 +1312,10 @@ selection: podman (the next visible row; docker is hidden)
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │                                                                                  │  ────────────────── ▁   ▪ ╮
+│                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │                                                                                  │  ────────────────── ▁   ▪ ╮
+│                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │   Cancel     Back     Next                                                       │                           │
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                                          │
@@ -1325,9 +1325,9 @@ selection: podman (the next visible row; docker is hidden)
 action: None
 === container_fields_are_underlined_before_focus_and_clickable_on_small_terminals (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │No sessions yet                             ││                                                                                            │
 │Create new work or open a                                                                                                                 │
@@ -1354,10 +1354,10 @@ action: None
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -1367,9 +1367,9 @@ action: None
 cell style: CPU and MEM (GiB) inputs are underlined before focus
 === container_fields_are_underlined_before_focus_and_clickable_on_small_terminals (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │No sessions yet                             ││                                                                                            │
 │Create new work or open a                                                                                                                 │
@@ -1396,10 +1396,10 @@ cell style: CPU and MEM (GiB) inputs are underlined before focus
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▪ ╮
+│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                 ─────────────────────────╯
-│                                                                                                                 ────────────────── ▁   ▪ ╮
+│                                                                                                                 ────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │

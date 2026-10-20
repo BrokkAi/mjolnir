@@ -6,7 +6,7 @@
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
+│  Stopped  podman    │   Enabled                                                                                 ☒  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
 │  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
 │                     │   Total cache budget (GB)                                                                25  │                     │
@@ -19,10 +19,10 @@
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │ Resolving the build cache defaults on the machine…                                           │  ──────────── ▁   ▪ ╮
+│                     │ Resolving the build cache defaults on the machine…                                           │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
@@ -51,10 +51,10 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back                                                                                       │                     │
@@ -84,10 +84,10 @@ editor value: 107
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back                                                                                       │                     │
@@ -117,10 +117,10 @@ stored size after rejection: "100GiB"
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back                                                                                       │                     │
@@ -138,7 +138,7 @@ saved machine.local: {"kind":"local","build_cache":{"max_total_size":"12GB"}}
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
+│  Stopped  podman    │   Enabled                                                                                 ☒  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
 │  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
 │                     │   Total cache budget (GB)                                                                12  │                     │
@@ -151,10 +151,10 @@ saved machine.local: {"kind":"local","build_cache":{"max_total_size":"12GB"}}
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
@@ -183,10 +183,10 @@ Settings saved. New
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back                                                                                       │                     │
@@ -216,10 +216,10 @@ budget after Use default: null
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
@@ -248,10 +248,10 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
@@ -268,7 +268,7 @@ saved scheduler: {"cpus":12,"memory":"6GiB"}
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
+│  Stopped  podman    │   Enabled                                                                                 ☒  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
 │  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
 │                     │   Total cache budget (GB)                                                        Resolving…  │                     │
@@ -281,10 +281,10 @@ saved scheduler: {"cpus":12,"memory":"6GiB"}
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
@@ -301,7 +301,7 @@ focused control: Some(Back)
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
+│  Stopped  podman    │   Enabled                                                                                 ☒  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
 │  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
 │                     │   Total cache budget (GB)                                                        Resolving…  │                     │
@@ -314,10 +314,10 @@ focused control: Some(Back)
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
@@ -334,7 +334,7 @@ focused control: Some(Save)
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
+│  Stopped  podman    │   Enabled                                                                                 ☒  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
 │  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
 │                     │   Total cache budget (GB)                                                        Resolving…  │                     │
@@ -347,10 +347,10 @@ focused control: Some(Save)
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
@@ -367,7 +367,7 @@ focused control: Some(List)
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
+│  Stopped  podman    │   Enabled                                                                                 ☒  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
 │  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
 │                     │   Total cache budget (GB)                                                        Resolving…  │                     │
@@ -380,10 +380,10 @@ focused control: Some(List)
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
@@ -401,7 +401,7 @@ Tab-reached Save action: true
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
+│  Stopped  podman    │   Enabled                                                                                 ☒  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
 │  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
 │                     │   Total cache budget (GB)                                                        Resolving…  │                     │
@@ -414,10 +414,10 @@ Tab-reached Save action: true
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
@@ -434,7 +434,7 @@ focused control: Some(Back)
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
+│  Stopped  podman    │   Enabled                                                                                 ☒  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
 │  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
 │                     │   Total cache budget (GB)                                                        Resolving…  │                     │
@@ -447,10 +447,10 @@ focused control: Some(Back)
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
@@ -480,10 +480,10 @@ focused control: Some(Save)
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
@@ -501,7 +501,7 @@ returned page path: ["machines", "local"]
 │ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
 │hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
+│  Stopped  podman    │   Enabled                                                                                 ☒  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
 │  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
 │                     │   Total cache budget (GB)                                                               250  │                     │
@@ -514,10 +514,10 @@ returned page path: ["machines", "local"]
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │ Resolving the build cache defaults on the machine…                                           │  ──────────── ▁   ▪ ╮
+│                     │ Resolving the build cache defaults on the machine…                                           │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
@@ -556,10 +556,10 @@ Enter open · / searc                                                           
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
 │                               │ Resolving the build cache defaults on the machine…                                           │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
 │                               │   Back     Save and Close                                                                    │                               │
 │                               ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                               │
 │                                                                                                                                                              │
@@ -576,7 +576,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ─────────────────────────  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                               │
 │› ■ ACP pretty name            │ Bazel.                                                                                       │                               │
 │  Stopped  podman  codex-1     │                                                                                              │                               │
-│  │ No messages yet            │   Enabled                                                                                 ☑  │                               │
+│  │ No messages yet            │   Enabled                                                                                 ☒  │                               │
 │  │                            │   Cache directory                                                                Resolving…  │                               │
 │                               │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                               │
 │                               │   Total cache budget (GB)                                                        Resolving…  │                               │
@@ -598,10 +598,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
 │                               │   Back     Save and Close                                                                    │                               │
 │                               ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                               │
 │                                                                                                                                                              │
@@ -640,10 +640,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
 │                               │ Resolving the build cache defaults on the machine…                                           │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
 │                               │   Back     Save and Close                                                                    │                               │
 │                               ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                               │
 │                                                                                                                                                              │
@@ -683,10 +683,10 @@ summary contains changed state: true
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
 │                               │ Resolving the build cache defaults on the machine…                                           │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
 │                               │   Back     Save and Close                                                                    │                               │
 │                               ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                               │
 │                                                                                                                                                              │
@@ -703,7 +703,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ─────────────────────────  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                               │
 │› ■ ACP pretty name            │ Bazel.                                                                                       │                               │
 │  Stopped  podman  codex-1     │                                                                                              │                               │
-│  │ No messages yet            │   Enabled                                                                                 ☑  │                               │
+│  │ No messages yet            │   Enabled                                                                                 ☒  │                               │
 │  │                            │   Cache directory                                                                Resolving…  │                               │
 │                               │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                               │
 │                               │   Total cache budget (GB)                                                        Resolving…  │                               │
@@ -725,10 +725,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
 │                               │   Back     Save and Close                                                                    │                               │
 │                               ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                               │
 │                                                                                                                                                              │
@@ -767,10 +767,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
 │                               │ Resolving the build cache defaults on the machine…                                           │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
 │                               │   Back     Save and Close                                                                    │                               │
 │                               ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                               │
 │                                                                                                                                                              │

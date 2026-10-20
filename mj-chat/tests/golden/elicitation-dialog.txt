@@ -42,6 +42,219 @@
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 
+=== Codex answers as submitted and as the harness receives them (100x20) ===
+╭ × Question 3/3 · 0 unanswered ───────────────────────────────────────────────────────────────────╮
+│Which role name? (required)                                                                       │
+│                                                                                                  │
+│Codex has questions for you. Work can continue while you answer.                                  │
+│                                                                                                  │
+│> BedrockCI                                                                                       │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Submit all     Previous     Next     Skip     Cancel                                            │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+submitted: Accept { content: {"question_01_note": String("Use a third AWS billing account"), "question_02": String("CI"), "question_03": String("BedrockCI")} }
+harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing account"), "question_02": String("CI"), "question_03": String("BedrockCI")} })
+
+=== Claude optional question starts with nothing picked (100x20) ===
+╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
+│Cache                                                                                             │
+│Which cache should the service use?                                                               │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│○ Redis                                                                                           │
+│    In-memory store with persistence                                                              │
+│    maxmemory-policy allkeys-lru                                                                  │
+│○ Memcached                                                                                       │
+│✎ Other                                                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│                                                                                                  │
+│Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== Claude pick kept while writing Other (100x20) ===
+╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
+│Cache                                                                                             │
+│Which cache should the service use?                                                               │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│● Redis                                                                                           │
+│○ Memcached                                                                                       │
+│✎ Other                                                                                           │
+│    Type your own answer, or add a note to the option you chose above (optional).                 │
+│> Keep TTLs short                                                                                 │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│                                                                                                  │
+│Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== Claude multi-select picks with Other text (100x20) ===
+╭ × Question 2/2 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Targets                                                                                           │
+│Which platforms should CI cover?                                                                  │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│☒ linux                                                                                           │
+│☒ macos                                                                                           │
+│☐ windows                                                                                         │
+│✎ Other                                                                                           │
+│    Type your own answer to add to your selection above (optional).                               │
+│> freebsd                                                                                         │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Submit all     Previous     Next     Skip     Cancel                                            │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== Claude answers as submitted and as the harness receives them (100x20) ===
+╭ × Question 2/2 · 0 unanswered ───────────────────────────────────────────────────────────────────╮
+│Targets                                                                                           │
+│Which platforms should CI cover?                                                                  │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│☒ linux                                                                                           │
+│☒ macos                                                                                           │
+│☐ windows                                                                                         │
+│✎ Other                                                                                           │
+│    Type your own answer to add to your selection above (optional).                               │
+│> freebsd                                                                                         │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Submit all     Previous     Next     Skip     Cancel                                            │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+submitted: Accept { content: {"question_0": String("Redis"), "question_0_custom": String("Keep TTLs short"), "question_1": StringArray(["linux", "macos"]), "question_1_custom": String("freebsd")} }
+harness: Ok(Accept { content: {"question_0": String("Redis"), "question_0_custom": String("Keep TTLs short"), "question_1": StringArray(["linux", "macos"]), "question_1_custom": String("freebsd")} })
+
+=== Claude Other text reached with arrows picks nothing on the way (100x20) ===
+╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
+│Cache                                                                                             │
+│Which cache should the service use?                                                               │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│○ Redis                                                                                           │
+│○ Memcached                                                                                       │
+│✎ Other                                                                                           │
+│    Type your own answer, or add a note to the option you chose above (optional).                 │
+│> Valkey                                                                                          │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│                                                                                                  │
+│Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+submitted: Accept { content: {"question_0_custom": String("Valkey")} }
+
+=== Claude clicks and Space toggle the pick (100x20) ===
+╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
+│Cache                                                                                             │
+│Which cache should the service use?                                                               │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│○ Redis                                                                                           │
+│○ Memcached                                                                                       │
+│✎ Other                                                                                           │
+│    Type your own answer, or add a note to the option you chose above (optional).                 │
+│> Valkey                                                                                          │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│                                                                                                  │
+│Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+click Redis: Ok({"question_0": String("Redis")})
+click Memcached: Ok({"question_0": String("Memcached")})
+click Memcached again, later: Ok({})
+Space on Redis: Ok({"question_0": String("Redis")})
+Space on Redis again: Ok({})
+click Other, write Valkey: Ok({"question_0_custom": String("Valkey")})
+
+=== Claude double-click picks the option and answers (100x20) ===
+╭ × Question 2/2 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Targets                                                                                           │
+│Which platforms should CI cover?                                                                  │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│☐ linux                                                                                           │
+│☐ macos                                                                                           │
+│☐ windows                                                                                         │
+│✎ Other                                                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Submit all     Previous     Next     Skip     Cancel                                            │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+recorded form: second click lands on "✎ Other"; Ok({"question_0": String("Memcached")}), answered=true, now on question 2, response=None
+with Dragonfly after Memcached: second click lands on "○ Dragonfly"; Ok({"question_0": String("Memcached")}), answered=true, now on question 2, response=None
+
+=== Claude Enter on an option answers with what is there (100x20) ===
+╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
+│Cache                                                                                             │
+│Which cache should the service use?                                                               │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│○ Redis                                                                                           │
+│○ Memcached                                                                                       │
+│    Simple volatile cache                                                                         │
+│✎ Other                                                                                           │
+│    Valkey                                                                                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│                                                                                                  │
+│Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter on Memcached, nothing picked, Other blank: Ok({"question_0": String("Memcached")})
+Enter on Memcached, nothing picked, Other holds Valkey: Ok({"question_0_custom": String("Valkey")})
+
 === small question pane keeps the focused custom answer and actions (60x6) ===
 ╭ × Question 1/1 · 1 unanswered ───────────────────────────╮
 │Question 1                                                │
@@ -122,7 +335,7 @@ focus index=0
 │Architecture                                                                                      │
 │                                                                                                  │
 │Choose an architecture                                                                            │
-│☑ Yes                                                                                             │
+│☒ Yes                                                                                             │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
@@ -155,7 +368,7 @@ field value=Boolean(true)
 │Architecture                                                                                      │
 │                                                                                                  │
 │Choose an architecture                                                                            │
-│☑ Yes                                                                                             │
+│☒ Yes                                                                                             │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
