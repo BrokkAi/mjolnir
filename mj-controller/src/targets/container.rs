@@ -517,6 +517,22 @@ fn container_pids_limit_args(engine: &str, template: &ContainerTemplate) -> Vec<
     vec![format!("--pids-limit={CONTAINER_PIDS_LIMIT}")]
 }
 
+/// The command that keeps a Podman or Docker session container alive.
+///
+/// With `--init`, PID 1 is the engine's init and its only child is this
+/// `sleep`. The init forwards SIGTERM and similar signals to that child, and
+/// the child's exit stops the container and the worker with it. An agent that
+/// walks a build's parent chain (`ps -o ppid=`) and kills what it finds reaches
+/// PID 1 this way. So `sleep` starts with every catchable signal whose default
+/// action ends or stops it set to ignore, and an ignored signal stays ignored
+/// across `exec`. The numbers are Linux's: HUP INT QUIT ILL TRAP ABRT BUS FPE
+/// USR1 SEGV USR2 PIPE ALRM TERM STKFLT TSTP TTIN TTOU XCPU XFSZ VTALRM PROF
+/// IO PWR SYS. The kernel already drops SIGKILL and SIGSTOP that a process in
+/// the container sends to PID 1. The run arguments set `--stop-signal KILL`
+/// so that stopping or removing the container does not wait out the grace
+/// period for a signal that is now ignored.
+const KEEPALIVE_SCRIPT: &str = "trap '' 1 2 3 4 5 6 7 8 10 11 12 13 14 15 16 20 21 22 24 25 26 27 29 30 31; exec sleep infinity";
+
 // Every argument is an independent input the engine needs: the template, the
 // resource identity, the mounts, and the workspace the session runs in.
 #[allow(clippy::too_many_arguments)]
@@ -535,12 +551,16 @@ pub(super) fn container_run_args(
         args.extend(podman_pull_argument(template));
         // PID 1 is `sleep infinity`, which reaps nothing, so every exec that
         // outlives its parent leaves a zombie behind. Apple's `container`
-        // engine is left alone: its support for the flag is unverified.
+        // engine is left alone: its support for `--init` and `--stop-signal`
+        // is unverified, and its PID 1 is `sleep` itself, which the kernel
+        // shields from signals sent from inside the container.
         args.push("--init".to_owned());
+        args.extend(["--stop-signal".to_owned(), "KILL".to_owned()]);
     } else if engine == "docker" {
         let pull = docker_pull_policy(template);
         args.push(format!("--pull={pull}"));
         args.push("--init".to_owned());
+        args.extend(["--stop-signal".to_owned(), "KILL".to_owned()]);
     }
     args.extend(container_pids_limit_args(engine, template));
     args.extend(["--detach".to_owned(), "--name".to_owned(), name.to_owned()]);
@@ -635,11 +655,16 @@ pub(super) fn container_run_args(
             _ => bail!("additional mounts are unsupported for container engine {engine:?}"),
         }
     }
-    args.extend([
-        template.image.clone(),
-        "sleep".to_owned(),
-        "infinity".to_owned(),
-    ]);
+    args.push(template.image.clone());
+    if matches!(engine, "podman" | "docker") {
+        args.extend([
+            "sh".to_owned(),
+            "-c".to_owned(),
+            KEEPALIVE_SCRIPT.to_owned(),
+        ]);
+    } else {
+        args.extend(["sleep".to_owned(), "infinity".to_owned()]);
+    }
     Ok(args)
 }
 
