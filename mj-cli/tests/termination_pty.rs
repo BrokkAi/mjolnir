@@ -417,6 +417,24 @@ fn spawn_dashboard_pty_with_setup(
     prefix: Option<&str>,
     first_run: bool,
 ) -> DashboardPty {
+    spawn_dashboard_pty_with_setup_and_args(
+        exit_when_idle,
+        pending_session,
+        local_target,
+        prefix,
+        first_run,
+        &[],
+    )
+}
+
+fn spawn_dashboard_pty_with_setup_and_args(
+    exit_when_idle: bool,
+    pending_session: bool,
+    local_target: bool,
+    prefix: Option<&str>,
+    first_run: bool,
+    args: &[&str],
+) -> DashboardPty {
     let directory = tempfile::tempdir().expect("create Hel test storage");
     let config_directory = directory.path().join("config/hel");
     let data_directory = directory.path().join("data/hel");
@@ -622,6 +640,7 @@ image = "ubuntu:24.04"
     common::AgentIsolation::under(storage.path()).apply(&mut command);
     command.env("PATH", tools);
     command.args(["--instance", "terminal-regression"]);
+    command.args(args);
     common::own_test_daemons(&mut command);
     if let Some(workspace) = &seeded_workspace {
         command.args(["--workspace", workspace]);
@@ -980,6 +999,55 @@ fn control_backslash_prefix_detaches_from_a_real_terminal() {
         &mut fixture.master,
         &mut output,
         "Ctrl+backslash q",
+    );
+    assert!(status.success(), "PTY child exit: {status}");
+}
+
+#[test]
+fn simple_mode_detaches_on_direct_ctrl_q_and_never_claims_ctrl_b() {
+    let mut fixture = spawn_dashboard_pty_with_setup_and_args(
+        true,
+        false,
+        true,
+        None,
+        false,
+        &["simple", env!("CARGO_MANIFEST_DIR")],
+    );
+    let mut output = PtyOutput::new();
+    wait_for_ready(
+        fixture.child.child_mut(),
+        &mut fixture.master,
+        &mut output,
+        b"Preparing session",
+    );
+
+    // This is the old detach chord. In Simple mode Ctrl+B reaches the focused
+    // surface, so q is ordinary prompt text and the dashboard stays alive.
+    fixture
+        .master
+        .write_all(b"\x02q")
+        .expect("send the normal prefix sequence");
+    thread::sleep(Duration::from_millis(250));
+    assert!(
+        fixture
+            .child
+            .child_mut()
+            .try_wait()
+            .expect("query simple dashboard")
+            .is_none(),
+        "Ctrl+B must not act as a Mjolnir prefix"
+    );
+
+    // Ctrl+Q is the direct Simple mode detach command.
+    fixture
+        .master
+        .write_all(b"\x11")
+        .expect("send direct simple detach");
+    let status = wait_for_exit(
+        fixture.child.child_mut(),
+        &mut fixture.master,
+        &mut output,
+        "simple Ctrl+Q",
     );
     assert!(status.success(), "PTY child exit: {status}");
 }

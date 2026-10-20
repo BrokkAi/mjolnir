@@ -26,9 +26,17 @@ of a coding harness, and is documented in [ACP agent](/acp-agent/).
 | `mj workspaces list [--json]` | List workspaces without a terminal. |
 | `mj workspaces create <name> [--json]` | Create a workspace, or select the one that already has the name. |
 | `mj go [--setup] [--global-default] [<folder>]` | Open the dashboard on a folder (default: the current directory) with its remembered account and target. `--setup` changes that folder's setup; `--global-default` also makes it the default for new projects. |
+| `mj simple [<folder>]` | Open the folder's last running Simple session or start one immediately with the default enabled agent, the local `localhost` target, and an isolated checkout. Automatic turn review is off for the session. Commands are direct Ctrl-key chords with no prefix, so Ctrl+B remains available to tmux. |
 | `mj app` | Open the authenticated web viewer in the separate `mj-desktop` application. |
 
 Use `prefix+q` to detach from the dashboard without stopping the daemon or any session. The [terminal surface](/terminal-surface/) documents its keys; the [web viewer](/web-viewer/) covers `mj app` and browser access.
+
+`mj simple` is intentionally narrower than `mj go`: it does not show the
+profile, target, project, or review wizard, does not choose a remote or
+container target, and does not write its fixed recipe into the folder's normal
+`mj go` setup. In Simple mode, `ctrl+q` detaches, `ctrl+n` starts another
+session, `ctrl+g` opens the session list, and `ctrl+f1` lists every command.
+Ctrl+B is not a Mjolnir prefix or command.
 
 ## Daemon control
 

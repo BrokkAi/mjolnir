@@ -265,6 +265,41 @@ impl DashboardState {
         let Some(combo) = key_event_combo(key) else {
             return KeyRoute::Forward;
         };
+        if self.simple_mode {
+            // Simple mode has no prefix state. Every Mjolnir command is one
+            // direct chord, and unbound keys continue into the focused
+            // surface unchanged (including a bare Ctrl+B for tmux).
+            self.prefix_pending = false;
+            if self.keybinds.resolve_direct(combo).is_none() && self.resize_mode_active() {
+                let id = if key.modifiers.is_empty() {
+                    match key.code {
+                        KeyCode::Char('h') | KeyCode::Left => Some(CommandId::ResizePaneLeft),
+                        KeyCode::Char('j') | KeyCode::Down => Some(CommandId::ResizePaneDown),
+                        KeyCode::Char('k') | KeyCode::Up => Some(CommandId::ResizePaneUp),
+                        KeyCode::Char('l') | KeyCode::Right => Some(CommandId::ResizePaneRight),
+                        KeyCode::Esc => {
+                            self.resize_mode = false;
+                            None
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                return id.map_or(KeyRoute::Consumed, |id| KeyRoute::Command {
+                    id,
+                    index: None,
+                });
+            }
+            self.resize_mode = false;
+            return match self.keybinds.resolve_direct(combo) {
+                Some(matched) => KeyRoute::Command {
+                    id: command_for_action(matched.action),
+                    index: matched.index,
+                },
+                None => KeyRoute::Forward,
+            };
+        }
         if !self.prefix_pending {
             if combo == self.keybinds.prefix {
                 self.prefix_pending = true;
@@ -400,6 +435,57 @@ mod tests {
 
     fn plain(character: char) -> KeyEvent {
         key(KeyCode::Char(character))
+    }
+
+    #[test]
+    fn simple_mode_has_no_prefix_and_leaves_ctrl_b_to_the_focused_surface() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.simple_mode = true;
+        dashboard.keybinds = mj_core::config::simple_keybinds();
+
+        let ctrl_b = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        assert_eq!(dashboard.route_bound_key(&ctrl_b), KeyRoute::Forward);
+        assert!(!dashboard.prefix_pending());
+
+        let ctrl_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
+        assert_eq!(
+            dashboard.route_bound_key(&ctrl_q),
+            KeyRoute::Command {
+                id: CommandId::QuitDetach,
+                index: None,
+            }
+        );
+        assert!(!dashboard.prefix_pending());
+
+        let dormant_prefix = KeyEvent::new(KeyCode::F(12), KeyModifiers::CONTROL);
+        assert_eq!(
+            dashboard.route_bound_key(&dormant_prefix),
+            KeyRoute::Forward
+        );
+        assert!(!dashboard.prefix_pending());
+    }
+
+    #[test]
+    fn a_config_reload_does_not_restore_prefix_bindings_in_simple_mode() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.simple_mode = true;
+        dashboard.keybinds = mj_core::config::simple_keybinds();
+        let mut reloaded = config();
+        reloaded.keys.prefix = "ctrl+a".into();
+        reloaded.keys.detach = "prefix+q".into();
+        dashboard.set_config(reloaded);
+
+        let ctrl_b = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        assert_eq!(dashboard.route_bound_key(&ctrl_b), KeyRoute::Forward);
+        assert!(!dashboard.prefix_pending());
+        let ctrl_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            dashboard.route_bound_key(&ctrl_q),
+            KeyRoute::Command {
+                id: CommandId::QuitDetach,
+                ..
+            }
+        ));
     }
 
     #[test]

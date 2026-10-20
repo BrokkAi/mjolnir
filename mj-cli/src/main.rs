@@ -17,6 +17,7 @@ mod import;
 mod logging;
 mod pollers;
 mod session_presentation;
+mod simple;
 mod splash;
 
 #[cfg(test)]
@@ -82,6 +83,8 @@ struct Cli {
 enum Command {
     /// Work in a folder using remembered account and target settings.
     Go(go::GoArgs),
+    /// Open a minimal local session with direct Ctrl-key commands.
+    Simple(simple::SimpleArgs),
     /// Open the workspace selector even when Mjolnir could auto-attach, or
     /// list and create workspaces without a terminal.
     Workspaces(WorkspacesArgs),
@@ -539,6 +542,7 @@ fn process_kind(command: Option<&Command>) -> logging::ProcessKind {
         Some(Command::DaemonRun) => logging::ProcessKind::Daemon,
         None
         | Some(Command::Go(_))
+        | Some(Command::Simple(_))
         | Some(Command::Workspaces(WorkspacesArgs { command: None }))
         | Some(Command::App) => logging::ProcessKind::Tui,
         _ => logging::ProcessKind::Cli,
@@ -549,6 +553,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
     match command {
         None => "dashboard",
         Some(Command::Go(_)) => "go",
+        Some(Command::Simple(_)) => "simple",
         Some(Command::Workspaces(_)) => "workspaces",
         Some(Command::App) => "app",
         Some(Command::DesktopBootstrap) => "desktop-bootstrap",
@@ -683,6 +688,17 @@ async fn run_command(
                 .context("prepare fast start")??;
             // `mj go` never runs the startup update check.
             run_workspace_dashboard(None, false, Some((mode, setup)), None, no_splash).await
+        }
+        Some(Command::Simple(args)) => {
+            ensure!(
+                requested_workspace.is_none(),
+                "mj simple selects its workspace from the folder; omit --workspace"
+            );
+            let mode = tokio::task::spawn_blocking(move || simple::prepare(args))
+                .await
+                .context("prepare simple mode")??;
+            // `mj simple` never runs the startup update check or setup flow.
+            run_workspace_dashboard(None, false, Some((mode, false)), None, no_splash).await
         }
         Some(Command::Workspaces(args)) => match args.command {
             None => {

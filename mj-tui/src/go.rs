@@ -8,6 +8,8 @@ use mj_core::state::SessionRecord;
 
 use crate::{DashboardAction, DashboardState};
 
+const SIMPLE_TARGET_ID: &str = "localhost";
+
 #[derive(Debug, Clone)]
 pub struct GoMode {
     pub workspace_id: Option<String>,
@@ -15,6 +17,10 @@ pub struct GoMode {
     pub directory: PathBuf,
     pub recipe: Option<GoRecipe>,
     pub save_as_default: bool,
+    /// `mj simple` fixes the target, checkout, review, and key prefix. The
+    /// startup state machine uses this marker rather than inferring those
+    /// invariants from a recipe that a normal `mj go` user may edit.
+    pub simple: bool,
 }
 
 impl DashboardState {
@@ -57,6 +63,11 @@ impl DashboardState {
         setup: bool,
         startup: Option<SessionRecord>,
     ) -> DashboardAction {
+        if mode.simple {
+            self.simple_mode = true;
+            self.prefix_pending = false;
+            self.keybinds = mj_core::config::simple_keybinds();
+        }
         let needs_remote_path = mode.recipe.as_ref().is_some_and(|recipe| {
             matches!(
                 self.config.targets.get(&recipe.target_id),
@@ -65,21 +76,39 @@ impl DashboardState {
         });
         self.go = Some(mode);
         self.focus_prompt();
-        if setup || needs_remote_path {
-            self.change_go_setup()
-        } else if let Some(session) = startup {
-            let session_id = session.id.clone();
-            if session.state == mj_core::state::SessionState::Stopped {
-                // The runtime feed carries only live sessions; the resume
-                // wizard reads this one from the on-demand store.
-                self.remember_stopped_record(session);
-                self.begin_resume_for(&session_id)
-            } else {
+        if self.simple_mode {
+            let startup = startup.filter(|session| {
+                session.state.is_active()
+                    && session.target_template_id == SIMPLE_TARGET_ID
+                    && session.create_managed_worktree == Some(true)
+            });
+            if let Some(session) = startup {
+                let session_id = session.id.clone();
                 self.select_active_session(&session_id);
                 self.open_selected_session()
+            } else if let Some(recipe) = self.go.as_ref().and_then(|go| go.recipe.clone()) {
+                DashboardAction::GoLaunch { recipe }
+            } else {
+                self.set_failure_notice("Simple mode has no launch recipe; run `mj simple` again.");
+                DashboardAction::None
             }
         } else {
-            self.begin_new()
+            if setup || needs_remote_path {
+                self.change_go_setup()
+            } else if let Some(session) = startup {
+                let session_id = session.id.clone();
+                if session.state == mj_core::state::SessionState::Stopped {
+                    // The runtime feed carries only live sessions; the resume
+                    // wizard reads this one from the on-demand store.
+                    self.remember_stopped_record(session);
+                    self.begin_resume_for(&session_id)
+                } else {
+                    self.select_active_session(&session_id);
+                    self.open_selected_session()
+                }
+            } else {
+                self.begin_new()
+            }
         }
     }
 
@@ -107,6 +136,10 @@ impl DashboardState {
 
     pub fn go_mode(&self) -> Option<&GoMode> {
         self.go.as_ref()
+    }
+
+    pub fn simple_mode(&self) -> bool {
+        self.simple_mode
     }
 
     pub(crate) fn change_go_setup(&mut self) -> DashboardAction {
@@ -155,6 +188,9 @@ impl DashboardState {
             project_directory: recipe.project_directory,
             create_managed_worktree: recipe.create_managed_worktree,
             subagents: Some(recipe.subagents.unwrap_or_default()),
+            review: self
+                .simple_mode
+                .then_some(mj_core::config::SessionReview::Off),
             additional_mounts: recipe.additional_mounts,
             resource_allocation: recipe.resource_allocation,
         }
@@ -164,6 +200,9 @@ impl DashboardState {
         &mut self,
         action: &DashboardAction,
     ) -> Option<(PathBuf, GoRecipe, bool)> {
+        if self.simple_mode {
+            return None;
+        }
         let DashboardAction::CreateSession {
             workspace_id,
             profile_id,
@@ -172,6 +211,7 @@ impl DashboardState {
             project_directory,
             create_managed_worktree,
             subagents,
+            review: _,
             additional_mounts,
             resource_allocation,
             ..
@@ -249,6 +289,7 @@ mod tests {
             last_session_id: None,
             directory: "/projects/current".into(),
             save_as_default: false,
+            simple: false,
             recipe: Some(GoRecipe {
                 profile_id: "codex-1".into(),
                 target_id: "podman".into(),
@@ -263,6 +304,17 @@ mod tests {
                 resource_allocation: None,
             }),
         }
+    }
+
+    fn simple_mode() -> GoMode {
+        let mut mode = mode();
+        mode.simple = true;
+        let recipe = mode.recipe.as_mut().unwrap();
+        recipe.target_id = SIMPLE_TARGET_ID.into();
+        recipe.bundle_id = None;
+        recipe.project_directory = Some(mode.directory.clone());
+        recipe.create_managed_worktree = Some(true);
+        mode
     }
 
     /// The session the daemon would choose in these one-session fixtures.
@@ -349,5 +401,51 @@ mod tests {
         let text = dashboard.go_context().join("\n");
         assert!(text.contains("target disconnected"));
         assert!(!text.contains("/old"));
+    }
+
+    #[test]
+    fn simple_mode_launches_the_fixed_local_recipe_with_review_off_and_no_wizard() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let simple = simple_mode();
+        let simple_directory = simple.directory.clone();
+        let expected = simple.recipe.clone().unwrap();
+        assert_eq!(
+            dashboard.begin_go(simple, false, None),
+            DashboardAction::GoLaunch {
+                recipe: expected.clone()
+            }
+        );
+        assert!(dashboard.simple_mode());
+        assert!(matches!(dashboard.mode, Mode::Dashboard));
+        assert!(!dashboard.prefix_pending());
+        assert_eq!(
+            dashboard.dispatch_command(CommandId::NewSessionWizard),
+            DashboardAction::GoLaunch {
+                recipe: expected.clone()
+            }
+        );
+
+        let action = dashboard.go_launch_action("workspace".into(), expected.clone());
+        let DashboardAction::CreateSession {
+            target_template_id,
+            project_directory,
+            create_managed_worktree,
+            review,
+            ..
+        } = &action
+        else {
+            panic!("simple mode should create a session directly");
+        };
+        assert_eq!(target_template_id, SIMPLE_TARGET_ID);
+        assert_eq!(
+            project_directory.as_deref(),
+            Some(simple_directory.as_path())
+        );
+        assert_eq!(*create_managed_worktree, Some(true));
+        assert_eq!(review, &Some(mj_core::config::SessionReview::Off));
+        assert!(
+            dashboard.remember_go_launch(&action).is_none(),
+            "simple mode must not rewrite the normal go-mode recipe"
+        );
     }
 }
