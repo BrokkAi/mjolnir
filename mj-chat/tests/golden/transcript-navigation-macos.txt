@@ -100,7 +100,7 @@ ctrl+b then : palette · ? keys
 │> Message the agent, or / for commands                    │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 
 === page up (60x24) ===
 ╭ Conversation · message 29 of 40 · End to follow ─────────╮
@@ -126,7 +126,7 @@ Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 │> Message the agent, or / for commands                    │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 
 === page down follows (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮
@@ -152,7 +152,7 @@ Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 │> Message the agent, or / for commands                    │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 
 === ctrl end follows (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮
@@ -178,7 +178,7 @@ Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 │> Message the agent, or / for commands                    │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 
 === ctrl home (40x24) ===
 ╭ Conversation · message 1 of 200 · En…╮
@@ -364,7 +364,7 @@ input cursor: 12
 │> Message the agent, or / for commands                    │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 
 === revealed transcript tail (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮
@@ -390,7 +390,7 @@ Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 │> Message the agent, or / for commands                    │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 
 === reopened transcript tail (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮
@@ -416,7 +416,7 @@ Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 │> Message the agent, or / for commands                    │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 
 === short transcript ignores scrolling (40x24) ===
 ╭ Conversation ────────────────────────╮
@@ -469,7 +469,7 @@ viewport unchanged: true
 │> Message the agent, or / for commands                    │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 track content surface: None
 
 === scrollbar track seeks (60x24) ===
@@ -496,7 +496,7 @@ track content surface: None
 │> Message the agent, or / for commands                    │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 anchor: Row { entry: 0, row: 93 }
 
 === scrollbar release preserves seek (60x24) ===
@@ -523,7 +523,7 @@ anchor: Row { entry: 0, row: 93 }
 │> Message the agent, or / for commands                    │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 anchor unchanged: true
 
 === empty transcript drag (60x24) ===
@@ -550,7 +550,7 @@ anchor unchanged: true
 │> What would you like to build?                           │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 scrollbar dragging: false
 
 === empty transcript drag (4x24) ===
