@@ -9,8 +9,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use tree_sitter::{Node, Parser};
 const TOOL_SUMMARY_SOURCE_BYTES: usize = 64 * 1024;
+const TOOL_SUMMARY_MAX_NESTING: usize = 16;
 /// Parser-rule version stored with cached tool summaries.
-pub const TOOL_SUMMARY_VERSION: u8 = 5;
+pub const TOOL_SUMMARY_VERSION: u8 = 6;
 
 /// Reduce a tool call to what a reader still needs, once a verified checkpoint
 /// holds the whole of it.
@@ -276,7 +277,7 @@ fn presentation_from_source(
     let (source, summary) = match source {
         ToolSummarySource::Shell(source) => {
             let bounded = bound_summary_source(&source);
-            let summary = summarize_shell(&bounded)
+            let summary = summarize_shell(&bounded, 0)
                 .or_else(|| first_meaningful_token(title))
                 .unwrap_or_else(|| "tool".to_owned());
             (bounded, summary)
@@ -309,7 +310,7 @@ fn presentation_from_title(title: &str, tool_kind: ToolKind) -> ToolCallPresenta
     let source = title_source(title);
     let bounded = bound_summary_source(&source);
     let summary = if tool_kind == ToolKind::Execute {
-        summarize_shell(&bounded)
+        summarize_shell(&bounded, 0)
             .or_else(|| first_meaningful_token(&bounded))
             .unwrap_or_else(|| "tool".to_owned())
     } else if bounded.trim_end().ends_with('?') {
@@ -369,7 +370,12 @@ fn bound_summary_source(source: &str) -> String {
     source[..end].to_owned()
 }
 
-fn summarize_shell(source: &str) -> Option<String> {
+fn summarize_shell(source: &str, nesting: usize) -> Option<String> {
+    // SSH chains need no quoting, so the byte bound alone cannot bound their
+    // recursive parsing. Keep nested shell scripts within the same budget.
+    if nesting >= TOOL_SUMMARY_MAX_NESTING {
+        return Some("…".to_owned());
+    }
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_bash::LANGUAGE.into())
@@ -383,7 +389,14 @@ fn summarize_shell(source: &str) -> Option<String> {
     let mut commands = Vec::new();
     let mut operators = Vec::new();
     let mut subshells = Vec::new();
-    if !collect_shell_tokens(root, source, &mut commands, &mut operators, &mut subshells) {
+    if !collect_shell_tokens(
+        root,
+        source,
+        nesting,
+        &mut commands,
+        &mut operators,
+        &mut subshells,
+    ) {
         return None;
     }
     if commands.is_empty() {
@@ -469,6 +482,7 @@ struct ShellToken {
 fn collect_shell_tokens(
     node: Node<'_>,
     source: &str,
+    nesting: usize,
     commands: &mut Vec<ShellCommandToken>,
     operators: &mut Vec<ShellOperatorToken>,
     subshells: &mut Vec<ShellSubshell>,
@@ -478,7 +492,7 @@ fn collect_shell_tokens(
         return true;
     }
     if kind == "command" {
-        if let Some(summary) = summarize_command_node(node, source) {
+        if let Some(summary) = summarize_command_node(node, source, nesting) {
             commands.push(ShellCommandToken {
                 start: node.start_byte(),
                 end: node.end_byte(),
@@ -505,7 +519,7 @@ fn collect_shell_tokens(
 
     let mut cursor = node.walk();
     node.children(&mut cursor)
-        .all(|child| collect_shell_tokens(child, source, commands, operators, subshells))
+        .all(|child| collect_shell_tokens(child, source, nesting, commands, operators, subshells))
 }
 
 fn shell_separator_between(
@@ -538,7 +552,7 @@ struct InvocationArgument {
     literal: bool,
 }
 
-fn summarize_command_node(node: Node<'_>, source: &str) -> Option<String> {
+fn summarize_command_node(node: Node<'_>, source: &str, nesting: usize) -> Option<String> {
     let name = node.child_by_field_name("name")?;
     let executable = shell_command_name(name, source)?;
     let mut cursor = node.walk();
@@ -555,7 +569,7 @@ fn summarize_command_node(node: Node<'_>, source: &str) -> Option<String> {
             },
         })
         .collect::<Vec<_>>();
-    summarize_invocation_with_literals(&executable, &arguments)
+    summarize_invocation_with_literals(&executable, &arguments, nesting)
 }
 
 fn shell_command_name(node: Node<'_>, source: &str) -> Option<String> {
@@ -601,12 +615,14 @@ fn summarize_invocation(executable: &str, arguments: &[String]) -> Option<String
                 literal: true,
             })
             .collect::<Vec<_>>(),
+        0,
     )
 }
 
 fn summarize_invocation_with_literals(
     executable: &str,
     arguments: &[InvocationArgument],
+    nesting: usize,
 ) -> Option<String> {
     let mut executable = normalize_command_name(executable)?;
     let mut arguments = arguments;
@@ -620,7 +636,7 @@ fn summarize_invocation_with_literals(
             .unwrap_or(&executable)
             .to_owned();
         if is_shell_interpreter(&basename) {
-            words.push(summarize_shell_invocation(&basename, arguments));
+            words.push(summarize_shell_invocation(&basename, arguments, nesting));
             break;
         }
         words.push(executable);
@@ -654,6 +670,36 @@ fn summarize_invocation_with_literals(
             }
             break argument.value.as_str();
         };
+
+        if basename == "ssh" {
+            words.push(first_verb.to_owned());
+            index += 1;
+            // OpenSSH also accepts options after the destination. The rest
+            // is joined with spaces and interpreted by the remote shell.
+            while let Some(argument) = arguments.get(index) {
+                if !argument.literal || !argument.value.starts_with('-') {
+                    break;
+                }
+                let Some(consumed) = known_leading_option_arguments("ssh", arguments, index) else {
+                    break 'invocations;
+                };
+                index += consumed;
+                if argument.value == "--" {
+                    break;
+                }
+            }
+            let script = arguments[index..]
+                .iter()
+                .map(|argument| argument.value.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !script.is_empty()
+                && let Some(inner) = summarize_shell(&script, nesting + 1)
+            {
+                words.push(inner);
+            }
+            break;
+        }
 
         if basename == "timeout" {
             let duration = first_verb
@@ -706,7 +752,11 @@ fn summarize_invocation_with_literals(
 /// is summarized in its own right, so `/bin/bash -c "python x.py"` reads
 /// `bash -c python`. The script is parsed even when it contains an expansion,
 /// because only its command names matter here.
-fn summarize_shell_invocation(shell: &str, arguments: &[InvocationArgument]) -> String {
+fn summarize_shell_invocation(
+    shell: &str,
+    arguments: &[InvocationArgument],
+    nesting: usize,
+) -> String {
     let values = arguments
         .iter()
         .map(|argument| argument.value.as_str())
@@ -714,7 +764,7 @@ fn summarize_shell_invocation(shell: &str, arguments: &[InvocationArgument]) -> 
     let Some(script) = shell_script_argument(&values) else {
         return shell.to_owned();
     };
-    match summarize_shell(script) {
+    match summarize_shell(script, nesting + 1) {
         Some(inner) => format!("{shell} -c {inner}"),
         None => format!("{shell} -c"),
     }
@@ -738,6 +788,7 @@ fn is_summary_executable(basename: &str) -> bool {
             | "podman"
             | "nice"
             | "timeout"
+            | "ssh"
             | "mbx"
             | "mj"
             | "tmux"
@@ -846,10 +897,31 @@ fn known_leading_option_arguments(
 ) -> Option<usize> {
     let option = arguments.get(index)?.value.as_str();
     if option == "--" {
-        if matches!(basename, "nice" | "timeout") {
+        if matches!(basename, "nice" | "timeout" | "ssh") {
             return Some(1);
         }
         return None;
+    }
+    if basename == "ssh" {
+        // Short flags can be bundled; a value-taking option consumes the
+        // remainder of its bundle, or the next argument when there is none.
+        let flags = option.strip_prefix('-')?;
+        for (offset, flag) in flags.char_indices() {
+            if "BbcDEeFIiJLlmOoPpQRSWw".contains(flag) {
+                return if offset + flag.len_utf8() < flags.len() {
+                    Some(1)
+                } else {
+                    arguments
+                        .get(index + 1)
+                        .filter(|argument| argument.literal)
+                        .map(|_| 2)
+                };
+            }
+            if !"46AaCfGgKkMNnqsTtVvXxYy".contains(flag) {
+                return None;
+            }
+        }
+        return (!flags.is_empty()).then_some(1);
     }
     let (option_name, attached_value) = option
         .split_once('=')
@@ -2213,6 +2285,59 @@ mod tests {
                 "ordinary command arguments are not invocations",
                 json!("timeout 30 python git status"),
             ),
+            (
+                "ssh remote command",
+                json!("ssh builder git status --short"),
+            ),
+            (
+                "ssh remote argv",
+                json!(["ssh", "builder", "git", "-C", "repo", "worktree", "list"]),
+            ),
+            (
+                "ssh quoted remote script",
+                json!("ssh builder 'cd repo && git status | cat'"),
+            ),
+            (
+                "ssh quoted remote argv script",
+                json!(["ssh", "builder", "git status && cargo test -q"]),
+            ),
+            (
+                "ssh connection options",
+                json!(
+                    "/usr/bin/ssh -vvT -p 2222 -o BatchMode=yes -i /keys/build builder git status"
+                ),
+            ),
+            (
+                "ssh attached options after destination",
+                json!("ssh builder -Tp2222 -oBatchMode=yes -- uv run pytest -q"),
+            ),
+            (
+                "ssh wrapped remote shell",
+                json!("timeout 30 ssh -- builder 'bash -lc \"git status && cargo test\"'"),
+            ),
+            ("ssh without remote command", json!("ssh builder")),
+            ("ssh dynamic destination", json!("ssh \"$host\" git status")),
+            (
+                "ssh dynamic remote script",
+                json!("ssh builder \"cd $dir && git status\""),
+            ),
+            (
+                "ssh dynamic remote command",
+                json!("ssh builder \"$script\""),
+            ),
+            (
+                "ssh unknown connection option",
+                json!("ssh --mystery value builder git status"),
+            ),
+            (
+                "ssh unknown option after destination",
+                json!("ssh builder --mystery value git status"),
+            ),
+            ("ssh without destination", json!(["ssh", "-p", "2222"])),
+            (
+                "ssh nesting budget",
+                json!(format!("{}git status", "ssh builder ".repeat(2_000))),
+            ),
         ] {
             append_tool_row(
                 &mut output,
@@ -2222,32 +2347,42 @@ mod tests {
                     .raw_input(json!({"command": command})),
             );
         }
-        let cached = ToolCall::new("cached-wrapper", "Bash")
-            .kind(ToolKind::Execute)
-            .raw_input(json!({"command": "nice -n 10 timeout 30 git status"}));
-        let item = TranscriptItem {
-            stable_id: "tool:cached-wrapper".into(),
-            position: 1,
-            latest_content_event_ordinal: None,
-            created_at_ms: 1,
-            last_changed_at_ms: 1,
-            body: TranscriptBody::Tool {
-                call: serde_json::to_value(&cached).expect("serialize tool call"),
-                terminal_outputs: Vec::new(),
-                terminal_refs: Vec::new(),
-                presentation: Some(Box::new(ToolCallPresentation {
-                    summary: "nice timeout".into(),
-                    summary_version: 4,
-                    ..tool_call_presentation(&cached)
-                })),
-            },
-        };
-        writeln!(
-            output,
-            "\n=== cached wrapper summary (transcript row) ===\n{}",
-            transcript_item_text(&item)
-        )
-        .unwrap();
+        for (label, command, summary, summary_version) in [
+            (
+                "cached wrapper summary",
+                "nice -n 10 timeout 30 git status",
+                "nice timeout",
+                4,
+            ),
+            ("cached ssh summary", "ssh builder 'git status'", "ssh", 5),
+        ] {
+            let cached = ToolCall::new("cached-wrapper", "Bash")
+                .kind(ToolKind::Execute)
+                .raw_input(json!({"command": command}));
+            let item = TranscriptItem {
+                stable_id: "tool:cached-wrapper".into(),
+                position: 1,
+                latest_content_event_ordinal: None,
+                created_at_ms: 1,
+                last_changed_at_ms: 1,
+                body: TranscriptBody::Tool {
+                    call: serde_json::to_value(&cached).expect("serialize tool call"),
+                    terminal_outputs: Vec::new(),
+                    terminal_refs: Vec::new(),
+                    presentation: Some(Box::new(ToolCallPresentation {
+                        summary: summary.into(),
+                        summary_version,
+                        ..tool_call_presentation(&cached)
+                    })),
+                },
+            };
+            writeln!(
+                output,
+                "\n=== {label} (transcript row) ===\n{}",
+                transcript_item_text(&item)
+            )
+            .unwrap();
+        }
         append_tool_row(
             &mut output,
             "non-execute tool title",
