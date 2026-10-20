@@ -2427,6 +2427,7 @@ mod tests {
             last_session_id: None,
             directory: "/projects/current".into(),
             save_as_default: false,
+            simple: false,
             recipe: Some(mj_core::go::GoRecipe {
                 profile_id: "codex-1".into(),
                 target_id: "podman".into(),

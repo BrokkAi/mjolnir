@@ -43,6 +43,7 @@ pub(crate) fn prepare(args: GoArgs) -> Result<mj_tui::GoMode> {
         recipe: preferences.recipe(&directory),
         directory,
         save_as_default: args.global_default,
+        simple: false,
     })
 }
 
@@ -96,6 +97,8 @@ pub(crate) async fn resolve_workspace(
         mode.last_session_id = None;
     }
     mode.workspace_id = Some(id.clone());
+    // Simple mode binds too: the binding holds the workspace and remembered
+    // session it reuses, and is stored apart from the folder's Go recipe.
     let directory = mode.directory.clone();
     let saved_id = id.clone();
     tokio::task::spawn_blocking(move || {
@@ -116,6 +119,7 @@ pub(crate) fn saved_workspace_modes() -> Result<Vec<mj_tui::GoMode>> {
             directory: binding.directory.clone(),
             recipe: preferences.recipe(&binding.directory),
             save_as_default: false,
+            simple: false,
         })
         .collect())
 }

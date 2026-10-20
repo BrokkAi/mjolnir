@@ -1411,6 +1411,7 @@ pub(crate) fn spawn_dashboard_create_session(
         let DashboardAction::CreateSession {
             create_managed_worktree,
             subagents,
+            review,
             workspace_id,
             profile_id,
             bundle_id,
@@ -1467,7 +1468,7 @@ pub(crate) fn spawn_dashboard_create_session(
                 daemon::connect_or_start()
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
-                        review: None,
+                        review,
                         no_project_memory: false,
                         no_github_events: false,
                         at: None,

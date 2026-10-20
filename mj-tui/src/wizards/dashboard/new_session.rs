@@ -334,6 +334,7 @@ impl DashboardState {
         let raw_project = is_bare_project_target(&self.config.targets[&target_template_id]);
         DashboardAction::CreateSession {
             subagents: Some(wizard.subagents.policy.clone()),
+            review: None,
             create_managed_worktree: Some(
                 raw_project
                     && wizard.create_managed_worktree

@@ -103,6 +103,10 @@ targets in Settings (`ctrl+b s`).
   your existing configuration.
 - `mj go` is a shortcut for later. Each folder remembers its setup, and
   running `mj go` again returns you to that folder's last conversation.
+- `mj simple` is the minimal tmux-friendly mode. It uses the default
+  enabled agent, always starts locally with an isolated checkout, disables
+  automatic review for that session, and uses direct Ctrl-key commands with no
+  prefix, so Ctrl+B stays available to tmux.
 - `mj doctor` checks prerequisites and tells you how to fix anything missing.
 
 The [quickstart](https://mjolnir.brokk.ai/quickstart/) walks through a first

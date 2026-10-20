@@ -168,6 +168,9 @@ fn entries(dashboard: &DashboardState) -> Vec<HelpEntry> {
         })
         .collect();
     for (index, (keys, description)) in COMPOSER_KEYS.iter().enumerate() {
+        if dashboard.simple_mode() && index == COMPOSER_KEYS.len() - 1 {
+            continue;
+        }
         // Doubling the active prefix sends that literal key, even after rebinding.
         let (keys, description) = if index == COMPOSER_KEYS.len() - 1 {
             let prefix = dashboard.keybinds().prefix_label();
@@ -624,10 +627,14 @@ pub(crate) fn render_help(
         .title_bottom(Line::styled(footer, theme::muted()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    let prefix = format!(
-        "prefix: {}   (change it in Setup → Interface)",
-        dashboard.keybinds().prefix_label()
-    );
+    let prefix = if dashboard.simple_mode() {
+        "direct Ctrl-key commands; no prefix".to_owned()
+    } else {
+        format!(
+            "prefix: {}   (change it in Setup → Interface)",
+            dashboard.keybinds().prefix_label()
+        )
+    };
     let header = wrap_styled_line(
         Line::styled(prefix, theme::muted()),
         usize::from(inner.width),

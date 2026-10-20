@@ -502,12 +502,17 @@ async fn classify_recorded_items(
             .then_with(|| a.0.number.cmp(&b.0.number))
             .then_with(|| a.1.id.cmp(&b.1.id))
     });
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let login = api.credential_login().await?;
+    let login = login.as_deref();
     let results = stream::iter(pending.into_iter().take(MAX_CLASSIFICATIONS_PER_POLL)).map(|(item, session, _, attempts)| {
         let classifier = classifier.clone(); let control = api.control.clone();
         async move {
             if stop.is_cancelled() { return Ok(()); }
             let number = item.number; let session_id = session.id.clone();
-            match classify_for_session(owner, repo, item, session, classifier, control).await {
+            match classify_for_session(owner, repo, item, session, login, classifier, control).await {
                 Ok(()) => Ok(()),
                 Err(error) if is_github_events_disabled(&error) => Err(error),
                 Err(error) => {
@@ -529,11 +534,15 @@ async fn classify_for_session(
     repo: &str,
     item: crate::database::GithubSeenItem,
     session: SessionRecord,
+    credential_login: Option<&str>,
     classifier: Arc<dyn GithubClassifier>,
     control: PollControl,
 ) -> Result<()> {
     let repo_label = format!("{owner}/{repo}");
     let kind = item_kind_from_watch(&item.kind);
+    // Sessions share one GitHub account, so the author cannot name a session,
+    // but this session did not open an item another account authored.
+    let own_account = credential_login.is_none_or(|login| login.eq_ignore_ascii_case(&item.author));
     let recent_turns = recent_turns(session.id.clone()).await?;
     let evidence = GithubItemEvidence {
         item: GithubItem {
@@ -550,7 +559,10 @@ async fn classify_for_session(
     control.check_enabled()?;
     let verdict = classifier.classify(&evidence).await?;
     control.check_enabled()?;
-    let event = if verdict.interested && !verdict.created {
+    let created = own_account
+        && (verdict.created
+            || opened_by_session_tool_call(&session.id, &item.created_at, &item.title).await?);
+    let event = if verdict.interested && !created {
         let key = format!(
             "github:{repo_label}#{}:interest:{}",
             item.number, session.id
@@ -581,12 +593,56 @@ async fn classify_for_session(
         url: item.url,
         created_at: item.created_at,
         interested: verdict.interested,
-        created: verdict.created,
+        created,
     };
     blocking_db(move || {
         crate::database::commit_github_item_classification(classification, event).map(|_| ())
     })
     .await
+}
+
+/// Jev misses items whose opening command has left its evidence or never
+/// showed the title. A `gh pr create` or `gh issue create` call that was
+/// running when the item appeared and names its title also counts. Requiring
+/// the title stops a long command from claiming another session's item.
+async fn opened_by_session_tool_call(
+    session_id: &str,
+    created_at: &str,
+    title: &str,
+) -> Result<bool> {
+    let Some(created_at_ms) = timestamp_millis(created_at) else {
+        return Ok(false);
+    };
+    let session_id = session_id.to_owned();
+    let commands = blocking_db(move || {
+        crate::database::load_github_session_tool_commands_at(&session_id, created_at_ms)
+    })
+    .await?;
+    Ok(commands
+        .iter()
+        .any(|command| command_opens_titled_item(command, title)))
+}
+
+fn command_opens_titled_item(command: &str, title: &str) -> bool {
+    let command = spaced_words(command);
+    let title = spaced_words(title);
+    !title.trim().is_empty()
+        && (command.contains(" gh pr create ") || command.contains(" gh issue create "))
+        && command.contains(&title)
+}
+
+/// Lowercase words with a space before and after each, so shell quoting and
+/// escaping cannot hide a title and a match always covers whole words.
+fn spaced_words(text: &str) -> String {
+    let mut spaced = String::from(" ");
+    for word in text
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+    {
+        spaced.push_str(&word.to_lowercase());
+        spaced.push(' ');
+    }
+    spaced
 }
 
 async fn recent_turns(session_id: String) -> Result<String> {
@@ -3045,6 +3101,114 @@ mod tests {
                 .unwrap()
                 .contains("bad")
         );
+    }
+
+    // Hard-won: d3fd6f01e: Jev denied items a session's own `gh pr create` opened and claimed bot batches.
+    #[tokio::test]
+    async fn classification_uses_opening_tool_calls_and_the_credential_author() {
+        if !run_isolated_child("classification_uses_opening_tool_calls_and_the_credential_author") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
+        let created = DateTime::parse_from_rfc3339(&cursor.watch_started_at).unwrap()
+            + chrono::Duration::seconds(1);
+        let created_ms = created.timestamp_millis();
+        let created = created.to_rfc3339();
+        let mut opened = github_item(1, 1, "interesting synthetic change", created.clone(), true);
+        opened["user"]["login"] = json!("Watcher-Bot");
+        let mut batch = github_item(2, 2, "interesting created batch", created.clone(), true);
+        batch["user"]["login"] = json!("merge-bot[bot]");
+        crate::database::record_github_page(
+            "acme".into(),
+            "repo".into(),
+            vec![
+                parse_github_item(&opened).unwrap(),
+                parse_github_item(&batch).unwrap(),
+            ],
+            crate::database::GithubFeedProgress::Main(created),
+        )
+        .unwrap();
+        let mut sessions = Vec::new();
+        for id in ["opener", "other"] {
+            let mut session = crate::database::test_session(id, "project");
+            session.created_at = cursor.watch_started_at.clone();
+            crate::database::save_session(&session).unwrap();
+            sessions.push(session);
+        }
+        use mj_core::state::{
+            MaterializedExecutionState, MaterializedSession, TranscriptBody, TranscriptItem,
+        };
+        crate::database::save_materialized_session(&MaterializedSession {
+            session_id: "opener".into(),
+            applied_event_ordinal: 1,
+            applied_event_digest: "1".repeat(64),
+            last_activity_at_ms: Some(1),
+            execution: MaterializedExecutionState::Idle,
+            session_title: None,
+            configuration: Default::default(),
+            transcript: vec![Arc::new(TranscriptItem {
+                stable_id: "tool:1".into(),
+                position: 1,
+                latest_content_event_ordinal: None,
+                created_at_ms: created_ms - 3000,
+                last_changed_at_ms: created_ms + 2000,
+                body: TranscriptBody::Tool {
+                    call: json!({
+                        "toolCallId": "call-1",
+                        "title": "Open the pull request",
+                        "kind": "execute",
+                        "status": "completed",
+                        "rawInput": {"command": "gh pr create --title 'Interesting synthetic change' --body-file pr.md"}
+                    }),
+                    terminal_outputs: vec![],
+                    terminal_refs: vec![],
+                    presentation: None,
+                },
+            })],
+            queued_prompts: vec![],
+            pending_elicitations: vec![],
+            active_turn: None,
+            last_turn_outcome: None,
+        })
+        .unwrap();
+        let (api, server) = start_fake_github(FakeGithub::default()).await;
+        classify_recorded_items(
+            "acme",
+            "repo",
+            &sessions,
+            fake_classifier(),
+            &cursor.watch_started_at,
+            &api,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let watches = crate::database::load_github_watches("acme", "repo").unwrap();
+        assert_eq!(
+            watches
+                .iter()
+                .map(|watch| (watch.number, watch.creator_session_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "opener")],
+            "the opening call claims item 1; another account's batch has no creator"
+        );
+        let mut interest = crate::database::pending_mailbox_events(1000)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.event_key)
+            .collect::<Vec<_>>();
+        interest.sort();
+        assert_eq!(
+            interest,
+            vec![
+                "github:acme/repo#1:interest:other",
+                "github:acme/repo#2:interest:opener",
+                "github:acme/repo#2:interest:other",
+            ]
+        );
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
     }
 
     /// Run with MJ_GITHUB_DRY_RUN pointing to a private JSON file containing

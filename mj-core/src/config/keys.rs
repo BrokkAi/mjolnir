@@ -541,6 +541,68 @@ impl Default for Keybinds {
     }
 }
 
+/// The direct command map used by `mj simple`.
+///
+/// No key arms a prefix. Common commands use one Ctrl chord. Less common pane
+/// and workspace commands add Alt so they do not replace the composer's
+/// Ctrl+H/J/K/M editing keys. Ctrl+B is never bound.
+pub fn simple_keybinds() -> Keybinds {
+    KeysConfig {
+        // The router does not arm this prefix in Simple mode. Keeping it
+        // outside the command map lets the ordinary `Keybinds`
+        // representation remain the single owner of key interpretation.
+        prefix: "ctrl+f12".to_owned(),
+        help: "ctrl+f1".into(),
+        settings: "ctrl+s".into(),
+        detach: "ctrl+q".into(),
+        new_session: "ctrl+n".into(),
+        resume: "ctrl+g".into(),
+        workspace_manager: "ctrl+alt+n".into(),
+        focus_workspaces: "ctrl+alt+w".into(),
+        next_workspace: "ctrl+pagedown".into(),
+        previous_workspace: "ctrl+pageup".into(),
+        switch_workspace: "ctrl+1..9".into(),
+        next_pane: "ctrl+tab".into(),
+        previous_pane: "ctrl+shift+tab".into(),
+        pane_size: "ctrl+shift+z".into(),
+        pane_preset: "ctrl+alt+p".into(),
+        refresh: "ctrl+r".into(),
+        palette: "ctrl+p".into(),
+        cancel_operation: "ctrl+shift+x".into(),
+        mark_all_read: "ctrl+alt+a".into(),
+        next_attention: "ctrl+o".into(),
+        previous_attention: "ctrl+alt+o".into(),
+        web_viewer: "ctrl+alt+u".into(),
+        rename_session: "ctrl+alt+t".into(),
+        toggle_transcript_rendering: "ctrl+t".into(),
+        toggle_dictation: "ctrl+alt+m".into(),
+        changed_files: "ctrl+d".into(),
+        split_vertical: "ctrl+alt+v".into(),
+        split_horizontal: "ctrl+alt+minus".into(),
+        close_pane: "ctrl+alt+x".into(),
+        focus_pane_left: "ctrl+alt+left".into(),
+        focus_pane_down: "ctrl+alt+down".into(),
+        focus_pane_up: "ctrl+alt+up".into(),
+        focus_pane_right: "ctrl+alt+right".into(),
+        zoom: "ctrl+alt+z".into(),
+        last_pane: "ctrl+alt+semicolon".into(),
+        resize_mode: "ctrl+alt+r".into(),
+        swap_pane_left: "ctrl+alt+shift+left".into(),
+        swap_pane_down: "ctrl+alt+shift+down".into(),
+        swap_pane_up: "ctrl+alt+shift+up".into(),
+        swap_pane_right: "ctrl+alt+shift+right".into(),
+        suspend_session: "ctrl+alt+shift+x".into(),
+        rename_workspace: "ctrl+alt+shift+w".into(),
+        close_workspace: "ctrl+alt+shift+d".into(),
+        open_subagents: "ctrl+alt+shift+a".into(),
+        session_actions: "ctrl+a".into(),
+        interrupt_turn: "ctrl+x".into(),
+        ..KeysConfig::default()
+    }
+    .resolve()
+    .expect("the simple-mode key bindings resolve without conflicts")
+}
+
 fn key_error(field: &str, raw: &str, reason: impl fmt::Display) -> anyhow::Error {
     anyhow!("keys.{field} = \"{raw}\": {reason}")
 }
@@ -703,4 +765,32 @@ fn check_combo(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simple_mode_commands_are_direct_and_never_bind_ctrl_b() {
+        let keys = simple_keybinds();
+        assert_eq!(keys.labels(KeyAction::Detach), vec!["ctrl+q".to_owned()]);
+        assert_eq!(
+            keys.labels(KeyAction::NewSession),
+            vec!["ctrl+n".to_owned()]
+        );
+
+        let ctrl_b = KeyCombo::new(KeyName::Char('b'), Modifiers::CTRL);
+        assert!(keys.resolve_direct(ctrl_b).is_none());
+        assert!(keys.resolve_prefix(ctrl_b).is_none());
+        assert!(KeyAction::ALL.iter().all(|action| {
+            keys.bindings(*action)
+                .iter()
+                .all(|binding| binding.trigger == Trigger::Direct && binding.combo != ctrl_b)
+        }));
+        let defaults = Keybinds::default();
+        assert!(KeyAction::ALL.iter().all(|action| {
+            defaults.bindings(*action).is_empty() || !keys.bindings(*action).is_empty()
+        }));
+    }
 }
