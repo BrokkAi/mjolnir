@@ -566,6 +566,15 @@ pub fn materialized_chat_entry_with_diffstats(
     entry.seq = item_update_ordinal(item, frontier);
     entry.recorded_at_ms = Some(item.created_at_ms);
     entry.revision = u64::try_from(item.last_changed_at_ms).unwrap_or_default();
+    // A finished call is not updated again, so its last change is its end.
+    if entry.role == ChatRole::Tool
+        && matches!(
+            entry.tool_status,
+            Some(ToolStatus::Completed | ToolStatus::Failed)
+        )
+    {
+        entry.tool_ended_at_ms = Some(item.last_changed_at_ms);
+    }
     if matches!(
         &item.body,
         TranscriptBody::Agent { .. } | TranscriptBody::Thought { .. }
@@ -660,6 +669,7 @@ pub fn browser_entry(entry: &ChatEntry) -> BrowserTranscriptEntry {
         role,
         label,
         recorded_at_ms: entry.recorded_at_ms,
+        tool_ended_at_ms: entry.tool_ended_at_ms,
         mailbox_events: Vec::new(),
         lines: source
             .into_iter()
@@ -1207,6 +1217,7 @@ fn same_rendering(previous: &BrowserTranscriptEntry, next: &BrowserTranscriptEnt
         role,
         label,
         recorded_at_ms,
+        tool_ended_at_ms,
         lines,
         mailbox_events,
         glyph,
@@ -1220,6 +1231,7 @@ fn same_rendering(previous: &BrowserTranscriptEntry, next: &BrowserTranscriptEnt
         && previous.role == *role
         && previous.label == *label
         && previous.recorded_at_ms == *recorded_at_ms
+        && previous.tool_ended_at_ms == *tool_ended_at_ms
         && previous.lines == *lines
         && previous.mailbox_events == *mailbox_events
         && previous.glyph == *glyph
@@ -1355,6 +1367,32 @@ mod tests {
             last_changed_at_ms: 1,
             body,
         })
+    }
+
+    #[test]
+    fn a_finished_tool_call_ends_at_its_last_change() {
+        let tool = |status: &str| {
+            let mut item = item(
+                2,
+                TranscriptBody::Tool {
+                    call: json!({"toolCallId":"tool-2", "title":"cargo test", "status":status, "kind":"execute"}),
+                    terminal_outputs: Vec::new(),
+                    terminal_refs: Vec::new(),
+                    presentation: None,
+                },
+            );
+            let item_mut = Arc::make_mut(&mut item);
+            item_mut.created_at_ms = 1_000;
+            item_mut.last_changed_at_ms = 91_000;
+            browser_entry(&materialized_chat_entry(&item, 2))
+        };
+
+        for status in ["completed", "failed"] {
+            let entry = tool(status);
+            assert_eq!(entry.recorded_at_ms, Some(1_000));
+            assert_eq!(entry.tool_ended_at_ms, Some(91_000), "{status}");
+        }
+        assert_eq!(tool("in_progress").tool_ended_at_ms, None);
     }
 
     fn assert_projection(

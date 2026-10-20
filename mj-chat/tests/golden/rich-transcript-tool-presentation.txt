@@ -332,7 +332,7 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 
 === restored message includes original arguments (80x28) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
-│ ✓ Tool · done                                                               ▐│
+│ ✓ Tool · done · 15:00                                                       ▐│
 │ │ mcp__mj-agents__send_message                                              ▐│
 │ │ Input arguments                                                           ▐│
 │ │ session_id:                                                               ▐│
@@ -362,7 +362,7 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 
 === empty input replaces earlier message arguments (80x28) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
-│ ✓ Tool · done                                                               ▐│
+│ ✓ Tool · done · 15:00                                                       ▐│
 │ │ mcp__mj-agents__send_message                                              ▐│
 │ │ Input arguments                                                           ▐│
 │ │ {}                                                                        ▐│

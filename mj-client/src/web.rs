@@ -36,6 +36,9 @@ pub struct BrowserTranscriptEntry {
     pub role: &'static str,
     pub label: String,
     pub recorded_at_ms: Option<i64>,
+    /// When a finished tool call ended. `None` for every other entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_ended_at_ms: Option<i64>,
     pub lines: Vec<String>,
     /// Mailbox events split into a header and report continuation lines, from
     /// the same bounded text as `lines`. Each event is a separate disclosure.
