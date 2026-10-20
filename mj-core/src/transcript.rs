@@ -420,6 +420,10 @@ pub struct ChatEntry {
     pub role: ChatRole,
     pub text: String,
     pub recorded_at_ms: Option<i64>,
+    /// When a finished tool call last changed, which is when it ended.
+    /// `None` for a call still running and for every other role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_ended_at_ms: Option<i64>,
     pub revision: u64,
     pub message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -541,6 +545,7 @@ impl ChatEntry {
             role: ChatRole::Plan,
             text: String::new(),
             recorded_at_ms: None,
+            tool_ended_at_ms: None,
             revision: 0,
             message_id: None,
             incoming_message: None,
@@ -623,6 +628,7 @@ impl ChatEntry {
             role,
             text: sanitize_terminal_text(&text.into()),
             recorded_at_ms: None,
+            tool_ended_at_ms: None,
             revision: 0,
             message_id: None,
             incoming_message: None,
@@ -654,6 +660,7 @@ impl ChatEntry {
             role: ChatRole::Tool,
             text: sanitize_terminal_text(&title.into()),
             recorded_at_ms: None,
+            tool_ended_at_ms: None,
             revision: 0,
             message_id: None,
             incoming_message: None,

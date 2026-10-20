@@ -827,6 +827,32 @@ fn reset_interaction_preserves_projected_transcript_and_render_cache() {
 }
 
 #[test]
+fn an_expanded_tool_header_shows_when_the_call_ran() {
+    let started = 1_000_000_000_000;
+    let header = |ended_at_ms: Option<i64>| {
+        let mut entry = completed_tool(2, "cargo test").with_recorded_at(Some(started));
+        entry.tool_ended_at_ms = ended_at_ms;
+        line_text(render_transcript_entry_expanded(&entry, 80)).remove(0)
+    };
+    let start = format_event_time(Some(started)).unwrap();
+    let end = format_event_time(Some(started + 5 * 60_000)).unwrap();
+
+    assert!(header(Some(started + 59_999)).ends_with(&format!(" · {start}")));
+    assert!(header(None).ends_with(&format!(" · {start}")));
+    assert!(header(Some(started + 5 * 60_000)).ends_with(&format!(" · {start}–{end}")));
+
+    // A compact summary row stays without a time.
+    let mut entry = completed_tool(2, "cargo test").with_recorded_at(Some(started));
+    entry.tool_ended_at_ms = Some(started + 5 * 60_000);
+    let summary = line_text(render_transcript_entry(
+        &entry,
+        80,
+        TranscriptRenderMode::Rich,
+    ));
+    assert!(!summary[0].contains(&start), "{summary:?}");
+}
+
+#[test]
 fn user_and_agent_headers_show_first_event_time_as_local_hours_and_minutes() {
     let expected = format_event_time(Some(0)).unwrap();
     let runtime = |text| RuntimeEvent::SessionUpdate {
@@ -4163,6 +4189,15 @@ fn golden_rich_transcript_tool_presentation() {
         &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 28)),
         &[],
     );
+    // An expanded call shows its local start time; pin it so the golden reads
+    // the same in every timezone.
+    let started = chrono::TimeZone::with_ymd_and_hms(&chrono::Local, 2026, 10, 9, 15, 0, 0)
+        .single()
+        .unwrap()
+        .timestamp_millis();
+    for entry in &mut chat.entries {
+        entry.recorded_at_ms = Some(started);
+    }
     let session = mj_transcript::projection::materialized_session_from_entries(
         "message-session",
         &chat.entries,

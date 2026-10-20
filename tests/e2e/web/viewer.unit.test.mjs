@@ -916,6 +916,27 @@ test('a search snippet marks the matched words as elements, not markup', () => {
   assert.deepEqual(built, [['span', 'read '], ['mark', 'README'], ['span', ' now']]);
 });
 
+test('a tool header shows when a call of a minute or more started and ended', () => {
+  const context = vm.createContext({
+    el: (name, className, textContent) => ({ ...makeNode(name), className, textContent }),
+  });
+  vm.runInContext(
+    sourceBetween('/// When the entry happened.', '\n/// Rewrite one entry'),
+    context,
+  );
+  const header = entry => vm.runInContext('entryTimestamp', context)(entry).textContent;
+  const started = Date.UTC(2026, 9, 9, 15, 0, 0);
+  const start = new Date(started).toLocaleTimeString();
+  const end = new Date(started + 5 * 60_000).toLocaleTimeString();
+
+  assert.equal(header({ recorded_at_ms: started }), start);
+  assert.equal(header({ recorded_at_ms: started, tool_ended_at_ms: started + 59_999 }), start);
+  assert.equal(
+    header({ recorded_at_ms: started, tool_ended_at_ms: started + 5 * 60_000 }),
+    `${start}–${end}`,
+  );
+});
+
 // A turn the harness ended without answering offers its prompt back rather
 // than resending it (#970).
 test('an unanswered turn offers the prompt that was running', () => {

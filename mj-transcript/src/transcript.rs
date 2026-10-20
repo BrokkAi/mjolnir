@@ -1260,7 +1260,9 @@ pub fn apply_session_update_to_entries(
                 call.title,
                 Some(call.tool_call_id.to_string()),
                 tool_status(&call.status),
-            );
+            )
+            .with_recorded_at(recorded_at_ms);
+            mark_tool_end(&mut entry, recorded_at_ms);
             entry.tool_summary = Some(presentation.summary.clone());
             entry.tool_presentation = Some(presentation);
             entry.tool_input = call.raw_input;
@@ -1287,6 +1289,7 @@ pub fn apply_session_update_to_entries(
             }
             if let Some(status) = update.fields.status {
                 entry.tool_status = Some(tool_status(&status));
+                mark_tool_end(entry, recorded_at_ms);
             }
             if let Some(content) = update.fields.content {
                 entry.tool_content =
@@ -1334,6 +1337,14 @@ pub fn apply_session_update_to_entries(
         other => return Some(other),
     }
     None
+}
+
+/// Record when a tool call finished, the time of the event that finished it.
+fn mark_tool_end(entry: &mut ChatEntry, recorded_at_ms: Option<i64>) {
+    entry.tool_ended_at_ms = match entry.tool_status {
+        Some(ToolStatus::Completed | ToolStatus::Failed) => recorded_at_ms,
+        _ => None,
+    };
 }
 
 /// Apply the transcript-visible part of one persisted runtime event. Returns
@@ -1510,8 +1521,30 @@ fn format_diffstat(diff: &agent_client_protocol::schema::v1::Diff) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus};
+    use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus, ToolCallUpdate};
     use serde_json::json;
+
+    #[test]
+    fn a_live_tool_call_records_when_it_started_and_ended() {
+        let mut entries = Vec::new();
+        let call = ToolCall::new("tool-1", "cargo test").status(ToolCallStatus::InProgress);
+        apply_session_update_to_entries(
+            &mut entries,
+            1,
+            Some(1_000),
+            SessionUpdate::ToolCall(call),
+        );
+        assert_eq!(entries[0].recorded_at_ms, Some(1_000));
+        assert_eq!(entries[0].tool_ended_at_ms, None);
+
+        let finish = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            "tool-1",
+            ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+        ));
+        apply_session_update_to_entries(&mut entries, 2, Some(91_000), finish);
+        assert_eq!(entries[0].recorded_at_ms, Some(1_000));
+        assert_eq!(entries[0].tool_ended_at_ms, Some(91_000));
+    }
 
     /// I1-18: Claude's question tool is titled with the question itself. Its
     /// row showed only "Which"; it must show the whole question.

@@ -7095,10 +7095,17 @@ function renderDiffStats(diffstats) {
   return list;
 }
 
+/// When the entry happened. A tool call that ran for a minute or more shows
+/// when it started and ended; a shorter one shows only when it started.
 function entryTimestamp(entry) {
   if (!entry.recorded_at_ms) return null;
-  const node = el('time', 'entry-time', new Date(entry.recorded_at_ms).toLocaleTimeString());
-  node.setAttribute('datetime', new Date(entry.recorded_at_ms).toISOString());
+  const started = new Date(entry.recorded_at_ms);
+  let text = started.toLocaleTimeString();
+  if (entry.tool_ended_at_ms && entry.tool_ended_at_ms - entry.recorded_at_ms >= 60_000) {
+    text += `–${new Date(entry.tool_ended_at_ms).toLocaleTimeString()}`;
+  }
+  const node = el('time', 'entry-time', text);
+  node.setAttribute('datetime', started.toISOString());
   return node;
 }
 
