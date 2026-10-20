@@ -1014,11 +1014,13 @@ fn simple_mode_detaches_on_direct_ctrl_q_and_never_claims_ctrl_b() {
         &["simple", env!("CARGO_MANIFEST_DIR")],
     );
     let mut output = PtyOutput::new();
+    // The launch notices replace each other within milliseconds; the session
+    // row stays, and shows the launch went ahead without a wizard.
     wait_for_ready(
         fixture.child.child_mut(),
         &mut fixture.master,
         &mut output,
-        b"Preparing session",
+        b"Conversation 1",
     );
 
     // This is the old detach chord. In Simple mode Ctrl+B reaches the focused

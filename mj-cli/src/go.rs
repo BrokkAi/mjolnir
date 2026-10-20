@@ -97,15 +97,15 @@ pub(crate) async fn resolve_workspace(
         mode.last_session_id = None;
     }
     mode.workspace_id = Some(id.clone());
-    if !mode.simple {
-        let directory = mode.directory.clone();
-        let saved_id = id.clone();
-        tokio::task::spawn_blocking(move || {
-            GoPreferences::bind_workspace(&GoPreferences::path(), directory, saved_id)
-        })
-        .await
-        .context("save project workspace task failed")??;
-    }
+    // Simple mode binds too: the binding holds the workspace and remembered
+    // session it reuses, and is stored apart from the folder's Go recipe.
+    let directory = mode.directory.clone();
+    let saved_id = id.clone();
+    tokio::task::spawn_blocking(move || {
+        GoPreferences::bind_workspace(&GoPreferences::path(), directory, saved_id)
+    })
+    .await
+    .context("save project workspace task failed")??;
     Ok(id)
 }
 
