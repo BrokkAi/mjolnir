@@ -29,7 +29,11 @@ pub(crate) fn footer_commands(
 /// "then", because the palette's own chord key is `:` and `then: : palette`
 /// reads as a doubled colon.
 pub(crate) fn chord_prefix(dashboard: &DashboardState) -> String {
-    format!("{} then ", dashboard.keybinds().prefix_label())
+    if dashboard.simple_mode() {
+        String::new()
+    } else {
+        format!("{} then ", dashboard.keybinds().prefix_label())
+    }
 }
 
 /// The footer hints that survive longest when the row runs out of width: a

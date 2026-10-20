@@ -1,6 +1,6 @@
 === tail before wheel (40x24) ===
 ╭ Conversation ────────────────────────╮
-│ │ message 34                        ││
+│ │ message 34                        ━│
 │                                     ││
 │ ❯ You                               ││
 │ │ message 35                        ││
@@ -15,7 +15,7 @@
 │ │ message 38                        ││
 │                                     ││
 │ ❯ You                               ││
-│ │ message 39                        ││
+│ │ message 39                        ▐│
 │                                     ▐│
 ╰──────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────╮
@@ -26,7 +26,7 @@ ctrl+b then : palette · ? keys
 
 === wheel up (40x24) ===
 ╭ Conversation · message 34 of 40 · En…╮
-│ │ message 33                        ││
+│ │ message 33                        ━│
 │                                     ││
 │ ❯ You                               ││
 │ │ message 34                        ││
@@ -40,9 +40,9 @@ ctrl+b then : palette · ? keys
 │ ❯ You                               ││
 │ │ message 37                        ││
 │                                     ││
-│ ❯ You                               ││
+│ ❯ You                               ▐│
 │ │ message 38                        ▐│
-│                                     ││
+│                                     ━│
 ╰──────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────╮
 │> Message the agent, or / for         │
@@ -52,7 +52,7 @@ ctrl+b then : palette · ? keys
 
 === wheel down follows (40x24) ===
 ╭ Conversation ────────────────────────╮
-│ │ message 34                        ││
+│ │ message 34                        ━│
 │                                     ││
 │ ❯ You                               ││
 │ │ message 35                        ││
@@ -67,7 +67,7 @@ ctrl+b then : palette · ? keys
 │ │ message 38                        ││
 │                                     ││
 │ ❯ You                               ││
-│ │ message 39                        ││
+│ │ message 39                        ▐│
 │                                     ▐│
 ╰──────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────╮
@@ -78,7 +78,7 @@ ctrl+b then : palette · ? keys
 
 === page navigation tail (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮
-│ │ message 34                                            ││
+│ │ message 34                                            ━│
 │                                                         ││
 │ ❯ You                                                   ││
 │ │ message 35                                            ││
@@ -93,7 +93,7 @@ ctrl+b then : palette · ? keys
 │ │ message 38                                            ││
 │                                                         ││
 │ ❯ You                                                   ││
-│ │ message 39                                            ││
+│ │ message 39                                            ▐│
 │                                                         ▐│
 ╰──────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────╮
@@ -104,7 +104,7 @@ Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 
 === page up (60x24) ===
 ╭ Conversation · message 29 of 40 · End to follow ─────────╮
-│                                                         ││
+│                                                         ━│
 │ ❯ You                                                   ││
 │ │ message 29                                            ││
 │                                                         ││
@@ -116,9 +116,9 @@ Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 │                                                         ││
 │ ❯ You                                                   ││
 │ │ message 32                                            ││
-│                                                         ││
+│                                                         ▐│
 │ ❯ You                                                   ▐│
-│ │ message 33                                            ││
+│ │ message 33                                            ━│
 │                                                         ││
 │ ❯ You                                                   ││
 ╰──────────────────────────────────────────────────────────╯
@@ -130,7 +130,7 @@ Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 
 === page down follows (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮
-│ │ message 34                                            ││
+│ │ message 34                                            ━│
 │                                                         ││
 │ ❯ You                                                   ││
 │ │ message 35                                            ││
@@ -145,7 +145,7 @@ Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 │ │ message 38                                            ││
 │                                                         ││
 │ ❯ You                                                   ││
-│ │ message 39                                            ││
+│ │ message 39                                            ▐│
 │                                                         ▐│
 ╰──────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────╮
@@ -156,7 +156,7 @@ Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 
 === ctrl end follows (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮
-│ │ message 34                                            ││
+│ │ message 34                                            ━│
 │                                                         ││
 │ ❯ You                                                   ││
 │ │ message 35                                            ││
@@ -171,7 +171,7 @@ Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 │ │ message 38                                            ││
 │                                                         ││
 │ ❯ You                                                   ││
-│ │ message 39                                            ││
+│ │ message 39                                            ▐│
 │                                                         ▐│
 ╰──────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────╮
@@ -183,7 +183,7 @@ Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 === ctrl home (40x24) ===
 ╭ Conversation · message 1 of 200 · En…╮
 │ ❯ You                               ▐│
-│ │ message 0                         ││
+│ │ message 0                         ━│
 │                                     ││
 │ ❯ You                               ││
 │ │ message 1                         ││
@@ -208,7 +208,7 @@ ctrl+b then : palette · ? keys
 
 === ctrl end (40x24) ===
 ╭ Conversation ────────────────────────╮
-│ │ message 194                       ││
+│ │ message 194                       ━│
 │                                     ││
 │ ❯ You                               ││
 │ │ message 195                       ││
@@ -235,7 +235,7 @@ ctrl+b then : palette · ? keys
 === keypad home leaves draft cursor (40x24) ===
 ╭ Conversation · message 1 of 200 · En…╮
 │ ❯ You                               ▐│
-│ │ message 0                         ││
+│ │ message 0                         ━│
 │                                     ││
 │ ❯ You                               ││
 │ │ message 1                         ││
@@ -261,7 +261,7 @@ input cursor: 12
 
 === keypad end leaves draft cursor (40x24) ===
 ╭ Conversation ────────────────────────╮
-│ │ message 194                       ││
+│ │ message 194                       ━│
 │                                     ││
 │ ❯ You                               ││
 │ │ message 195                       ││
@@ -288,7 +288,7 @@ input cursor: 12
 
 === plain home edits draft (40x24) ===
 ╭ Conversation ────────────────────────╮
-│ │ message 194                       ││
+│ │ message 194                       ━│
 │                                     ││
 │ ❯ You                               ││
 │ │ message 195                       ││
@@ -315,7 +315,7 @@ input cursor: 0
 
 === plain end edits draft (40x24) ===
 ╭ Conversation ────────────────────────╮
-│ │ message 194                       ││
+│ │ message 194                       ━│
 │                                     ││
 │ ❯ You                               ││
 │ │ message 195                       ││
@@ -344,8 +344,8 @@ input cursor: 12
 ╭ Conversation · message 1 of 9 · End to follow ───────────╮
 │ ● Agent                                                 ▐│
 │ │ response advertised on the dashboard                  ▐│
-│                                                         ▐│
-│ ─ Mjolnir                                               ▐│
+│                                                         ││
+│ ─ Mjolnir                                               ││
 │ │ terminal failure 0                                    ││
 │ │ output                                                ││
 │ │ output                                                ││
@@ -381,8 +381,8 @@ Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 │ │ output                                                ││
 │ │ output                                                ││
 │ │ output                                                ││
-│ │ output                                                ▐│
-│ │ output                                                ▐│
+│ │ output                                                ││
+│ │ output                                                ││
 │ │ output                                                ▐│
 │                                                         ▐│
 ╰──────────────────────────────────────────────────────────╯
@@ -407,8 +407,8 @@ Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 │ │ output                                                ││
 │ │ output                                                ││
 │ │ output                                                ││
-│ │ output                                                ▐│
-│ │ output                                                ▐│
+│ │ output                                                ││
+│ │ output                                                ││
 │ │ output                                                ▐│
 │                                                         ▐│
 ╰──────────────────────────────────────────────────────────╯

@@ -293,6 +293,9 @@ pub enum DashboardAction {
     CreateSession {
         create_managed_worktree: Option<bool>,
         subagents: Option<mj_core::subagent::SubagentPolicy>,
+        /// The session's automatic turn-review choice. `None` follows the
+        /// global `[review]` settings.
+        review: Option<mj_core::config::SessionReview>,
         /// Workspace selected when the creation request was submitted. The
         /// dashboard may switch tabs while validation or dirty-repository
         /// confirmation is still in flight, so the request keeps its origin.
@@ -1028,6 +1031,7 @@ pub struct DashboardState {
     pub(crate) help_request_generation: u64,
     pub(crate) usage_request_generation: u64,
     pub(crate) go: Option<go::GoMode>,
+    simple_mode: bool,
     /// The Git repository `mj` was started in, found before the dashboard
     /// opened. The new-session wizard offers it as the local project.
     pub(crate) launch_project_directory: Option<std::path::PathBuf>,
@@ -1200,6 +1204,7 @@ impl DashboardState {
             launch_recency,
             container_recreation_sessions: BTreeSet::new(),
             go: None,
+            simple_mode: false,
             launch_project_directory: None,
             go_workspaces: BTreeMap::new(),
             go_contexts: BTreeMap::new(),

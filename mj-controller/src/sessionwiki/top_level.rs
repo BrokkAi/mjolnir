@@ -96,6 +96,9 @@ fn native_is_child(kind: HarnessKind, path: &Path, cache: &NativeScanCache) -> R
     Ok(!cache.index_eligible(kind, path)?)
 }
 
+/// The separator SessionWiki puts between a store's path and an entry in it.
+const STORE_KEY_SEPARATOR: char = '\u{1f}';
+
 /// Classify one row as a child. SessionWiki's `kind` remains one signal, while
 /// Mjolnir native-id ownership and the shared native summary classifier cover
 /// rows a standalone sync may have mislabeled as `main`.
@@ -118,7 +121,10 @@ pub(super) fn is_child(
         }
         // Store keys and retained transcripts need not name a file. Their
         // indexed kind and ownership above remain the classification signals.
+        // A store key joins its database path and entry with U+001F, which
+        // Windows rejects as a path, so it is never probed as a file.
         if sessionwiki::index::native_id_of(&row.path).is_none()
+            || row.path.contains(STORE_KEY_SEPARATOR)
             || !path
                 .try_exists()
                 .with_context(|| format!("check indexed source {}", path.display()))?

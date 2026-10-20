@@ -1580,6 +1580,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateSession {
             subagents: Some(mj_core::subagent::SubagentPolicy::Native),
+            review: None,
             create_managed_worktree: Some(true),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "claude-1".into(),
@@ -1840,6 +1841,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
         dashboard.take_prerequisite_check().unwrap(),
         DashboardAction::CreateSession {
             subagents: Some(mj_core::subagent::SubagentPolicy::Native),
+            review: None,
             create_managed_worktree: Some(true),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "kimi".into(),
