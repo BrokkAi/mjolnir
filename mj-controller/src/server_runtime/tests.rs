@@ -2043,7 +2043,7 @@ fn phone_cancel_targets_the_matching_background_action() {
 #[test]
 fn phone_new_cancel_and_running_commit_have_one_atomic_winner() {
     for _ in 0..100 {
-        let create = CreateSessionControl::default();
+        let create = LifecycleControl::default();
         let control = PhoneActionControl {
             cancelled: create.cancelled.clone(),
             create: Some(create),

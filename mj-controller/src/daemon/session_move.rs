@@ -102,7 +102,7 @@ impl RuntimeState {
             super::lifecycle::LifecycleStart {
                 resume_workspace_id: None,
                 request_key: Some(key),
-                create_control: None,
+                control: None,
                 phase: LifecyclePhase::Executing,
                 move_operation_id: Some(operation_id.clone()),
             },
@@ -194,7 +194,7 @@ impl RuntimeState {
                 super::lifecycle::LifecycleStart {
                     resume_workspace_id: None,
                     request_key: Some(key),
-                    create_control: None,
+                    control: None,
                     phase,
                     move_operation_id: None,
                 },
