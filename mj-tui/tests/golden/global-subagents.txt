@@ -29,10 +29,10 @@
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
 │                                                                                                                                          │
@@ -71,10 +71,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
 │                                                                                                                                          │
@@ -113,10 +113,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
 │                                                                                                                                          │
@@ -155,10 +155,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
 │                                                                                                                                          │

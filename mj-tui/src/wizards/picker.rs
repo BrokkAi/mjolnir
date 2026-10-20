@@ -45,9 +45,12 @@ impl PickerCell {
         Self::text("")
     }
 
-    /// The yellow triangle that marks a row the picker footnote explains.
+    /// The warning mark on a row the picker footnote explains.
     pub(crate) fn warning_marker() -> Self {
-        Self::styled("⚠", Style::default().fg(theme::palette().warning))
+        Self::styled(
+            theme::glyphs().warning,
+            Style::default().fg(theme::palette().warning),
+        )
     }
 
     pub(crate) fn width(&self) -> usize {
@@ -202,10 +205,13 @@ pub(crate) fn guardian_warning_marker(harness: HarnessKind) -> PickerCell {
     }
 }
 
-/// The row below a profile table that explains its warning triangles.
+/// The row below a profile table that explains its warning marks.
 pub(crate) fn guardian_footnote() -> Line<'static> {
     Line::from(vec![
-        Span::styled("⚠  ", Style::default().fg(theme::palette().warning)),
+        Span::styled(
+            format!("{}  ", theme::glyphs().warning),
+            Style::default().fg(theme::palette().warning),
+        ),
         Span::styled(
             "No guardian approval mode; do not run on a raw, unsandboxed target.",
             theme::muted(),

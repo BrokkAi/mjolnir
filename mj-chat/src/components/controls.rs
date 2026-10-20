@@ -644,11 +644,11 @@ pub struct Checkbox;
 impl Checkbox {
     /// The shared checked/unchecked symbol, respecting ASCII terminals.
     pub fn marker(checked: bool) -> &'static str {
-        match (theme::ascii(), checked) {
-            (false, true) => "☑",
-            (false, false) => "☐",
-            (true, true) => "[x]",
-            (true, false) => "[ ]",
+        let glyphs = theme::glyphs();
+        if checked {
+            glyphs.checkbox_checked
+        } else {
+            glyphs.checkbox_unchecked
         }
     }
 

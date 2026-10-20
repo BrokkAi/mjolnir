@@ -2,9 +2,9 @@ action: None
 
 === target actions (120x34) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -25,10 +25,10 @@ action: None
 │                │  Rename     Test     Settings                                                      │                │
 │                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
 │                                                                                                        ──────────────╯
-│                                                                                                        ─────── ▁   ▪ ╮
+│                                                                                                        ─────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -39,9 +39,9 @@ action: TestTarget { target_id: "podman" }
 
 === target test result (120x34) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -62,10 +62,10 @@ action: TestTarget { target_id: "podman" }
 │                │  Rename     Test     Settings                                                      │                │
 │                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
 │                                                                                                        ──────────────╯
-│                                                                                                        ─────── ▁   ▪ ╮
+│                                                                                                        ─────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -75,9 +75,9 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 
 === target ID editor (120x34) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -98,10 +98,10 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 │                                                                                                                      │
 │                                                                                                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -111,9 +111,9 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 
 === edited target ID (120x34) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -134,10 +134,10 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 │                                                                                                                      │
 │                                                                                                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -150,9 +150,9 @@ action: None
 
 === cancelled target ID editor returns to actions (120x34) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -173,10 +173,10 @@ action: None
 │                │  Rename     Test     Settings                                                      │                │
 │                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
 │                                                                                                        ──────────────╯
-│                                                                                                        ─────── ▁   ▪ ╮
+│                                                                                                        ─────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -187,9 +187,9 @@ action: ProbeGitStatus { session_id: "session-1" }
 
 === changed files while the checkout probe is pending (100x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
 │ Create   Open   Filter: _____________││        Select a session to open its conversation.        │
 │hel ───                                                                                           │
 │› · ACP                                                                                           │
@@ -200,10 +200,10 @@ action: ProbeGitStatus { session_id: "session-1" }
 │         │                                                                              │         │
 │         │                                                                              │  en.    │
 │         │                                                                              │  ───────╯
-│         │  Refresh (r)     Close                                                       │   ▁   ▪ ╮
+│         │  Refresh (r)     Close                                                       │   ▁   ▄ ╮
 │         ╰──────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                           ───────╯
-│                                                                                            ▁   ▪ ╮
+│                                                                                            ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets    │
 │                                      ││  claude-1  Claude Code  refreshing…                      │
 │                                      ││  codex-1   Codex        refreshing…                      │
@@ -226,10 +226,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │         │modified src/module-06.rs         +7 −6                                      ││         │
 │         │modified src/module-07.rs         +8 −7                                      ││  en.    │
 │         │modified src/module-08.rs         +9 −8                                      ││  ───────╯
-│         │modified src/module-09.rs        +10 −9                                      ││   ▁   ▪ ╮
+│         │modified src/module-09.rs        +10 −9                                      ││   ▁   ▄ ╮
 │         │modified src/module-10.rs       +11 −10                                      ││         │
 │         │modified src/module-11.rs       +12 −11                                      ││  ───────╯
-│         │modified src/module-12.rs       +13 −12                                      ││   ▁   ▪ ╮
+│         │modified src/module-12.rs       +13 −12                                      ││   ▁   ▄ ╮
 │         │modified src/module-13.rs       +14 −13                                       │  ets    │
 │         │                                                                              │         │
 │         │  Refresh (r)     Close                                                       │         │
@@ -252,10 +252,10 @@ Enter op                                                                        
 │         │modified src/module-16.rs       +17 −16                                      ▐│         │
 │         │modified src/module-17.rs       +18 −17                                      ▐│  en.    │
 │         │modified src/module-18.rs       +19 −18                                      ││  ───────╯
-│         │modified src/module-19.rs       +20 −19                                      ││   ▁   ▪ ╮
+│         │modified src/module-19.rs       +20 −19                                      ││   ▁   ▄ ╮
 │         │modified src/module-20.rs       +21 −20                                      ││         │
 │         │modified src/module-21.rs       +22 −21                                      ││  ───────╯
-│         │modified src/module-22.rs       +23 −22                                      ││   ▁   ▪ ╮
+│         │modified src/module-22.rs       +23 −22                                      ││   ▁   ▄ ╮
 │         │modified src/module-23.rs       +24 −23                                       │  ets    │
 │         │                                                                              │         │
 │         │  Refresh (r)     Close                                                       │         │
@@ -267,9 +267,9 @@ action: None
 
 === dashboard after closing changed files (100x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
 │ Create   Open   Filter: _____________││        Select a session to open its conversation.        │
 │hel ──────────────────────────────────││                                                          │
 │› · ACP pretty name  ⎇ featu…logs ◇ ⋯ ││                                                          │
@@ -280,10 +280,10 @@ action: None
 │                                      ││No conversation open.                                     │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.    │
 │                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                         │
 │                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets    │
 │                                      ││  claude-1  Claude Code  refreshing…                      │
 │                                      ││  codex-1   Codex        refreshing…                      │
@@ -293,9 +293,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 
 === command palette search for recent messages (100x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
 │ Create   Open   Filter: _____________││                     ✦  M J O L N I R                     │
 │hel ──────────────────────────────────││                                                          │
 │› · ACP pretty name               ◇ ⋯ ││        Select a session to open its conversation.        │
@@ -310,10 +310,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │             │  Run                                                                 │             │
 │             ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ───────────────╯  o open.    │
 │                                                                                       ───────────╯
-│                                                                                       ──── ▁   ▪ ╮
+│                                                                                       ──── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                         │
 │                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets    │
 │                                      ││  claude-1  Claude Code  refreshing…                      │
 │                                      ││  codex-1   Codex        refreshing…                      │
@@ -324,7 +324,7 @@ action: None
 
 === recent messages (100x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessio                                                                                           │
 │ Create                                                                                           │
@@ -341,10 +341,10 @@ action: None
 │         │load the requested profile                                                    │         │
 │         ????? ago Build step 06 failed: the remote worker could not start its checkout or│  en.    │
 │         │load the requested profile                                                    │  ───────╯
-│         ????? ago Build step 05 failed: the remote worker could not start its checkout or│   ▁   ▪ ╮
+│         ????? ago Build step 05 failed: the remote worker could not start its checkout or│   ▁   ▄ ╮
 │         │                                                                              │         │
 │         │  Close                                                                       │  ───────╯
-│         ╰──────────────────────────────────────────────────────────────────────────────╯   ▁   ▪ ╮
+│         ╰──────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
 │                                                                                           ets    │
 │                                                                                                  │
 │                                      ││  codex-1   Codex        refreshing…                      │
@@ -354,7 +354,7 @@ action: None
 
 === recent messages after paging down (100x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessio                                                                                           │
 │ Create                                                                                           │
@@ -371,10 +371,10 @@ action: None
 │         │load the requested profile                                                    │         │
 │         ????? ago Build step 01 failed: the remote worker could not start its checkout or│  en.    │
 │         │load the requested profile                                                    │  ───────╯
-│         ????? ago Build step 00 failed: the remote worker could not start its checkout or│   ▁   ▪ ╮
+│         ????? ago Build step 00 failed: the remote worker could not start its checkout or│   ▁   ▄ ╮
 │         │                                                                              │         │
 │         │  Close                                                                       │  ───────╯
-│         ╰──────────────────────────────────────────────────────────────────────────────╯   ▁   ▪ ╮
+│         ╰──────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
 │                                                                                           ets    │
 │                                                                                                  │
 │                                      ││  codex-1   Codex        refreshing…                      │
@@ -385,9 +385,9 @@ action: None
 
 === command palette search for CPU by session (120x36) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │  · CPU session 06            11% ◇ ⋯ ││                                                                              │
 │  Idle  podman [5]  codex-1           ││                                                                              │
@@ -410,10 +410,10 @@ action: None
 │  │                                   ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │› · ACP pretty name           23% ◇ ⋯ │╰──────────────────────────────────────────────────────────────────────────────╯
-│  Idle  podman [9]  codex-1           │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│  Idle  podman [9]  codex-1           │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  │ No messages yet                   ││  Host / fleet  Targets  CPU  RAM                                             │
 │  │                                   │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │  · CPU session 10            11% ◇ ⋯ ││            Harness      Weekly      Resets  5H Resets                        │
 │  Idle  podman [10]  codex-1          ││  claude-1  Claude Code  refreshing…                                          │
 │  │ No messages yet                   ││  codex-1   Codex        refreshing…                                          │
@@ -449,10 +449,10 @@ action: None
 │  │        │                                                                                              │           │
 │           │  CPU session 10  [codex-1]  9.0% hourly                                                      │           │
 │› · ACP p  │                                                                                              │  ─────────╯
-│  Idle  p  │  CPU session 09  [codex-1]  8.9% hourly                                                      │  ── ▁   ▪ ╮
+│  Idle  p  │  CPU session 09  [codex-1]  8.9% hourly                                                      │  ── ▁   ▄ ╮
 │  │ No me  │                                                                                              │           │
 │  │        │  CPU session 08  [codex-1]  8.8% hourly                                                      │  ─────────╯
-│           │                                                                                              │  ── ▁   ▪ ╮
+│           │                                                                                              │  ── ▁   ▄ ╮
 │  · CPU s  │←/→ tabs · ↑/↓ sessions · Enter opens · Esc closes                                            │           │
 │  Idle  p  │  Close                                                                                       │           │
 │  │ No me  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯           │
@@ -487,10 +487,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  │        │                                                                                              │           │
 │           │  CPU session 06  [codex-1]  8.6% hourly                                                      │           │
 │› · ACP p  │                                                                                              │  ─────────╯
-│  Idle  p  │  CPU session 05  [codex-1]  8.5% hourly                                                      │  ── ▁   ▪ ╮
+│  Idle  p  │  CPU session 05  [codex-1]  8.5% hourly                                                      │  ── ▁   ▄ ╮
 │  │ No me  │                                                                                              │           │
 │  │        │  CPU session 04  [codex-1]  8.4% hourly                                                      │  ─────────╯
-│           │                                                                                              │  ── ▁   ▪ ╮
+│           │                                                                                              │  ── ▁   ▄ ╮
 │  · CPU s  │←/→ tabs · ↑/↓ sessions · Enter opens · Esc closes                                            │           │
 │  Idle  p  │  Close                                                                                       │           │
 │  │ No me  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯           │
@@ -501,9 +501,9 @@ action: None
 
 === Profiles menu with usage report (120x36) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -526,10 +526,10 @@ action: None
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -564,10 +564,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
 │    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
 │    │  Refresh     Close                                                                                         │    │
@@ -602,10 +602,10 @@ Ent                                                                             
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
 │    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
 │    │  Refresh     Close                                                                                         │    │
@@ -640,10 +640,10 @@ Ent                                                                             
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
 │    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
 │    │  Refresh     Close                                                                                         │    │
@@ -678,10 +678,10 @@ Ent                                                                             
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
 │    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
 │    │  Refresh     Close                                                                                         │    │
@@ -716,10 +716,10 @@ Ent                                                                             
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
 │    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
 │    │  Refresh     Close                                                                                         │    │
@@ -733,7 +733,7 @@ Ent                                                                             
 ╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
 ╭ S  │Profile claude ▾                                                                      Period Weekly ▾       │    │
 │ C  │                                                                                                            │    │
-│he  │☑ Include suspended sessions                                                                                │    │
+│he  │☒ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │
 │    │Total $7.205+ · last 7 days · estimated API USD                                                             │    │
 │    │                                                                                                            │    │
@@ -754,10 +754,10 @@ Ent                                                                             
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
 │    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
 │    │  Refresh     Close                                                                                         │    │
@@ -771,7 +771,7 @@ Ent                                                                             
 ╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
 ╭ S  │Profile claude ▾                                                                      Period Weekly ▾       │    │
 │ C  │                                                                                                            │    │
-│he  │☑ Include suspended sessions                                                                                │    │
+│he  │☒ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
@@ -792,10 +792,10 @@ Ent                                                                             
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
 │    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
 │    │  Refresh     Close                                                                                         │    │

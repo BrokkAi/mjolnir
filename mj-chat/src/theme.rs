@@ -420,6 +420,10 @@ pub fn palette_for(theme: UiTheme) -> &'static Palette {
 /// The glyphs one symbol set draws with. Every site that draws a status
 /// mark, a control, a rule, or a separator reads these through [`glyphs`],
 /// so switching the set changes all of them together.
+///
+/// Every Unicode glyph must take the same columns in every common terminal;
+/// `every_unicode_glyph_takes_the_same_columns_in_every_terminal` lists the
+/// rules and why.
 #[derive(Debug)]
 pub struct Glyphs {
     pub pin: &'static str,
@@ -473,6 +477,9 @@ pub struct Glyphs {
     pub role_gutter: &'static str,
     /// The microphone chip on the composer's top border.
     pub microphone: &'static str,
+    /// A checkbox's mark when checked and when not.
+    pub checkbox_checked: &'static str,
+    pub checkbox_unchecked: &'static str,
     /// The marks a transcript header draws for each kind of message. A system
     /// message uses `rule` and a tool row uses the tool-status glyphs, so only
     /// the kinds without a mark of their own are listed here.
@@ -506,12 +513,12 @@ pub const UNICODE_GLYPHS: Glyphs = Glyphs {
     selected: "› ",
     ellipsis: "…",
     row_menu: " ⋯ ",
-    workspace_menu: " ☰ ",
+    workspace_menu: " ≡ ",
     close: " × ",
     size_minimized: "▁",
-    size_standard: "▪",
+    size_standard: "▄",
     size_maximized: "□",
-    warning: "⚠",
+    warning: "!",
     spark: "✦",
     rule: "─",
     none: "—",
@@ -532,9 +539,9 @@ pub const UNICODE_GLYPHS: Glyphs = Glyphs {
     bar_right: "▏",
     arrows_vertical: "↑↓",
     role_gutter: "│ ",
-    // The text variation selector is intentional: a terminal should keep this
-    // as a compact text button rather than an emoji of a different width.
-    microphone: "🎙︎",
+    microphone: "mic",
+    checkbox_checked: "☒",
+    checkbox_unchecked: "☐",
     role_user: "❯",
     role_message: "←",
     role_agent: "●",
@@ -591,6 +598,8 @@ pub const ASCII_GLYPHS: Glyphs = Glyphs {
     arrows_vertical: "^v",
     role_gutter: "| ",
     microphone: "mic",
+    checkbox_checked: "[x]",
+    checkbox_unchecked: "[ ]",
     role_user: ">",
     role_message: "<",
     role_agent: "*",
@@ -1323,6 +1332,85 @@ mod tests {
             assert_eq!(line.spans[1].content, "Shift-Enter");
         });
         assert_eq!(footer_separator(), " · ");
+    }
+
+    /// ratatui writes a run of changed cells without moving the cursor, so a
+    /// glyph that a terminal draws wider than `unicode-width` measures it
+    /// moves every later cell of the run, and at the right edge the overflow
+    /// wraps onto the next row, where it stays. Every glyph the dashboard
+    /// draws must therefore take the same columns in every common terminal:
+    ///
+    /// - No zero-width code point (variation selector, joiner, combining
+    ///   mark). Windows Terminal before 1.22, and its "Windows Console" text
+    ///   measurement mode since, give every code point a column of its own.
+    /// - No emoji without default emoji presentation. Terminals disagree on
+    ///   whether to draw those as one-column text or two-column emoji.
+    /// - No code point whose East Asian Width changed in Unicode 16, which a
+    ///   terminal with an older table draws one column narrower.
+    ///
+    /// East Asian Ambiguous characters stay allowed: Windows Terminal, ConPTY
+    /// and `unicode-width` all draw them one column wide unless a terminal is
+    /// set to draw them wide, and the box-drawing characters of every border
+    /// are Ambiguous too.
+    // Hard-won: #1243: a glyph measured 1 column by ratatui and 2 by Windows Terminal shifted composer rows over the Sessions pane
+    #[test]
+    fn every_unicode_glyph_takes_the_same_columns_in_every_terminal() {
+        use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+        // Destructuring without `..` makes a glyph added to the table fail
+        // to compile here until it is checked too.
+        macro_rules! entries {
+            ($table:expr; $($field:ident),* $(,)?) => {{
+                let Glyphs { $($field),* } = $table;
+                [$((stringify!($field), *$field)),*]
+            }};
+        }
+        let entries = entries!(&UNICODE_GLYPHS;
+            pin, pinned, working, waiting, unread, idle, unknown, unreachable,
+            failed, starting, resuming, moving, checkpointing, stopping,
+            stopped, destroying, selected, ellipsis, row_menu, workspace_menu,
+            close, size_minimized, size_standard, size_maximized, warning,
+            spark, rule, none, footer_separator, footer_group_separator,
+            bullet, check, running, pending, dropdown, dropup, navigate,
+            scroll_track, scroll_thumb, scroll_mark, bar_full, bar_left,
+            bar_right, arrows_vertical, role_gutter, microphone, role_user,
+            checkbox_checked, checkbox_unchecked, role_message, role_agent,
+            role_thought, role_plan, role_plan_proposal, tool_output,
+        );
+        // Changed from Neutral to Wide in Unicode 16.0: the trigrams,
+        // monograms and digrams, the Yijing hexagrams, and the Tai Xuan Jing
+        // symbols.
+        let width_changed = [
+            0x2630..=0x2637,
+            0x268A..=0x268F,
+            0x4DC0..=0x4DFF,
+            0x1D300..=0x1D356,
+        ];
+        let mut offending = Vec::new();
+        for (name, glyph) in entries {
+            for mark in glyph.chars() {
+                let problem = match mark.width() {
+                    None | Some(0) => Some("is a zero-width code point"),
+                    Some(1) if format!("{mark}\u{FE0F}").width() == 2 => {
+                        Some("is an emoji without default emoji presentation")
+                    }
+                    _ if width_changed
+                        .iter()
+                        .any(|range| range.contains(&u32::from(mark))) =>
+                    {
+                        Some("changed East Asian Width in Unicode 16")
+                    }
+                    _ => None,
+                };
+                if let Some(problem) = problem {
+                    offending.push(format!(
+                        "{name} {glyph:?}: U+{:04X} {problem}",
+                        u32::from(mark)
+                    ));
+                }
+            }
+        }
+        assert!(offending.is_empty(), "{}", offending.join("\n"));
     }
 }
 

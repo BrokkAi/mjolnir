@@ -1,8 +1,8 @@
 === search hits on each tab (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │No sessions yet                       ││                                                                              │
 │Create                                                                                                                │
@@ -29,10 +29,10 @@
 │         │                                                                                                  │         │
 │         │                                 hel · Publication status unknown                                 │         │
 │         │                                                                                                  │  ───────╯
-│         │   Cancel     Destroy     Resume                                                                  │   ▁   ▪ ╮
+│         │   Cancel     Destroy     Resume                                                                  │   ▁   ▄ ╮
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                               ───────╯
-│                                                                                                                ▁   ▪ ╮
+│                                                                                                                ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -42,9 +42,9 @@
 tab hit counts: [0, 1, 2, 1]
 === search result on another tab (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │No sessions yet                       ││                                                                              │
 │Create                                                                                                                │
@@ -71,10 +71,10 @@ tab hit counts: [0, 1, 2, 1]
 │         │                                                                                                  │         │
 │         │                                                                                                  │         │
 │         │                                                                                                  │  ───────╯
-│         │   Cancel     Destroy     Resume                                                                  │   ▁   ▪ ╮
+│         │   Cancel     Destroy     Resume                                                                  │   ▁   ▄ ╮
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                               ───────╯
-│                                                                                                                ▁   ▪ ╮
+│                                                                                                                ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -85,9 +85,9 @@ tab hit counts after refresh: [0, 0, 1, 0]
 empty tab message: "No matches here · 1 on Import"
 === preview opens at first matching passage (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │No sessions yet                       ││                                                                              │
 │Create                                                                                                                │
@@ -114,10 +114,10 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │                          archived · 7 messages · the last thing it said                          │         │
 │         │                                                                                                  │  ───────╯
-│         │   Cancel     Restore                                                                             │   ▁   ▪ ╮
+│         │   Cancel     Restore                                                                             │   ▁   ▄ ╮
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                               ───────╯
-│                                                                                                                ▁   ▪ ╮
+│                                                                                                                ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -126,9 +126,9 @@ empty tab message: "No matches here · 1 on Import"
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === n selects and scrolls to second match (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │No sessions yet                       ││                                                                              │
 │Create                                                                                                                │
@@ -155,10 +155,10 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │                          archived · 7 messages · the last thing it said                          │         │
 │         │                                                                                                  │  ───────╯
-│         │   Cancel     Restore                                                                             │   ▁   ▪ ╮
+│         │   Cancel     Restore                                                                             │   ▁   ▄ ╮
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                               ───────╯
-│                                                                                                                ▁   ▪ ╮
+│                                                                                                                ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -167,9 +167,9 @@ empty tab message: "No matches here · 1 on Import"
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === previous-hit arrow (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │No sessions yet                       ││                                                                              │
 │Create                                                                                                                │
@@ -196,10 +196,10 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │                          archived · 7 messages · the last thing it said                          │         │
 │         │                                                                                                  │  ───────╯
-│         │   Cancel     Restore                                                                             │   ▁   ▪ ╮
+│         │   Cancel     Restore                                                                             │   ▁   ▄ ╮
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                               ───────╯
-│                                                                                                                ▁   ▪ ╮
+│                                                                                                                ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -208,9 +208,9 @@ empty tab message: "No matches here · 1 on Import"
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === next-hit arrow (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │No sessions yet                       ││                                                                              │
 │Create                                                                                                                │
@@ -237,10 +237,10 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │                          archived · 7 messages · the last thing it said                          │         │
 │         │                                                                                                  │  ───────╯
-│         │   Cancel     Restore                                                                             │   ▁   ▪ ╮
+│         │   Cancel     Restore                                                                             │   ▁   ▄ ╮
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                               ───────╯
-│                                                                                                                ▁   ▪ ╮
+│                                                                                                                ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -249,9 +249,9 @@ empty tab message: "No matches here · 1 on Import"
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === archived briefing without a query (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │No sessions yet                       ││                                                                              │
 │Create                                                                                                                │
@@ -278,10 +278,10 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │                          archived · 7 messages · the last thing it said                          │         │
 │         │                                                                                                  │  ───────╯
-│         │   Cancel     Restore                                                                             │   ▁   ▪ ╮
+│         │   Cancel     Restore                                                                             │   ▁   ▄ ╮
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                               ───────╯
-│                                                                                                                ▁   ▪ ╮
+│                                                                                                                ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -291,9 +291,9 @@ empty tab message: "No matches here · 1 on Import"
 briefing request action: None
 === archived hit query (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │No sessions yet                       ││                                                                              │
 │Create                                                                                                                │
@@ -320,10 +320,10 @@ briefing request action: None
 │         │                                                                                                  │         │
 │         │                          archived · 7 messages · the last thing it said                          │         │
 │         │                                                                                                  │  ───────╯
-│         │   Cancel     Restore                                                                             │   ▁   ▪ ╮
+│         │   Cancel     Restore                                                                             │   ▁   ▄ ╮
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                               ───────╯
-│                                                                                                                ▁   ▪ ╮
+│                                                                                                                ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -336,9 +336,9 @@ cached hit request: None
 new query request action: LoadArchivedHits { wiki_id: "archive-0", query: "other" }
 === new archived hit query (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │No sessions yet                       ││                                                                              │
 │Create                                                                                                                │
@@ -365,10 +365,10 @@ new query request action: LoadArchivedHits { wiki_id: "archive-0", query: "other
 │         │                                                                                                  │         │
 │         │                          archived · 7 messages · the last thing it said                          │         │
 │         │                                                                                                  │  ───────╯
-│         │   Cancel     Restore                                                                             │   ▁   ▪ ╮
+│         │   Cancel     Restore                                                                             │   ▁   ▄ ╮
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 │                                                                                                               ───────╯
-│                                                                                                                ▁   ▪ ╮
+│                                                                                                                ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │

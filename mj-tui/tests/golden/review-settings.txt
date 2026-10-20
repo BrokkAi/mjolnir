@@ -53,10 +53,10 @@ selected session: None
 │             │  Zoom pane                                                 ctrl+b z ││             │
 │             │  Resize panes                                              ctrl+b r ││  to find    │
 │             │  Swap pane left                                      ctrl+b shift+h ││  ───────────╯
-│             │  Swap pane down                                      ctrl+b shift+j ││  ──── ▁   ▪ ╮
+│             │  Swap pane down                                      ctrl+b shift+j ││  ──── ▁   ▄ ╮
 │             │  Swap pane up                                        ctrl+b shift+k ││             │
 │             │  Swap pane right                                     ctrl+b shift+l ││  ───────────╯
-│             │  Resize pane left                                                   ││  ──── ▁   ▪ ╮
+│             │  Resize pane left                                                   ││  ──── ▁   ▄ ╮
 │             │  Resize pane down                                                    │   Resets    │
 │             │Choose the profile, project, target, and mounts in the full wizard.   │             │
 │             │  Run                                                                 │             │

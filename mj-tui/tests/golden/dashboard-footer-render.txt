@@ -1,8 +1,8 @@
 === notice takes over the one-row footer (120x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                      Create a session to start building.                     │
 │No sessions yet                       ││                                                                              │
 │Create new work or open a session.    ││                                                                              │
@@ -13,10 +13,10 @@
 │                                      ││No live session in this workspace.                                            │
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -25,9 +25,9 @@
 Transient dashboard message
 === footer hints after notice (120x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                      Create a session to start building.                     │
 │No sessions yet                       ││                                                                              │
 │Create new work or open a session.    ││                                                                              │
@@ -38,10 +38,10 @@ Transient dashboard message
 │                                      ││No live session in this workspace.                                            │
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -50,9 +50,9 @@ Transient dashboard message
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === footer at Sessions focus (200x24) ===
 ╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                                      ☰ ││                                                                                                                                    │
+│ default                                                      ≡ ││                                                                                                                                    │
 ╰────────────────────────────────────────────────────────────────╯│                                                          ✦  M J O L N I R                                                          │
-╭ Sessions ─────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                    │
+╭ Sessions ─────────────────────────────────────────── ▁   ▄   □ ╮│                                                                                                                                    │
 │ Create   Open   Filter: ________________________               ││                                             Select a session to open its conversation.                                             │
 │hel ────────────────────────────────────────────────────────────││                                                                                                                                    │
 │› · ACP pretty name                                         ◇ ⋯ ││                                                                                                                                    │
@@ -62,11 +62,11 @@ Transient dashboard message
 │                                                                ││No conversation open.                                                                                                               │
 │                                                                ││Press Tab for Sessions, then Enter on the one to open.                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                                                │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                                                │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                ││  Host / fleet  Targets  CPU          RAM                                                                                           │
 │                                                                ││  local         podman   unavailable                                                                                                │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                ││            Harness      Weekly      Resets  5H Resets                                                                              │
 │                                                                ││  claude-1  Claude Code  refreshing…                                                                                                │
 │                                                                ││  codex-1   Codex        refreshing…                                                                                                │
@@ -75,9 +75,9 @@ Transient dashboard message
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
 === footer at Targets focus (200x24) ===
 ╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                                      ☰ ││                                                                                                                                    │
+│ default                                                      ≡ ││                                                                                                                                    │
 ╰────────────────────────────────────────────────────────────────╯│                                                          ✦  M J O L N I R                                                          │
-╭ Sessions ─────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                    │
+╭ Sessions ─────────────────────────────────────────── ▁   ▄   □ ╮│                                                                                                                                    │
 │ Create   Open   Filter: ________________________               ││                                             Select a session to open its conversation.                                             │
 │hel ────────────────────────────────────────────────────────────││                                                                                                                                    │
 │› · ACP pretty name                                         ◇ ⋯ ││                                                                                                                                    │
@@ -87,11 +87,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                ││No conversation open.                                                                                                               │
 │                                                                ││Press Tab for Sessions, then Enter on the one to open.                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                                                │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                                                │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                ││  Host / fleet  Targets  CPU          RAM                                                                                           │
 │                                                                ││› local         podman   unavailable                                                                                                │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                ││            Harness      Weekly      Resets  5H Resets                                                                              │
 │                                                                ││  claude-1  Claude Code  refreshing…                                                                                                │
 │                                                                ││  codex-1   Codex        refreshing…                                                                                                │
@@ -100,9 +100,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys
 === footer at Quota focus (200x24) ===
 ╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                                      ☰ ││                                                                                                                                    │
+│ default                                                      ≡ ││                                                                                                                                    │
 ╰────────────────────────────────────────────────────────────────╯│                                                          ✦  M J O L N I R                                                          │
-╭ Sessions ─────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                    │
+╭ Sessions ─────────────────────────────────────────── ▁   ▄   □ ╮│                                                                                                                                    │
 │ Create   Open   Filter: ________________________               ││                                             Select a session to open its conversation.                                             │
 │hel ────────────────────────────────────────────────────────────││                                                                                                                                    │
 │› · ACP pretty name                                         ◇ ⋯ ││                                                                                                                                    │
@@ -112,11 +112,11 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 │                                                                ││No conversation open.                                                                                                               │
 │                                                                ││Press Tab for Sessions, then Enter on the one to open.                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                                                │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                                                │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                ││  Host / fleet  Targets  CPU          RAM                                                                                           │
 │                                                                ││  local         podman   unavailable                                                                                                │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                ││            Harness      Weekly      Resets  5H Resets                                                                              │
 │                                                                ││› claude-1  Claude Code  refreshing…                                                                                                │
 │                                                                ││  codex-1   Codex        refreshing…                                                                                                │
@@ -125,9 +125,9 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys
 === footer at Prompt focus (200x24) ===
 ╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                                      ☰ ││                                                                                                                                    │
+│ default                                                      ≡ ││                                                                                                                                    │
 ╰────────────────────────────────────────────────────────────────╯│                                                          ✦  M J O L N I R                                                          │
-╭ Sessions ─────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                    │
+╭ Sessions ─────────────────────────────────────────── ▁   ▄   □ ╮│                                                                                                                                    │
 │ Create   Open   Filter: ________________________               ││                                             Select a session to open its conversation.                                             │
 │hel ────────────────────────────────────────────────────────────││                                                                                                                                    │
 │› · ACP pretty name                                         ◇ ⋯ ││                                                                                                                                    │
@@ -137,11 +137,11 @@ Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes
 │                                                                ││No conversation open.                                                                                                               │
 │                                                                ││Press Tab for Sessions, then Enter on the one to open.                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                                                │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                                                │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                ││  Host / fleet  Targets  CPU          RAM                                                                                           │
 │                                                                ││  local         podman   unavailable                                                                                                │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                ││            Harness      Weekly      Resets  5H Resets                                                                              │
 │                                                                ││  claude-1  Claude Code  refreshing…                                                                                                │
 │                                                                ││  codex-1   Codex        refreshing…                                                                                                │
@@ -2010,9 +2010,9 @@ Need at least 60 columns.
 
 === footer at 60 columns (60x30) ===
 ╭ Workspaces ──────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                ☰ │
+│ default                                                ≡ │
 ╰──────────────────────────────────────────────────────────╯
-╭ Sessions ───────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ───────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                            │
 │hel ──────────────────────────────────────────────────────│
 │› · ACP pretty name                                   ◇ ⋯ │
@@ -2028,11 +2028,11 @@ Need at least 60 columns.
 │No conversation open.                                     │
 │Press Tab for Sessions, then Enter on the one to open.    │
 ╰──────────────────────────────────────────────────────────╯
-╭ Targets ▾ ──────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ──────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                 │
 │  local         podman   unavailable                      │
 ╰──────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets    │
 │  claude-1  Claude Code  refreshing…                      │
 │  codex-1   Codex        refreshing…                      │
@@ -2041,9 +2041,9 @@ Need at least 60 columns.
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 61 columns (61x30) ===
 ╭ Workspaces ───────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                 ☰ │
+│ default                                                 ≡ │
 ╰───────────────────────────────────────────────────────────╯
-╭ Sessions ────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                             │
 │hel ───────────────────────────────────────────────────────│
 │› · ACP pretty name                                    ◇ ⋯ │
@@ -2059,11 +2059,11 @@ Enter open │ ctrl+b then : palette · ? keys
 │No conversation open.                                      │
 │Press Tab for Sessions, then Enter on the one to open.     │
 ╰───────────────────────────────────────────────────────────╯
-╭ Targets ▾ ───────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ───────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                  │
 │  local         podman   unavailable                       │
 ╰───────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)───────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)───────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets     │
 │  claude-1  Claude Code  refreshing…                       │
 │  codex-1   Codex        refreshing…                       │
@@ -2072,9 +2072,9 @@ Enter open │ ctrl+b then : palette · ? keys
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 62 columns (62x30) ===
 ╭ Workspaces ────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                  ☰ │
+│ default                                                  ≡ │
 ╰────────────────────────────────────────────────────────────╯
-╭ Sessions ─────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ─────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                              │
 │hel ────────────────────────────────────────────────────────│
 │› · ACP pretty name                                     ◇ ⋯ │
@@ -2090,11 +2090,11 @@ Enter open │ ctrl+b then : palette · ? keys
 │No conversation open.                                       │
 │Press Tab for Sessions, then Enter on the one to open.      │
 ╰────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                   │
 │  local         podman   unavailable                        │
 ╰────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets      │
 │  claude-1  Claude Code  refreshing…                        │
 │  codex-1   Codex        refreshing…                        │
@@ -2103,9 +2103,9 @@ Enter open │ ctrl+b then : palette · ? keys
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 63 columns (63x30) ===
 ╭ Workspaces ─────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                   ☰ │
+│ default                                                   ≡ │
 ╰─────────────────────────────────────────────────────────────╯
-╭ Sessions ──────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ──────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                               │
 │hel ─────────────────────────────────────────────────────────│
 │› · ACP pretty name                                      ◇ ⋯ │
@@ -2121,11 +2121,11 @@ Enter open │ ctrl+b then : palette · ? keys
 │No conversation open.                                        │
 │Press Tab for Sessions, then Enter on the one to open.       │
 ╰─────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ─────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ─────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                    │
 │  local         podman   unavailable                         │
 ╰─────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)─────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)─────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets       │
 │  claude-1  Claude Code  refreshing…                         │
 │  codex-1   Codex        refreshing…                         │
@@ -2134,9 +2134,9 @@ Enter open │ ctrl+b then : palette · ? keys
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 64 columns (64x30) ===
 ╭ Workspaces ──────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                    ☰ │
+│ default                                                    ≡ │
 ╰──────────────────────────────────────────────────────────────╯
-╭ Sessions ───────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ───────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                                │
 │hel ──────────────────────────────────────────────────────────│
 │› · ACP pretty name                                       ◇ ⋯ │
@@ -2152,11 +2152,11 @@ Enter open │ ctrl+b then : palette · ? keys
 │No conversation open.                                         │
 │Press Tab for Sessions, then Enter on the one to open.        │
 ╰──────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ──────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ──────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                     │
 │  local         podman   unavailable                          │
 ╰──────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)──────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)──────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets        │
 │  claude-1  Claude Code  refreshing…                          │
 │  codex-1   Codex        refreshing…                          │
@@ -2165,9 +2165,9 @@ Enter open │ ctrl+b then : palette · ? keys
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 65 columns (65x30) ===
 ╭ Workspaces ───────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                     ☰ │
+│ default                                                     ≡ │
 ╰───────────────────────────────────────────────────────────────╯
-╭ Sessions ────────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ────────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                                 │
 │hel ───────────────────────────────────────────────────────────│
 │› · ACP pretty name                                        ◇ ⋯ │
@@ -2183,11 +2183,11 @@ Enter open │ ctrl+b then : palette · ? keys
 │No conversation open.                                          │
 │Press Tab for Sessions, then Enter on the one to open.         │
 ╰───────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ───────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ───────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                      │
 │  local         podman   unavailable                           │
 ╰───────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)───────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)───────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets         │
 │  claude-1  Claude Code  refreshing…                           │
 │  codex-1   Codex        refreshing…                           │
@@ -2196,9 +2196,9 @@ Enter open │ ctrl+b then : palette · ? keys
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 66 columns (66x30) ===
 ╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                      ☰ │
+│ default                                                      ≡ │
 ╰────────────────────────────────────────────────────────────────╯
-╭ Sessions ─────────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ─────────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                                  │
 │hel ────────────────────────────────────────────────────────────│
 │› · ACP pretty name                                         ◇ ⋯ │
@@ -2214,11 +2214,11 @@ Enter open │ ctrl+b then : palette · ? keys
 │No conversation open.                                           │
 │Press Tab for Sessions, then Enter on the one to open.          │
 ╰────────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ────────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                       │
 │  local         podman   unavailable                            │
 ╰────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)────────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)────────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets          │
 │  claude-1  Claude Code  refreshing…                            │
 │  codex-1   Codex        refreshing…                            │
@@ -2227,9 +2227,9 @@ Enter open │ ctrl+b then : palette · ? keys
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 67 columns (67x30) ===
 ╭ Workspaces ─────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                       ☰ │
+│ default                                                       ≡ │
 ╰─────────────────────────────────────────────────────────────────╯
-╭ Sessions ──────────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ──────────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                                   │
 │hel ─────────────────────────────────────────────────────────────│
 │› · ACP pretty name                                          ◇ ⋯ │
@@ -2245,11 +2245,11 @@ Enter open │ ctrl+b then : palette · ? keys
 │No conversation open.                                            │
 │Press Tab for Sessions, then Enter on the one to open.           │
 ╰─────────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ─────────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ─────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                        │
 │  local         podman   unavailable                             │
 ╰─────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)─────────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)─────────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets           │
 │  claude-1  Claude Code  refreshing…                             │
 │  codex-1   Codex        refreshing…                             │
@@ -2258,9 +2258,9 @@ Enter open │ ctrl+b then : palette · ? keys
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 68 columns (68x30) ===
 ╭ Workspaces ──────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                        ☰ │
+│ default                                                        ≡ │
 ╰──────────────────────────────────────────────────────────────────╯
-╭ Sessions ───────────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ───────────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                                    │
 │hel ──────────────────────────────────────────────────────────────│
 │› · ACP pretty name                                           ◇ ⋯ │
@@ -2276,11 +2276,11 @@ Enter open │ ctrl+b then : palette · ? keys
 │No conversation open.                                             │
 │Press Tab for Sessions, then Enter on the one to open.            │
 ╰──────────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ──────────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ──────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                         │
 │  local         podman   unavailable                              │
 ╰──────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)──────────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)──────────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets            │
 │  claude-1  Claude Code  refreshing…                              │
 │  codex-1   Codex        refreshing…                              │
@@ -2289,9 +2289,9 @@ Enter open │ ctrl+b then : palette · ? keys
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 69 columns (69x30) ===
 ╭ Workspaces ───────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                         ☰ │
+│ default                                                         ≡ │
 ╰───────────────────────────────────────────────────────────────────╯
-╭ Sessions ────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ────────────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                                     │
 │hel ───────────────────────────────────────────────────────────────│
 │› · ACP pretty name                                            ◇ ⋯ │
@@ -2307,11 +2307,11 @@ Enter open │ ctrl+b then : palette · ? keys
 │No conversation open.                                              │
 │Press Tab for Sessions, then Enter on the one to open.             │
 ╰───────────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ───────────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ───────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                          │
 │  local         podman   unavailable                               │
 ╰───────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)───────────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)───────────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets             │
 │  claude-1  Claude Code  refreshing…                               │
 │  codex-1   Codex        refreshing…                               │
@@ -2320,9 +2320,9 @@ Enter open │ ctrl+b then : palette · ? keys
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 70 columns (70x30) ===
 ╭ Workspaces ────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                          ☰ │
+│ default                                                          ≡ │
 ╰────────────────────────────────────────────────────────────────────╯
-╭ Sessions ─────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ─────────────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                                      │
 │hel ────────────────────────────────────────────────────────────────│
 │› · ACP pretty name                                             ◇ ⋯ │
@@ -2338,11 +2338,11 @@ Enter open │ ctrl+b then : palette · ? keys
 │No conversation open.                                               │
 │Press Tab for Sessions, then Enter on the one to open.              │
 ╰────────────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                           │
 │  local         podman   unavailable                                │
 ╰────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets              │
 │  claude-1  Claude Code  refreshing…                                │
 │  codex-1   Codex        refreshing…                                │
@@ -2351,9 +2351,9 @@ Enter open │ ctrl+b then : palette · ? keys
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 71 columns (71x30) ===
 ╭ Workspaces ─────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                           ☰ │
+│ default                                                           ≡ │
 ╰─────────────────────────────────────────────────────────────────────╯
-╭ Sessions ──────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ──────────────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                                       │
 │hel ─────────────────────────────────────────────────────────────────│
 │› · ACP pretty name                                              ◇ ⋯ │
@@ -2369,11 +2369,11 @@ Enter open │ ctrl+b then : palette · ? keys
 │No conversation open.                                                │
 │Press Tab for Sessions, then Enter on the one to open.               │
 ╰─────────────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ─────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ─────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                            │
 │  local         podman   unavailable                                 │
 ╰─────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)─────────────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)─────────────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets               │
 │  claude-1  Claude Code  refreshing…                                 │
 │  codex-1   Codex        refreshing…                                 │
@@ -2382,9 +2382,9 @@ Enter open │ ctrl+b then : palette · ? keys
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 72 columns (72x30) ===
 ╭ Workspaces ──────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                            ☰ │
+│ default                                                            ≡ │
 ╰──────────────────────────────────────────────────────────────────────╯
-╭ Sessions ───────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ───────────────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                                        │
 │hel ──────────────────────────────────────────────────────────────────│
 │› · ACP pretty name                                               ◇ ⋯ │
@@ -2400,11 +2400,11 @@ Enter open │ ctrl+b then : palette · ? keys
 │No conversation open.                                                 │
 │Press Tab for Sessions, then Enter on the one to open.                │
 ╰──────────────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ──────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ──────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                             │
 │  local         podman   unavailable                                  │
 ╰──────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)──────────────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)──────────────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets                │
 │  claude-1  Claude Code  refreshing…                                  │
 │  codex-1   Codex        refreshing…                                  │
@@ -2413,9 +2413,9 @@ Enter open │ ctrl+b then : palette · ? keys
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 73 columns (73x30) ===
 ╭ Workspaces ───────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                             ☰ │
+│ default                                                             ≡ │
 ╰───────────────────────────────────────────────────────────────────────╯
-╭ Sessions ────────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ────────────────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                                         │
 │hel ───────────────────────────────────────────────────────────────────│
 │› · ACP pretty name                                                ◇ ⋯ │
@@ -2431,11 +2431,11 @@ Enter open │ ctrl+b then : palette · ? keys
 │No conversation open.                                                  │
 │Press Tab for Sessions, then Enter on the one to open.                 │
 ╰───────────────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ───────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ───────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                              │
 │  local         podman   unavailable                                   │
 ╰───────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)───────────────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)───────────────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets                 │
 │  claude-1  Claude Code  refreshing…                                   │
 │  codex-1   Codex        refreshing…                                   │
@@ -2444,9 +2444,9 @@ Enter open │ ctrl+b then : palette · ? keys
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 === footer at 74 columns (74x30) ===
 ╭ Workspaces ────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                              ☰ │
+│ default                                                              ≡ │
 ╰────────────────────────────────────────────────────────────────────────╯
-╭ Sessions ─────────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ─────────────────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                                          │
 │hel ────────────────────────────────────────────────────────────────────│
 │› · ACP pretty name                                                 ◇ ⋯ │
@@ -2462,11 +2462,11 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │No conversation open.                                                   │
 │Press Tab for Sessions, then Enter on the one to open.                  │
 ╰────────────────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ────────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                               │
 │  local         podman   unavailable                                    │
 ╰────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)────────────────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)────────────────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets                  │
 │  claude-1  Claude Code  refreshing…                                    │
 │  codex-1   Codex        refreshing…                                    │
@@ -2475,9 +2475,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 === footer at 75 columns (75x30) ===
 ╭ Workspaces ─────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                               ☰ │
+│ default                                                               ≡ │
 ╰─────────────────────────────────────────────────────────────────────────╯
-╭ Sessions ──────────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ──────────────────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                                           │
 │hel ─────────────────────────────────────────────────────────────────────│
 │› · ACP pretty name                                                  ◇ ⋯ │
@@ -2493,11 +2493,11 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │No conversation open.                                                    │
 │Press Tab for Sessions, then Enter on the one to open.                   │
 ╰─────────────────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ─────────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ─────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                                │
 │  local         podman   unavailable                                     │
 ╰─────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)─────────────────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)─────────────────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets                   │
 │  claude-1  Claude Code  refreshing…                                     │
 │  codex-1   Codex        refreshing…                                     │
@@ -2506,9 +2506,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 === footer at 76 columns (76x30) ===
 ╭ Workspaces ──────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                                ☰ │
+│ default                                                                ≡ │
 ╰──────────────────────────────────────────────────────────────────────────╯
-╭ Sessions ───────────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ───────────────────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                                            │
 │hel ──────────────────────────────────────────────────────────────────────│
 │› · ACP pretty name                                                   ◇ ⋯ │
@@ -2524,11 +2524,11 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │No conversation open.                                                     │
 │Press Tab for Sessions, then Enter on the one to open.                    │
 ╰──────────────────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ──────────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ──────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                                 │
 │  local         podman   unavailable                                      │
 ╰──────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)──────────────────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)──────────────────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets                    │
 │  claude-1  Claude Code  refreshing…                                      │
 │  codex-1   Codex        refreshing…                                      │
@@ -2537,9 +2537,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 === footer at 77 columns (77x30) ===
 ╭ Workspaces ───────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                                 ☰ │
+│ default                                                                 ≡ │
 ╰───────────────────────────────────────────────────────────────────────────╯
-╭ Sessions ────────────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ────────────────────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                                             │
 │hel ───────────────────────────────────────────────────────────────────────│
 │› · ACP pretty name                                                    ◇ ⋯ │
@@ -2555,11 +2555,11 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │No conversation open.                                                      │
 │Press Tab for Sessions, then Enter on the one to open.                     │
 ╰───────────────────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ───────────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ───────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                                  │
 │  local         podman   unavailable                                       │
 ╰───────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)───────────────────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)───────────────────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets                     │
 │  claude-1  Claude Code  refreshing…                                       │
 │  codex-1   Codex        refreshing…                                       │
@@ -2568,9 +2568,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 === footer at 78 columns (78x30) ===
 ╭ Workspaces ────────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                                  ☰ │
+│ default                                                                  ≡ │
 ╰────────────────────────────────────────────────────────────────────────────╯
-╭ Sessions ─────────────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ─────────────────────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                                              │
 │hel ────────────────────────────────────────────────────────────────────────│
 │› · ACP pretty name                                                     ◇ ⋯ │
@@ -2586,11 +2586,11 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │No conversation open.                                                       │
 │Press Tab for Sessions, then Enter on the one to open.                      │
 ╰────────────────────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ────────────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                                   │
 │  local         podman   unavailable                                        │
 ╰────────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)────────────────────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)────────────────────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets                      │
 │  claude-1  Claude Code  refreshing…                                        │
 │  codex-1   Codex        refreshing…                                        │
@@ -2599,9 +2599,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 === footer at 79 columns (79x30) ===
 ╭ Workspaces ─────────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
-│ default                                                                   ☰ │
+│ default                                                                   ≡ │
 ╰─────────────────────────────────────────────────────────────────────────────╯
-╭ Sessions ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Sessions ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │ Create   Open                                                               │
 │hel ─────────────────────────────────────────────────────────────────────────│
 │› · ACP pretty name                                                      ◇ ⋯ │
@@ -2617,11 +2617,11 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │No conversation open.                                                        │
 │Press Tab for Sessions, then Enter on the one to open.                       │
 ╰─────────────────────────────────────────────────────────────────────────────╯
-╭ Targets ▾ ─────────────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ─────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                                    │
 │  local         podman   unavailable                                         │
 ╰─────────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)─────────────────────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)─────────────────────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets                       │
 │  claude-1  Claude Code  refreshing…                                         │
 │  codex-1   Codex        refreshing…                                         │
@@ -2630,9 +2630,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 === footer at 80 columns (80x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
-│ default                            ☰ ││                                      │
+│ default                            ≡ ││                                      │
 ╰──────────────────────────────────────╯│                                      │
-╭ Sessions ───────────────────── ▁   ▪ ╮│                                      │
+╭ Sessions ───────────────────── ▁   ▄ ╮│                                      │
 │ Create   Open   Filter: _____________││                                      │
 │hel ──────────────────────────────────││           ✦  M J O L N I R           │
 │› · ACP pretty name               ◇ ⋯ ││                                      │
@@ -2648,11 +2648,11 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │                                      ││No conversation open.                 │
 │                                      ││Press Tab for Sessions, then Enter on │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────╯
-╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU          RAM                                     │
 │  local         podman   unavailable                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets                        │
 │  claude-1  Claude Code  refreshing…                                          │
 │  codex-1   Codex        refreshing…                                          │
@@ -2662,9 +2662,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 Sessions prefix action: Consumed
 === Sessions pending chord (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -2691,10 +2691,10 @@ Sessions prefix action: Consumed
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -2703,9 +2703,9 @@ Sessions prefix action: Consumed
  PREFIX  esc cancel · ctrl+b send · ? keys
 === Sessions after cancelling chord (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -2732,10 +2732,10 @@ Sessions prefix action: Consumed
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -2745,9 +2745,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Prompt prefix action: Consumed
 === Prompt pending chord (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -2774,10 +2774,10 @@ Prompt prefix action: Consumed
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -2786,9 +2786,9 @@ Prompt prefix action: Consumed
  PREFIX  esc cancel · ctrl+b send · ? keys
 === Prompt after cancelling chord (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
@@ -2815,10 +2815,10 @@ Prompt prefix action: Consumed
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │

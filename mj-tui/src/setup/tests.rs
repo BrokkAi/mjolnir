@@ -81,7 +81,7 @@ fn every_boolean_setting_is_drawn_as_a_checkbox() {
             .find(|line| line.contains(label))
             .unwrap_or_else(|| panic!("{section}: missing {label:?}: {lines:#?}"));
         assert!(
-            row.contains('☑') || row.contains('☐'),
+            row.contains('☒') || row.contains('☐'),
             "{section} › {label} is a checkbox: {row:?}"
         );
         assert!(
@@ -1379,7 +1379,7 @@ fn disabling_a_profile_clears_references_and_reports_the_cleanup() {
         .draw(|frame| crate::render::render(frame, &mut dashboard))
         .unwrap();
     let enabled = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(enabled.contains('☑'), "{enabled}");
+    assert!(enabled.contains('☒'), "{enabled}");
 
     choose(&mut dashboard, "enabled");
     let Mode::Setup(dialog) = &dashboard.mode else {
@@ -2081,7 +2081,7 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
     let resolved = buffer_lines(terminal.backend().buffer()).join("\n");
     for expected in [
         "Enabled",
-        "☑",
+        "☒",
         "mbx: the filesystem under /mnt/fast/mbx-cache does not support reflinks",
         "/mnt/fast/mbx-cache",
         "537 GB, host mbx config",
@@ -2235,7 +2235,7 @@ fn the_build_cache_switch_is_a_checkbox_on_a_host_that_supports_it() {
         false,
     );
     let checked = drawn(&mut dashboard, 140, 30).join("\n");
-    assert!(checked.contains("☑"), "an unset switch is on:\n{checked}");
+    assert!(checked.contains("☒"), "an unset switch is on:\n{checked}");
     // The page otherwise only predicts; this line is the one thing on it that
     // says the cache is being used.
     for expected in [

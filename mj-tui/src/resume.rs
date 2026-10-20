@@ -162,12 +162,13 @@ impl ResumeRowStatus {
     }
 
     /// Short marker shown in the origin column, sized to fit beside it.
-    pub(crate) fn warning(self) -> Option<&'static str> {
-        match self {
-            Self::Lost => Some("⚠ lost"),
-            Self::DataLoss => Some("⚠ data lost"),
-            Self::Running | Self::Resumable | Self::Importable | Self::Restorable => None,
-        }
+    pub(crate) fn warning(self) -> Option<String> {
+        let what = match self {
+            Self::Lost => "lost",
+            Self::DataLoss => "data lost",
+            Self::Running | Self::Resumable | Self::Importable | Self::Restorable => return None,
+        };
+        Some(format!("{} {what}", theme::glyphs().warning))
     }
 
     /// Why the row cannot be resumed, in full, for the details line and the

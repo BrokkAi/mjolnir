@@ -918,7 +918,7 @@ pub(crate) fn render_review_wizard(
     {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
-            format!("⚠ {warning}"),
+            format!("{} {warning}", theme::glyphs().warning),
             Style::default()
                 .fg(theme::palette().error)
                 .add_modifier(Modifier::BOLD),
