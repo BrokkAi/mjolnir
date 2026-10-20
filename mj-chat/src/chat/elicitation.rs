@@ -341,7 +341,7 @@ impl ElicitationDialog {
                         Some(ElicitationControl::Field(_))
                     )
                 {
-                    self.pick_cursor_when_nothing_picked();
+                    self.pick_cursor_when_empty();
                     return self.answer_and_next();
                 }
             }
@@ -405,7 +405,7 @@ impl ElicitationDialog {
                 Some(ElicitationResponse::Cancel)
             }
             Interaction::Activate(ElicitationControl::Field(_)) => {
-                self.pick_cursor_when_nothing_picked();
+                self.pick_cursor_when_empty();
                 self.answer_and_next()
             }
             Interaction::Toggle(ElicitationControl::Field(index)) => {
@@ -451,12 +451,12 @@ impl ElicitationDialog {
                 }
                 _ => None,
             };
-            let toggle = clicked
-                .is_some_and(|display| matches!(self.values[display.field], FieldValue::Multi(_)));
-            // A click on an option is a deliberate pick, which moving the
-            // cursor is not beside an alongside text field.
-            let pick = clicked.is_some_and(|display| {
-                display.alongside && matches!(self.values[display.field], FieldValue::Single(_))
+            // A click toggles an option as Space does: in a multi-select, and
+            // in a single-select beside its own text field, where moving the
+            // cursor does not pick.
+            let toggle = clicked.is_some_and(|display| {
+                matches!(self.values[display.field], FieldValue::Multi(_))
+                    || self.picks_on_purpose(display)
             });
             let response = self.apply_interaction(interaction);
             if toggle {
@@ -465,9 +465,6 @@ impl ElicitationDialog {
                 } else {
                     self.toggle_current();
                 }
-            }
-            if pick && self.editable_field().is_none() {
-                self.pick_cursor();
             }
             return response;
         }
@@ -766,32 +763,35 @@ impl ElicitationDialog {
         }
     }
 
-    /// Picks the option under the cursor of an alongside single-select.
-    fn pick_cursor(&mut self) {
+    /// Whether `display` is a single-select beside its own text field, where
+    /// a pick is deliberate: ↑/↓ move only the cursor, Space or a click
+    /// toggles the option under it, and Enter answers with what is there.
+    fn picks_on_purpose(&self, display: DisplayField) -> bool {
+        display.alongside && matches!(self.values[display.field], FieldValue::Single(_))
+    }
+
+    /// Enter on a page that picks on purpose answers with the pick and the
+    /// text already there. Only when that answer would be empty, with
+    /// nothing picked and the text blank, does it take the option under the
+    /// cursor, as Enter does on any other list.
+    fn pick_cursor_when_empty(&mut self) {
         let Some(display) = self.display_fields.get(self.focus_index()).copied() else {
             return;
         };
-        let cursor = self.option_cursors[display.field];
-        let option_count = select_option_count(&self.request.fields[display.field]).unwrap_or(0);
-        if !display.alongside || cursor >= option_count {
+        if !self.picks_on_purpose(display) {
             return;
         }
-        if let FieldValue::Single(selected) = &mut self.values[display.field]
-            && *selected != Some(cursor)
+        let cursor = self.option_cursors[display.field];
+        let option_count = select_option_count(&self.request.fields[display.field]).unwrap_or(0);
+        let text_blank = display.custom.is_none_or(|custom| {
+            matches!(&self.values[custom], FieldValue::Text(value) if value.value().trim().is_empty())
+        });
+        if cursor < option_count
+            && text_blank
+            && let FieldValue::Single(selected @ None) = &mut self.values[display.field]
         {
             *selected = Some(cursor);
             self.confirmed.remove(&self.current_question);
-        }
-    }
-
-    /// Enter on an option row of an alongside single-select with nothing
-    /// picked answers with that option, as Enter does on any other list.
-    fn pick_cursor_when_nothing_picked(&mut self) {
-        let Some(display) = self.display_fields.get(self.focus_index()).copied() else {
-            return;
-        };
-        if matches!(self.values[display.field], FieldValue::Single(None)) {
-            self.pick_cursor();
         }
     }
 
@@ -1545,13 +1545,24 @@ fn render_elicitation_body(
             ElicitationControl::Field(dialog.current_question)
         });
     }
+    // Where a pick is deliberate, the arrows only move and Space picks.
+    let picks_on_purpose = !dialog.confirming_unanswered
+        && dialog
+            .display_fields
+            .get(dialog.current_question)
+            .is_some_and(|display| dialog.picks_on_purpose(*display));
+    let space_help = if picks_on_purpose {
+        "Space pick"
+    } else {
+        "Space toggle"
+    };
     let scroll_help = if maximum_scroll > 0 {
         let start = message_scroll.saturating_add(1);
         let end = message_scroll
             .saturating_add(chunks[0].height)
             .min(total_lines);
         Some(format!(
-            "Text {start}–{end}/{total_lines} · PgUp/PgDn or wheel scroll · Space toggle · Enter answer · Alt+←/→ questions"
+            "Text {start}–{end}/{total_lines} · PgUp/PgDn or wheel scroll · {space_help} · Enter answer · Alt+←/→ questions"
         ))
     } else {
         None
@@ -1562,6 +1573,8 @@ fn render_elicitation_body(
         scroll_help
     } else if dialog.confirming_unanswered {
         "Enter confirm · Esc go back".to_owned()
+    } else if picks_on_purpose {
+        "Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions".to_owned()
     } else {
         "Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions".to_owned()
     };

@@ -614,6 +614,66 @@ fn golden_elicitation_dialog() {
         &[format!("submitted: {answer:?}")],
     );
 
+    // A click or Space toggles an option: it picks it, replacing any other
+    // pick, and takes back the option already picked. A mouse-only answer
+    // can therefore still end with nothing picked.
+    let page_answer = |dialog: &ElicitationDialog| format!("{:?}", dialog.question_content(0));
+    let mut toggles = ElicitationDialog::new(claude.request.clone());
+    let mut steps = Vec::new();
+    for (label, step) in [
+        ("click Redis", "Redis"),
+        ("click Memcached", "Memcached"),
+        ("click Memcached again", "Memcached"),
+    ] {
+        click_question_button(&mut toggles, step);
+        steps.push(format!("{label}: {}", page_answer(&toggles)));
+    }
+    toggles.handle_key(KeyCode::Up, KeyModifiers::NONE);
+    toggles.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+    steps.push(format!("Space on Redis: {}", page_answer(&toggles)));
+    toggles.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+    steps.push(format!("Space on Redis again: {}", page_answer(&toggles)));
+    click_question_button(&mut toggles, "Other");
+    toggles.paste("Valkey");
+    steps.push(format!(
+        "click Other, write Valkey: {}",
+        page_answer(&toggles)
+    ));
+    append_elicitation_golden_state(
+        &mut output,
+        "Claude clicks and Space toggle the pick",
+        &rendered_in_pane(&toggles, 100, 20),
+        &steps,
+    );
+
+    // Enter answers with what is already there. It takes the option under
+    // the cursor only when the question would otherwise be empty.
+    let mut empty = ElicitationDialog::new(claude.request.clone());
+    empty.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    empty.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    let mut written = ElicitationDialog::new(claude.request.clone());
+    written.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    written.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    written.paste("Valkey");
+    written.handle_key(KeyCode::Up, KeyModifiers::NONE);
+    let buffer = rendered_in_pane(&written, 100, 20);
+    written.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    append_elicitation_golden_state(
+        &mut output,
+        "Claude Enter on an option answers with what is there",
+        &buffer,
+        &[
+            format!(
+                "Enter on Memcached, nothing picked, Other blank: {}",
+                page_answer(&empty)
+            ),
+            format!(
+                "Enter on Memcached, nothing picked, Other holds Valkey: {}",
+                page_answer(&written)
+            ),
+        ],
+    );
+
     let mut smallest = ElicitationDialog::new(paired_request(1, true));
     smallest.handle_key(KeyCode::End, KeyModifiers::NONE);
     smallest.paste("custom draft");

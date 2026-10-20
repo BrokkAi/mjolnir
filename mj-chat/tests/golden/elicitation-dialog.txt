@@ -85,7 +85,7 @@ harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing ac
 │                                                                                                  │
 │  Answer and next     Previous     Next     Skip     Cancel                                       │
 │                                                                                                  │
-│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+│Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 === Claude pick kept while writing Other (100x20) ===
@@ -107,7 +107,7 @@ harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing ac
 │                                                                                                  │
 │  Answer and next     Previous     Next     Skip     Cancel                                       │
 │                                                                                                  │
-│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+│Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 === Claude multi-select picks with Other text (100x20) ===
@@ -175,9 +175,61 @@ harness: Ok(Accept { content: {"question_0": String("Redis"), "question_0_custom
 │                                                                                                  │
 │  Answer and next     Previous     Next     Skip     Cancel                                       │
 │                                                                                                  │
-│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+│Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 submitted: Accept { content: {"question_0_custom": String("Valkey")} }
+
+=== Claude clicks and Space toggle the pick (100x20) ===
+╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
+│Cache                                                                                             │
+│Which cache should the service use?                                                               │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│○ Redis                                                                                           │
+│○ Memcached                                                                                       │
+│✎ Other                                                                                           │
+│    Type your own answer, or add a note to the option you chose above (optional).                 │
+│> Valkey                                                                                          │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│                                                                                                  │
+│Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+click Redis: Ok({"question_0": String("Redis")})
+click Memcached: Ok({"question_0": String("Memcached")})
+click Memcached again: Ok({})
+Space on Redis: Ok({"question_0": String("Redis")})
+Space on Redis again: Ok({})
+click Other, write Valkey: Ok({"question_0_custom": String("Valkey")})
+
+=== Claude Enter on an option answers with what is there (100x20) ===
+╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
+│Cache                                                                                             │
+│Which cache should the service use?                                                               │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│○ Redis                                                                                           │
+│○ Memcached                                                                                       │
+│    Simple volatile cache                                                                         │
+│✎ Other                                                                                           │
+│    Valkey                                                                                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│                                                                                                  │
+│Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter on Memcached, nothing picked, Other blank: Ok({"question_0": String("Memcached")})
+Enter on Memcached, nothing picked, Other holds Valkey: Ok({"question_0_custom": String("Valkey")})
 
 === small question pane keeps the focused custom answer and actions (60x6) ===
 ╭ × Question 1/1 · 1 unanswered ───────────────────────────╮
