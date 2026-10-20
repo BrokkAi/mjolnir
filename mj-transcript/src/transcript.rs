@@ -11,7 +11,7 @@ use tree_sitter::{Node, Parser};
 const TOOL_SUMMARY_SOURCE_BYTES: usize = 64 * 1024;
 const TOOL_SUMMARY_MAX_NESTING: usize = 16;
 /// Parser-rule version stored with cached tool summaries.
-pub const TOOL_SUMMARY_VERSION: u8 = 6;
+pub const TOOL_SUMMARY_VERSION: u8 = 7;
 
 /// Reduce a tool call to what a reader still needs, once a verified checkpoint
 /// holds the whole of it.
@@ -151,12 +151,22 @@ pub fn tool_call_presentation(call: &ToolCall) -> ToolCallPresentation {
 /// Use cached presentation data when it was produced by current parser rules,
 /// otherwise rebuild it from the complete stored call. This lets parser fixes
 /// repair existing transcripts while current summaries remain cheap to load.
+///
+/// Retention drops a finished call's raw input and output, so a summary made
+/// from them is kept: rebuilt from what remains, it could only get worse.
 pub fn materialized_tool_call_presentation(
     stored: Option<&ToolCallPresentation>,
     call: &ToolCall,
 ) -> ToolCallPresentation {
     stored
-        .filter(|presentation| presentation.summary_version >= TOOL_SUMMARY_VERSION)
+        .filter(|presentation| {
+            presentation.summary_version >= TOOL_SUMMARY_VERSION
+                || match presentation.source_kind {
+                    ToolSummarySourceKind::RawInput => call.raw_input.is_none(),
+                    ToolSummarySourceKind::RawOutput => call.raw_output.is_none(),
+                    ToolSummarySourceKind::Title => false,
+                }
+        })
         .cloned()
         .unwrap_or_else(|| tool_call_presentation(call))
 }
@@ -251,21 +261,130 @@ fn is_shell_interpreter(value: &str) -> bool {
 }
 
 fn shell_script_argument<'a>(arguments: &'a [&'a str]) -> Option<&'a str> {
-    let mut index = 0;
-    while index < arguments.len() {
-        let argument = arguments[index];
-        if argument == "--" {
+    arguments.get(shell_script_index(arguments)?).copied()
+}
+
+/// Where the script a shell runs with `-c` is among its arguments.
+fn shell_script_index(arguments: &[&str]) -> Option<usize> {
+    for (index, argument) in arguments.iter().enumerate() {
+        if *argument == "--" {
             return None;
         }
-        if argument == "-c" || argument == "--command" {
-            return arguments.get(index + 1).copied();
+        if *argument == "-c"
+            || *argument == "--command"
+            || (argument.starts_with('-')
+                && !argument.starts_with("--")
+                && argument[1..].contains('c'))
+        {
+            return (index + 1 < arguments.len()).then_some(index + 1);
         }
-        if argument.starts_with('-') && !argument.starts_with("--") && argument[1..].contains('c') {
-            return arguments.get(index + 1).copied();
-        }
-        index += 1;
     }
     None
+}
+
+/// The script of a command that is nothing but a shell running one `-c`
+/// script, such as `/bin/bash -lc "python3 x.py"`. Codex reports some commands
+/// with the shell it wraps every command in, as one string. The wrapper says
+/// no more there than it does in an argv call, which drops it the same way.
+fn wrapped_shell_script(command: &str) -> Option<String> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(command, None)?;
+    let root = tree.root_node();
+    if root.has_error() || root.named_child_count() != 1 {
+        return None;
+    }
+    let node = root.named_child(0)?;
+    if node.kind() != "command" {
+        return None;
+    }
+    let name = shell_command_name(node.child_by_field_name("name")?, command)?;
+    let mut cursor = node.walk();
+    let arguments = node
+        .children_by_field_name("argument", &mut cursor)
+        .collect::<Vec<_>>();
+    // Only the name and its arguments: an environment assignment before the
+    // shell is part of what the command does.
+    if !is_shell_interpreter(&name) || node.named_child_count() != arguments.len() + 1 {
+        return None;
+    }
+    let words = arguments
+        .iter()
+        .map(|argument| &command[argument.byte_range()])
+        .collect::<Vec<_>>();
+    shell_literal_text(arguments[shell_script_index(&words)?], command)
+}
+
+/// The text a shell passes on for a quoted or plain word. Codex quotes a
+/// script holding both kinds of quote as several quoted pieces in a row, such
+/// as `"rg '"'^fn'"' src"`, so a concatenation is the text of its pieces.
+fn shell_literal_text(node: Node<'_>, source: &str) -> Option<String> {
+    let text = &source[node.byte_range()];
+    match node.kind() {
+        "raw_string" => Some(text.strip_prefix('\'')?.strip_suffix('\'')?.to_owned()),
+        "string" => Some(unescape_double_quoted(
+            text.strip_prefix('"')?.strip_suffix('"')?,
+        )),
+        "word" => Some(unescape_word(text)),
+        "concatenation" => {
+            let mut cursor = node.walk();
+            let mut end = node.start_byte();
+            let mut joined = String::new();
+            for piece in node.children(&mut cursor) {
+                // Every byte must belong to a piece this reads.
+                if piece.start_byte() != end {
+                    return None;
+                }
+                end = piece.end_byte();
+                joined.push_str(&shell_literal_text(piece, source)?);
+            }
+            (end == node.end_byte()).then_some(joined)
+        }
+        _ => None,
+    }
+}
+
+/// The text of an unquoted word, where a backslash escapes any character and
+/// a backslash before a newline joins the lines.
+fn unescape_word(text: &str) -> String {
+    let mut unescaped = String::with_capacity(text.len());
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => match characters.next() {
+                Some('\n') | None => {}
+                Some(escaped) => unescaped.push(escaped),
+            },
+            character => unescaped.push(character),
+        }
+    }
+    unescaped
+}
+
+/// The text a shell reads from inside double quotes, where a backslash
+/// escapes only `$`, a backquote, `"`, a backslash, and a newline.
+fn unescape_double_quoted(text: &str) -> String {
+    let mut unescaped = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\\' {
+            match characters.peek() {
+                Some('$' | '`' | '"' | '\\') => {
+                    unescaped.extend(characters.next());
+                    continue;
+                }
+                Some('\n') => {
+                    characters.next();
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        unescaped.push(character);
+    }
+    unescaped
 }
 
 fn presentation_from_source(
@@ -277,10 +396,16 @@ fn presentation_from_source(
     let (source, summary) = match source {
         ToolSummarySource::Shell(source) => {
             let bounded = bound_summary_source(&source);
-            let summary = summarize_shell(&bounded, 0)
-                .or_else(|| first_meaningful_token(title))
-                .unwrap_or_else(|| "tool".to_owned());
-            (bounded, summary)
+            if let Some(script) = wrapped_shell_script(&bounded)
+                && let Some(summary) = summarize_shell(&script, 1)
+            {
+                (script, summary)
+            } else {
+                let summary = summarize_shell(&bounded, 0)
+                    .or_else(|| first_meaningful_token(title))
+                    .unwrap_or_else(|| "tool".to_owned());
+                (bounded, summary)
+            }
         }
         ToolSummarySource::Argv {
             executable,
@@ -1721,18 +1846,20 @@ mod tests {
     #[test]
     fn a_nested_shell_is_named_without_its_path_and_shows_its_script() {
         let cases = [
-            ("bash -c 'python x.py'", "bash -c python"),
-            ("/bin/bash -c \"python x.py\"", "bash -c python"),
+            ("cd dir && bash -c 'python x.py'", "cd && bash -c python"),
             (
-                "/usr/bin/zsh -lc 'git status && cargo test'",
-                "zsh -c git status && cargo test",
+                "/bin/bash -c \"python x.py\" | tee log",
+                "bash -c python | tee",
             ),
-            ("bash -c \"cd $dir && make\"", "bash -c cd && make"),
+            (
+                "true; /usr/bin/zsh -lc 'git status && cargo test'",
+                "true ; zsh -c git status && cargo test",
+            ),
             ("bash -c \"$script\"", "bash -c"),
             ("/bin/bash script.sh", "bash"),
             (
                 "bash -c 'bash -c \"uv run pytest\"'",
-                "bash -c bash -c uv run pytest",
+                "bash -c uv run pytest",
             ),
         ];
         for (command, summary) in cases {
@@ -1750,6 +1877,74 @@ mod tests {
         assert_eq!(
             execute_summary(json!({"command": ["/bin/zsh", "script.sh"]})),
             "zsh"
+        );
+    }
+
+    /// Codex reports a command that went through its approval path as one
+    /// string with its shell wrapper. The same script reads the same whether
+    /// the wrapper is there or not.
+    #[test]
+    fn a_command_that_is_only_a_shell_wrapper_stands_for_its_script() {
+        let script = "python3 - <<'PY'\nprint(\"x\")\nPY";
+        let wrapped = format!(
+            "/bin/bash -lc \"{}\"",
+            script.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        let presentation = |command: &str| {
+            tool_call_presentation(
+                &ToolCall::new("call", "Bash")
+                    .kind(ToolKind::Execute)
+                    .raw_input(json!({ "command": command })),
+            )
+        };
+        assert_eq!(presentation(script).summary, "python3");
+        assert_eq!(presentation(&wrapped).summary, "python3");
+        assert_eq!(presentation(&wrapped).source, script);
+
+        let cases = [
+            ("bash -c 'python x.py'", "python"),
+            (
+                "/usr/bin/zsh -lc 'git status && cargo test'",
+                "git status && cargo test",
+            ),
+            ("bash -c \"cd $dir && make\"", "cd && make"),
+            ("bash -c 'cargo test' arg0", "cargo test"),
+            // Codex's quoting of a script with both kinds of quote.
+            (
+                "/bin/bash -lc \"rg -n '\"'^fn'\"' src | head\"",
+                "rg | head",
+            ),
+            // An environment assignment is part of what the command does.
+            ("FOO=1 bash -c 'cargo test'", "bash -c cargo test"),
+        ];
+        for (command, summary) in cases {
+            assert_eq!(presentation(command).summary, summary, "{command}");
+        }
+    }
+
+    /// Retention drops a finished call's raw input. Rebuilding its summary
+    /// from the title alone would lose what the input said.
+    #[test]
+    fn a_summary_whose_input_retention_dropped_is_kept() {
+        let compacted = ToolCall::new("call", "Bash").kind(ToolKind::Execute);
+        let stale = ToolCallPresentation {
+            summary: "cargo test".into(),
+            source: "cargo test --workspace".into(),
+            source_kind: ToolSummarySourceKind::RawInput,
+            tool_kind: ToolKind::Execute,
+            summary_version: 0,
+        };
+        assert_eq!(
+            materialized_tool_call_presentation(Some(&stale), &compacted),
+            stale
+        );
+        let titled = ToolCallPresentation {
+            source_kind: ToolSummarySourceKind::Title,
+            ..stale
+        };
+        assert_eq!(
+            materialized_tool_call_presentation(Some(&titled), &compacted).summary,
+            "Bash"
         );
     }
 
