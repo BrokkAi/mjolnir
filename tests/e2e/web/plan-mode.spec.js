@@ -71,7 +71,7 @@ function claudeTwoQuestionRequest() {
     required: false,
     secret: false,
     custom_answer_for: id.replace('_custom', ''),
-    custom_answer_option: null,
+    custom_answer_option: '\u001falongside',
     kind: 'text',
     default: null,
     min_length: null,
@@ -850,7 +850,7 @@ function multiQuestion(id, message) {
         required: false,
         secret: false,
         custom_answer_for: 'regions',
-        custom_answer_option: null,
+        custom_answer_option: '\u001falongside',
         kind: 'text',
         default: null,
         min_length: null,
@@ -951,22 +951,67 @@ test('custom multi-select text answers alone or joins picks that keep their limi
   });
 });
 
-// Hard-won: #1312: a note typed under a chosen option was dropped instead of sent with the pick.
-test('free text written before a pick is sent beside it as the pick note', async ({ page }) => {
-  const state = await mockViewerApi(page, [question('noted-question', 'Which architecture, with a note?')]);
-  const card = page.locator('#elicitations .elicitation');
-  const freeText = card.getByRole('radio', { name: 'Other', exact: true });
-  // Starting to write makes the free-text choice the answer.
-  await card.locator('input[type="text"]').fill('Canary first');
-  await expect(freeText).toBeChecked();
-  // Picking an option afterwards keeps the text as that pick's note.
-  await card.getByRole('radio', { name: /^Green/ }).check();
-  await card.getByRole('button', { name: 'Submit all' }).click();
+// A question as claude-agent-acp asks it: optional, with its "Other" text
+// beside the choices.
+function claudeQuestion(id, message) {
+  const request = question(id, message);
+  request.fields[0].required = false;
+  request.fields[1].custom_answer_option = '\u001falongside';
+  return request;
+}
+
+// Hard-won: #1312: writing Claude's Other text took back the option picked before it.
+test('Claude Other text goes beside the pick in either order, and alone with nothing picked', async ({ page }) => {
+  const state = await mockViewerApi(page, [
+    claudeQuestion('pick-then-write', 'Pick, then write a note.'),
+    claudeQuestion('write-then-pick', 'Write, then pick.'),
+    claudeQuestion('write-only', 'Write your own answer.'),
+  ]);
+  const card = message => page.locator('#elicitations .elicitation').filter({ hasText: message });
+  const submit = async message => card(message).getByRole('button', { name: 'Submit all' }).click();
+
+  // The text box is a field of its own, not one of the choices.
+  await expect(card('Pick, then write a note.').getByRole('radio', { name: 'Other', exact: true })).toHaveCount(0);
+  await card('Pick, then write a note.').getByRole('radio', { name: /^Blue/ }).check();
+  await card('Pick, then write a note.').locator('input[type="text"]').fill('Canary first');
+  await submit('Pick, then write a note.');
   await waitForActionCount(state, 1);
   expect(state.actions[0].response).toEqual({
     action: 'accept',
+    content: { question_0: 'blue', question_0_custom: 'Canary first' },
+  });
+
+  await card('Write, then pick.').locator('input[type="text"]').fill('Canary first');
+  await card('Write, then pick.').getByRole('radio', { name: /^Green/ }).check();
+  await submit('Write, then pick.');
+  await waitForActionCount(state, 2);
+  expect(state.actions[1].response).toEqual({
+    action: 'accept',
     content: { question_0: 'green', question_0_custom: 'Canary first' },
   });
+
+  await card('Write your own answer.').locator('input[type="text"]').fill('Canary');
+  await submit('Write your own answer.');
+  await waitForActionCount(state, 3);
+  expect(state.actions[2].response).toEqual({
+    action: 'accept',
+    content: { question_0_custom: 'Canary' },
+  });
+});
+
+// Hard-won: #1312: a Codex note sent beside a pick replaced the pick on codex-acp's async path.
+test('a free-text alternative is the answer only while it is chosen', async ({ page }) => {
+  const state = await mockViewerApi(page, [question('alternative-question', 'Which architecture, or your own?')]);
+  const card = page.locator('#elicitations .elicitation');
+  const freeText = card.getByRole('radio', { name: 'Other', exact: true });
+  // Writing chooses the free-text alternative.
+  await card.locator('input[type="text"]').fill('Canary');
+  await expect(freeText).toBeChecked();
+  // Choosing an offered option instead leaves the text out of the answer.
+  await card.getByRole('radio', { name: /^Green/ }).check();
+  await card.getByRole('button', { name: 'Submit all' }).click();
+  await waitForActionCount(state, 1);
+  expect(state.actions[0].response).toEqual({ action: 'accept', content: { question_0: 'green' } });
 });
 
 test('submitted content appears while the request is held and a newer draft survives acceptance', async ({ page }) => {

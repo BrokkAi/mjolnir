@@ -20,7 +20,7 @@ use crate::selection::{
 };
 use crate::text_input::TextInput;
 use mj_core::elicitation::{
-    ElicitationField, ElicitationFieldKind, ElicitationRequest, ElicitationResponse,
+    CompanionRole, ElicitationField, ElicitationFieldKind, ElicitationRequest, ElicitationResponse,
     ElicitationValue, validate_field_value,
 };
 
@@ -64,6 +64,9 @@ struct DisplayField {
     field: usize,
     custom: Option<usize>,
     custom_option: Option<usize>,
+    /// The companion goes beside any pick (claude-agent-acp's "Other")
+    /// instead of replacing it ([`CompanionRole::Alongside`]).
+    alongside: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,13 +167,26 @@ impl ElicitationDialog {
             let Some(custom) = display.custom else {
                 continue;
             };
+            // An optional question whose text goes beside a pick starts with
+            // nothing picked, so the text alone can be the whole answer.
+            let owner = &request.fields[display.field];
+            if display.alongside
+                && !owner.required
+                && matches!(
+                    owner.kind,
+                    ElicitationFieldKind::SingleSelect { default: None, .. }
+                )
+            {
+                values[display.field] = FieldValue::Single(None);
+            }
             if active_custom_fields.contains(&custom)
-                && let Some(option_count) = select_option_count(&request.fields[display.field])
+                && !display.alongside
+                && let Some(option_count) = select_option_count(owner)
             {
                 let cursor = display.custom_option.unwrap_or(option_count);
                 option_cursors[display.field] = cursor;
-                // A free-text choice is the answer on its own, so it picks no
-                // option; a companion tied to one option picks that option.
+                // A free-text alternative picks no option; detail tied to an
+                // option picks that option.
                 if let FieldValue::Single(selected) = &mut values[display.field] {
                     *selected = display.custom_option;
                 }
@@ -632,28 +648,24 @@ impl ElicitationDialog {
             return;
         }
         self.option_cursors[display.field] = selected;
+        // Text that goes beside a pick is a field of its own: moving onto it
+        // keeps the pick, so writing never takes back an option chosen first.
+        if display.alongside && selected == option_count {
+            return;
+        }
         if let FieldValue::Single(value) = &mut self.values[display.field] {
             let next = (selected < option_count).then_some(selected);
             if *value != next {
                 self.confirmed.remove(&self.current_question);
             }
             *value = next;
-            if let Some(custom) = display.custom {
-                match display.custom_option {
-                    // Detail tied to one option belongs to that option alone.
-                    Some(option) if option == selected => {
-                        self.active_custom_fields.insert(custom);
-                    }
-                    Some(_) => {
-                        self.active_custom_fields.remove(&custom);
-                    }
-                    // A free-text choice row answers on its own. Picking an
-                    // option keeps text already written, which then travels
-                    // beside the pick as its note.
-                    None if selected == option_count => {
-                        self.active_custom_fields.insert(custom);
-                    }
-                    None => {}
+            if let Some(custom) = display.custom
+                && !display.alongside
+            {
+                if display.custom_option == Some(selected) || selected == option_count {
+                    self.active_custom_fields.insert(custom);
+                } else {
+                    self.active_custom_fields.remove(&custom);
                 }
             }
         }
@@ -745,20 +757,27 @@ impl ElicitationDialog {
         self.confirmed.remove(&self.current_question);
         let value = &mut self.values[display.field];
         match value {
+            // Beside its own text field a pick can be taken back, so the
+            // text alone can be the whole answer.
+            FieldValue::Single(selected) if display.alongside => {
+                let cursor = self.option_cursors[display.field];
+                *selected = (*selected != Some(cursor)).then_some(cursor);
+            }
             FieldValue::Single(selected) => {
                 *selected = Some(self.option_cursors[display.field]);
-                if let Some(custom) = display.custom
-                    && display.custom_option.is_some()
-                {
+                if let Some(custom) = display.custom {
                     self.active_custom_fields.remove(&custom);
                 }
             }
-            // A multi-select's free-text choice adds to its picks, so
-            // toggling a pick leaves it as it is.
             FieldValue::Multi(selected) => {
                 let index = self.option_cursors[display.field];
                 if !selected.remove(&index) {
                     selected.insert(index);
+                }
+                if let Some(custom) = display.custom
+                    && !display.alongside
+                {
+                    self.active_custom_fields.remove(&custom);
                 }
             }
             FieldValue::Boolean(selected) => *selected = !*selected,
@@ -786,28 +805,30 @@ impl ElicitationDialog {
         display_index: usize,
     ) -> Result<BTreeMap<String, ElicitationValue>, String> {
         let display = self.display_fields[display_index];
-        let mut content = BTreeMap::new();
-        // Each field sends its own value; `harness_response` decides how the
-        // harness reads a pick and its companion text together.
-        if let Some(custom) = display
+        let active_custom = display
             .custom
-            .filter(|custom| self.active_custom_fields.contains(custom))
-        {
-            let field = &self.request.fields[custom];
-            if let Some(value) = validated_value(field, &self.values[custom])? {
-                content.insert(field.id.clone(), value);
-            }
-        }
-        let owner_empty = match &self.values[display.field] {
-            FieldValue::Single(selected) => selected.is_none(),
-            FieldValue::Multi(selected) => selected.is_empty(),
-            _ => false,
+            .filter(|custom| self.active_custom_fields.contains(custom));
+        let picked = match &self.values[display.field] {
+            FieldValue::Single(selected) => selected.is_some(),
+            FieldValue::Multi(selected) => !selected.is_empty(),
+            _ => true,
         };
-        // A free-text answer answers the question on its own, so an owner
-        // with nothing picked adds nothing rather than counting as missing.
-        if !(owner_empty && !content.is_empty()) {
-            let field = &self.request.fields[display.field];
-            if let Some(value) = validated_value(field, &self.values[display.field])? {
+        let indices = match (active_custom, display.custom_option) {
+            // Text beside a pick is sent with whatever is picked; with
+            // nothing picked it is the whole answer.
+            _ if display.alongside => display
+                .custom
+                .into_iter()
+                .chain(picked.then_some(display.field))
+                .collect(),
+            (Some(custom), Some(_)) => vec![display.field, custom],
+            (Some(custom), None) => vec![custom],
+            (None, _) => vec![display.field],
+        };
+        let mut content = BTreeMap::new();
+        for index in indices {
+            let field = &self.request.fields[index];
+            if let Some(value) = validated_value(field, &self.values[index])? {
                 content.insert(field.id.clone(), value);
             }
         }
@@ -1000,10 +1021,14 @@ fn display_fields(
             field,
             custom: custom_by_owner.get(&field).copied(),
             custom_option: custom_by_owner.get(&field).and_then(|custom| {
-                request.fields[*custom]
-                    .custom_answer_option
-                    .as_deref()
+                let custom = &request.fields[*custom];
+                (custom.companion_role() == CompanionRole::Detail)
+                    .then_some(custom.custom_answer_option.as_deref())
+                    .flatten()
                     .and_then(|value| select_option_index(&request.fields[field], value))
+            }),
+            alongside: custom_by_owner.get(&field).is_some_and(|custom| {
+                request.fields[*custom].companion_role() == CompanionRole::Alongside
             }),
         })
         .collect::<Vec<_>>();
@@ -1640,13 +1665,20 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
             ));
         }
         (ElicitationFieldKind::SingleSelect { options, .. }, FieldValue::Single(selected)) => {
+            // Only a free-text alternative takes the pick's place.
+            let custom_active = !display.alongside
+                && display
+                    .custom
+                    .is_some_and(|custom| dialog.active_custom_fields.contains(&custom));
             for (index, option) in options.iter().enumerate() {
                 let cursor = dialog.option_cursors[display.field] == index;
-                let marker = if *selected == Some(index) {
-                    "●"
-                } else {
-                    "○"
-                };
+                let custom_replaces_selection = display.custom_option.is_none();
+                let marker =
+                    if (!custom_active || !custom_replaces_selection) && *selected == Some(index) {
+                        "●"
+                    } else {
+                        "○"
+                    };
                 let style = if cursor {
                     Style::default()
                         .fg(theme::palette().accent)
@@ -1684,28 +1716,26 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
                 option_rows.resize(lines.len(), None);
                 option_rows.push(Some(options.len()));
             }
-            // The free-text row is the answer while no option is picked,
-            // and a note beside the pick once one is.
-            let marker = match custom_answer_state(dialog, display) {
-                CustomAnswerState::Unused => "○",
-                CustomAnswerState::Answer => "●",
-                CustomAnswerState::Beside => "+",
-            };
             render_custom_answer(
                 &mut lines,
                 &mut text_cursor,
                 dialog,
                 display,
                 options.len(),
-                marker,
+                "○",
+                "●",
             );
         }
         (ElicitationFieldKind::MultiSelect { options, .. }, FieldValue::Multi(selected)) => {
+            let custom_active = !display.alongside
+                && display
+                    .custom
+                    .is_some_and(|custom| dialog.active_custom_fields.contains(&custom));
             for (index, option) in options.iter().enumerate() {
                 if dialog.option_cursors[display.field] == index {
                     focused_row = Some(lines.len());
                 }
-                let marker = Checkbox::marker(selected.contains(&index));
+                let marker = Checkbox::marker(!custom_active && selected.contains(&index));
                 let style = if dialog.option_cursors[display.field] == index {
                     Style::default()
                         .fg(theme::palette().accent)
@@ -1721,18 +1751,14 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
                 option_rows.resize(lines.len(), None);
                 option_rows.push(Some(options.len()));
             }
-            // A multi-select's free-text choice adds to the picks.
-            let marker = Checkbox::marker(
-                custom_answer_state(dialog, display) != CustomAnswerState::Unused
-                    && custom_answer_has_text(dialog, display),
-            );
             render_custom_answer(
                 &mut lines,
                 &mut text_cursor,
                 dialog,
                 display,
                 options.len(),
-                marker,
+                Checkbox::marker(false),
+                Checkbox::marker(true),
             );
         }
         (ElicitationFieldKind::Boolean { .. }, FieldValue::Boolean(selected)) => {
@@ -1807,51 +1833,14 @@ fn render_focus(
     }
 }
 
-/// How a select's free-text choice takes part in the current answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CustomAnswerState {
-    /// Not part of the answer.
-    Unused,
-    /// The whole answer: nothing is picked.
-    Answer,
-    /// Sent beside the picks.
-    Beside,
-}
-
-fn custom_answer_state(dialog: &ElicitationDialog, display: DisplayField) -> CustomAnswerState {
-    let Some(custom) = display.custom else {
-        return CustomAnswerState::Unused;
-    };
-    if !dialog.active_custom_fields.contains(&custom) {
-        return CustomAnswerState::Unused;
-    }
-    let picked = match &dialog.values[display.field] {
-        FieldValue::Single(selected) => selected.is_some(),
-        FieldValue::Multi(selected) => !selected.is_empty(),
-        _ => false,
-    };
-    if !picked {
-        CustomAnswerState::Answer
-    } else if custom_answer_has_text(dialog, display) {
-        CustomAnswerState::Beside
-    } else {
-        CustomAnswerState::Unused
-    }
-}
-
-fn custom_answer_has_text(dialog: &ElicitationDialog, display: DisplayField) -> bool {
-    display.custom.is_some_and(|custom| {
-        matches!(&dialog.values[custom], FieldValue::Text(value) if !value.value().trim().is_empty())
-    })
-}
-
 fn render_custom_answer(
     lines: &mut Vec<Line<'_>>,
     text_cursor: &mut Option<(u16, usize)>,
     dialog: &ElicitationDialog,
     display: DisplayField,
     option_count: usize,
-    marker: &str,
+    unselected_marker: &str,
+    selected_marker: &str,
 ) {
     let Some(custom_index) = display.custom else {
         return;
@@ -1861,6 +1850,15 @@ fn render_custom_answer(
     }
     let custom = &dialog.request.fields[custom_index];
     let focused = dialog.option_cursors[display.field] == option_count;
+    let active = dialog.active_custom_fields.contains(&custom_index);
+    // Text beside the pick is a field of its own, not one of the choices.
+    let marker = if display.alongside {
+        "✎"
+    } else if active {
+        selected_marker
+    } else {
+        unselected_marker
+    };
     let style = if focused {
         Style::default()
             .fg(theme::palette().accent)
@@ -1873,11 +1871,11 @@ fn render_custom_answer(
         render_custom_text(lines, text_cursor, dialog, custom_index);
         return;
     }
-    // Text that is part of the answer stays visible while the cursor is
-    // elsewhere, so the page shows everything it will send.
-    if custom_answer_state(dialog, display) != CustomAnswerState::Unused
-        && custom_answer_has_text(dialog, display)
+    // Text beside the pick is sent with it, so it stays in view while the
+    // cursor is on the choices.
+    if display.alongside
         && let FieldValue::Text(value) = &dialog.values[custom_index]
+        && !value.value().trim().is_empty()
     {
         let shown = if custom.secret {
             "•".repeat(value.chars().count())

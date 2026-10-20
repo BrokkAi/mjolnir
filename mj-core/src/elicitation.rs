@@ -91,17 +91,25 @@ impl ElicitationRequest {
     /// submitted answer does not fit this request.
     ///
     /// Every surface (terminal, web, `mj respond`) submits each field's own
-    /// value: a select's picks, and beside them the text of the select's
-    /// free-text choice when the user wrote one. The bridges read the two
-    /// fields together (claude-agent-acp joins a multi-select's picks with
-    /// the text and attaches the text to a single pick as a note; codex-acp
-    /// appends it as a `user_note`), so both are forwarded as submitted.
-    /// The one change is a required select answered only by its free-text
-    /// choice: the text becomes the select's own value, the Air convention
-    /// (codex-acp's `typedChoiceAnswer`), so the harness never receives an
-    /// answer that omits a required field. Only that move puts text outside
-    /// the offered options into a select; a submitted select value must
-    /// still be one of them.
+    /// value: a select's picks, and the text of its companion field. How the
+    /// two combine depends on the companion's [`CompanionRole`]:
+    ///
+    /// - [`CompanionRole::Alongside`] (claude-agent-acp's "Other") goes beside
+    ///   any pick: the bridge joins a multi-select's picks with the text and
+    ///   attaches the text to a single pick as a note, so both are forwarded.
+    /// - [`CompanionRole::Alternative`] (codex-acp's note) is the answer in
+    ///   place of a pick. Its text becomes the select's own value, the Air
+    ///   convention codex-acp reads on both its question paths
+    ///   (`typedChoiceAnswer` and the async answer), and a pick sent with it
+    ///   is refused: codex-acp's async path would read the note in place of
+    ///   the pick.
+    /// - [`CompanionRole::Detail`] (plan-review feedback on Revise) goes with
+    ///   its option.
+    ///
+    /// A required select answered only by its companion gets the text as its
+    /// own value, so the harness never receives an answer that omits a
+    /// required field. Only that move puts text outside the offered options
+    /// into a select; a submitted select value must still be one of them.
     ///
     /// Surfaces that answer out of band — the phone posts an answer over
     /// HTTP — can send content for a request the agent has already replaced,
@@ -123,20 +131,29 @@ impl ElicitationRequest {
             validate_field_value(field, value)?;
         }
         for field in &self.fields {
-            if !field.required || content.contains_key(&field.id) {
-                continue;
-            }
-            let Some(choice) = self.free_text_choice(field) else {
+            let Some((companion, role)) = self.companion(field) else {
                 continue;
             };
-            let Some(ElicitationValue::String(text)) = content.get(&choice.id) else {
+            let Some(ElicitationValue::String(text)) = content.get(&companion.id) else {
                 continue;
             };
             if text.trim().is_empty() {
                 continue;
             }
-            let Some(ElicitationValue::String(text)) = content.remove(&choice.id) else {
-                unreachable!("the free-text answer was just read as text")
+            if content.contains_key(&field.id) {
+                if role == CompanionRole::Alternative {
+                    return Err(format!(
+                        "{} takes either an offered option or {}, not both",
+                        field.title, companion.title
+                    ));
+                }
+                continue;
+            }
+            if role != CompanionRole::Alternative && !field.required {
+                continue;
+            }
+            let Some(ElicitationValue::String(text)) = content.remove(&companion.id) else {
+                unreachable!("the companion answer was just read as text")
             };
             let value = match field.kind {
                 ElicitationFieldKind::MultiSelect { .. } => {
@@ -158,25 +175,27 @@ impl ElicitationRequest {
         Ok(ElicitationResponse::Accept { content })
     }
 
-    /// The text field that is `select`'s free-text choice: the answer the
-    /// user writes in place of, or beside, the offered options. The bridge
-    /// names it with a marker the parser reads into `custom_answer_for`; a
-    /// companion tied to one option (`custom_answer_option`, as Mjolnir's
-    /// plan-review feedback is tied to Revise) is that option's detail
-    /// instead, not a free-text choice.
+    /// `select`'s companion text field and its role: the field whose
+    /// `custom_answer_for` names `select`. The first one counts, as every
+    /// surface lays it out.
     #[must_use]
-    pub fn free_text_choice(&self, select: &ElicitationField) -> Option<&ElicitationField> {
+    pub fn companion(
+        &self,
+        select: &ElicitationField,
+    ) -> Option<(&ElicitationField, CompanionRole)> {
         if !matches!(
             select.kind,
             ElicitationFieldKind::SingleSelect { .. } | ElicitationFieldKind::MultiSelect { .. }
         ) {
             return None;
         }
-        self.fields.iter().find(|field| {
-            field.custom_answer_for.as_deref() == Some(select.id.as_str())
-                && field.custom_answer_option.is_none()
-                && matches!(field.kind, ElicitationFieldKind::Text { .. })
-        })
+        self.fields
+            .iter()
+            .find(|field| {
+                field.custom_answer_for.as_deref() == Some(select.id.as_str())
+                    && matches!(field.kind, ElicitationFieldKind::Text { .. })
+            })
+            .map(|field| (field, field.companion_role()))
     }
 
     /// The user's reply for conversation history. Mask secrets here, before
@@ -352,6 +371,32 @@ fn validate_text_format(value: &str, format: &str) -> Result<(), &'static str> {
     }
 }
 
+/// The `custom_answer_option` of a companion that goes beside any pick of its
+/// select, or answers on its own when nothing is picked.
+///
+/// It is not an option value. It rides in the existing field so the relayed,
+/// journaled and stored form keeps its shape: a reader from before it finds
+/// no option of that value and treats the companion as the select's
+/// free-text alternative, the earlier behavior, which the bridge also reads.
+pub const COMPANION_ALONGSIDE: &str = "\u{1f}alongside";
+
+/// How a select's companion text field (the field whose `custom_answer_for`
+/// names the select) takes part in the select's answer. The parser decides it
+/// from the bridge's own marker on the field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompanionRole {
+    /// The answer in place of any pick: codex-acp's `user_note`, which its
+    /// async question path reads instead of the pick.
+    Alternative,
+    /// Beside any pick, or the whole answer when nothing is picked:
+    /// claude-agent-acp's "Other" ("Type your own answer, or add a note to
+    /// the option you chose above").
+    Alongside,
+    /// The detail of the one option `custom_answer_option` names, sent with
+    /// it: Mjolnir's plan-review feedback on Revise.
+    Detail,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ElicitationField {
     pub id: String,
@@ -363,6 +408,8 @@ pub struct ElicitationField {
     pub secret: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_answer_for: Option<String>,
+    /// For a companion: the option its text belongs to, or
+    /// [`COMPANION_ALONGSIDE`]. See [`ElicitationField::companion_role`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_answer_option: Option<String>,
     #[serde(flatten)]
@@ -370,6 +417,17 @@ pub struct ElicitationField {
 }
 
 impl ElicitationField {
+    /// The role this field plays as a companion. Only meaningful for a text
+    /// field whose `custom_answer_for` names a select.
+    #[must_use]
+    pub fn companion_role(&self) -> CompanionRole {
+        match self.custom_answer_option.as_deref() {
+            None => CompanionRole::Alternative,
+            Some(COMPANION_ALONGSIDE) => CompanionRole::Alongside,
+            Some(_) => CompanionRole::Detail,
+        }
+    }
+
     fn reply_value_text(&self, value: &ElicitationValue) -> String {
         let option_title = |value: &str| match &self.kind {
             ElicitationFieldKind::SingleSelect { options, .. }
@@ -520,26 +578,32 @@ fn parse_field(field_id: &str, value: &Value, required: bool) -> Result<Elicitat
         .and_then(|meta| meta.get("isSecret"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    // The free-text choice of a select names that select. codex-acp names it
-    // in its own `_meta.codex` (`role: "user_note"`); claude-agent-acp names
-    // it in the Air `customAnswer` key, which it sends because Mjolnir
-    // declares `_meta.jetbrains.air`.
+    // A companion names its select with the bridge's own marker, and the
+    // marker also says how its text relates to the pick. codex-acp's note
+    // (`_meta.codex`, `role: "user_note"`) is the answer in place of a pick;
+    // claude-agent-acp's "Other" (the Air `customAnswer` key, sent because
+    // Mjolnir declares `_meta.jetbrains.air`) goes beside it.
     let air_custom_answer = meta
         .and_then(|meta| meta.get("jetbrains"))
         .and_then(|jetbrains| jetbrains.get("air"))
         .and_then(|air| air.get("customAnswer"))
         .and_then(Value::as_object);
-    let custom_answer_for = codex
+    let codex_note_for = codex
         .filter(|meta| meta.get("role").and_then(Value::as_str) == Some("user_note"))
         .and_then(|meta| meta.get("questionId"))
-        .and_then(Value::as_str)
-        .or_else(|| {
-            air_custom_answer
-                .filter(|meta| meta.get("isCustomAnswer").and_then(Value::as_bool) == Some(true))
-                .and_then(|meta| meta.get("questionId"))
-                .and_then(Value::as_str)
-        })
-        .map(str::to_owned);
+        .and_then(Value::as_str);
+    let claude_other_for = air_custom_answer
+        .filter(|meta| meta.get("isCustomAnswer").and_then(Value::as_bool) == Some(true))
+        .and_then(|meta| meta.get("questionId"))
+        .and_then(Value::as_str);
+    let (custom_answer_for, custom_answer_option) = match (codex_note_for, claude_other_for) {
+        (Some(question), _) => (Some(question.to_owned()), None),
+        (None, Some(question)) => (
+            Some(question.to_owned()),
+            Some(COMPANION_ALONGSIDE.to_owned()),
+        ),
+        (None, None) => (None, None),
+    };
     let kind = match string(schema, "type")? {
         "string" => {
             let options = parse_string_options(schema)?;
@@ -601,7 +665,7 @@ fn parse_field(field_id: &str, value: &Value, required: bool) -> Result<Elicitat
         required,
         secret,
         custom_answer_for,
-        custom_answer_option: None,
+        custom_answer_option,
         kind,
     })
 }
@@ -849,6 +913,8 @@ mod tests {
             request.fields[1].custom_answer_for.as_deref(),
             Some("question_0")
         );
+        // Claude's "Other" goes beside a pick, or answers on its own.
+        assert_eq!(request.fields[1].companion_role(), CompanionRole::Alongside);
     }
 
     // Hard-won: 86ab9abd: Muse forms showed q0 and Sessions rows showed the tool name
@@ -981,16 +1047,17 @@ mod tests {
             request.harness_response(answer(&[("scope_note", "Only the parser")])),
             Ok(answer(&[("scope", "Only the parser")]))
         );
-        // A note beside a pick travels with it as codex-acp's `user_note`.
-        assert_eq!(
-            request.harness_response(answer(&[
-                ("scope", "Narrow"),
-                ("scope_note", "Parser first")
-            ])),
-            Ok(answer(&[
-                ("scope", "Narrow"),
-                ("scope_note", "Parser first")
-            ]))
+        // The note is an alternative to a pick, never beside one: codex-acp's
+        // async question path reads a note in place of the pick, so sending
+        // both would lose the pick.
+        assert_eq!(note.companion_role(), CompanionRole::Alternative);
+        assert!(
+            request
+                .validate_response(&answer(&[
+                    ("scope", "Narrow"),
+                    ("scope_note", "Parser first")
+                ]))
+                .is_err()
         );
         // Neither a pick nor text leaves the required question unanswered,
         // and a submitted pick must still be an offered option.

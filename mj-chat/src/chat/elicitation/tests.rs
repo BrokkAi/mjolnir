@@ -481,7 +481,7 @@ fn append_elicitation_golden_state(
 }
 
 // Hard-won: #1265: async Codex questions must expose both suggested and custom answers.
-// Hard-won: #1312: an Other answer dropped multi-select picks and a required Codex question's own field.
+// Hard-won: #1312: Claude's Other dropped the picks beside it and a required Codex question's own field.
 #[test]
 fn golden_elicitation_dialog() {
     let mut output = String::new();
@@ -511,18 +511,7 @@ fn golden_elicitation_dialog() {
         &[],
     );
     billing.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-    // Text written in the free-text row stays when an option is picked
-    // after it, and then travels beside that pick as its note.
-    billing.handle_key(KeyCode::End, KeyModifiers::NONE);
-    billing.paste("only until March");
-    billing.handle_key(KeyCode::Up, KeyModifiers::NONE);
-    let buffer = rendered_in_pane(&billing, 100, 20);
-    append_elicitation_golden_state(
-        &mut output,
-        "Codex question with a pick and a note",
-        &buffer,
-        &[],
-    );
+    billing.handle_key(KeyCode::Down, KeyModifiers::NONE);
     billing.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     billing.paste("BedrockCI");
     let answer = billing
@@ -551,14 +540,21 @@ fn golden_elicitation_dialog() {
         )
         .unwrap(),
     );
-    claude.handle_key(KeyCode::End, KeyModifiers::NONE);
-    claude.paste("Keep TTLs short");
-    claude.handle_key(KeyCode::Up, KeyModifiers::NONE);
-    claude.handle_key(KeyCode::Up, KeyModifiers::NONE);
     let buffer = rendered_in_pane(&claude, 100, 20);
     append_elicitation_golden_state(
         &mut output,
-        "Claude single-select pick with an Other note",
+        "Claude optional question starts with nothing picked",
+        &buffer,
+        &[],
+    );
+    // Pick first, then write: the text box under the choices keeps the pick.
+    claude.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+    claude.handle_key(KeyCode::End, KeyModifiers::NONE);
+    claude.paste("Keep TTLs short");
+    let buffer = rendered_in_pane(&claude, 100, 20);
+    append_elicitation_golden_state(
+        &mut output,
+        "Claude pick kept while writing Other",
         &buffer,
         &[],
     );
@@ -589,6 +585,27 @@ fn golden_elicitation_dialog() {
                 claude.request.harness_response(answer.clone())
             ),
         ],
+    );
+    // With nothing picked, the text alone is the whole answer.
+    let mut own = ElicitationDialog::new(claude.request.clone());
+    own.handle_key(KeyCode::End, KeyModifiers::NONE);
+    own.paste("Valkey");
+    let buffer = rendered_in_pane(&own, 100, 20);
+    own.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    own.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    assert!(
+        own.confirming_unanswered,
+        "the targets question is unanswered"
+    );
+    own.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    let answer = own
+        .handle_key(KeyCode::Char(' '), KeyModifiers::NONE)
+        .expect("submitting with an unanswered question still answers");
+    append_elicitation_golden_state(
+        &mut output,
+        "Claude Other text with nothing picked",
+        &buffer,
+        &[format!("submitted: {answer:?}")],
     );
 
     let mut smallest = ElicitationDialog::new(paired_request(1, true));
@@ -729,6 +746,41 @@ fn custom_answer_uses_the_adapter_field_instead_of_the_stale_selection() {
             content: BTreeMap::from([(
                 "question_0__other".into(),
                 ElicitationValue::String("custom answer".into())
+            )])
+        })
+    );
+}
+
+#[test]
+fn choosing_an_option_after_typing_other_omits_the_custom_draft() {
+    let mut dialog = ElicitationDialog::new(paired_request(1, false));
+    dialog.handle_key(KeyCode::End, KeyModifiers::NONE);
+    dialog.paste("custom draft");
+    dialog.handle_key(KeyCode::Up, KeyModifiers::NONE);
+    assert_eq!(
+        dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+        Some(ElicitationResponse::Accept {
+            content: BTreeMap::from([(
+                "question_0".into(),
+                ElicitationValue::String("beta".into())
+            )])
+        })
+    );
+}
+
+#[test]
+fn toggling_a_multi_select_option_deactivates_other() {
+    let mut dialog = ElicitationDialog::new(paired_request(1, true));
+    dialog.handle_key(KeyCode::End, KeyModifiers::NONE);
+    dialog.paste("custom draft");
+    dialog.handle_key(KeyCode::Up, KeyModifiers::NONE);
+    dialog.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+    assert_eq!(
+        dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+        Some(ElicitationResponse::Accept {
+            content: BTreeMap::from([(
+                "question_0".into(),
+                ElicitationValue::StringArray(vec!["beta".into()])
             )])
         })
     );

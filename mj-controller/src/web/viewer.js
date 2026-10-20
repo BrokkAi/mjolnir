@@ -5689,19 +5689,27 @@ function elicitationFieldValue(field, control) {
   if (field.kind === 'number') return Number(control.value);
   return control.value;
 }
-// The radio value of a single-select's free-text choice. It picks no option:
-// the companion text is the answer. The unit separator keeps it apart from
-// any option value an agent sends.
+// The radio value of a single-select's free-text alternative. It picks no
+// option: the companion text is the answer. The unit separator keeps it apart
+// from any option value an agent sends.
 const FREE_TEXT_CHOICE = '\u001ffree-text';
+// `custom_answer_option` of a companion that goes beside any pick, as
+// `mj_core::elicitation::COMPANION_ALONGSIDE` defines it.
+const COMPANION_ALONGSIDE = '\u001falongside';
+// How a select's companion text field takes part in its answer, as
+// `ElicitationField::companion_role` decides it.
+function companionRole(field) {
+  if (field.custom_answer_option == null) return 'alternative';
+  return field.custom_answer_option === COMPANION_ALONGSIDE ? 'alongside' : 'detail';
+}
 // Build logical question pages and collect only the requested pages as ACP
-// content. Every field sends its own value: a select's picks, and beside them
-// the text of its free-text choice. The daemon and worker decide how the
-// harness reads the two together (`ElicitationRequest::harness_response`).
+// content. Every field sends its own value; the daemon and worker decide how
+// the harness reads a pick and its companion together
+// (`ElicitationRequest::harness_response`). A free-text alternative replaces
+// the pick, text beside a pick is sent with it, and detail tied to one option
+// is sent with that option.
 function buildElicitationForm(form, request, register, onEdit) {
   const fields = request.fields || [];
-  // A select's companion text field, named by the bridge's marker. One tied
-  // to a single option (plan-review feedback on Revise) is that option's
-  // detail; one with no option is the select's free-text choice.
   const companions = new Map();
   for (const field of fields) {
     const owner = field.custom_answer_for;
@@ -5715,8 +5723,8 @@ function buildElicitationForm(form, request, register, onEdit) {
   for (const field of fields) {
     const isChoice = field.kind === 'single_select' || field.kind === 'multi_select';
     const companion = companions.get(field.id);
-    const freeTextRadio =
-      field.kind === 'single_select' && companion && companion.custom_answer_option == null;
+    const role = companion ? companionRole(companion) : undefined;
+    const freeTextRadio = field.kind === 'single_select' && role === 'alternative';
     // A fieldset contains its own option labels. Keeping its outer wrapper a
     // div avoids invalid nested labels and preserves one target per option.
     const wrapper = document.createElement(isChoice ? 'div' : 'label');
@@ -5752,12 +5760,10 @@ function buildElicitationForm(form, request, register, onEdit) {
       const validateTarget = control.querySelector('input');
       validateChoices = () => {
         const custom = customByOwner.get(field.id);
-        const freeText =
-          custom && custom.field.custom_answer_option == null ? custom : undefined;
         if (field.kind === 'single_select') {
-          // The free-text choice of a required question needs its text.
-          if (freeText) {
-            freeText.control.required =
+          // The free-text alternative of a required question needs its text.
+          if (custom && role === 'alternative') {
+            custom.control.required =
               Boolean(field.required) &&
               control.querySelector('input:checked')?.value === FREE_TEXT_CHOICE;
           }
@@ -5765,9 +5771,11 @@ function buildElicitationForm(form, request, register, onEdit) {
         }
         if (field.kind !== 'multi_select' || !validateTarget) return;
         const count = control.querySelectorAll('input:checked').length;
-        // Free text with nothing picked answers the question on its own. Picks
-        // beside it are sent with it, so they keep their own limits.
-        if (freeText && count === 0 && freeText.control.value.trim() !== '') {
+        const text = custom && role !== 'detail' && custom.control.value.trim() !== '';
+        // A free-text alternative replaces the picks. Text beside the picks
+        // answers alone when nothing is picked; picks sent with it keep their
+        // own limits.
+        if (text && (role === 'alternative' || count === 0)) {
           validateTarget.setCustomValidity('');
           return;
         }
@@ -5815,17 +5823,12 @@ function buildElicitationForm(form, request, register, onEdit) {
     const owner = entry.field.custom_answer_for;
     if (customByOwner.get(owner) !== entry) continue;
     const target = entries.find(candidate => candidate.field.id === owner);
-    // Starting to write in an empty free-text box makes it the answer, as
-    // the terminal's free-text row does; picking an option afterwards keeps
-    // the text as that pick's note.
+    // Writing a free-text alternative chooses it as the answer.
     const freeTextInput = [...target.control.querySelectorAll('input')].find(
       input => input.value === FREE_TEXT_CHOICE,
     );
-    let previous = entry.control.value;
     entry.control.addEventListener('input', () => {
-      if (freeTextInput && previous.trim() === '' && entry.control.value.trim() !== '')
-        freeTextInput.checked = true;
-      previous = entry.control.value;
+      if (freeTextInput && entry.control.value.trim() !== '') freeTextInput.checked = true;
       target.validateChoices();
     });
     entry.control.addEventListener('change', target.validateChoices);
@@ -5842,6 +5845,15 @@ function buildElicitationForm(form, request, register, onEdit) {
     question.wrapper.addEventListener('input', () => onEdit(index));
     question.wrapper.addEventListener('change', () => onEdit(index));
   });
+  // Whether `entry`'s free-text alternative is the answer in place of its
+  // choices: its radio for a single-select, its text for a multi-select.
+  const alternativeAnswers = entry => {
+    const custom = customByOwner.get(entry.field.id);
+    if (!custom || companionRole(custom.field) !== 'alternative') return false;
+    if (entry.field.kind === 'single_select')
+      return entry.control.querySelector('input:checked')?.value === FREE_TEXT_CHOICE;
+    return custom.control.value !== '';
+  };
   // Validate only participating questions. Hidden, unanswered controls must
   // neither block the current page nor leak suggested defaults into content.
   const collect = indices => {
@@ -5852,11 +5864,16 @@ function buildElicitationForm(form, request, register, onEdit) {
     }
     const restored = [];
     for (const entry of entries) {
+      // A multi-select replaced by its free-text alternative must not block
+      // the page with its own limits.
+      const omit =
+        !included.has(entry) ||
+        (entry.field.kind === 'multi_select' && alternativeAnswers(entry));
       const controls = entry.control.matches('input')
         ? [entry.control] : [...entry.control.querySelectorAll('input')];
       for (const input of controls) {
         restored.push([input, input.disabled]);
-        if (!included.has(entry)) input.disabled = true;
+        if (omit) input.disabled = true;
       }
     }
     const valid = form.reportValidity();
@@ -5865,19 +5882,22 @@ function buildElicitationForm(form, request, register, onEdit) {
     const content = {};
     for (const entry of included) {
       const { field, control } = entry;
-      if (customByOwner.get(field.custom_answer_for) === entry) {
-        if (control.value !== '') content[field.id] = control.value;
+      const owner = questions.find(question => question.entries[1] === entry)?.entries[0];
+      if (owner) {
+        const role = companionRole(field);
+        // A free-text alternative counts only while it is the answer.
+        if (control.value !== '' && (role !== 'alternative' || alternativeAnswers(owner)))
+          content[field.id] = control.value;
         continue;
       }
+      if (alternativeAnswers(entry)) continue;
       const custom = customByOwner.get(field.id);
-      const freeTextAnswered =
-        custom && custom.field.custom_answer_option == null && custom.control.value !== '';
-      // The free-text choice picks no option.
-      if (control.querySelector('input:checked')?.value === FREE_TEXT_CHOICE) continue;
-      // Free text with nothing picked is the whole answer.
+      // Text beside nothing picked is the whole answer.
       if (
         field.kind === 'multi_select' &&
-        freeTextAnswered &&
+        custom &&
+        companionRole(custom.field) === 'alongside' &&
+        custom.control.value !== '' &&
         !control.querySelector('input:checked')
       )
         continue;

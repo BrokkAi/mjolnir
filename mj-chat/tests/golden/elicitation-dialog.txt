@@ -42,28 +42,6 @@
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 
-=== Codex question with a pick and a note (100x20) ===
-╭ × Question 2/3 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
-│Which fallback account? (required)                                                                │
-│                                                                                                  │
-│Codex has questions for you. Work can continue while you answer.                                  │
-│○ Main                                                                                            │
-│● CI                                                                                              │
-│+ Additional answer or note                                                                       │
-│    only until March                                                                              │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│  Answer and next     Previous     Next     Skip     Cancel                                       │
-│                                                                                                  │
-│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-
 === Codex answers as submitted and as the harness receives them (100x20) ===
 ╭ × Question 3/3 · 0 unanswered ───────────────────────────────────────────────────────────────────╮
 │Which role name? (required)                                                                       │
@@ -85,21 +63,43 @@
 │                                                                                                  │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-submitted: Accept { content: {"question_01_note": String("Use a third AWS billing account"), "question_02": String("CI"), "question_02_note": String("only until March"), "question_03": String("BedrockCI")} }
-harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing account"), "question_02": String("CI"), "question_02_note": String("only until March"), "question_03": String("BedrockCI")} })
+submitted: Accept { content: {"question_01_note": String("Use a third AWS billing account"), "question_02": String("CI"), "question_03": String("BedrockCI")} }
+harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing account"), "question_02": String("CI"), "question_03": String("BedrockCI")} })
 
-=== Claude single-select pick with an Other note (100x20) ===
+=== Claude optional question starts with nothing picked (100x20) ===
+╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
+│Cache                                                                                             │
+│Which cache should the service use?                                                               │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│○ Redis                                                                                           │
+│    In-memory store with persistence                                                              │
+│    maxmemory-policy allkeys-lru                                                                  │
+│○ Memcached                                                                                       │
+│✎ Other                                                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== Claude pick kept while writing Other (100x20) ===
 ╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
 │Cache                                                                                             │
 │Which cache should the service use?                                                               │
 │                                                                                                  │
 │Please answer the following questions.                                                            │
 │● Redis                                                                                           │
-│    In-memory store with persistence                                                              │
-│    maxmemory-policy allkeys-lru                                                                  │
 │○ Memcached                                                                                       │
-│+ Other                                                                                           │
-│    Keep TTLs short                                                                               │
+│✎ Other                                                                                           │
+│    Type your own answer, or add a note to the option you chose above (optional).                 │
+│> Keep TTLs short                                                                                 │
+│                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
@@ -119,7 +119,7 @@ harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing ac
 │☑ linux                                                                                           │
 │☑ macos                                                                                           │
 │☐ windows                                                                                         │
-│☑ Other                                                                                           │
+│✎ Other                                                                                           │
 │    Type your own answer to add to your selection above (optional).                               │
 │> freebsd                                                                                         │
 │                                                                                                  │
@@ -141,7 +141,7 @@ harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing ac
 │☑ linux                                                                                           │
 │☑ macos                                                                                           │
 │☐ windows                                                                                         │
-│☑ Other                                                                                           │
+│✎ Other                                                                                           │
 │    Type your own answer to add to your selection above (optional).                               │
 │> freebsd                                                                                         │
 │                                                                                                  │
@@ -155,6 +155,29 @@ harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing ac
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 submitted: Accept { content: {"question_0": String("Redis"), "question_0_custom": String("Keep TTLs short"), "question_1": StringArray(["linux", "macos"]), "question_1_custom": String("freebsd")} }
 harness: Ok(Accept { content: {"question_0": String("Redis"), "question_0_custom": String("Keep TTLs short"), "question_1": StringArray(["linux", "macos"]), "question_1_custom": String("freebsd")} })
+
+=== Claude Other text with nothing picked (100x20) ===
+╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
+│Cache                                                                                             │
+│Which cache should the service use?                                                               │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│○ Redis                                                                                           │
+│○ Memcached                                                                                       │
+│✎ Other                                                                                           │
+│    Type your own answer, or add a note to the option you chose above (optional).                 │
+│> Valkey                                                                                          │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+submitted: Accept { content: {"question_0_custom": String("Valkey")} }
 
 === small question pane keeps the focused custom answer and actions (60x6) ===
 ╭ × Question 1/1 · 1 unanswered ───────────────────────────╮
