@@ -151,11 +151,22 @@ pub(super) struct ElicitationDialog {
     /// Wrapped rows to skip in the form body when a long option list is
     /// taller than the space left above the answer controls.
     focus_scroll: Cell<u16>,
-    /// The last click on an option of a page that picks on purpose:
-    /// `(display field, option, when)`. The list cannot see a double-click
-    /// there, because the first click changes the row's marker and the list
-    /// treats changed rows as new contents.
-    last_option_click: Option<(usize, usize, Instant)>,
+    /// The last click on an option of a page that picks on purpose. The
+    /// dialog decides double-clicks there by screen cell, because the first
+    /// click moves the cursor and reflows the rows below it: the second
+    /// click lands on the same cell but often on a different row.
+    last_option_click: Cell<Option<OptionClick>>,
+}
+
+/// A click on an option: the screen cell it landed on, the option drawn
+/// there at the time, and when.
+#[derive(Debug, Clone, Copy)]
+struct OptionClick {
+    field: usize,
+    option: usize,
+    column: u16,
+    row: u16,
+    at: Instant,
 }
 
 impl ElicitationDialog {
@@ -218,7 +229,7 @@ impl ElicitationDialog {
             message_anchor_width: Cell::new(0),
             rendered_area: Cell::new(None),
             focus_scroll: Cell::new(0),
-            last_option_click: None,
+            last_option_click: Cell::new(None),
         };
         dialog.reset_controls();
         dialog
@@ -299,6 +310,7 @@ impl ElicitationDialog {
     }
 
     pub(super) fn paste(&mut self, text: &str) {
+        self.last_option_click.set(None);
         let text = crate::text_input::single_line_paste(&sanitize_terminal_text(text));
         if text.is_empty() {
             return;
@@ -331,6 +343,8 @@ impl ElicitationDialog {
         if key.kind == crossterm::event::KeyEventKind::Release {
             return None;
         }
+        // A key between two clicks makes them two separate clicks.
+        self.last_option_click.set(None);
         if key.kind == crossterm::event::KeyEventKind::Press {
             if self.confirming_unanswered && code == KeyCode::Esc {
                 self.go_back();
@@ -458,11 +472,31 @@ impl ElicitationDialog {
     ) -> Option<ElicitationResponse> {
         let event = crossterm::event::Event::Mouse(mouse);
         let result = self.form.borrow_mut().handle_at(&event, now);
+        let click = matches!(
+            mouse.kind,
+            MouseEventKind::Up(crossterm::event::MouseButton::Left)
+        );
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+        ) {
+            self.last_option_click.set(None);
+        }
+        // The dialog alone decides double-clicks on pages that pick on
+        // purpose: a second click on the cell of the last option click,
+        // within the interval, is a double-click on the option drawn there
+        // then, whatever the first click has since reflowed onto that cell.
+        if click
+            && let Some(first) = self.last_option_click.take()
+            && (first.column, first.row) == (mouse.column, mouse.row)
+            && now.saturating_duration_since(first.at) <= DOUBLE_CLICK_INTERVAL
+        {
+            return self.double_click_option(first.field, first.option);
+        }
         if let Some(interaction) = result.action {
-            let click = matches!(
-                mouse.kind,
-                MouseEventKind::Up(crossterm::event::MouseButton::Left)
-            );
             let clicked_row = match interaction {
                 Interaction::Select(ElicitationControl::Field(index), row) if click => {
                     Some((index, row))
@@ -480,7 +514,7 @@ impl ElicitationDialog {
                     .get(index)
                     .is_some_and(|display| self.picks_on_purpose(*display))
             {
-                return self.click_option_on_purpose(index, row, now);
+                return self.click_option_on_purpose(index, row, mouse, now);
             }
             let clicked = match interaction {
                 Interaction::Select(ElicitationControl::Field(index), _) if click => {
@@ -532,11 +566,13 @@ impl ElicitationDialog {
 
     pub(super) fn cancel_component_pointer(&self) {
         self.form.borrow_mut().cancel_pointer();
+        self.last_option_click.set(None);
     }
 
     pub(super) fn reset_component_geometry(&self) {
         self.form.borrow_mut().reset_geometry();
         self.rendered_area.set(None);
+        self.last_option_click.set(None);
     }
 
     fn focus_index(&self) -> usize {
@@ -621,6 +657,7 @@ impl ElicitationDialog {
     }
 
     fn reset_page(&mut self) {
+        self.last_option_click.set(None);
         self.message_scroll.set(0);
         self.message_anchor.set(None);
         self.message_anchor_width.set(0);
@@ -796,15 +833,15 @@ impl ElicitationDialog {
         }
     }
 
-    /// A click on row `row` of a page that picks on purpose. On an option, a
-    /// click toggles it as Space does, and a double-click, two clicks on the
-    /// same option within the double-click interval, picks it and answers,
-    /// as a double-click does on any other list. On the text row it starts
-    /// writing.
+    /// A single click on row `row` of a page that picks on purpose, the
+    /// list's own activation included. On an option it toggles the option as
+    /// Space does and records the click, so a second click on the same cell
+    /// is a double-click on this option. On the text row it starts writing.
     fn click_option_on_purpose(
         &mut self,
         index: usize,
         row: usize,
+        mouse: MouseEvent,
         now: Instant,
     ) -> Option<ElicitationResponse> {
         self.focus_control(index);
@@ -812,30 +849,36 @@ impl ElicitationDialog {
         let display = self.display_fields[index];
         let option_count = select_option_count(&self.request.fields[display.field]).unwrap_or(0);
         if row >= option_count {
-            self.last_option_click = None;
             if let Some((custom, true)) = self.editable_field() {
                 self.active_custom_fields.insert(custom);
             }
             return None;
         }
-        let double = self.last_option_click.is_some_and(|(field, option, at)| {
-            field == index
-                && option == row
-                && now.saturating_duration_since(at) <= DOUBLE_CLICK_INTERVAL
-        });
-        if double {
-            self.last_option_click = None;
-            if let FieldValue::Single(selected) = &mut self.values[display.field]
-                && *selected != Some(row)
-            {
-                *selected = Some(row);
-                self.confirmed.remove(&self.current_question);
-            }
-            return self.answer_and_next();
-        }
-        self.last_option_click = Some((index, row, now));
         self.toggle_current();
+        self.last_option_click.set(Some(OptionClick {
+            field: index,
+            option: row,
+            column: mouse.column,
+            row: mouse.row,
+            at: now,
+        }));
         None
+    }
+
+    /// A double-click on `option` of display field `index`: it ends picked
+    /// and the question is answered, as a double-click does on any other
+    /// list.
+    fn double_click_option(&mut self, index: usize, option: usize) -> Option<ElicitationResponse> {
+        self.focus_control(index);
+        let display = self.display_fields[index];
+        self.option_cursors[display.field] = option;
+        if let FieldValue::Single(selected) = &mut self.values[display.field]
+            && *selected != Some(option)
+        {
+            *selected = Some(option);
+            self.confirmed.remove(&self.current_question);
+        }
+        self.answer_and_next()
     }
 
     /// Whether `display` is a single-select beside its own text field, where

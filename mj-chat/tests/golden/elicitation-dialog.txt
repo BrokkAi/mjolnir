@@ -228,8 +228,8 @@ click Other, write Valkey: Ok({"question_0_custom": String("Valkey")})
 │                                                                                                  │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-double-click Memcached: Ok({"question_0": String("Memcached")}), answered=true, now on question 2, response=None
-double-click Memcached, already picked: Ok({"question_0": String("Memcached")}), answered=true, now on question 2, response=None
+recorded form: second click lands on "✎ Other"; Ok({"question_0": String("Memcached")}), answered=true, now on question 2, response=None
+with Dragonfly after Memcached: second click lands on "○ Dragonfly"; Ok({"question_0": String("Memcached")}), answered=true, now on question 2, response=None
 
 === Claude Enter on an option answers with what is there (100x20) ===
 ╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮

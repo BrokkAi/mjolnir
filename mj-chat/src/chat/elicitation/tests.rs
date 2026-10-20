@@ -653,27 +653,47 @@ fn golden_elicitation_dialog() {
     );
 
     // A double-click on an option is an activation, as on any other list:
-    // the option ends picked and the question is answered, whether it was
-    // picked before or not.
+    // the option ends picked and the question is answered. A real
+    // double-click lands twice on one screen cell, and the first click moves
+    // the cursor, which reflows the rows below it, so the second click lands
+    // on whatever row now occupies that cell. Starting from the default
+    // cursor on Redis, that is Other on the recorded form and Dragonfly once
+    // a third option follows Memcached.
+    let mut with_dragonfly: serde_json::Value =
+        serde_json::from_str(include_str!("testdata/claude-ask-user-question.json")).unwrap();
+    with_dragonfly["requestedSchema"]["properties"]["question_0"]["oneOf"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "const": "Dragonfly",
+            "title": "Dragonfly",
+            "description": "Redis-compatible, multi-threaded"
+        }));
     let mut steps = Vec::new();
     let mut double = ElicitationDialog::new(claude.request.clone());
-    for (label, picked_first) in [
-        ("double-click Memcached", false),
-        ("double-click Memcached, already picked", true),
+    for (label, request) in [
+        ("recorded form", claude.request.clone()),
+        (
+            "with Dragonfly after Memcached",
+            ElicitationRequest::from_acp_params("claude-questions", with_dragonfly).unwrap(),
+        ),
     ] {
-        double = ElicitationDialog::new(claude.request.clone());
-        if picked_first {
-            click_question_button_at(&mut double, "Memcached", start);
-        }
+        double = ElicitationDialog::new(request);
+        let (column, row) = label_cell(&double, "Memcached");
         let first = start + crate::components::DOUBLE_CLICK_INTERVAL * 3;
-        click_question_button_at(&mut double, "Memcached", first);
-        let response = click_question_button_at(
+        click_cell_at(&mut double, column, row, first);
+        let redrawn = rendered_in_pane(&double, 110, 22);
+        let under_cell = buffer_row(&redrawn, row, 0, redrawn.area.width)
+            .trim_matches(|character: char| character == '│' || character.is_whitespace())
+            .to_owned();
+        let response = click_cell_at(
             &mut double,
-            "Memcached",
+            column,
+            row,
             first + crate::components::DOUBLE_CLICK_INTERVAL / 2,
         );
         steps.push(format!(
-            "{label}: {}, answered={}, now on question {}, response={response:?}",
+            "{label}: second click lands on {under_cell:?}; {}, answered={}, now on question {}, response={response:?}",
             page_answer(&double),
             double.confirmed.contains(&0),
             double.current_question + 1,
@@ -1220,14 +1240,30 @@ fn click_question_button_at(
     label: &str,
     now: std::time::Instant,
 ) -> Option<ElicitationResponse> {
+    let (column, row) = label_cell(dialog, label);
+    click_cell_at(dialog, column, row, now)
+}
+
+/// The screen cell where `label` starts once the dialog is drawn.
+fn label_cell(dialog: &ElicitationDialog, label: &str) -> (u16, u16) {
     let buffer = rendered_in_pane(dialog, 110, 22);
-    let (column, row) = (0..buffer.area.height)
+    (0..buffer.area.height)
         .find_map(|row| {
             let line = buffer_row(&buffer, row, 0, buffer.area.width);
             line.find(label)
                 .map(|byte| (line[..byte].chars().count() as u16, row))
         })
-        .expect("button rendered");
+        .expect("label rendered")
+}
+
+/// Presses and releases the left button on one screen cell, as a real
+/// click does, whatever is drawn there.
+fn click_cell_at(
+    dialog: &mut ElicitationDialog,
+    column: u16,
+    row: u16,
+    now: std::time::Instant,
+) -> Option<ElicitationResponse> {
     let mut response = None;
     for kind in [
         MouseEventKind::Down(MouseButton::Left),
