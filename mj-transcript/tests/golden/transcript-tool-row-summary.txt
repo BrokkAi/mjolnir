@@ -170,8 +170,56 @@ timeout npm run git
 === ordinary command arguments are not invocations (transcript row) ===
 timeout python
 
+=== ssh remote command (transcript row) ===
+ssh builder git status
+
+=== ssh remote argv (transcript row) ===
+ssh builder git worktree list
+
+=== ssh quoted remote script (transcript row) ===
+ssh builder cd && git status | cat
+
+=== ssh quoted remote argv script (transcript row) ===
+ssh builder git status && cargo test
+
+=== ssh connection options (transcript row) ===
+/usr/bin/ssh builder git status
+
+=== ssh attached options after destination (transcript row) ===
+ssh builder uv run pytest
+
+=== ssh wrapped remote shell (transcript row) ===
+timeout ssh builder bash -c git status && cargo test
+
+=== ssh without remote command (transcript row) ===
+ssh builder
+
+=== ssh dynamic destination (transcript row) ===
+ssh
+
+=== ssh dynamic remote script (transcript row) ===
+ssh builder cd && git status
+
+=== ssh dynamic remote command (transcript row) ===
+ssh builder
+
+=== ssh unknown connection option (transcript row) ===
+ssh
+
+=== ssh unknown option after destination (transcript row) ===
+ssh builder
+
+=== ssh without destination (transcript row) ===
+ssh
+
+=== ssh nesting budget (transcript row) ===
+ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder …
+
 === cached wrapper summary (transcript row) ===
 nice timeout git status
+
+=== cached ssh summary (transcript row) ===
+ssh builder git status
 
 === non-execute tool title (transcript row) ===
 Read
