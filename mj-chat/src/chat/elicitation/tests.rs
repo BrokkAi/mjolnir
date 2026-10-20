@@ -547,9 +547,11 @@ fn golden_elicitation_dialog() {
         &buffer,
         &[],
     );
-    // Pick first, then write: the text box under the choices keeps the pick.
+    // Pick first, then write: arrows to the text box under the choices pass
+    // Memcached without picking it, and the pick stays Redis.
     claude.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
-    claude.handle_key(KeyCode::End, KeyModifiers::NONE);
+    claude.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    claude.handle_key(KeyCode::Down, KeyModifiers::NONE);
     claude.paste("Keep TTLs short");
     let buffer = rendered_in_pane(&claude, 100, 20);
     append_elicitation_golden_state(
@@ -586,10 +588,14 @@ fn golden_elicitation_dialog() {
             ),
         ],
     );
-    // With nothing picked, the text alone is the whole answer.
+    // With nothing picked, the text alone is the whole answer, also when the
+    // arrows pass every option on the way to it.
     let mut own = ElicitationDialog::new(claude.request.clone());
-    own.handle_key(KeyCode::End, KeyModifiers::NONE);
-    own.paste("Valkey");
+    own.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    own.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    for character in "Valkey".chars() {
+        own.handle_key(KeyCode::Char(character), KeyModifiers::NONE);
+    }
     let buffer = rendered_in_pane(&own, 100, 20);
     own.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     own.handle_key(KeyCode::Enter, KeyModifiers::NONE);
@@ -603,7 +609,7 @@ fn golden_elicitation_dialog() {
         .expect("submitting with an unanswered question still answers");
     append_elicitation_golden_state(
         &mut output,
-        "Claude Other text with nothing picked",
+        "Claude Other text reached with arrows picks nothing on the way",
         &buffer,
         &[format!("submitted: {answer:?}")],
     );

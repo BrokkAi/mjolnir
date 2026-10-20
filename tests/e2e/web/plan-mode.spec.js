@@ -990,7 +990,13 @@ test('Claude Other text goes beside the pick in either order, and alone with not
     content: { question_0: 'green', question_0_custom: 'Canary first' },
   });
 
-  await card('Write your own answer.').locator('input[type="text"]').fill('Canary');
+  // From the keyboard, the text box is reached by leaving the choices, not
+  // by moving through them, so getting there picks nothing.
+  await card('Write your own answer.').getByRole('radio', { name: 'No answer', exact: true }).focus();
+  await page.keyboard.press('Tab');
+  await expect(card('Write your own answer.').locator('input[type="text"]')).toBeFocused();
+  await page.keyboard.type('Canary');
+  await expect(card('Write your own answer.').locator('input[type="radio"]:checked')).toHaveCount(0);
   await submit('Write your own answer.');
   await waitForActionCount(state, 3);
   expect(state.actions[2].response).toEqual({

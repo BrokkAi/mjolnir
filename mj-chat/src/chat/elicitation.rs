@@ -341,6 +341,7 @@ impl ElicitationDialog {
                         Some(ElicitationControl::Field(_))
                     )
                 {
+                    self.pick_cursor_when_nothing_picked();
                     return self.answer_and_next();
                 }
             }
@@ -403,7 +404,10 @@ impl ElicitationDialog {
             Interaction::Activate(ElicitationControl::Cancel) | Interaction::Cancel => {
                 Some(ElicitationResponse::Cancel)
             }
-            Interaction::Activate(ElicitationControl::Field(_)) => self.answer_and_next(),
+            Interaction::Activate(ElicitationControl::Field(_)) => {
+                self.pick_cursor_when_nothing_picked();
+                self.answer_and_next()
+            }
             Interaction::Toggle(ElicitationControl::Field(index)) => {
                 self.focus_control(index);
                 self.toggle_current();
@@ -437,10 +441,23 @@ impl ElicitationDialog {
         let event = crossterm::event::Event::Mouse(mouse);
         let result = self.form.borrow_mut().handle(&event);
         if let Some(interaction) = result.action {
-            let toggle = matches!(
+            let click = matches!(
                 mouse.kind,
                 MouseEventKind::Up(crossterm::event::MouseButton::Left)
-            ) && matches!(interaction, Interaction::Select(ElicitationControl::Field(index), _) if matches!(self.values[self.display_fields[index].field], FieldValue::Multi(_)));
+            );
+            let clicked = match interaction {
+                Interaction::Select(ElicitationControl::Field(index), _) if click => {
+                    self.display_fields.get(index).copied()
+                }
+                _ => None,
+            };
+            let toggle = clicked
+                .is_some_and(|display| matches!(self.values[display.field], FieldValue::Multi(_)));
+            // A click on an option is a deliberate pick, which moving the
+            // cursor is not beside an alongside text field.
+            let pick = clicked.is_some_and(|display| {
+                display.alongside && matches!(self.values[display.field], FieldValue::Single(_))
+            });
             let response = self.apply_interaction(interaction);
             if toggle {
                 if let Some((custom, true)) = self.editable_field() {
@@ -448,6 +465,9 @@ impl ElicitationDialog {
                 } else {
                     self.toggle_current();
                 }
+            }
+            if pick && self.editable_field().is_none() {
+                self.pick_cursor();
             }
             return response;
         }
@@ -648,9 +668,11 @@ impl ElicitationDialog {
             return;
         }
         self.option_cursors[display.field] = selected;
-        // Text that goes beside a pick is a field of its own: moving onto it
-        // keeps the pick, so writing never takes back an option chosen first.
-        if display.alongside && selected == option_count {
+        // Beside its own text field, a pick is a deliberate act (Space, a
+        // click, or Enter with nothing picked): moving the cursor, on the
+        // way to the text row or back, never picks an option the user did
+        // not choose.
+        if display.alongside {
             return;
         }
         if let FieldValue::Single(value) = &mut self.values[display.field] {
@@ -659,9 +681,7 @@ impl ElicitationDialog {
                 self.confirmed.remove(&self.current_question);
             }
             *value = next;
-            if let Some(custom) = display.custom
-                && !display.alongside
-            {
+            if let Some(custom) = display.custom {
                 if display.custom_option == Some(selected) || selected == option_count {
                     self.active_custom_fields.insert(custom);
                 } else {
@@ -743,6 +763,35 @@ impl ElicitationDialog {
                 self.message_anchor_width.get(),
                 next,
             )));
+        }
+    }
+
+    /// Picks the option under the cursor of an alongside single-select.
+    fn pick_cursor(&mut self) {
+        let Some(display) = self.display_fields.get(self.focus_index()).copied() else {
+            return;
+        };
+        let cursor = self.option_cursors[display.field];
+        let option_count = select_option_count(&self.request.fields[display.field]).unwrap_or(0);
+        if !display.alongside || cursor >= option_count {
+            return;
+        }
+        if let FieldValue::Single(selected) = &mut self.values[display.field]
+            && *selected != Some(cursor)
+        {
+            *selected = Some(cursor);
+            self.confirmed.remove(&self.current_question);
+        }
+    }
+
+    /// Enter on an option row of an alongside single-select with nothing
+    /// picked answers with that option, as Enter does on any other list.
+    fn pick_cursor_when_nothing_picked(&mut self) {
+        let Some(display) = self.display_fields.get(self.focus_index()).copied() else {
+            return;
+        };
+        if matches!(self.values[display.field], FieldValue::Single(None)) {
+            self.pick_cursor();
         }
     }
 
@@ -986,50 +1035,30 @@ fn display_fields(
     request: &ElicitationRequest,
     values: &[FieldValue],
 ) -> (Vec<DisplayField>, BTreeSet<usize>) {
-    let fields_by_id = request
-        .fields
-        .iter()
-        .enumerate()
-        .map(|(index, field)| (field.id.as_str(), index))
-        .collect::<BTreeMap<_, _>>();
     let mut custom_by_owner = BTreeMap::new();
     let mut attached_custom = BTreeSet::new();
-    for (custom, field) in request.fields.iter().enumerate() {
-        let Some(owner) = field
-            .custom_answer_for
-            .as_deref()
-            .and_then(|owner| fields_by_id.get(owner))
-            .copied()
-        else {
-            continue;
-        };
-        if !matches!(field.kind, ElicitationFieldKind::Text { .. })
-            || select_option_count(&request.fields[owner]).is_none()
-            || custom_by_owner.contains_key(&owner)
-        {
-            continue;
+    for (owner, field) in request.fields.iter().enumerate() {
+        if let Some((custom, role)) = request.companion(field) {
+            custom_by_owner.insert(owner, (custom, role));
+            attached_custom.insert(custom);
         }
-        custom_by_owner.insert(owner, custom);
-        attached_custom.insert(custom);
     }
     let display_fields = request
         .fields
         .iter()
         .enumerate()
         .filter(|(index, _)| !attached_custom.contains(index))
-        .map(|(field, _)| DisplayField {
-            field,
-            custom: custom_by_owner.get(&field).copied(),
-            custom_option: custom_by_owner.get(&field).and_then(|custom| {
-                let custom = &request.fields[*custom];
-                (custom.companion_role() == CompanionRole::Detail)
-                    .then_some(custom.custom_answer_option.as_deref())
-                    .flatten()
-                    .and_then(|value| select_option_index(&request.fields[field], value))
-            }),
-            alongside: custom_by_owner.get(&field).is_some_and(|custom| {
-                request.fields[*custom].companion_role() == CompanionRole::Alongside
-            }),
+        .map(|(field, _)| {
+            let companion = custom_by_owner.get(&field).copied();
+            DisplayField {
+                field,
+                custom: companion.map(|(custom, _)| custom),
+                custom_option: companion
+                    .filter(|(_, role)| *role == CompanionRole::Detail)
+                    .and_then(|(custom, _)| request.fields[custom].custom_answer_option.as_deref())
+                    .and_then(|value| select_option_index(&request.fields[field], value)),
+                alongside: companion.is_some_and(|(_, role)| role == CompanionRole::Alongside),
+            }
         })
         .collect::<Vec<_>>();
     let active_custom_fields = attached_custom

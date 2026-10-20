@@ -156,7 +156,7 @@ harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing ac
 submitted: Accept { content: {"question_0": String("Redis"), "question_0_custom": String("Keep TTLs short"), "question_1": StringArray(["linux", "macos"]), "question_1_custom": String("freebsd")} }
 harness: Ok(Accept { content: {"question_0": String("Redis"), "question_0_custom": String("Keep TTLs short"), "question_1": StringArray(["linux", "macos"]), "question_1_custom": String("freebsd")} })
 
-=== Claude Other text with nothing picked (100x20) ===
+=== Claude Other text reached with arrows picks nothing on the way (100x20) ===
 ╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
 │Cache                                                                                             │
 │Which cache should the service use?                                                               │

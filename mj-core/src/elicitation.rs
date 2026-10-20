@@ -134,6 +134,7 @@ impl ElicitationRequest {
             let Some((companion, role)) = self.companion(field) else {
                 continue;
             };
+            let companion = &self.fields[companion];
             let Some(ElicitationValue::String(text)) = content.get(&companion.id) else {
                 continue;
             };
@@ -149,8 +150,12 @@ impl ElicitationRequest {
                 }
                 continue;
             }
-            if role != CompanionRole::Alternative && !field.required {
-                continue;
+            // Detail belongs to its option and never answers the select; text
+            // beside a pick answers an optional select as it is.
+            match role {
+                CompanionRole::Detail => continue,
+                CompanionRole::Alongside if !field.required => continue,
+                CompanionRole::Alongside | CompanionRole::Alternative => {}
             }
             let Some(ElicitationValue::String(text)) = content.remove(&companion.id) else {
                 unreachable!("the companion answer was just read as text")
@@ -176,13 +181,11 @@ impl ElicitationRequest {
     }
 
     /// `select`'s companion text field and its role: the field whose
-    /// `custom_answer_for` names `select`. The first one counts, as every
-    /// surface lays it out.
+    /// `custom_answer_for` names `select`, as its index in `fields`. The first
+    /// one counts. This is the one rule every Rust surface lays out by; the
+    /// web viewer's `buildElicitationForm` mirrors it.
     #[must_use]
-    pub fn companion(
-        &self,
-        select: &ElicitationField,
-    ) -> Option<(&ElicitationField, CompanionRole)> {
+    pub fn companion(&self, select: &ElicitationField) -> Option<(usize, CompanionRole)> {
         if !matches!(
             select.kind,
             ElicitationFieldKind::SingleSelect { .. } | ElicitationFieldKind::MultiSelect { .. }
@@ -191,11 +194,11 @@ impl ElicitationRequest {
         }
         self.fields
             .iter()
-            .find(|field| {
+            .position(|field| {
                 field.custom_answer_for.as_deref() == Some(select.id.as_str())
                     && matches!(field.kind, ElicitationFieldKind::Text { .. })
             })
-            .map(|field| (field, field.companion_role()))
+            .map(|index| (index, self.fields[index].companion_role()))
     }
 
     /// The user's reply for conversation history. Mask secrets here, before
@@ -1071,6 +1074,33 @@ mod tests {
                 .validate_response(&answer(&[("scope", "Only the parser")]))
                 .is_err()
         );
+    }
+
+    // Hard-won: #1312: plan-review feedback alone was forwarded as the plan decision
+    #[test]
+    fn plan_review_feedback_never_stands_in_for_its_decision() {
+        use crate::acp::{PLAN_REVIEW_ACTION, PLAN_REVIEW_FEEDBACK, normalized_plan_review};
+        let review = normalized_plan_review("plan-review-1".into(), &json!({"plan": "1. Do it"}));
+        let answer = |pairs: &[(&str, &str)]| ElicitationResponse::Accept {
+            content: pairs
+                .iter()
+                .map(|(id, value)| {
+                    (
+                        (*id).to_owned(),
+                        ElicitationValue::String((*value).to_owned()),
+                    )
+                })
+                .collect(),
+        };
+        assert_eq!(
+            review.harness_response(answer(&[(PLAN_REVIEW_FEEDBACK, "tighten step 3")])),
+            Err("Decision is required".to_owned())
+        );
+        let revise = answer(&[
+            (PLAN_REVIEW_ACTION, "revise"),
+            (PLAN_REVIEW_FEEDBACK, "tighten step 3"),
+        ]);
+        assert_eq!(review.harness_response(revise.clone()), Ok(revise));
     }
 
     fn numeric_request() -> ElicitationRequest {

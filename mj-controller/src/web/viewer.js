@@ -5710,13 +5710,17 @@ function companionRole(field) {
 // is sent with that option.
 function buildElicitationForm(form, request, register, onEdit) {
   const fields = request.fields || [];
+  // A select's companion: the first text field whose `custom_answer_for`
+  // names it. This mirrors `ElicitationRequest::companion` in mj-core
+  // exactly, which the daemon, worker and terminal form use; keep the two
+  // rules identical.
   const companions = new Map();
   for (const field of fields) {
-    const owner = field.custom_answer_for;
-    if (!owner || field.kind !== 'text' || companions.has(owner)) continue;
-    const target = fields.find(candidate => candidate.id === owner);
-    if (!target || !Array.isArray(target.options)) continue;
-    companions.set(owner, field);
+    if (field.kind !== 'single_select' && field.kind !== 'multi_select') continue;
+    const companion = fields.find(
+      candidate => candidate.kind === 'text' && candidate.custom_answer_for === field.id,
+    );
+    if (companion) companions.set(field.id, companion);
   }
   const entries = [],
     customByOwner = new Map();
