@@ -626,44 +626,76 @@ pub fn capture_paths(
 }
 
 /// The tree a review point names, the commit HEAD was at when it was taken,
-/// and the session that took it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// where that sits in HEAD's reflog, the turn's commits no review has seen
+/// yet, and the session that took it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReviewPoint {
     pub tree: String,
     /// `None` for an unborn branch, and for a bare tree id pinned by a release
     /// that did not record HEAD.
     pub head: Option<String>,
+    /// `None` for a point recorded by a release that did not record it, and
+    /// for one taken while HEAD's reflog did not end at `head`.
+    pub reflog: Option<ReflogAnchor>,
+    /// Commits the turn made that were not in the workspace when this point
+    /// was captured, such as work committed on a branch it then left. A later
+    /// review still counts them as the turn's.
+    pub pending: Vec<String>,
     /// `None` for a point recorded by a release that did not record it.
     pub session: Option<String>,
 }
 
-/// Records `tree`, the HEAD it was captured at, and the session that captured
-/// it as one Git object, and returns its id: the id a review hands on as its
-/// capture and later pins as a baseline.
+/// Where a review point sits in its worktree's HEAD reflog: how many entries
+/// the reflog held when the point was taken, and the time of the newest one.
 ///
-/// The object is an annotated tag pointing at the tree, with `head <commit>`
-/// and `session <id>` as its message. The tree and its commit are one fact, so
-/// they travel as one id, and the session lets a pin say whose it is. A tag is
-/// still a tree-ish, so `git diff`, `git ls-tree` and `^{tree}` read it exactly
-/// as they read the bare tree ids earlier releases stored, with no change to
-/// the controller's records or the relay protocol. Unlike a commit, a tag
-/// pointing at a tree does not appear in `git log --all`. The fixed tagger and
-/// date make equal captures equal ids.
+/// Entries expire only from the oldest end, so the count finds the entry even
+/// when one second holds several entries for one commit; the time finds it
+/// again after expiry has shifted the count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReflogAnchor {
+    pub entries: usize,
+    /// `None` when the reflog was empty.
+    pub timestamp: Option<i64>,
+}
+
+/// Records `point` as one Git object and returns its id: the id a review
+/// hands on as its capture and later pins as a baseline.
+///
+/// The object is an annotated tag pointing at the tree, with one line per
+/// field as its message: `head <commit>`, `reflog <entries> [<timestamp>]`,
+/// one `pending <commit>` per pending commit, and `session <id>`. The tree and
+/// its commit are one fact, so they travel as one id, and the session lets a
+/// pin say whose it is. A tag is still a tree-ish, so `git diff`, `git ls-tree`
+/// and `^{tree}` read it exactly as they read the bare tree ids earlier
+/// releases stored, with no change to the controller's records or the relay
+/// protocol. Unlike a commit, a tag pointing at a tree does not appear in
+/// `git log --all`. The fixed tagger and date make equal captures equal ids.
 pub fn record_review_point(
     runner: &dyn GitCommandRunner,
     repository: &Path,
-    tree: &str,
-    head: Option<&str>,
-    session: &str,
+    point: &ReviewPoint,
 ) -> Result<String> {
     let mut tag = format!(
-        "object {tree}\ntype tree\ntag mjolnir-review-point\n\
-         tagger Mjolnir <mjolnir@localhost> 0 +0000\n\n"
+        "object {}\ntype tree\ntag mjolnir-review-point\n\
+         tagger Mjolnir <mjolnir@localhost> 0 +0000\n\n",
+        point.tree
     );
-    if let Some(head) = head {
+    if let Some(head) = &point.head {
         tag.push_str(&format!("head {head}\n"));
     }
-    tag.push_str(&format!("session {session}\n"));
+    if let Some(anchor) = point.reflog {
+        tag.push_str(&format!("reflog {}", anchor.entries));
+        if let Some(timestamp) = anchor.timestamp {
+            tag.push_str(&format!(" {timestamp}"));
+        }
+        tag.push('\n');
+    }
+    for commit in &point.pending {
+        tag.push_str(&format!("pending {commit}\n"));
+    }
+    if let Some(session) = &point.session {
+        tag.push_str(&format!("session {session}\n"));
+    }
     let output = git_bytes(
         runner,
         repository,
@@ -691,8 +723,7 @@ pub fn read_review_point(
     match trim_output(&kind, "decode the review point type")?.as_str() {
         "tree" => Ok(ReviewPoint {
             tree: id.to_owned(),
-            head: None,
-            session: None,
+            ..ReviewPoint::default()
         }),
         "tag" => {
             let tag = git_bytes(
@@ -715,14 +746,145 @@ pub fn read_review_point(
             );
             let tree = field(header, "object ")
                 .with_context(|| format!("review point {id} names no object"))?;
+            // An anchor that does not parse is treated as absent, which makes
+            // the next review diff the whole tree rather than misattribute.
+            let reflog = field(message, "reflog ").and_then(|anchor| {
+                let mut parts = anchor.split_whitespace();
+                let entries = parts.next()?.parse().ok()?;
+                let timestamp = match parts.next() {
+                    Some(timestamp) => Some(timestamp.parse().ok()?),
+                    None => None,
+                };
+                Some(ReflogAnchor { entries, timestamp })
+            });
             Ok(ReviewPoint {
                 tree,
                 head: field(message, "head "),
+                reflog,
+                pending: message
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("pending "))
+                    .map(str::to_owned)
+                    .collect(),
                 session: field(message, "session "),
             })
         }
         other => bail!("review point {id} is a {other}, not a tag or tree"),
     }
+}
+
+/// One entry of a worktree's HEAD reflog: the commit HEAD was set to, that
+/// commit's tree and parents, when, and the action Git recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReflogEntry {
+    pub commit: String,
+    pub tree: String,
+    pub parents: Vec<String>,
+    pub timestamp: i64,
+    pub message: String,
+}
+
+impl ReflogEntry {
+    /// Whether this entry only moved HEAD to a commit that already existed,
+    /// as a checkout, reset, fast-forward, clone or the start and end of a
+    /// rebase do, rather than recording a commit made in this worktree.
+    ///
+    /// Git names the action at the start of every message (`commit:`,
+    /// `checkout: moving from …`, `merge topic: Fast-forward`, `rebase (pick):
+    /// …`). A commit's own subject can only follow a `commit`, `cherry-pick`,
+    /// `revert`, `am` or rebase action, so the moves are told apart by their
+    /// action alone. A message this does not recognize, such as one written
+    /// under a custom `GIT_REFLOG_ACTION`, counts as a commit made here: a
+    /// review that covers too much is the safe way to be wrong.
+    #[must_use]
+    pub fn moves_only(&self) -> bool {
+        let message = self.message.as_str();
+        if message.starts_with("commit") {
+            return false;
+        }
+        let (action, rest) = message.split_once(": ").unwrap_or((message, ""));
+        message.starts_with("checkout: moving from ")
+            || message.starts_with("reset: moving to ")
+            || message.starts_with("clone: from ")
+            || message.starts_with("branch: ")
+            // `merge topic: Fast-forward` and `pull …: Fast-forward`. After
+            // `cherry-pick` the same words could be a commit's subject, so
+            // `cherry-pick --ff` counts as a commit.
+            || ((action.starts_with("merge ") || action == "pull" || action.starts_with("pull "))
+                && rest.eq_ignore_ascii_case("fast-forward"))
+            || ["(start)", "(finish)", "(abort)"]
+                .iter()
+                .any(|step| action.ends_with(step))
+    }
+}
+
+/// The worktree's HEAD reflog, oldest entry first, or no entries when HEAD has
+/// no reflog.
+///
+/// A linked worktree has a HEAD reflog of its own, so this is the history of
+/// one checkout. `git log -g` shows the current commit as an entry even when
+/// the reflog is gone, so its existence is checked first.
+pub fn read_head_reflog(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+) -> Result<Vec<ReflogEntry>> {
+    let exists = run_git(runner, repository, ["reflog", "exists", "HEAD"], &[])?;
+    match exists.status {
+        0 => {}
+        1 => return Ok(Vec::new()),
+        _ => return Err(git_failure("check for a HEAD reflog", &exists)),
+    }
+    let output = git_bytes(
+        runner,
+        repository,
+        [
+            "log",
+            "--walk-reflogs",
+            "--no-abbrev",
+            "--no-show-signature",
+            "--date=raw",
+            "-z",
+            "--format=%H%x1f%T%x1f%P%x1f%gd%x1f%gs",
+            "HEAD",
+        ],
+        &[],
+        "read the HEAD reflog",
+    )?;
+    let mut entries = output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            let record = String::from_utf8_lossy(record);
+            let fields = record.splitn(5, '\x1f').collect::<Vec<_>>();
+            let [commit, tree, parents, selector, message] = fields[..] else {
+                bail!("malformed HEAD reflog entry {record:?}");
+            };
+            // `--date=raw` makes the selector `HEAD@{<seconds> <zone>}`.
+            let timestamp = selector
+                .split_once('{')
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                .and_then(|seconds| seconds.parse().ok())
+                .with_context(|| format!("HEAD reflog selector {selector:?} has no time"))?;
+            Ok(ReflogEntry {
+                commit: commit.trim().to_owned(),
+                tree: tree.to_owned(),
+                parents: parents.split_whitespace().map(str::to_owned).collect(),
+                timestamp,
+                message: message.to_owned(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    entries.reverse();
+    Ok(entries)
+}
+
+/// What [`merge_trees`] records where both sides changed the same lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeConflicts {
+    /// Conflict markers holding both sides.
+    Mark,
+    /// The `ours` side's lines.
+    KeepOurs,
 }
 
 /// Three-way merges `theirs` into `ours` from their common `ancestor` (`None`
@@ -731,17 +893,18 @@ pub fn read_review_point(
 /// This is Git's resolve strategy run in a scratch index, and it works on any
 /// Git a worker may have; `git merge-tree --write-tree` needs Git 2.38.
 /// `read-tree -m` settles every path only one side changed. A path both sides
-/// changed as regular files is merged with `git merge-file`, which leaves
-/// conflict markers where the changes overlap. Any other path both sides
-/// changed, and a file `merge-file` cannot merge such as a binary one, keeps
-/// `ours`. There is no rename detection: a file `theirs` renamed while `ours`
-/// changed it ends up under both names.
+/// changed as regular files is merged with `git merge-file`, which settles
+/// lines where the changes overlap as `conflicts` says. Any other path both
+/// sides changed, and a file `merge-file` cannot merge such as a binary one,
+/// keeps `ours`. There is no rename detection: a file `theirs` renamed while
+/// `ours` changed it ends up under both names.
 pub fn merge_trees(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     ancestor: Option<&str>,
     ours: &str,
     theirs: &str,
+    conflicts: MergeConflicts,
 ) -> Result<String> {
     let ancestor = match ancestor {
         Some(ancestor) => ancestor.to_owned(),
@@ -770,9 +933,9 @@ pub fn merge_trees(
         Vec::new(),
         "list the paths both sides changed",
     )?;
-    let conflicts = unmerged_paths(&unmerged)?;
-    if !conflicts.is_empty() {
-        let resolutions = resolve_conflicts(runner, repository, &conflicts)?;
+    let unmerged = unmerged_paths(&unmerged)?;
+    if !unmerged.is_empty() {
+        let resolutions = resolve_conflicts(runner, repository, &unmerged, conflicts)?;
         scratch.run(
             runner,
             repository,
@@ -879,6 +1042,7 @@ fn resolve_conflicts(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     conflicts: &[UnmergedPath],
+    lines: MergeConflicts,
 ) -> Result<Vec<u8>> {
     let blobs = read_blobs(
         runner,
@@ -900,6 +1064,7 @@ fn resolve_conflicts(
                 &files.path().join(number.to_string()),
                 sides,
                 &blobs,
+                lines,
             )?,
             None => None,
         };
@@ -953,6 +1118,7 @@ fn merge_file(
     stem: &Path,
     (ancestor, ours, theirs): (Option<&IndexEntry>, &IndexEntry, &IndexEntry),
     blobs: &BTreeMap<String, Vec<u8>>,
+    conflicts: MergeConflicts,
 ) -> Result<Option<(String, PathBuf)>> {
     let write = |side: &str, entry: Option<&IndexEntry>| -> Result<OsString> {
         let path = stem.with_extension(side);
@@ -969,6 +1135,7 @@ fn merge_file(
     let current = write("ours", Some(ours))?;
     let mut arguments: Vec<OsString> = ["merge-file", "-q"]
         .into_iter()
+        .chain((conflicts == MergeConflicts::KeepOurs).then_some("--ours"))
         .chain(["-L", "reviewed", "-L", "ancestor", "-L", "merged in"])
         .map(OsString::from)
         .collect();

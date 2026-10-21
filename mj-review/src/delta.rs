@@ -191,6 +191,7 @@ mod tests {
             changed_lines: summary.changed_line_count(),
             files: Vec::new(),
             merged_in: Vec::new(),
+            unattributed: None,
         }
     }
 
