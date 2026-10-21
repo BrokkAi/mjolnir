@@ -505,29 +505,25 @@ pub(super) fn collect_native_tree(
     Ok(())
 }
 
+/// OpenCode's database within a session home.
+pub(super) const OPENCODE_DATABASE: &str = ".data/opencode/opencode.db";
+
+/// The files SQLite keeps beside [`OPENCODE_DATABASE`] while it is open: the
+/// write-ahead log, whose pages SQLite replays over the database when it next
+/// opens it, and the shared-memory index of that log.
+pub(super) const OPENCODE_DATABASE_SIDECARS: [&str; 2] = [
+    ".data/opencode/opencode.db-wal",
+    ".data/opencode/opencode.db-shm",
+];
+
 /// OpenCode keeps every session of a data directory in one SQLite database,
-/// `opencode.db`. A session home has exactly one data directory, so the
-/// database is the session's native state. It is captured as a snapshot
-/// ([`opencode_database_without_logins`]) that already holds the pages of
-/// the write-ahead log beside it, so neither that log nor the `-shm`
-/// shared-memory file is captured.
+/// [`OPENCODE_DATABASE`]. A session home has exactly one data directory, so
+/// the database is the session's native state. It is captured as a snapshot
+/// ([`opencode_database_without_logins`]) that already holds the pages of the
+/// write-ahead log, so no [`OPENCODE_DATABASE_SIDECARS`] are captured, and a
+/// restore removes any it finds beside the database it replaces.
 pub(super) fn is_opencode_native_artifact(relative_path: &Path) -> bool {
-    let mut components = relative_path.components();
-    let (
-        Some(Component::Normal(data)),
-        Some(Component::Normal(opencode)),
-        Some(Component::Normal(file)),
-        None,
-    ) = (
-        components.next(),
-        components.next(),
-        components.next(),
-        components.next(),
-    )
-    else {
-        return false;
-    };
-    data == ".data" && opencode == "opencode" && file == "opencode.db"
+    relative_path == Path::new(OPENCODE_DATABASE)
 }
 
 /// The tables in which OpenCode keeps logins: provider and connector
@@ -542,7 +538,7 @@ const OPENCODE_LOGIN_TABLES: [&str; 3] = ["credential", "account", "control_acco
 /// their secrets.
 fn opencode_database_without_logins(path: &Path) -> Result<Vec<u8>> {
     let scratch = tempfile::tempdir().context("create OpenCode database snapshot directory")?;
-    let copy = scratch.path().join("opencode.db");
+    let snapshot_path = scratch.path().join("opencode.db");
     let snapshot = || -> Result<()> {
         let source = rusqlite::Connection::open_with_flags(
             path,
@@ -550,12 +546,26 @@ fn opencode_database_without_logins(path: &Path) -> Result<Vec<u8>> {
         )?;
         // The running OpenCode may hold a brief write lock.
         source.busy_timeout(std::time::Duration::from_secs(5))?;
-        source.execute(
-            "VACUUM INTO ?1",
-            [copy.to_str().context("snapshot path is not UTF-8")?],
-        )?;
+        // SQLite's backup takes the destination as a path, whatever its
+        // encoding. Copying every page in one step reads them all in one
+        // transaction, so the copy is consistent, write-ahead log included.
+        let mut copy = rusqlite::Connection::open(&snapshot_path)?;
+        {
+            use rusqlite::backup::{Backup, StepResult};
+            let backup = Backup::new(&source, &mut copy)?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match backup.step(-1)? {
+                    StepResult::Done => break,
+                    // A writer held the database; wait it out, briefly.
+                    _ if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    other => bail!("OpenCode's database stayed busy ({other:?})"),
+                }
+            }
+        }
         drop(source);
-        let copy = rusqlite::Connection::open(&copy)?;
         for table in OPENCODE_LOGIN_TABLES {
             let exists: bool = copy.query_row(
                 "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
@@ -566,12 +576,18 @@ fn opencode_database_without_logins(path: &Path) -> Result<Vec<u8>> {
                 copy.execute(&format!("DELETE FROM \"{table}\""), [])?;
             }
         }
-        // VACUUM rebuilds the file, so no freed page keeps a deleted login.
-        copy.execute_batch("VACUUM")?;
+        // VACUUM rebuilds the file, so no freed page keeps a deleted login;
+        // the checkpoint moves a copy in WAL mode back into the file itself.
+        copy.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     };
     snapshot().with_context(|| format!("snapshot OpenCode database {}", path.display()))?;
-    fs::read(&copy).with_context(|| format!("read OpenCode database snapshot {}", copy.display()))
+    fs::read(&snapshot_path).with_context(|| {
+        format!(
+            "read OpenCode database snapshot {}",
+            snapshot_path.display()
+        )
+    })
 }
 
 pub(super) fn kimi_session_artifact(relative: &Path, session_id: &str) -> bool {

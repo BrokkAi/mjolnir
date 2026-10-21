@@ -433,7 +433,10 @@ when set. OpenCode 2 keeps its logins in its database, `opencode.db`, in its
 data directory: `$XDG_DATA_HOME/opencode` (or `~/.local/share/opencode`) for
 your own `~/.config/opencode`, and `<home>/.data/opencode` for any other home.
 That database also holds every OpenCode session, so Mjolnir reads only the
-logins from it, read-only. Mjolnir gives each session a private configuration
+logins from it, read-only. An OpenCode 1 login in `auth.json`, in the data
+directory or under `<home>/.data/opencode` where Mjolnir kept it for OpenCode
+1, still reaches sessions until OpenCode 2 takes that directory over, the way
+OpenCode 2's own upgrade carries it. Mjolnir gives each session a private configuration
 copy with those logins, which the session imports when it starts, and keeps the
 session's own database under that copy's `.data/opencode/` tree, including on
 a bare runtime on this machine. A login added or changed after a session

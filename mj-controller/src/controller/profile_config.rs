@@ -637,6 +637,9 @@ mod tests {
         assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), credentials);
     }
 
+    /// Discovery offers the providers of an OpenCode 2 login stored in its
+    /// database, and of an OpenCode 1 login in `auth.json` that no OpenCode 2
+    /// has taken over, both through the pinned OpenCode's own import.
     #[test]
     #[ignore = "requires MJ_OPENCODE_TEST_BINARY naming an OpenCode 2 executable and MJ_WORKER_BINARY pointing to the current mj-worker build; discovers models without a provider turn"]
     fn live_opencode_profile_discovery_offers_logins_from_its_database() {
@@ -644,8 +647,8 @@ mod tests {
             std::env::var_os("MJ_OPENCODE_TEST_BINARY").expect("set an OpenCode 2 executable"),
         );
         let isolated = tempfile::tempdir().unwrap();
-        let home = isolated.path().join("config/opencode");
-        std::fs::create_dir_all(&home).unwrap();
+        let stored = isolated.path().join("stored/opencode");
+        std::fs::create_dir_all(&stored).unwrap();
         // OpenCode itself writes the login, so the read meets its own schema.
         let export = isolated.path().join("export.json");
         std::fs::write(
@@ -656,38 +659,48 @@ mod tests {
         let status = std::process::Command::new(&opencode)
             .args(["auth", "import", "--standalone"])
             .arg(&export)
-            .env("XDG_CONFIG_HOME", isolated.path().join("config"))
-            .env("XDG_DATA_HOME", home.join(".data"))
+            .env("XDG_CONFIG_HOME", isolated.path().join("stored"))
+            .env("XDG_DATA_HOME", stored.join(".data"))
             .env("OPENCODE_DISABLE_AUTOUPDATE", "1")
             .status()
             .unwrap();
         assert!(status.success(), "seed the OpenCode login: {status}");
-        let profile = HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::OpenCode,
-            home,
-            environment: Default::default(),
-            context_window_bytes: None,
-            guardian_review_model: None,
-            codex_profile: None,
-            legacy_subagents: None,
-        };
-        let choices = probe_profile(
-            "opencode-database-login-test",
-            &profile,
-            Default::default(),
-            None,
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        let legacy = isolated.path().join("legacy/opencode");
+        std::fs::create_dir_all(legacy.join(".data/opencode")).unwrap();
+        std::fs::write(
+            legacy.join(".data/opencode/auth.json"),
+            r#"{"deepseek":{"type":"api","key":"sk-mjolnir-live-legacy"}}"#,
         )
         .unwrap();
-        assert!(
-            choices
-                .models
-                .iter()
-                .any(|choice| choice.value.starts_with("deepseek/")),
-            "discovered models: {:?}",
-            choices.models
-        );
+        for home in [stored, legacy] {
+            let profile = HarnessProfile {
+                enabled: true,
+                kind: mj_core::config::HarnessKind::OpenCode,
+                home: home.clone(),
+                environment: Default::default(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+                codex_profile: None,
+                legacy_subagents: None,
+            };
+            let choices = probe_profile(
+                "opencode-database-login-test",
+                &profile,
+                Default::default(),
+                None,
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .unwrap();
+            assert!(
+                choices
+                    .models
+                    .iter()
+                    .any(|choice| choice.value.starts_with("deepseek/")),
+                "{}: discovered models: {:?}",
+                home.display(),
+                choices.models
+            );
+        }
     }
 
     #[tokio::test]
