@@ -54,7 +54,7 @@ Each workspace tab carries the most urgent symbol among its own sessions and how
 Press **Create**, `n`, `N`, or `prefix+c` anywhere in the terminal
 dashboard. The full wizard resolves four things:
 
-1. A [profile](/profiles/) selects Codex, Claude Code, Kimi Code, Grok Build, Muse Code, or OpenCode and the credentials to use.
+1. A [profile](/profiles/) selects Codex, Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, or MiMo Code and the credentials to use.
 2. A [target](/targets/) selects the local, container, SSH, or EC2 environment.
 3. A project source supplies the working directory: a [bundle](/workspaces-bundles/) for a managed target, or an existing Git directory for a bare target.
 4. A final launch review, with optional attached directories and per-session container sizing where the target supports them.
@@ -440,7 +440,7 @@ For Codex, the archive includes the primary thread and child-agent results surfa
 
 ## Import a native harness session
 
-The `prefix+g` picker also has an Import view for sessions created outside Mjolnir. Native sessions from five of the six supported harnesses can be adopted into a suspended, verified Mjolnir archive and then resumed on a configured target; OpenCode keeps its sessions in a SQLite database, so it cannot be imported yet. Muse imports retain their native session IDs and support workspace relocation. Muse accepts one workspace root.
+The `prefix+g` picker also has an Import view for sessions created outside Mjolnir. Native sessions from five of the seven supported harnesses can be adopted into a suspended, verified Mjolnir archive and then resumed on a configured target; OpenCode and MiMo Code keep their sessions in SQLite databases, so they cannot be imported yet. Muse imports retain their native session IDs and support workspace relocation. Muse accepts one workspace root.
 
 The Import view and `mj import` read the home of each enabled profile. A session Mjolnir runs writes its native history into its own staged home instead, on this machine as on every other target, so it never appears in the Import view, and your harness's own resume command, such as `codex resume` or `claude --resume`, does not list it either. Find it on the **Mjolnir** or **Archived** tab. See [Native session history](/profiles/#native-session-history).
 
@@ -493,9 +493,10 @@ reads **Indexing…**; the tabs and the list keep working, and the box becomes
 typable as soon as the build finishes, though moving the keyboard focus there
 still takes `/` or a click. What is stored is the conversation: the prompts,
 the agent's replies, the titles of the tool calls, the session title, and the
-project directory. Native sessions from every enabled profile home are indexed
-too, including Kimi Code, Grok Build, and Muse, under the tool names
-`kimi-code`, `grok-build`, and `muse`. Each Mjolnir instance indexes only its
+project directory. Native sessions from every enabled profile home that
+Mjolnir can read are indexed too, including Kimi Code, Grok Build, and Muse,
+under the tool names `kimi-code`, `grok-build`, and `muse`. OpenCode and MiMo
+Code SQLite stores are not indexed yet. Each Mjolnir instance indexes only its
 own sessions, and all of them share the tool name `mjolnir`, so one search
 covers every instance:
 

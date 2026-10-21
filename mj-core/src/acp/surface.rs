@@ -211,7 +211,10 @@ impl AcpSessionSurface {
     /// normal mode `build`; every other harness Hel drives with a plan pair
     /// names it `default`.
     fn execution_mode_id(&self) -> &'static str {
-        if self.harness_kind == Some(HarnessKind::OpenCode) {
+        if matches!(
+            self.harness_kind,
+            Some(HarnessKind::OpenCode | HarnessKind::Mimo)
+        ) {
             "build"
         } else {
             "default"
@@ -247,7 +250,7 @@ impl AcpSessionSurface {
             // OpenCode advertises its agent modes as a `mode` select whose
             // normal value is `build`, so Hel's plan toggle maps onto it
             // without the `default` value the other harnesses use.
-            Some(HarnessKind::OpenCode) => self
+            Some(HarnessKind::OpenCode | HarnessKind::Mimo) => self
                 .exact_config_has_pair("mode", "build")
                 .then(|| PlanControl::SetConfig {
                     key: "mode".into(),
@@ -482,5 +485,30 @@ mod tests {
             Value::String("plan".into()),
         )]));
         assert_eq!(surface.current_mode(), Some("plan"));
+    }
+
+    #[test]
+    fn mimo_plan_exit_selects_its_build_mode() {
+        let mut surface = AcpSessionSurface::default();
+        surface.set_harness_kind(HarnessKind::Mimo);
+        surface.set_config_options(&[SessionConfigOption::new(
+            SessionConfigId::new("mode"),
+            "Mode",
+            SessionConfigKind::Select(SessionConfigSelect::new(
+                SessionConfigValueId::new("build"),
+                SessionConfigSelectOptions::Ungrouped(vec![
+                    SessionConfigSelectOption::new("build", "Build"),
+                    SessionConfigSelectOption::new("plan", "Plan"),
+                ]),
+            )),
+        )]);
+
+        assert_eq!(
+            surface.plan_control(false),
+            Ok(PlanControl::SetConfig {
+                key: "mode".into(),
+                value: "build".into(),
+            })
+        );
     }
 }

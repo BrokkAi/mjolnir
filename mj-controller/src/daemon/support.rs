@@ -14,7 +14,12 @@ pub(super) async fn report_worker_upgrade(
         return;
     }
     match &result.outcome {
-        Ok(WorkerUpgradeOutcome::Upgraded { build }) => {
+        Ok(
+            WorkerUpgradeOutcome::Upgraded { build }
+            | WorkerUpgradeOutcome::ContainerMoveBlocked {
+                upgraded: Some(build),
+            },
+        ) => {
             tracing::info!(%session_id, %build, "replaced the session worker with the current build");
             let name = state
                 .owner()
@@ -34,8 +39,11 @@ pub(super) async fn report_worker_upgrade(
         Ok(WorkerUpgradeOutcome::Deferred) => {
             tracing::debug!(%session_id, "worker upgrade deferred: the session is working");
         }
-        Ok(WorkerUpgradeOutcome::RecreateContainer) => {
-            spawn_container_recreation(state.clone(), session_id.clone());
+        Ok(WorkerUpgradeOutcome::ContainerMoveBlocked { upgraded: None }) => {
+            tracing::debug!(%session_id, "container move to the new image waits for sub-agents to leave it");
+        }
+        Ok(WorkerUpgradeOutcome::RecreateContainer { image }) => {
+            spawn_container_recreation(state.clone(), session_id.clone(), image.clone());
         }
         Err(error) => {
             tracing::warn!(%session_id, %error, "could not upgrade the session worker");
@@ -55,14 +63,18 @@ pub(super) async fn report_worker_upgrade(
 /// Recreate a session's container for an upgrade, off the serving loop, and
 /// hand the outcome back to the upgrade coordinator, which owns the retry
 /// policy. A panic is reported as a failure, never dropped.
-fn spawn_container_recreation(state: Arc<RuntimeState>, session_id: String) {
+fn spawn_container_recreation(state: Arc<RuntimeState>, session_id: String, image: String) {
     use crate::worker_upgrade::{ContainerRecreated, ContainerRecreationReport};
 
     tokio::spawn(async move {
         let recreation = tokio::spawn({
             let state = state.clone();
             let session_id = session_id.clone();
-            async move { state.recreate_container_for_upgrade(session_id).await }
+            async move {
+                state
+                    .recreate_container_for_upgrade(session_id, image)
+                    .await
+            }
         })
         .await;
         let outcome = match recreation {

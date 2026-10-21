@@ -1191,8 +1191,12 @@ impl Controller {
         )?;
         let mounts = selection.additional_mounts.as_deref().unwrap_or_default();
         ensure!(
-            profile.kind != mj_core::config::HarnessKind::Muse || mounts.is_empty(),
-            "Muse Code ACP supports one workspace root; attached directories are unsupported"
+            !matches!(
+                profile.kind,
+                mj_core::config::HarnessKind::Muse | mj_core::config::HarnessKind::Mimo
+            ) || mounts.is_empty(),
+            "{} ACP supports one workspace root; attached directories are unsupported",
+            profile.kind.display_name()
         );
         ensure!(
             mounts.is_empty() || mj_core::config::mount_history_host(target).is_some(),

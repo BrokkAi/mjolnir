@@ -42,7 +42,7 @@ deliver only part of an equivalent environment setting.
 ## ACP bridges
 
 For each harness, Mjolnir first looks for an image-baked bridge binary on
-`PATH`: `codex-acp`, `claude-agent-acp`, `kimi`, `grok`, or `opencode`. If it doesn't find
+`PATH`: `codex-acp`, `claude-agent-acp`, `kimi`, `grok`, `opencode`, or `mimo`. If it doesn't find
 one, Codex and Claude Code install Mjolnir's pinned packages into a leased cache
 using `npm ci`. This requires Node.js 22+ and npm on the target PATH. Codex also
 uses this installation when the image's bridge version differs from Mjolnir's
@@ -55,6 +55,10 @@ Mjolnir runs their official installer with `curl` piped to Bash instead, which
 needs both tools in the image. An image-baked `opencode` must be OpenCode 2,
 because each session imports its logins with `opencode auth import` before it
 starts.
+
+MiMo Code can fall back to `npx -y @mimo-ai/cli@0.1.15 acp`, so an unbaked
+image needs Node.js 22, npm, and npx. Bake `@mimo-ai/cli@0.1.15` and set
+`MIMOCODE_DISABLE_AUTOUPDATE=1` for a stable managed runtime.
 
 Baking the bridges in, the way the reference image does, avoids that
 installation cost. Codex images should install the bridge version pinned by

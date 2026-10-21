@@ -28,6 +28,8 @@ const CODEX_PACKAGE_LOCK: &[u8] = include_bytes!("../../assets/harnesses/codex/p
 const CLAUDE_PACKAGE_JSON: &[u8] = include_bytes!("../../assets/harnesses/claude/package.json");
 const CLAUDE_PACKAGE_LOCK: &[u8] =
     include_bytes!("../../assets/harnesses/claude/package-lock.json");
+const MIMO_PACKAGE_JSON: &[u8] = include_bytes!("../../assets/harnesses/mimo/package.json");
+const MIMO_PACKAGE_LOCK: &[u8] = include_bytes!("../../assets/harnesses/mimo/package-lock.json");
 
 #[derive(Debug)]
 pub(crate) struct ManagedHarness {
@@ -180,6 +182,9 @@ async fn resolve_at_async(
     if harness == HarnessKind::OpenCode {
         launch_environment.insert("OPENCODE_DISABLE_AUTOUPDATE".into(), "1".into());
     }
+    if harness == HarnessKind::Mimo {
+        launch_environment.insert("MIMOCODE_DISABLE_AUTOUPDATE".into(), "1".into());
+    }
     // Muse launches its adapter the way the other npm bridges do: the target's
     // own `muse-acp` when present, otherwise npx fetches the pinned package.
     let (command, args) = if harness == HarnessKind::Muse {
@@ -306,6 +311,15 @@ async fn install_into(
         HarnessKind::Grok => install_grok(staging.path(), environment).await?,
         HarnessKind::Muse => install_muse_native(staging.path(), environment).await?,
         HarnessKind::OpenCode => install_opencode(staging.path(), environment).await?,
+        HarnessKind::Mimo => {
+            install_npm(
+                staging.path(),
+                MIMO_PACKAGE_JSON,
+                MIMO_PACKAGE_LOCK,
+                environment,
+            )
+            .await?
+        }
     }
     relativize_internal_links(staging.path(), staging.path())?;
     validate_entrypoint(staging.path(), selected, harness)?;

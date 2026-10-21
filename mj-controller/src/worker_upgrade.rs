@@ -284,6 +284,10 @@ struct PolicyState {
     /// The daemon is recreating this session's container. Nothing else is
     /// due until it reports how that ended.
     recreation_pending: bool,
+    /// The last attempt found the container due to move to a newer image
+    /// while a sub-agent occupied it. The move stays due, whatever the
+    /// worker's build, until an attempt finds it moved or not needed.
+    container_move_pending: bool,
 }
 
 impl PolicyState {
@@ -296,7 +300,8 @@ impl PolicyState {
         }
         // A container an upgrade left on an older image is due to move even
         // when its worker is current.
-        let moved = mj_core::state::ContainerSettings::default_image_moved(&observation.session);
+        let moved = self.container_move_pending
+            || mj_core::state::ContainerSettings::default_image_moved(&observation.session);
         if self.recreation_pending
             || (!moved && self.worker_is_known_current(observation.worker_build.as_deref()))
         {
@@ -358,15 +363,25 @@ impl PolicyState {
                 // repeat preparation on every unchanged quiet observation.
                 self.deferred_at = Some(now);
             }
-            Ok(WorkerUpgradeOutcome::RecreateContainer) => {
+            Ok(WorkerUpgradeOutcome::RecreateContainer { .. }) => {
+                self.container_move_pending = false;
                 self.recreation_pending = true;
             }
+            Ok(WorkerUpgradeOutcome::ContainerMoveBlocked { .. }) => {
+                // Ask again after the deferral; the cached build cannot stand
+                // in for a move that has not happened.
+                self.container_move_pending = true;
+                self.current_build = None;
+                self.deferred_at = Some(now);
+            }
             Ok(outcome @ WorkerUpgradeOutcome::AlreadyCurrent { .. }) => {
+                self.container_move_pending = false;
                 self.failed_at = None;
                 self.consecutive_failures = 0;
                 self.current_build = outcome.build().map(str::to_owned);
             }
             Ok(outcome @ WorkerUpgradeOutcome::Upgraded { .. }) => {
+                self.container_move_pending = false;
                 // The worker this session runs now, so the next observation
                 // reporting it needs no attempt - and, through `observe`,
                 // clears the cooldown below.
@@ -591,7 +606,12 @@ mod tests {
             outcome,
         };
         let mut policy = PolicyState::default();
-        policy.record(&success(WorkerUpgradeOutcome::RecreateContainer), now);
+        policy.record(
+            &success(WorkerUpgradeOutcome::RecreateContainer {
+                image: "agent-dev:new".into(),
+            }),
+            now,
+        );
         assert!(!policy.due(&stale, now + chrono::Duration::days(1)));
 
         policy.record_recreation(&report(Ok(ContainerRecreated::StoodDown)), now);
@@ -599,16 +619,39 @@ mod tests {
         assert!(!policy.due(&stale, now + deferred - chrono::Duration::seconds(1)));
         assert!(policy.due(&stale, now + deferred));
 
-        policy.record(&success(WorkerUpgradeOutcome::RecreateContainer), now);
+        policy.record(
+            &success(WorkerUpgradeOutcome::RecreateContainer {
+                image: "agent-dev:new".into(),
+            }),
+            now,
+        );
         policy.record_recreation(&report(Err("provision the new container".into())), now);
         let retry = chrono::Duration::from_std(WORKER_UPGRADE_RETRY_INTERVAL).unwrap();
         assert!(!policy.due(&stale, now + retry - chrono::Duration::seconds(1)));
         assert!(policy.due(&stale, now + retry));
 
-        policy.record(&success(WorkerUpgradeOutcome::RecreateContainer), now);
+        policy.record(
+            &success(WorkerUpgradeOutcome::RecreateContainer {
+                image: "agent-dev:new".into(),
+            }),
+            now,
+        );
         policy.record_recreation(&report(Ok(ContainerRecreated::Recreated)), now);
         assert_eq!(policy.consecutive_failures, 0);
         assert!(policy.due(&observation(Some("build-b"), true), now));
+
+        // A move a sub-agent blocks stays due after the worker is current:
+        // the cached build must not end the attempts.
+        policy.record(&success(current("build-b")), now);
+        assert!(!policy.due(&observation(Some("build-b"), true), now));
+        policy.record(
+            &success(WorkerUpgradeOutcome::ContainerMoveBlocked {
+                upgraded: Some("build-b".into()),
+            }),
+            now,
+        );
+        assert!(!policy.due(&observation(Some("build-b"), true), now));
+        assert!(policy.due(&observation(Some("build-b"), true), now + deferred));
     }
 
     /// A successful upgrade stops the session being probed again: the worker

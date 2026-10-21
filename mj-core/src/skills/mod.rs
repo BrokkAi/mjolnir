@@ -1338,9 +1338,11 @@ mod tests {
                 ("skills/.system/imagegen/SKILL.md", b"imagegen"),
                 ("skills/.system/skill-creator/SKILL.md", b"creator"),
             ],
-            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse | HarnessKind::OpenCode => {
-                &[]
-            }
+            HarnessKind::Kimi
+            | HarnessKind::Grok
+            | HarnessKind::Muse
+            | HarnessKind::OpenCode
+            | HarnessKind::Mimo => &[],
         }
     }
 
@@ -1368,13 +1370,13 @@ mod tests {
     // Hard-won: 864ae4f8: Codex built-in skills were copied into every session and inflated the synchronized tree.
     #[test]
     fn harness_owned_skills_are_left_out_of_collection() {
-        let user = [SkillsEntry {
-            path: "skills/review/SKILL.md".into(),
-            bytes: b"review".to_vec(),
-        }];
         for kind in HarnessKind::ALL {
             let home = tempfile::tempdir().unwrap();
-            write(home.path(), "skills/review/SKILL.md", b"review");
+            let user = [SkillsEntry {
+                path: format!("{}/review/SKILL.md", kind.synced_skill_dirs()[0]),
+                bytes: b"review".to_vec(),
+            }];
+            write(home.path(), &user[0].path, b"review");
             write_harness_owned_skills(kind, home.path());
 
             assert_eq!(
@@ -1447,21 +1449,24 @@ mod tests {
     fn install_leaves_harness_owned_skills_in_place() {
         for kind in HarnessKind::ALL {
             let home = tempfile::tempdir().unwrap();
-            write(home.path(), "skills/old/SKILL.md", b"old");
+            let dir = kind.synced_skill_dirs()[0];
+            let review = format!("{dir}/review/SKILL.md");
+            let old = format!("{dir}/old/SKILL.md");
+            write(home.path(), &old, b"old");
             write_harness_owned_skills(kind, home.path());
             let owned = harness_owned_skills(kind);
 
             // An archive entry over one of the harness's files is ignored.
-            let mut pushed = vec![("skills/review/SKILL.md", &b"review"[..])];
+            let mut pushed = vec![(review.as_str(), &b"review"[..])];
             pushed.extend(owned.iter().map(|(path, _)| (*path, &b"pushed over"[..])));
             install_skills(kind, home.path(), &archive(&pushed)).unwrap();
 
             assert_eq!(
-                std::fs::read(home.path().join("skills/review/SKILL.md")).unwrap(),
+                std::fs::read(home.path().join(&review)).unwrap(),
                 b"review",
                 "{kind:?}"
             );
-            assert!(!home.path().join("skills/old").exists(), "{kind:?}");
+            assert!(!home.path().join(dir).join("old").exists(), "{kind:?}");
             for (relative, bytes) in owned {
                 assert_eq!(
                     std::fs::read(home.path().join(relative)).unwrap(),
@@ -1469,14 +1474,14 @@ mod tests {
                     "{kind:?} {relative}"
                 );
             }
-            assert!(!home.path().join("skills.hel-incoming").exists());
-            assert!(!home.path().join("skills.hel-retired").exists());
+            assert!(!home.path().join(format!("{dir}.hel-incoming")).exists());
+            assert!(!home.path().join(format!("{dir}.hel-retired")).exists());
             // The session reports what Mjolnir pushed, so the next reconcile
             // finds nothing to do.
             assert_eq!(
                 collect_skills(kind, home.path()).unwrap().entries(),
                 [SkillsEntry {
-                    path: "skills/review/SKILL.md".into(),
+                    path: review,
                     bytes: b"review".to_vec(),
                 }],
                 "{kind:?}"

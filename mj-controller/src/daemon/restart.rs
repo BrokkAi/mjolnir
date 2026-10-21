@@ -215,6 +215,12 @@ impl RuntimeState {
             "a Move still owns this environment; retry Move on its recorded destination"
         );
 
+        let prepared_image = match &request {
+            RestartRequest::Automatic { prepared_image } if recovered.is_none() => {
+                Some(prepared_image.clone())
+            }
+            _ => None,
+        };
         let mut intent = match recovered {
             Some(intent) => intent,
             None => {
@@ -232,7 +238,7 @@ impl RuntimeState {
                             acknowledge_container_recreation,
                         )
                         .map(Some),
-                        RestartRequest::Automatic => {
+                        RestartRequest::Automatic { .. } => {
                             crate::database::begin_automatic_session_restart(
                                 &session_id,
                                 &operation_id,
@@ -262,6 +268,30 @@ impl RuntimeState {
         let mut controller = tokio::task::spawn_blocking(Controller::load)
             .await
             .context("reload controller after Restart admission")??;
+        if intent.automatic
+            && let Some(prepared_image) = &prepared_image
+        {
+            // The target may name another image since the coordinator
+            // prepared this one. Retiring the container for an image nobody
+            // pulled could leave the session without one.
+            let named = controller
+                .state
+                .sessions
+                .get(session_id)
+                .and_then(|session| controller.config.targets.get(&session.target_template_id))
+                .and_then(mj_core::config::TargetTemplate::container)
+                .map(|container| container.image.as_str());
+            if named.is_some_and(|named| named != prepared_image) {
+                self.release_restart_intent(session_id, &intent.operation_id)
+                    .await?;
+                tracing::info!(
+                    %session_id,
+                    prepared_image,
+                    "automatic container recreation stood down: the target names another image now"
+                );
+                return Ok(DaemonLifecycleResult::Done);
+            }
+        }
         tracing::info!(
             %session_id,
             operation_id = %intent.operation_id,
@@ -807,14 +837,16 @@ impl RuntimeState {
 
 /// Who asked for a Restart. It decides only how a new intent is recorded;
 /// a recovered intent carries its own answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum RestartRequest {
     /// A person asked, and saw the recreation warning when one applied.
     Requested {
         acknowledge_container_recreation: bool,
     },
-    /// An upgrade recreates the container from the image this Mjolnir names.
-    Automatic,
+    /// An upgrade recreates the container from `prepared_image`, which the
+    /// worker-upgrade coordinator pulled and checked. It stands down rather
+    /// than retire the container for any other image.
+    Automatic { prepared_image: String },
 }
 
 /// Marks the error of an automatic recreation that stopped before it sealed
@@ -848,6 +880,7 @@ impl RuntimeState {
     pub(crate) async fn recreate_container_for_upgrade(
         self: &Arc<Self>,
         session_id: String,
+        prepared_image: String,
     ) -> Result<ContainerRecreationOutcome> {
         let workspace_id = blocking({
             let session_id = session_id.clone();
@@ -894,7 +927,12 @@ impl RuntimeState {
             },
             move |state, session_id, cancelled| async move {
                 match state
-                    .restart_admitted(session_id, cancelled, None, RestartRequest::Automatic)
+                    .restart_admitted(
+                        session_id,
+                        cancelled,
+                        None,
+                        RestartRequest::Automatic { prepared_image },
+                    )
                     .await
                 {
                     // Nothing changed and the intent is released: the
@@ -938,8 +976,9 @@ impl RuntimeState {
         {
             bail!(error);
         }
-        // The record owns the answer: a recreated container was created from
-        // this Mjolnir's default image, and one that stood down was not.
+        // The record owns the answer: a recreated container recorded the image
+        // it was created from, and one that stood down still runs an older or
+        // unrecorded one.
         let moved = blocking({
             let session_id = session_id.clone();
             move || {
@@ -947,7 +986,10 @@ impl RuntimeState {
                     .state
                     .sessions
                     .get(&session_id)
-                    .is_some_and(mj_core::state::ContainerSettings::default_image_moved))
+                    .is_some_and(|session| {
+                        mj_core::state::ContainerSettings::default_image_moved(session)
+                            || mj_core::state::ContainerSettings::image_unrecorded(session)
+                    }))
             }
         })
         .await?;

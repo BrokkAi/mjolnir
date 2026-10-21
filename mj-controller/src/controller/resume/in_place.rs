@@ -405,9 +405,12 @@ impl Controller {
             .clone();
         self.validate_muse_resume_destination(previous, profile.kind, target_template_id)?;
         ensure!(
-            profile.kind != mj_core::config::HarnessKind::Muse
-                || previous.additional_mounts.is_empty(),
-            "Muse Code ACP supports one workspace root; attached directories are unsupported"
+            !matches!(
+                profile.kind,
+                mj_core::config::HarnessKind::Muse | mj_core::config::HarnessKind::Mimo
+            ) || previous.additional_mounts.is_empty(),
+            "{} ACP supports one workspace root; attached directories are unsupported",
+            profile.kind.display_name()
         );
         // Resolving the worker binary is local and costs microseconds. A swap
         // that could never install a worker fails before the old harness is

@@ -608,6 +608,9 @@ async fn refresh_profile_with_cache_root(
         HarnessKind::OpenCode => Err(anyhow::anyhow!(
             "OpenCode does not publish a quota endpoint"
         )),
+        HarnessKind::Mimo => Err(anyhow::anyhow!(
+            "MiMo Code does not publish a quota endpoint"
+        )),
     };
     let report = result.unwrap_or_else(|error| ProfileQuota {
         banked_resets: None,

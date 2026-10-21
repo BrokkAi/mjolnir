@@ -74,6 +74,45 @@ fn empty_native_artifacts_allowed_only_for_unprompted_sessions() {
     assert!(artifacts.is_empty());
 }
 
+#[test]
+fn mimo_checkpoint_keeps_the_database_and_wal_without_runtime_state() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::create_dir_all(temp.path().join("data/log")).unwrap();
+    fs::create_dir_all(temp.path().join("state")).unwrap();
+    fs::write(temp.path().join("data/mimocode.db"), b"database").unwrap();
+    fs::write(temp.path().join("data/mimocode.db-wal"), b"wal").unwrap();
+    fs::write(
+        temp.path().join("data/mimocode-local.db"),
+        b"local database",
+    )
+    .unwrap();
+    fs::write(temp.path().join("data/mimocode-local.db-wal"), b"local wal").unwrap();
+    fs::write(temp.path().join("data/mimocode.db-shm"), b"shared memory").unwrap();
+    fs::write(temp.path().join("data/auth.json"), b"secret").unwrap();
+    fs::write(temp.path().join("data/log/mimocode.log"), b"log").unwrap();
+    fs::write(temp.path().join("state/model.json"), b"state").unwrap();
+
+    let artifacts =
+        collect_native_artifacts(HarnessKind::Mimo, temp.path(), NATIVE, false).unwrap();
+    let paths = artifacts
+        .iter()
+        .map(|artifact| artifact.relative_path.to_string_lossy().into_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(
+        paths,
+        [
+            "data/mimocode-local.db",
+            "data/mimocode-local.db-wal",
+            "data/mimocode.db",
+            "data/mimocode.db-wal",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect()
+    );
+}
+
 /// OpenCode 2 keeps its logins in the same database as its sessions. A
 /// checkpoint taken while OpenCode runs carries the sessions, including the
 /// pages still only in the write-ahead log, and no byte of any login. Resuming
@@ -855,6 +894,17 @@ fn restored_native_sessions_follow_each_harness_reading_of_the_launch_cwd() {
         PathBuf::from(format!(
             "projects/-srv-project--mj-clones-s1/{NATIVE}.jsonl"
         ))
+    );
+    // MiMo Code records the session directory inside its SQLite database, so
+    // relocating the workspace must not rewrite the database path.
+    assert_eq!(
+        restored_native_relative_path(
+            HarnessKind::Mimo,
+            Path::new("data/mimocode.db"),
+            Some(launch_cwd),
+        )
+        .unwrap(),
+        Path::new("data/mimocode.db")
     );
 }
 
