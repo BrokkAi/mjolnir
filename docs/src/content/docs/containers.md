@@ -118,6 +118,15 @@ the session runs that worker directly; nothing is copied into the container.
 Any other image, including a custom one, gets the worker installed from beside
 `mj` as before, and Mjolnir checks that it is the matching build either way.
 
+Upgrading `mj` moves container sessions onto the new release's image instead of
+patching anything inside their old containers. A stopped session has no
+container, so resuming it creates one from the new image. A running session
+keeps its container until it is idle; Mjolnir then saves its recovery copy and
+recreates the container from the new image, the same recreation **Restart**
+offers. Files outside the recovery copy, such as temporary files and installed
+tools, do not carry over. It never interrupts a turn or background work, and it
+waits while the session has sub-agents running in its container.
+
 Building it yourself remains a supported alternative, for example to
 customize the image or to work offline. Build from a Git checkout with the
 script, which computes the worker build identity the image needs:

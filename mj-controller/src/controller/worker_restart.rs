@@ -17,10 +17,10 @@ use mj_core::config::HarnessKind;
 use super::Controller;
 use super::readiness::{connect_started_worker_with_timeout, wait_for_native_session};
 use super::worker_binary::{
-    install_staged_worker_binary, prepare_managed_harness_for_upgrade,
+    WorkerInstall, install_staged_worker_binary, prepare_managed_harness_for_upgrade,
     replace_installed_worker_binary, replace_installed_worker_launch_config,
     stage_worker_binary_for_upgrade, start_worker, start_worker_durably,
-    stop_worker_after_target_recovery, worker_binary_for, worker_probe_diagnosis,
+    stop_worker_after_target_recovery, worker_probe_diagnosis,
 };
 
 /// How long a restarted worker has to recover its journal, bind `control.sock`
@@ -170,22 +170,23 @@ impl Controller {
             .into_iter()
             .next()
             .context("reconnect plan is empty")?;
-        let installed = mj_core::worker_build::WORKER_BUILD_ID.to_owned();
-        if worker_runs_installed_build(reported_build, &installed) {
-            return Ok(WorkerUpgradeOutcome::AlreadyCurrent { build: installed });
-        }
+        // Asked first, so a container whose worker a recovery already
+        // replaced still moves: its image and tools are an older release's.
         if self
             .state
             .sessions
             .get(session_id)
             .is_some_and(mj_core::state::ContainerSettings::default_image_moved)
         {
-            // Nothing is patched into a container an upgrade left behind: its
-            // image, tools and worker are all an older release's.
+            // Nothing is patched into a container an upgrade left behind.
             return Ok(WorkerUpgradeOutcome::RecreateContainer);
         }
-        let binary = worker_binary_for(&backend, executor)
-            .context("resolve the worker binary this controller would install")?;
+        let installed = mj_core::worker_build::WORKER_BUILD_ID.to_owned();
+        if worker_runs_installed_build(reported_build, &installed) {
+            return Ok(WorkerUpgradeOutcome::AlreadyCurrent { build: installed });
+        }
+        let worker = WorkerInstall::for_target(&backend, executor)
+            .context("resolve the worker this controller would install")?;
 
         // Preparation can download a managed harness. Keep the old worker and
         // its controls available for all of it; reserve only for the swap.
@@ -196,9 +197,9 @@ impl Controller {
             self.prepare_build_cache_links(session, &backend, &launch, executor)
                 .context("prepare shared machine cache configuration before worker upgrade")?;
         }
-        prepare_managed_harness_for_upgrade(executor, &backend, session_id, &binary, &launch)
+        prepare_managed_harness_for_upgrade(executor, &backend, session_id, &worker, &launch)
             .context("prepare the current managed harness before replacing the worker")?;
-        let staging = stage_worker_binary_for_upgrade(executor, &backend, session_id, &binary)
+        let staging = stage_worker_binary_for_upgrade(executor, &backend, session_id, &worker)
             .context("stage the current worker while the old worker remains available")?;
         let Some(owner) =
             crate::worker_lifecycle::WorkerPermit::try_acquire(session_id, "worker upgrade")?
@@ -433,8 +434,8 @@ impl Controller {
                 // fails with ETXTBSY ("dest open ... Failure") even after SIGKILL,
                 // and prepare_worker_files writes that path in place.
                 if !prepared {
-                    let binary = worker_binary_for(backend, executor)?;
-                    replace_installed_worker_binary(executor, backend, session_id, &binary)
+                    let worker = WorkerInstall::for_target(backend, executor)?;
+                    replace_installed_worker_binary(executor, backend, session_id, &worker)
                         .context(messages.replace)?;
                     if let Some(launch) = launch {
                         replace_installed_worker_launch_config(

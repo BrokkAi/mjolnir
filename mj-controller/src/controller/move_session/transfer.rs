@@ -26,25 +26,32 @@ fn utility(
     id: &str,
     command: &WorkspaceCommand,
 ) -> Result<serde_json::Value> {
-    let binary = super::super::worker_binary::worker_binary_for(backend, executor)?;
-    let executable = if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
-        binary.to_string_lossy().into_owned()
-    } else {
-        let root = targets::worker_root(backend, id)?;
-        let helper = format!(
-            "{root}/move-helper-{}",
-            mj_core::worker_build::WORKER_BUILD_ID
-        );
-        let probe = executor.execute(&targets::command_on_locator(
-            backend,
-            id,
-            vec!["test".into(), "-x".into(), helper.clone()],
-            "check Move helper",
-        )?)?;
-        if probe.status != 0 {
-            install_helper(executor, backend, id, &binary, &helper)?;
+    use super::super::worker_binary::{IMAGE_WORKER, WorkerInstall};
+    let executable = match WorkerInstall::for_target(backend, executor)? {
+        // The image's own worker is this build and needs no upload.
+        WorkerInstall::Image => IMAGE_WORKER.to_owned(),
+        WorkerInstall::Host(binary)
+            if matches!(backend, targets::TargetLocator::LocalBare { .. }) =>
+        {
+            binary.to_string_lossy().into_owned()
         }
-        helper
+        WorkerInstall::Host(binary) => {
+            let root = targets::worker_root(backend, id)?;
+            let helper = format!(
+                "{root}/move-helper-{}",
+                mj_core::worker_build::WORKER_BUILD_ID
+            );
+            let probe = executor.execute(&targets::command_on_locator(
+                backend,
+                id,
+                vec!["test".into(), "-x".into(), helper.clone()],
+                "check Move helper",
+            )?)?;
+            if probe.status != 0 {
+                install_helper(executor, backend, id, &binary, &helper)?;
+            }
+            helper
+        }
     };
     let command_spec = targets::command_on_locator(
         backend,

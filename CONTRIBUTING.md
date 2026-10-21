@@ -49,6 +49,16 @@ and container targets, where an unoptimized binary costs transfer size and
 session speed. A profile flag applies to every binary a script builds, so pass
 `--profile dev` to both, or to neither, when trading that for link speed.
 
+Container sessions of a development build use `ghcr.io/brokkai/mjolnir/agent-dev:latest`,
+which master republishes whenever anything the worker compiles from changes. A
+session runs the worker baked into that image when it is exactly your build;
+otherwise, including whenever you have changed the worker locally, it installs
+the musl worker these scripts built, and refuses a worker of any other build.
+To exercise the baked-in path itself, build the image from your checkout with
+`scripts/build-agent-dev-image.sh podman localhost/mjolnir/agent-dev:dev` and
+set that as the target's `image`. A release instead runs `agent-dev:<version>`,
+published with that release's worker.
+
 Native Windows builds the controller only. Windows runs no worker, so it has no
 `localhost` target; its sessions run on Linux, in Docker Desktop's Linux engine
 or on an SSH host. Install Visual Studio Build Tools with the C++ workload. On

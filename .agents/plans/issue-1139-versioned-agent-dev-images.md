@@ -61,9 +61,15 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
       coordinator returns `WorkerUpgradeOutcome::RecreateContainer` instead of copying a worker in
       and owns the retry policy through `ContainerRecreationReport`. Validated by two new tests and
       an isolated-instance upgrade from a fake release A to a fake release B (see Outcomes).
-- [ ] Milestone 5: no in-place worker replacement for a container whose default image moved;
-      preflight lets a release's own image supply the worker without a host copy; `mj doctor`
-      reports which image and worker a container target would use and why; documentation.
+- [x] (2026-10-21 15:30Z) Milestone 5: every path that installs a worker in place (recovery,
+      checkpoint restart, the export-protocol fallback, a parked sub-agent's wake, the idle upgrade
+      and its harness preparation) asks `WorkerInstall::for_target` and re-links the image's worker
+      when it is this build, so nothing is copied into such a container; a moved default image
+      triggers recreation even when a recovery already replaced the worker; the Move helper runs the
+      image's worker directly; preflight and launch admission let a release's own image supply the
+      worker without a host copy; `mj doctor` says which worker a container target runs and why, and
+      what worker each present image carries; CONTRIBUTING and the container docs describe the dev
+      loop and the upgrade behavior.
 
 ## Surprises & Discoveries
 
@@ -254,6 +260,29 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
   finishes, as a person's Restart does, because after the old container is retired the operation
   must complete; see Outcomes for this limitation. Date/Author: 2026-10-21, Claude.
 
+- Decision: keep the host copy-in for the exceptional in-place paths (recovery of a dead worker,
+  the worker restart a wedged checkpoint needs, and the export-protocol fallback) only when the
+  container's image cannot supply this build, i.e. a container an upgrade left on an older image.
+  Rationale: those paths run when a session would otherwise be unrecoverable or impossible to
+  checkpoint, and a recreation itself needs a checkpoint from a live worker; refusing would strand
+  the session. The routine path no longer patches (Milestone 4), and the coordinator now asks
+  `default_image_moved` before `AlreadyCurrent`, so a container whose worker a recovery replaced
+  is still recreated from the new image as soon as it is quiet. Date/Author: 2026-10-21, Claude.
+- Decision: re-link rather than compare digests when the image carries this build. Rationale: a
+  host copy and the image's worker of the same build never share bytes, so the existing digest gate
+  would have copied a host worker over a current image worker on every recovery; `ln -sfn` to a
+  staged name and a rename are cheap, atomic and idempotent. Date/Author: 2026-10-21, Claude.
+- Decision: skip the host-worker preflight only for a release build whose template names its own
+  default image (`release_image_supplies_worker`, from `DEFAULT_CONTAINER_IMAGE_IS_RELEASE`).
+  Rationale: preflight runs before the image is even pulled, so it cannot ask the image; the
+  release workflow is what guarantees that image carries the release's worker. Installation still
+  asks the image's worker and fails, naming both, if neither it nor a host worker is this build.
+  Date/Author: 2026-10-21, Claude.
+- Decision: `mj doctor` reads the image label (from the `image inspect` JSON it already fetches,
+  which for Podman replaces `image exists`) instead of starting a container. Rationale: doctor
+  predicts, and must not create containers outside `--smoke`; the label is verified against the
+  binary when the image is built. Date/Author: 2026-10-21, Claude.
+
 ## Outcomes & Retrospective
 
 Milestones 1 and 2 are complete. A tagged release now builds and publishes
@@ -338,6 +367,34 @@ finishes, like a person's Restart, and exporting a large workspace can take minu
 started after a handoff and is refused while one drains, so this matters only for two upgrades in
 quick succession.
 
+Milestone 5 is complete. With release B's daemon running and its host worker replaced by a
+debug build of the same worker identity (same `worker build-id`, different bytes, so the old digest
+gate would have copied it), killing the session's worker made recovery restart it with
+
+    lrwxrwxrwx. 1 hel hel 22 Oct 21 13:18 hel -> /opt/mjolnir/mj-worker
+
+and no host copy. `golden_doctor_reports_external_aws_ssh_docker_and_podman_observations` now
+covers the sentence an image check adds about the image's worker.
+
+Overall outcome: the issue's acceptance holds. A release `mj` names `agent-dev:<version>`
+(Milestone 2), whose worker is baked in and verified at image build time (Milestone 3), and new
+container sessions link to it. After an upgrade a stopped session resumes on a new container from
+the new image, and a running one is recreated from it once idle, never interrupting work
+(Milestone 4); nothing is copied into a container whose image carries the current worker
+(Milestone 5). A development build runs `:latest` and installs its own musl worker whenever that
+image's worker is not exactly its build; a custom image keeps the stamp-guarded copy-in. A failed
+image build already blocks the release (Milestone 1).
+
+What remains outside this plan: bare local, SSH-bare and EC2 targets have no image and keep the
+#1138-guarded copy-in by design. Versioned images accumulate on hosts (`image prune -f` removes
+only dangling ones); a cleanup of old `agent-dev:<version>` tags could follow. The Containerfile
+and workflow changes take effect on the next push to master and the next release; the first
+release built from them is the first whose image carries its worker.
+
+Lesson: the worker's name `<root>/hel` is load-bearing far beyond installation (process identity,
+reconnect, staged MCP commands), so a change of where the worker comes from has to keep that name.
+A link did, and made the rest of the change local.
+
 ## Context and Orientation
 
 Mjolnir builds one image, `containers/Containerfile.agent-dev`, published to
@@ -411,27 +468,49 @@ same config, also drop the legacy literal from the document in `document.rs` dur
 save; otherwise the file keeps the old value. No re-export sites change, but the configuration
 docs and the embedded skill reference that name the default and the schema version are updated.
 
-Milestone 3 — bake the worker. Add a builder stage to `containers/Containerfile.agent-dev` that
-builds `mj-worker` for the image architecture from the same commit (mirroring the existing Bifrost
-stage), copy the binary to `/opt/mjolnir/mj-worker`, and add a label such as
-`org.brokk.mjolnir.worker-build=<version>+<sha>`. Make the publish workflow's path filter include
-`mj-worker/**`, `mj-core/**` and the other crates the worker compiles from so `:latest` never
-carries a stale worker. Add a build-alignment test in the style of
-`scripts/build-alignment.test.mjs`.
+Milestone 3 — bake the worker. `containers/Containerfile.agent-dev` gains a `worker` stage from the
+same Rust image that copies `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and every workspace
+member (Cargo resolves the whole workspace to build one package), requires the build arguments
+`MJ_BUILD_REVISION`, `MJ_WORKER_INPUTS_ID` and `MJ_WORKER_BUILD_ID` (Git is not in the context),
+builds `brokk-mj-worker` for the musl triple of the build architecture, checks the binary is static
+and that `mj-worker worker build-id` prints exactly `MJ_WORKER_BUILD_ID`, and leaves it at
+`/out/mj-worker`. The final stage copies it to `/opt/mjolnir/mj-worker` as its last filesystem
+layer and labels the image `org.brokk.mjolnir.worker-build`. `.dockerignore` admits the members;
+`scripts/build-agent-dev-image.sh` and the publish workflow compute the three identities with
+`mj-core/worker_build_inputs.py`, and the workflow's push filter lists every entry of
+`mj-core/worker-build-inputs.txt`. Two tests in `scripts/release-workflow.test.mjs` keep those lists
+aligned. In the worker, a hidden `worker build-id` prints `WORKER_BUILD_ID`. In the controller,
+`mj-controller/src/controller/worker_binary/image_worker.rs` defines `WorkerInstall` (`Image` or
+`Host(path)`) and `WorkerInstall::for_target`, which asks the container's `/opt/mjolnir/mj-worker`
+for its build and chooses `Image` only when it equals this controller's; `install_worker_files`
+then runs `ln -sfn /opt/mjolnir/mj-worker <root>/hel` instead of copying, and skips the chown and
+chmod a copy needs.
 
-Milestone 4 — replace containers on upgrade. Reuse the existing recover-on-a-fresh-target path
-(checkpoint, provision, restore) to recreate stopped container sessions from the new image when
-the daemon hands off. Store the image version/digest a session runs so "needs recreation" is a
-comparison, not a probe. Never touch a running session: it is recreated after it stops or goes
-idle, which is what the AGENTS.md worker-replacement rule requires.
+Milestone 4 — replace containers on upgrade. A stopped session already gets a new container on
+resume, so the work is for running sessions. `ContainerSettings` (in
+`mj-core/src/state/target_runtime.rs`) records `default_image` when provisioning created the
+container from this build's default image, `requested` follows the default to this build's, and
+`default_image_moved` names a container left on an older one; migration 87 is breaking.
+`Controller::upgrade_session_worker` returns `WorkerUpgradeOutcome::RecreateContainer` for such a
+session before resolving any binary; the daemon (`spawn_container_recreation` in
+`mj-controller/src/daemon/support.rs`) calls `RuntimeState::recreate_container_for_upgrade`
+(`mj-controller/src/daemon/restart.rs`), which admits an automatic Restart only while no handoff
+drains and reports the outcome back to the coordinator. The automatic intent is recorded with
+`automatic = 1` (migration 88, breaking), its checkpoint uses `LatchExclusivity::HoldThroughIdleClose`
+(defer instead of interrupting, never restart the worker), its before-close hook keeps sub-agents
+(standing down while any child has a target), and a stand-down releases the intent and leaves the
+session running with no error.
 
-Milestone 5 — remove the patch-in-place path for the default image. Once the default container path
-serves a worker from the image, delete `stage_worker_binary_for_upgrade`, the staged-binary install,
-the digest-gated recovery refresh, and the `docker cp` of the worker for that path. Keep them for
-bare local, SSH-bare, EC2 and custom images, guarded by the #1138 stamp check. Make `mj doctor`
-report which image and worker build a container session would use and why (release pin, dev latest,
-or custom). Document the developer loop (a local `FROM ...:latest` image that `COPY`s the freshly
-built worker) so a checkout never silently falls back to a stale worker.
+Milestone 5 — no patching where the image can supply the worker. `replace_installed_worker_binary`,
+`stage_worker_binary_for_upgrade`, `prepare_managed_harness_for_upgrade`, the recovery refresh
+(`prepare_recovery_worker_binary`, `refresh_target_worker_binary_if_stale`) and the export fallback
+take a `WorkerInstall`; for `Image` they stage a link and rename it into place. The Move helper runs
+`/opt/mjolnir/mj-worker` directly in that case. `preflight_worker_binary` and
+`worker_source_problem` accept a release's own default image without a host worker
+(`release_image_supplies_worker`). `mj doctor`'s worker check names the image and why it is used,
+and its image checks add what worker the image carries, read from the label in the `image inspect`
+JSON. CONTRIBUTING and `docs/src/content/docs/containers.md` describe the development loop and the
+upgrade behavior.
 
 ## Concrete Steps
 
@@ -501,6 +580,14 @@ implicit `docker` target's image:
 
     cargo test -p brokk-mj-core a_container_target_without_an_image_uses_the_default_and_names_unknown_keys -- --nocapture
 
+Milestones 3 to 5 are accepted by these observable behaviors, each recorded in Outcomes: the
+image's worker stage builds and its worker reports the identity it is labelled with; a container
+session on an image carrying this build has `hel -> /opt/mjolnir/mj-worker` and nothing copied, and
+keeps it across suspend/resume and worker recovery; after a daemon handoff to a build with another
+default image, an idle session moves to a new container from that image within seconds; and a
+session with a running turn is never interrupted
+(`an_automatic_restart_stands_down_instead_of_cancelling_a_running_turn`).
+
 ## Idempotence and Recovery
 
 Every step is additive or a re-runnable text edit. Re-running the workflows is safe: the merge job
@@ -548,6 +635,26 @@ The reusable workflow contract is:
     outputs:
       digest: string
 
+Milestones 3 to 5 add, in `mj-controller/src/controller/worker_binary/image_worker.rs`:
+
+    pub(in crate::controller) const IMAGE_WORKER: &str = "/opt/mjolnir/mj-worker";
+    pub(in crate::controller) enum WorkerInstall { Image, Host(PathBuf) }
+    impl WorkerInstall {
+        pub(in crate::controller) fn for_target(locator, executor) -> Result<Self>;
+        pub(in crate::controller) fn host_binary(&self) -> Option<&Path>;
+    }
+    pub(in crate::controller) fn image_worker_build(locator, executor) -> Result<Option<String>>;
+
+in `mj-core/src/state/target_runtime.rs`, `ContainerSettings::default_image: Option<String>`,
+`ContainerSettings::applied(session, image)` and `ContainerSettings::default_image_moved(session)`;
+in `mj-core/src/config.rs`, `DEFAULT_CONTAINER_IMAGE_IS_RELEASE: bool`; in
+`mj-core/src/worker_build.rs`, `is_worker_build(&str) -> bool`; in the worker CLI, the hidden
+`mj-worker worker build-id`; `LatchExclusivity::HoldThroughIdleClose`;
+`WorkerUpgradeOutcome::RecreateContainer`, `ContainerRecreationReport` and
+`WorkerUpgradeObserver::report_recreation`; `SessionRestartIntent::automatic` and
+`begin_automatic_session_restart`; `RuntimeState::recreate_container_for_upgrade`; and
+`LifecycleStart::deferrable_admission`.
+
 Revision history. 2026-10-08, Codex: recorded milestones 1 and 2 as complete and corrected the
 plan's Milestone 2 and Interfaces sections to match what was built. The original plan proposed a
 resolver function and `publish_latest` as a boolean; the implementation keeps
@@ -555,3 +662,10 @@ resolver function and `publish_latest` as a boolean; the implementation keeps
 changes), needs `publish_latest` as a string because GitHub's `inputs` context is empty for the
 push and schedule triggers, and must drop the legacy image from the saved document because the
 in-place editor cannot delete a key that both serializations omit.
+
+Revision 2026-10-21, Claude: resumed the plan in a fresh session, mapped the code again, and
+replaced the original sketches of Milestones 3 to 5 with what was built and why: the image worker
+is linked behind `<root>/hel` because that name is the worker's identity; stopped sessions needed
+no work because they have no container; running sessions are recreated through Restart's existing
+recreation phase with a new non-interrupting latch mode and a durable `automatic` marker
+(migrations 87 and 88); and in-place installs share one `WorkerInstall` decision.

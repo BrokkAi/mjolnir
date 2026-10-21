@@ -208,20 +208,10 @@ impl RuntimeState {
         let state = Arc::clone(self);
         let parent_session_id = parent_session_id.to_owned();
         Box::pin(async move {
-            let occupied = {
-                let owner = state.owner();
-                let sessions = &owner.controller().state;
-                sessions
-                    .subagents
-                    .values()
-                    .filter(|child| child.parent_session_id == parent_session_id)
-                    .any(|child| {
-                        sessions
-                            .sessions
-                            .get(&child.child_session_id)
-                            .is_some_and(|session| session.target.is_some())
-                    })
-            };
+            let occupied = super::support::subagents_occupy_container(
+                &state.owner().controller().state,
+                &parent_session_id,
+            );
             if occupied {
                 return Err(
                     crate::controller::CheckpointDeferred::sub_agents_in_container().into(),

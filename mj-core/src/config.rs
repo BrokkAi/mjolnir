@@ -539,6 +539,11 @@ pub const CONTAINER_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/agent-dev"
 /// development build names the floating image published from master.
 /// `mj-core/build.rs` resolves which one this build is and bakes the answer in.
 pub const DEFAULT_CONTAINER_IMAGE: &str = env!("MJ_AGENT_DEV_IMAGE");
+/// Whether [`DEFAULT_CONTAINER_IMAGE`] is a release's own image. The release
+/// workflow publishes that image with this build's worker baked in, so a
+/// container on it needs no worker from the host.
+pub const DEFAULT_CONTAINER_IMAGE_IS_RELEASE: bool =
+    matches!(env!("MJ_AGENT_DEV_IMAGE_RELEASE").as_bytes(), b"1");
 /// The image name every configuration up to [`LEGACY_DEFAULT_IMAGE_LAST_VERSION`]
 /// wrote into a container target a user had touched.
 ///

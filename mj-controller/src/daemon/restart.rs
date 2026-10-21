@@ -759,8 +759,16 @@ impl RuntimeState {
         else {
             return Ok(ContainerRecreationOutcome::StoodDown);
         };
-        if self.owner().lifecycle.contains_key(&session_id) {
-            return Ok(ContainerRecreationOutcome::StoodDown);
+        {
+            let owner = self.owner();
+            // The barrier check in `keep_subagents_before_close` is the
+            // guarantee; this only saves exporting a checkpoint that check
+            // would throw away.
+            let occupied =
+                super::support::subagents_occupy_container(&owner.controller().state, &session_id);
+            if occupied || owner.lifecycle.contains_key(&session_id) {
+                return Ok(ContainerRecreationOutcome::StoodDown);
+            }
         }
         let admitted = self.admit_lifecycle(
             session_id.clone(),

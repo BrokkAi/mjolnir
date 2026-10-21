@@ -113,7 +113,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         Ok(output(b"")),
         Ok(output(b"27.5.1 linux\n")),
         Ok(output(
-            br#"[{"Id":"sha256:0123456789abcdef","RepoTags":["ghcr.io/example/dev:1.2.3"]}]"#,
+            br#"[{"Id":"sha256:0123456789abcdef","RepoTags":["ghcr.io/example/dev:1.2.3"],"Config":{"Labels":{"org.brokk.mjolnir.worker-build":"2.0.0+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}]"#,
         )),
     ]);
     let docker_check = ssh_docker_check(
@@ -252,10 +252,14 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     assert_eq!(arguments, ["auth", "login"]);
     assert_eq!(profile_quota_source(&native), "Claude subscription quota");
     for check in &mut checks {
-        check.detail = check.detail.replace(
-            &home.path().to_string_lossy().to_string(),
-            "/profiles/claude-bedrock",
-        );
+        check.detail = check
+            .detail
+            .replace(
+                &home.path().to_string_lossy().to_string(),
+                "/profiles/claude-bedrock",
+            )
+            // The running build's worker identity changes with every commit.
+            .replace(mj_core::worker_build::WORKER_BUILD_ID, "<this build>");
     }
 
     let mut rendered = Vec::new();

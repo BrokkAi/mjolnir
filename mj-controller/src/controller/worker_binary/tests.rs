@@ -347,16 +347,26 @@ fn upgrade_preparation_leaves_the_installed_worker_unchanged_until_promotion() {
             &executor,
             &locator,
             session_id,
-            &directory.path().join("missing")
+            &WorkerInstall::Host(directory.path().join("missing"))
         )
         .is_err()
     );
     assert_eq!(std::fs::read(&installed).unwrap(), b"running-worker");
-    let staging =
-        stage_worker_binary_for_upgrade(&executor, &locator, session_id, &source).unwrap();
+    let staging = stage_worker_binary_for_upgrade(
+        &executor,
+        &locator,
+        session_id,
+        &WorkerInstall::Host(source.clone()),
+    )
+    .unwrap();
     assert_eq!(std::fs::read(&installed).unwrap(), b"running-worker");
-    let abandoned =
-        stage_worker_binary_for_upgrade(&executor, &locator, session_id, &source).unwrap();
+    let abandoned = stage_worker_binary_for_upgrade(
+        &executor,
+        &locator,
+        session_id,
+        &WorkerInstall::Host(source.clone()),
+    )
+    .unwrap();
     assert_ne!(&*staging, &*abandoned);
     let abandoned_path = worker_root.join(&*abandoned);
     assert!(abandoned_path.exists());
@@ -416,12 +426,23 @@ fn failed_worker_staging_leaves_no_partial_upload_and_sweeps_stale_ones() {
     let executor = FullDiskUpload {
         fail: std::cell::Cell::new(false),
     };
-    let held = stage_worker_binary_for_upgrade(&executor, &locator, session_id, &source).unwrap();
+    let held = stage_worker_binary_for_upgrade(
+        &executor,
+        &locator,
+        session_id,
+        &WorkerInstall::Host(source.clone()),
+    )
+    .unwrap();
     assert!(!stale.exists(), "a stale partial upload survived staging");
     executor.fail.set(true);
-    let error = stage_worker_binary_for_upgrade(&executor, &locator, session_id, &source)
-        .err()
-        .expect("the upload fails");
+    let error = stage_worker_binary_for_upgrade(
+        &executor,
+        &locator,
+        session_id,
+        &WorkerInstall::Host(source.clone()),
+    )
+    .err()
+    .expect("the upload fails");
     assert!(format!("{error:#}").contains("No space left on device"));
     let mut remaining = std::fs::read_dir(&worker_root)
         .unwrap()
@@ -1463,7 +1484,7 @@ fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
                 &ProcessExecutor,
                 &locator,
                 &session,
-                &fixture.worker_binary,
+                &WorkerInstall::Host(fixture.worker_binary.clone()),
             )
         })?;
         execute_checked(
@@ -1840,7 +1861,12 @@ fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
             .unwrap();
     owner
         .scope_blocking(|| {
-            replace_installed_worker_binary(&executor, &locator, session, &fixture.worker_binary)
+            replace_installed_worker_binary(
+                &executor,
+                &locator,
+                session,
+                &WorkerInstall::Host(fixture.worker_binary.clone()),
+            )
         })
         .unwrap();
 
@@ -1903,8 +1929,12 @@ fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
             "{kind} worker start must inherit the configured container user: {start_text}"
         );
 
-        let upgrade =
-            installed_worker_binary_replacement_plan(&locator, session, source.path()).unwrap();
+        let upgrade = installed_worker_binary_replacement_plan(
+            &locator,
+            session,
+            &WorkerInstall::Host(source.path().to_path_buf()),
+        )
+        .unwrap();
         let commands = rendered(&upgrade.commands);
         let ownership = commands
             .iter()
@@ -4148,7 +4178,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         &executor,
         &ssh_bare_locator(session),
         session,
-        Path::new("/controller/hel"),
+        &WorkerInstall::Host("/controller/hel".into()),
         &launch,
     )
     .unwrap();
@@ -4380,7 +4410,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         &executor,
         &locator,
         "session-local",
-        Path::new("/controller/hel"),
+        &WorkerInstall::Host("/controller/hel".into()),
         &launch,
     )
     .unwrap();
@@ -4415,7 +4445,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         &failing,
         &locator,
         "session-local",
-        Path::new("/controller/hel"),
+        &WorkerInstall::Host("/controller/hel".into()),
         &launch,
     )
     .unwrap_err();
@@ -5477,7 +5507,11 @@ mod container_runtime {
                     fail_prepare,
                 };
                 let result = prepare_managed_harness_for_upgrade(
-                    &executor, &locator, &session, &worker, &launch,
+                    &executor,
+                    &locator,
+                    &session,
+                    &WorkerInstall::Host(worker.clone()),
+                    &launch,
                 );
                 assert_eq!(result.is_err(), fail_prepare);
                 let commands = executor.commands.borrow();

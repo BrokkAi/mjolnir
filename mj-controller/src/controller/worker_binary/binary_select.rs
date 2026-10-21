@@ -59,6 +59,17 @@ pub(super) fn preflight_architectures(
     }
 }
 
+/// Whether a container on this template gets its worker from the image: it
+/// names this release's own default image, which the release workflow
+/// published with this build's worker. Installation still asks the image's
+/// worker for its build before linking it (see [`WorkerInstall::for_target`]).
+pub(crate) fn release_image_supplies_worker(template: &mj_core::config::TargetTemplate) -> bool {
+    mj_core::config::DEFAULT_CONTAINER_IMAGE_IS_RELEASE
+        && template
+            .container()
+            .is_some_and(|container| container.image == mj_core::config::DEFAULT_CONTAINER_IMAGE)
+}
+
 /// Resolve the worker before expensive provisioning or transcript compaction.
 /// Existing SSH bare hosts are probed; disposable targets use their template.
 ///
@@ -71,6 +82,9 @@ pub(in crate::controller) fn preflight_worker_binary(
     template: &mj_core::config::TargetTemplate,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
+    if release_image_supplies_worker(template) {
+        return Ok(());
+    }
     if let mj_core::config::TargetTemplate::SshBare { ssh, .. } = template {
         let command = targets::ssh_command(&SshTarget::from(ssh), ["uname", "-sm"])
             .purpose("detect target platform");
@@ -116,6 +130,9 @@ pub(crate) fn worker_source_problem(
     template: &mj_core::config::TargetTemplate,
     executor: &impl CommandExecutor,
 ) -> Option<String> {
+    if release_image_supplies_worker(template) {
+        return None;
+    }
     if let mj_core::config::TargetTemplate::SshBare { ssh, .. } = template {
         let command = targets::ssh_command(&SshTarget::from(ssh), ["uname", "-sm"])
             .purpose("detect target platform");
