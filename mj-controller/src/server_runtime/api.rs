@@ -1571,6 +1571,16 @@ fn subagent_status(
     if closing && record.is_some_and(|record| record.state != SessionState::Stopped) {
         return ("stopping".into(), None, false);
     }
+    // A closed child is stopped, whatever its first prompt did. The close
+    // cleared the launch failure from the record, so a failed first prompt's
+    // message would otherwise replace it, keep the child `error`, and reach
+    // the parent as a second failure (#1321). A stopped record that holds an
+    // error is a failed resume, which still reports below.
+    if record
+        .is_some_and(|record| record.state == SessionState::Stopped && record.last_error.is_none())
+    {
+        return ("stopped".into(), None, true);
+    }
     // A record that failed to start holds the cause; the follow-up's own
     // message only says that the session would not take a prompt, which is
     // the symptom. Prefer the cause when there is one, and keep the follow-up

@@ -73,7 +73,8 @@ const SHUTDOWN_FORCE_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 const FORCE_DESTROY_PREEMPT_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Whether a running lifecycle operation can still be cancelled: open, then
-/// either cancelled or committed, and exactly one of those two wins.
+/// either cancelled or committed, and exactly one of those two wins. A cancel
+/// records whether daemon shutdown made it.
 ///
 /// An operation commits at the first step a cancel could no longer undo: a
 /// create once its new session is published, a graceful close once its
@@ -92,14 +93,26 @@ pub struct LifecycleControl {
 const LIFECYCLE_OPEN: u8 = 0;
 const LIFECYCLE_CANCELLED: u8 = 1;
 const LIFECYCLE_COMMITTED: u8 = 2;
+/// Cancelled because the daemon is stopping, not by a person or a close.
+const LIFECYCLE_CANCELLED_FOR_SHUTDOWN: u8 = 3;
 
 impl LifecycleControl {
     pub fn request_cancel(&self) -> bool {
+        self.cancel_as(LIFECYCLE_CANCELLED)
+    }
+
+    fn cancel_for_shutdown(&self) -> bool {
+        self.cancel_as(LIFECYCLE_CANCELLED_FOR_SHUTDOWN)
+    }
+
+    /// The state is written before the flag the executor reads, so an
+    /// operation that sees its cancel also sees which cancel it was.
+    fn cancel_as(&self, cancelled: u8) -> bool {
         let accepted = self
             .state
             .compare_exchange(
                 LIFECYCLE_OPEN,
-                LIFECYCLE_CANCELLED,
+                cancelled,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
@@ -132,7 +145,10 @@ impl LifecycleControl {
     }
 
     fn cancel_accepted(&self) -> bool {
-        self.state.load(Ordering::Acquire) == LIFECYCLE_CANCELLED
+        matches!(
+            self.state.load(Ordering::Acquire),
+            LIFECYCLE_CANCELLED | LIFECYCLE_CANCELLED_FOR_SHUTDOWN
+        )
     }
 
     /// Stop the operation's commands because the daemon is exiting, whether
@@ -140,6 +156,18 @@ impl LifecycleControl {
     /// is, and the next daemon finishes it from its durable record.
     fn interrupt(&self) {
         self.cancelled.store(true, Ordering::Release);
+    }
+
+    /// Whether daemon shutdown is what stopped the operation's commands, so a
+    /// failure can say so instead of only that an operation was cancelled
+    /// (#1321). A committed operation's commands are stopped only by
+    /// [`Self::interrupt`].
+    pub fn stopped_for_shutdown(&self) -> bool {
+        match self.state.load(Ordering::Acquire) {
+            LIFECYCLE_CANCELLED_FOR_SHUTDOWN => true,
+            LIFECYCLE_COMMITTED => self.cancelled.load(Ordering::Acquire),
+            _ => false,
+        }
     }
 }
 
@@ -513,13 +541,17 @@ impl ActiveLifecycle {
     }
 
     fn request_cancel(&mut self) -> bool {
+        self.cancel_with(LifecycleControl::request_cancel)
+    }
+
+    fn cancel_with(&mut self, cancel: fn(&LifecycleControl) -> bool) -> bool {
         if !matches!(
             self.phase,
             LifecyclePhase::Executing | LifecyclePhase::MovingDestination
         ) {
             return false;
         }
-        let accepted = self.control.request_cancel();
+        let accepted = cancel(&self.control);
         if accepted {
             self.phase = match self.phase {
                 LifecyclePhase::MovingDestination => LifecyclePhase::CancellingMoveDestination,
@@ -556,7 +588,7 @@ impl ActiveLifecycle {
     /// next daemon finishes it from its record, except a committed create,
     /// whose caller now owns the new session and which no daemon resumes.
     fn interrupt_for_shutdown(&mut self) -> bool {
-        if self.request_cancel() {
+        if self.cancel_with(LifecycleControl::cancel_for_shutdown) {
             return true;
         }
         let interruptible = self.kind != LifecycleKind::Create

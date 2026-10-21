@@ -2192,6 +2192,59 @@ fn create_cancellation_and_commit_have_one_winner() {
     }
 }
 
+/// A child launch that an explicit daemon stop cancelled reported only
+/// "operation cancelled", which its parent could not tell from a fault on the
+/// target. The control records which cancel won, so a person's cancel that
+/// came first is never blamed on the shutdown that followed it.
+// Hard-won: #1321: a daemon stop cancelled a child launch and the failure did not say so.
+#[test]
+fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
+    let operation = |kind: LifecycleKind, control: LifecycleControl| {
+        let (_completed, result) = tokio::sync::watch::channel(None);
+        ActiveLifecycle {
+            restart_intent: None,
+            upgrade_work: Arc::new(Mutex::new(None)),
+            phase: LifecyclePhase::Executing,
+            operation_id: "operation".into(),
+            control,
+            kind,
+            started_at_epoch_seconds: 1,
+            active_stages: BTreeMap::new(),
+            resume_workspace_id: None,
+            resume_destination: None,
+            notice: None,
+            request_key: None,
+            _move_guard: None,
+            result,
+        }
+    };
+
+    let control = LifecycleControl::default();
+    assert!(operation(LifecycleKind::Create, control.clone()).interrupt_for_shutdown());
+    assert!(control.cancelled.load(Ordering::Acquire));
+    assert!(control.stopped_for_shutdown());
+
+    let control = LifecycleControl::default();
+    let mut cancelled = operation(LifecycleKind::Create, control.clone());
+    assert!(cancelled.request_cancel());
+    assert!(!cancelled.interrupt_for_shutdown());
+    assert!(control.cancelled.load(Ordering::Acquire));
+    assert!(!control.stopped_for_shutdown());
+
+    // A committed create is not stopped by shutdown, so its commands never
+    // fail as cancelled and nothing may blame the daemon.
+    let control = LifecycleControl::default();
+    assert!(control.grant_commit());
+    assert!(!operation(LifecycleKind::Create, control.clone()).interrupt_for_shutdown());
+    assert!(!control.stopped_for_shutdown());
+
+    // Any other committed operation is interrupted, and only shutdown does that.
+    let control = LifecycleControl::default();
+    assert!(control.grant_commit());
+    assert!(operation(LifecycleKind::Suspend, control.clone()).interrupt_for_shutdown());
+    assert!(control.stopped_for_shutdown());
+}
+
 #[tokio::test]
 async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
     let state = test_runtime_state();

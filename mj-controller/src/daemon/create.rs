@@ -53,12 +53,13 @@ impl RuntimeState {
         }
         let session_id = relation.child_session_id.clone();
         let parent_session_id = relation.parent_session_id.clone();
+        let control = LifecycleControl::default();
         let started = self.start_or_join_lifecycle_controlled(
             session_id.clone(),
             LifecycleKind::Create,
             None,
             Some(relation.request_key.clone()),
-            None,
+            Some(control.clone()),
             move |state, session_id, cancelled| async move {
                 let mut controller = tokio::task::spawn_blocking(Controller::load)
                     .await
@@ -80,7 +81,9 @@ impl RuntimeState {
                     session_id.clone(),
                 );
                 if let Err(error) = controller
-                    .provision_subagent_session_controlled(&session_id, &executor)
+                    .provision_subagent_session_controlled(&session_id, &executor, || {
+                        control.stopped_for_shutdown()
+                    })
                     .await
                 {
                     drop(controller);
