@@ -795,6 +795,7 @@ fn recorded_repository(head_commit: &str, branch: Option<&str>) -> RepositoryMet
     RepositoryMetadata {
         saved_refs: Default::default(),
         stash_stack: Vec::new(),
+        git_operation: None,
         push_urls: Vec::new(),
         remote_workspace: false,
         id: "project".into(),

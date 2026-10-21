@@ -33,4 +33,5 @@ url.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+mj-core = { workspace = true, features = ["golden"] }
 tempfile.workspace = true
