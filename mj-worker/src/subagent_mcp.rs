@@ -670,11 +670,11 @@ fn tool_definitions_with_options(
     let child = json!({"type":"object","properties":{"child_session_id":{"type":"string"}},"required":["child_session_id"],"additionalProperties":false});
     vec![
         spawn_tool(options.subtle_subagents),
-        tool(
+        read_only(tool(
             "list_agents",
             "List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing. A finished child has parked true when its processes were released. A refused login reports failure kind login_invalid; its output names `mj login` and is not about the task.",
             json!({"type":"object","additionalProperties":false}),
-        ),
+        )),
         send_message_tool(),
         tool(
             "close",
@@ -714,6 +714,13 @@ fn child_tool_definitions() -> Vec<Value> {
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
     json!({"name":name,"description":description,"inputSchema":input_schema})
+}
+
+/// Marks a tool that changes nothing. Claude's plan mode asks before every MCP
+/// tool without this hint, even one its allowed tools list names.
+fn read_only(mut tool: Value) -> Value {
+    tool["annotations"] = json!({"readOnlyHint":true});
+    tool
 }
 
 #[cfg(test)]
@@ -777,6 +784,16 @@ mod tests {
             spawn["inputSchema"]["required"],
             json!(["task_name", "instructions"])
         );
+    }
+
+    #[test]
+    fn only_list_agents_is_read_only() {
+        let read_only = tool_definitions(None)
+            .into_iter()
+            .filter(|tool| tool["annotations"]["readOnlyHint"] == true)
+            .map(|tool| tool["name"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(read_only, vec![json!("list_agents")]);
     }
 
     #[test]
