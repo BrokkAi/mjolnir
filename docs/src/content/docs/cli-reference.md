@@ -116,7 +116,6 @@ mj import <harness> (--session <uuid> | --latest) [options]
 
 `<harness>` is one of `claude`, `codex`, `kimi`, `grok`, or `muse`. OpenCode
 and MiMo Code keep their sessions in SQLite stores and are not importable yet.
-keeps its sessions in a SQLite database, so it cannot be imported yet.
 
 | Option | Meaning |
 | --- | --- |
