@@ -3134,6 +3134,8 @@ fn startup_prompt_test_store(name: &str) -> Option<crate::database::DatabaseWrit
 }
 
 // Hard-won: #1139 review: a failed automatic recreation kept its Restart intent, so its stuck lifecycle stood down every retry and blocked continuation.
+// A local bare target exists only where the controller runs workers itself.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_failed_automatic_recreation_gives_back_its_intent_and_records_no_failure() {
     const NAME: &str = "a_failed_automatic_recreation_gives_back_its_intent_and_records_no_failure";
