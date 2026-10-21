@@ -104,10 +104,11 @@ impl WaitObservation {
                 && assessment.completed_ordinal == outcome.completed_ordinal
                 && assessment.current()
         });
-        // Pending until Jev answers; failed until the request is tried again.
-        if verdict
-            .is_some_and(|assessment| matches!(assessment.status, Status::Pending | Status::Failed))
-        {
+        // Only a request Jev has yet to answer holds the turn. A failed check
+        // waits minutes to retry, with no limit on retries, so holding on it
+        // would let a broken Jev profile keep every turn wait open; the turn
+        // then ends with the harness outcome.
+        if verdict.is_some_and(|assessment| assessment.status == Status::Pending) {
             return None;
         }
         let mut result = WaitDecision::from_outcome(outcome);

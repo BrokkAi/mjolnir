@@ -3891,13 +3891,22 @@ fn a_wait_reads_jev_s_verdict_from_the_turn_s_own_assessment() {
         );
         assert!(decision.turn.is_some(), "the reply is still the turn's");
 
-        for status in [Status::Pending, Status::Failed] {
-            assert_eq!(
-                resolve_wait(&observe(assessment_of(&turn, status, None)), &request),
-                None,
-                "Jev is still reading the reply"
-            );
-        }
+        assert_eq!(
+            resolve_wait(
+                &observe(assessment_of(&turn, Status::Pending, None)),
+                &request
+            ),
+            None,
+            "Jev is still reading the reply"
+        );
+        // A failed check retries minutes later, without limit; the turn ends
+        // with what the harness said rather than waiting on it.
+        let failed = resolve_wait(
+            &observe(assessment_of(&turn, Status::Failed, None)),
+            &request,
+        )
+        .expect("a failed check holds no wait");
+        assert_eq!(failed.outcome, WaitOutcome::Finished);
     }
 
     let other_turn = MaterializedTurnOutcome {
