@@ -2449,6 +2449,10 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         )
         .unwrap();
     assert!(prepared.in_place);
+    assert!(
+        prepared.stops_subagents,
+        "a destination without parent tools stops the parked children"
+    );
 }
 
 #[cfg(unix)]

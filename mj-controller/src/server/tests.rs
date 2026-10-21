@@ -3055,6 +3055,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
         destination_checks: Default::default(),
         workspace: None,
         in_place: false,
+        stops_subagents: true,
         source_unavailable: false,
         conversion: None,
         selection,
@@ -4541,7 +4542,8 @@ assert(moveSubagentChange(draft) === null, "a native destination keeps an alread
 draft.storedSubagents = { mode: "mjolnir", straightforward: { model: "gpt-6-sol", effort: "high" }, subtle: { model: "gpt-6-luna" } };
 draft.subagents = structuredClone(draft.storedSubagents);
 assert(moveSubagentChange(draft) === null, "a different destination preserves untouched legacy policy");
-assert(moveStoppedChildren(sessions.parent) === 1, "only a child still at its task is counted; a parked one has handed back");
+assert(moveStoppedChildren(sessions.parent, { stops_subagents: true }) === 1, "only a child still at its task is counted; a parked one has handed back");
+assert(moveStoppedChildren(sessions.parent, { in_place: true, stops_subagents: false }) === 0, "an in-place Move that keeps its children stops none");
 "#;
     run_viewer_script(
         "viewer-move-subagents",

@@ -218,6 +218,12 @@ pub struct MovePreparation {
     /// the container or worker root and the workspace are kept.
     #[serde(default)]
     pub in_place: bool,
+    /// Move stops the parent's live sub-agents before it closes the source.
+    /// An in-place Move keeps them running when the destination harness has
+    /// the mj-agents parent tools and the source worker can drain sub-agent
+    /// requests.
+    #[serde(default)]
+    pub stops_subagents: bool,
     /// Present only when this move converts a local checkout into an isolated
     /// workspace. Boxed because this preparation travels inside several
     /// request enums whose other variants are far smaller.

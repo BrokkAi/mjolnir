@@ -2139,6 +2139,7 @@ fn move_preparation() -> mj_core::state::MovePreparation {
         destination_checks: Default::default(),
         workspace: None,
         in_place: false,
+        stops_subagents: true,
         source_unavailable: false,
         conversion: None,
         selection: mj_core::state::MoveSelection {
@@ -2180,11 +2181,11 @@ fn raw_conversion_preview() -> mj_core::state::RawConversionPreview {
 
 /// A Move stops the parent's sub-agents as a suspend does. The review counts
 /// only the ones still at their task; idle ones have handed back and are not
-/// mentioned.
+/// mentioned. An in-place Move that keeps its children says nothing.
 // Hard-won: 63ed79ef: Move review counted idle children as needing suspension
 #[test]
 fn move_review_counts_only_working_subagents() {
-    let review = |working: bool| {
+    let review_with = |working: bool, stops_subagents: bool| {
         let (mut dashboard, _) = dashboard_with_one_subagent();
         if working {
             dashboard
@@ -2194,7 +2195,10 @@ fn move_review_counts_only_working_subagents() {
                 .current_turn_started_at = Some(1);
         }
         let request_id = open_move_review(&mut dashboard);
-        assert!(dashboard.apply_move_preparation(request_id, move_preparation()));
+        let mut preparation = move_preparation();
+        preparation.in_place = !stops_subagents;
+        preparation.stops_subagents = stops_subagents;
+        assert!(dashboard.apply_move_preparation(request_id, preparation));
         let mut terminal = Terminal::new(TestBackend::new(200, 44)).expect("terminal");
         terminal
             .draw(|frame| render(frame, &mut dashboard))
@@ -2202,14 +2206,20 @@ fn move_review_counts_only_working_subagents() {
         let rendered = buffer_lines(terminal.backend().buffer()).join(" ");
         rendered.split_whitespace().collect::<Vec<_>>().join(" ")
     };
-    let idle = review(false);
+    let idle = review_with(false, true);
     assert!(!idle.contains("will be stopped"), "{idle}");
-    let working = review(true);
+    let working = review_with(true, true);
     assert!(
         working.contains(
             "1 working sub-agent will be stopped; the session is told which when it resumes."
         ),
         "{working}"
+    );
+    let kept = review_with(true, false);
+    assert!(!kept.contains("will be stopped"), "{kept}");
+    assert!(
+        kept.contains("Only the harness and profile are replaced"),
+        "{kept}"
     );
 }
 

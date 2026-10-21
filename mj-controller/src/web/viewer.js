@@ -3820,8 +3820,10 @@ function moveSubagentChange(draft) {
   return JSON.stringify(draft.subagents) === JSON.stringify(draft.storedSubagents) ? null : draft.subagents;
 }
 
-function moveStoppedChildren(session) {
-  return workingChildCount(session);
+/// Working children the prepared Move stops; an in-place Move that keeps
+/// them reports none.
+function moveStoppedChildren(session, preparation) {
+  return preparation?.stops_subagents ? workingChildCount(session) : 0;
 }
 
 function moveQueueItemText(item) {
@@ -4034,7 +4036,7 @@ function renderMoveForm() {
       const mode = SUBAGENT_MODES.find(([value]) => value === preparation.selection.subagents.mode)?.[1] || preparation.selection.subagents.mode;
       moveStep.append(el('p', 'dim', `Delegation: ${mode}.`));
     }
-    const stoppedChildren = moveStoppedChildren(session);
+    const stoppedChildren = moveStoppedChildren(session, preparation);
     if (stoppedChildren) {
       moveStep.append(el('p', 'move-warning', `${stoppedChildren} working sub-agent${stoppedChildren === 1 ? '' : 's'} will be stopped; the session is told which when it resumes.`));
     }
