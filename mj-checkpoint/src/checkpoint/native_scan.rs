@@ -492,19 +492,25 @@ pub(super) fn collect_native_tree(
         "native artifact is too large"
     );
     validate_relative_path(relative)?;
+    let data = if harness == HarnessKind::OpenCode {
+        opencode_database_without_logins(path)?
+    } else {
+        fs::read(path)?
+    };
     output.push(NativeArtifact {
         relative_path: relative.to_path_buf(),
-        data: fs::read(path)?,
+        data,
         mode: file_mode(&metadata),
     });
     Ok(())
 }
 
 /// OpenCode keeps every session of a data directory in one SQLite database,
-/// `opencode.db`, with uncommitted pages in the write-ahead log beside it. A
-/// session home has exactly one data directory, so the database is the
-/// session's native state; the `-shm` shared-memory file is rebuilt on open
-/// and is not captured.
+/// `opencode.db`. A session home has exactly one data directory, so the
+/// database is the session's native state. It is captured as a snapshot
+/// ([`opencode_database_without_logins`]) that already holds the pages of
+/// the write-ahead log beside it, so neither that log nor the `-shm`
+/// shared-memory file is captured.
 pub(super) fn is_opencode_native_artifact(relative_path: &Path) -> bool {
     let mut components = relative_path.components();
     let (
@@ -521,9 +527,51 @@ pub(super) fn is_opencode_native_artifact(relative_path: &Path) -> bool {
     else {
         return false;
     };
-    data == ".data"
-        && opencode == "opencode"
-        && matches!(file.to_str(), Some("opencode.db" | "opencode.db-wal"))
+    data == ".data" && opencode == "opencode" && file == "opencode.db"
+}
+
+/// The tables in which OpenCode keeps logins: provider and connector
+/// credentials, and the tokens of OpenCode's own accounts.
+const OPENCODE_LOGIN_TABLES: [&str; 3] = ["credential", "account", "control_account"];
+
+/// OpenCode's database as a checkpoint carries it: a consistent copy of the
+/// live database, write-ahead log included, without the rows of
+/// [`OPENCODE_LOGIN_TABLES`]. OpenCode 2 keeps its logins in the same file as
+/// its sessions, and every launch imports the profile's logins into the
+/// staged home afresh, so a checkpoint needs none of them and must not carry
+/// their secrets.
+fn opencode_database_without_logins(path: &Path) -> Result<Vec<u8>> {
+    let scratch = tempfile::tempdir().context("create OpenCode database snapshot directory")?;
+    let copy = scratch.path().join("opencode.db");
+    let snapshot = || -> Result<()> {
+        let source = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        // The running OpenCode may hold a brief write lock.
+        source.busy_timeout(std::time::Duration::from_secs(5))?;
+        source.execute(
+            "VACUUM INTO ?1",
+            [copy.to_str().context("snapshot path is not UTF-8")?],
+        )?;
+        drop(source);
+        let copy = rusqlite::Connection::open(&copy)?;
+        for table in OPENCODE_LOGIN_TABLES {
+            let exists: bool = copy.query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                [table],
+                |row| row.get(0),
+            )?;
+            if exists {
+                copy.execute(&format!("DELETE FROM \"{table}\""), [])?;
+            }
+        }
+        // VACUUM rebuilds the file, so no freed page keeps a deleted login.
+        copy.execute_batch("VACUUM")?;
+        Ok(())
+    };
+    snapshot().with_context(|| format!("snapshot OpenCode database {}", path.display()))?;
+    fs::read(&copy).with_context(|| format!("read OpenCode database snapshot {}", copy.display()))
 }
 
 pub(super) fn kimi_session_artifact(relative: &Path, session_id: &str) -> bool {

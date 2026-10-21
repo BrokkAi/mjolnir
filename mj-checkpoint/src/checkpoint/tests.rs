@@ -74,6 +74,98 @@ fn empty_native_artifacts_allowed_only_for_unprompted_sessions() {
     assert!(artifacts.is_empty());
 }
 
+/// OpenCode 2 keeps its logins in the same database as its sessions. A
+/// checkpoint taken while OpenCode runs carries the sessions, including the
+/// pages still only in the write-ahead log, and no byte of any login.
+#[test]
+fn an_opencode_checkpoint_keeps_live_sessions_and_no_login_secret() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join(".data/opencode");
+    std::fs::create_dir_all(&data).unwrap();
+    let secrets = [
+        "sk-checkpoint-api-key",
+        "access-checkpoint-token",
+        "refresh-checkpoint-token",
+    ];
+    // OpenCode's open connection keeps the newest pages in its log.
+    let live = rusqlite::Connection::open(data.join("opencode.db")).unwrap();
+    live.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA wal_autocheckpoint = 0;
+         CREATE TABLE credential (id text PRIMARY KEY, integration_id text, label text NOT NULL,
+             value text NOT NULL, connector_id text, method_id text, active integer,
+             time_created integer NOT NULL, time_updated integer NOT NULL);
+         CREATE TABLE account (id text PRIMARY KEY, email text, url text, access_token text,
+             refresh_token text, token_expiry integer, time_created integer, time_updated integer);
+         CREATE TABLE control_account (email text, url text, access_token text, refresh_token text,
+             token_expiry integer, active integer, time_created integer, time_updated integer);
+         CREATE TABLE session_v2 (id text PRIMARY KEY, title text);",
+    )
+    .unwrap();
+    live.execute(
+        "INSERT INTO credential VALUES ('cred', 'deepseek', 'DeepSeek', ?1, NULL, NULL, 1, 1, 1)",
+        [format!(r#"{{"type":"key","key":"{}"}}"#, secrets[0])],
+    )
+    .unwrap();
+    live.execute(
+        "INSERT INTO account VALUES ('acct', 'me@example.com', 'https://opencode.ai', ?1, ?2, 0, 1, 1)",
+        [secrets[1], secrets[2]],
+    )
+    .unwrap();
+    live.execute(
+        "INSERT INTO control_account VALUES ('me@example.com', 'https://opencode.ai', ?1, ?2, 0, 1, 1, 1)",
+        [secrets[1], secrets[2]],
+    )
+    .unwrap();
+    // The logins reach the database file itself; the newest session is
+    // only in the log.
+    live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    live.execute(
+        "INSERT INTO session_v2 VALUES ('ses_live', 'still in the log')",
+        [],
+    )
+    .unwrap();
+    assert!(data.join("opencode.db-wal").metadata().unwrap().len() > 0);
+
+    let artifacts =
+        collect_native_artifacts(HarnessKind::OpenCode, temp.path(), NATIVE, false).unwrap();
+
+    let paths = artifacts
+        .iter()
+        .map(|artifact| artifact.relative_path.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(paths, [PathBuf::from(".data/opencode/opencode.db")]);
+    let captured = &artifacts[0].data;
+    for secret in secrets {
+        assert!(
+            !captured
+                .windows(secret.len())
+                .any(|window| window == secret.as_bytes()),
+            "the checkpoint carries {secret}"
+        );
+    }
+    let restored = temp.path().join("restored.db");
+    std::fs::write(&restored, captured).unwrap();
+    let restored = rusqlite::Connection::open(&restored).unwrap();
+    let title: String = restored
+        .query_row(
+            "SELECT title FROM session_v2 WHERE id = 'ses_live'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(title, "still in the log");
+    for table in ["credential", "account", "control_account"] {
+        let rows: i64 = restored
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0, "{table}");
+    }
+    drop(live);
+}
+
 /// R4-5: a Codex session whose only turn failed at the usage limit, followed
 /// by `/clear`, could not be suspended ("no session artifacts found"). The
 /// clear had replaced the native session with one that never received a
