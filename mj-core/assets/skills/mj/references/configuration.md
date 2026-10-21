@@ -324,7 +324,7 @@ login link keeps working, and it does not collide with the default instance's
 port 3765. If the port is taken anyway, for example by another named instance
 whose name maps to the same port, the viewer reports the conflict and gives the
 exact `bind` line to add under `[phone]`. The `mj` commands that use the HTTP API,
-such as `mj sessions` and `mj prompt`, need the viewer's listener and fail until
+such as `mj sessions`, `mj prompt` and `mj message`, need the viewer's listener and fail until
 the conflict is resolved.
 
 A non-loopback `bind` is rejected unless both explicit TLS paths are present.

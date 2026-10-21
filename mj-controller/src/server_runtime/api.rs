@@ -963,7 +963,7 @@ impl ApiBackend {
             } => {
                 let delivery = self
                     .deliver_session_message(
-                        Some(parent_session_id.to_owned()),
+                        parent_session_id.to_owned(),
                         child_session_id.clone(),
                         message.clone(),
                         request.request_id.clone(),
@@ -2551,9 +2551,16 @@ impl SubagentBackend for ApiBackend {
         })
     }
 
+    fn resolve_message_target(&self, requested_id: String) -> BoxFuture<'_, Result<String>> {
+        Box::pin(blocking("resolve the user's message target", move || {
+            let state = Controller::load()?.state;
+            subagent_input::resolve_session_message_target(&state, None, &requested_id)
+        }))
+    }
+
     fn deliver_message(
         &self,
-        sender_session_id: Option<String>,
+        sender_session_id: String,
         target_session_id: String,
         text: String,
         request_id: String,

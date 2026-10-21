@@ -252,9 +252,9 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--review-model <name>] [--review-effort <name>] [--review-tier quick|extended]
        [--no-review] [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
-mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>]
-          [--return-on-input] [--json]
-mj message --session <id> <text> [--json]
+mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--command-id <id>]
+          [--timeout <seconds>] [--return-on-input] [--json]
+mj message --session <id> [<text>|-] [--prompt-file <path>] [--command-id <id>] [--json]
 mj wait --session <id> [--turn <turn-id>] [--timeout <seconds>] [--return-on-input] [--json]
 mj transcript --session <id> [--after-seq <seq>] [--limit <count>]
              [--role <role>]... [--finished-only] [--json]
@@ -341,7 +341,7 @@ cannot be combined with a session that runs directly in the selected directory.
   that host, else 8 CPUs and 32 GiB, capped at the host's totals.
   `--cpus <count>` and `--memory-gib <GiB>` override either one. Other targets
   refuse both options.
-- `--return-on-input` makes `mj prompt --wait` and `mj wait` return as soon as
+- `--return-on-input` makes `mj prompt` and `mj wait` return as soon as
   the agent asks for structured input, with the outcome `input_required`.
   Answer with `mj elicitations` and `mj respond`, then wait again.
 - By default, `mj transcript` omits `tool` and `terminal` entries. Repeat
@@ -398,22 +398,41 @@ Mjolnir sub-agents.
 These commands run one Mjolnir session as a subagent: `mj new` starts it with a
 first prompt and prints its id, `mj wait` blocks until the turn ends and prints
 the outcome, the elapsed time, the number of tool calls, and the agent's final message,
-and `mj prompt --wait` does both for the next prompt. A prompt comes from the
+and `mj prompt` does both for the next prompt. A prompt comes from the
 positional argument, from `--prompt-file`, or from standard input when the
-argument is `-`.
+argument is `-`; `mj message` takes its text the same way.
 
-`mj message --session <id> <text>` sends a message to a top-level session, or
-to one of the caller's own sub-agents when `MJ_SESSION_ID` identifies that
-top-level sender. Messages from sessions show the sender's title and full ID,
-with a reply instruction. When `MJ_SESSION_ID` is not set, the message is
-labelled as coming from the user.
+Each command has one behavior: `mj prompt` always waits, and `mj message`
+never does.
+
+`mj prompt --session <id> <text>` sends the text as your prompt and waits for
+that turn to end. Before it waits, it prints `turn N` on standard error, so if
+the wait is cut off you can go on with `mj wait --session <id> --turn N`. With
+`--json`, standard output holds only the wait's result. `--command-id <id>`
+makes the send safe to retry: after an ambiguous reply, run the same command
+with the same ID and you get the same turn, not a second prompt. The retired
+`--wait` flag is still accepted and changes nothing. Because a prompt sent this
+way reads exactly as your own, `mj prompt` refuses to run inside a session
+(when `MJ_SESSION_ID` is set); an agent sends with `mj message` and follows
+with `mj wait`.
+
+`mj message --session <id> <text>` sends and returns. From your own shell
+(`MJ_SESSION_ID` not set), it submits the text as your prompt, just as
+`mj prompt` does: the session starts a turn with it, takes it into the running
+turn, or queues it. It prints `turn N`; follow it with
+`mj wait --session <id> --turn N` when you want the result. `--command-id <id>`
+makes it safe to retry in the same way. Inside a session (`MJ_SESSION_ID`
+set), `mj message` sends a message to another top-level session, or to one of
+the caller's own sub-agents. Messages from sessions show the sender's title and
+full ID, with a reply instruction, and `--command-id` identifies the message
+across retries.
 
 The first line of a wait says how the turn ended in the same words as
 `mj sessions --session <id>`, for example
 `turn finished (completed, end of turn) in 5.3s · 4 tool calls` or
 `turn error (failed: harness inactive) in 30.3s`. The tool-call count appears
 when the turn made any. The line carries no turn number: the number `mj prompt`
-prints is the handle `mj wait --turn` takes, not a count. With `--json`, the
+and `mj message` print is the handle `mj wait --turn` takes, not a count. With `--json`, the
 `stop_reason` field keeps the harness's own spelling, such as `EndTurn`, and
 `turn_id` and `tool_calls` are separate fields.
 
@@ -464,7 +483,7 @@ is one, so an agent can explain what it found before it continues it.
 The command answers as soon as the daemon has taken the session, because
 restoring an archive takes minutes. Follow it with `mj wait --session <id>`,
 which blocks while the resume runs and reports the reason if it fails, and then
-`mj set-config` and `mj prompt` as for any live session. A session that is
+`mj set-config`, `mj prompt` and `mj message` as for any live session. A session that is
 already running is refused: suspend it first. `mj move` is the command for a live
 session that should continue elsewhere.
 

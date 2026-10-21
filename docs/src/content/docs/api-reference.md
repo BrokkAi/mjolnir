@@ -531,7 +531,8 @@ answers `409` and never becomes a turn. Any other session that cannot take a
 prompt right now answers `409`.
 
 For recovery operations, supply an optional `command_id` (also exposed as
-`mj prompt --command-id ID`). Retrying the identical command with the same ID
+`mj prompt --command-id ID` and `mj message --command-id ID`). Retrying the
+identical command with the same ID
 returns its original relay acceptance ordinal. Keep the body unchanged; use a
 new ID for a different command. Ordinary clients may omit it.
 
@@ -550,13 +551,24 @@ POST /api/v1/sessions/{session_id}/message
 ```
 
 `sender_session_id` is optional. The CLI sets it from `MJ_SESSION_ID` when
-present; otherwise the message is from the user. The daemon requires a claimed
-sender to be an existing top-level session. An authenticated local caller may
-claim another top-level session ID. The reply is `202` with `session_id`, `via`
-(`mailbox` or `turn`), and an optional `turn_id`. Message delivery refuses an
-unknown, destroyed, stopped, self, or other session's sub-agent target. A peer
-mailbox message wakes an idle recipient; workers below relay protocol 36
-receive a queued turn with the same sender label and reply instruction.
+present.
+
+Without `sender_session_id` the message is from the user, and the daemon
+submits it as the user's prompt, exactly as `POST /sessions/{id}/prompt` does:
+a session that is still starting holds it, a busy session takes it into the
+running turn or queues it, and the same refusals apply. `request_id` is the
+prompt's command ID, so retrying with the same `request_id` returns the same
+turn rather than sending a second prompt. `{session_id}` may be a full ID or a
+unique hexadecimal prefix of at least 8 characters. The reply is `202` with the
+full `session_id`, `via: "turn"`, and the `turn_id` that `wait` takes.
+
+With `sender_session_id`, the daemon requires the sender to be an existing
+top-level session. An authenticated local caller may claim another top-level
+session ID. The reply is `202` with `session_id`, `via` (`mailbox` or `turn`),
+and an optional `turn_id`. Message delivery refuses an unknown, destroyed,
+stopped, self, or other session's sub-agent target. A peer mailbox message
+wakes an idle recipient; workers below relay protocol 36 receive a queued turn
+with the same sender label and reply instruction.
 
 Typed `/clear` clears the native conversation in the same session and checkout.
 Its acceptance is not completion: observe the `command_ended` event and the
@@ -637,7 +649,7 @@ that left a build running. It is absent when the session is idle.
 }
 ```
 
-For `mj wait --json` and `mj prompt --wait --json`, stdout contains the JSON
+For `mj wait --json` and `mj prompt --json`, stdout contains the JSON
 response even when the command exits unsuccessfully. `finished` and
 `input_required` exit **0**. `timeout`, `error`, `cancelled`, `quota_limit`, and
 `stopped` exit **1**, with a diagnostic on stderr. A timeout does not cancel the
@@ -966,9 +978,8 @@ Preconditions, all answering `409` with the reason:
 | `mj sessions` | `GET /sessions` |
 | `mj sessions --session <id>` | `GET /sessions/{id}` |
 | `mj new` | `POST /sessions` |
-| `mj prompt --session <id>` | `POST /sessions/{id}/prompt` |
-| `mj prompt --session <id> --wait` | `POST /sessions/{id}/prompt`, then `POST /sessions/{id}/wait` on the turn it returned |
-| `mj message --session <id> <text>` | `POST /sessions/{id}/message` |
+| `mj prompt --session <id> <text>` | `POST /sessions/{id}/prompt`, then `POST /sessions/{id}/wait` on the turn it returned |
+| `mj message --session <id> <text>` | `POST /sessions/{id}/message` (from your own shell, with no `sender_session_id`) |
 | `mj wait --session <id>` | `POST /sessions/{id}/wait` |
 | `mj transcript --session <id>` | `GET /sessions/{id}/transcript` |
 | `mj diff --session <id>` | `GET /sessions/{id}/diff` |
@@ -994,7 +1005,7 @@ mj workspaces create scripts
 mj new --workspace scripts --profile codex --target localhost --project-directory . \
   "add a README line"
 mj wait --session <id>
-mj prompt --session <id> --wait "now add a test"
+mj prompt --session <id> "now add a test"
 mj diff --session <id>
 mj export --session <id> --kind bundle --out work.bundle
 mj suspend --session <id> --acknowledge-unpublished-work
@@ -1344,6 +1355,6 @@ mj respond --session SESSION --elicitation REQUEST --response-file answer.json
 ```
 
 `mj put-file` accepts `-` as the source for binary stdin. `mj respond` accepts a
-positional JSON response or `-` for stdin. `mj prompt --wait` also accepts
+positional JSON response or `-` for stdin. `mj prompt` also accepts
 `--return-on-input`. The CLI exits successfully on `input_required`
 results so an orchestrator can answer and resume waiting.

@@ -20,8 +20,9 @@ pub struct MailboxEventResponse {
     pub inserted: bool,
 }
 
-/// Result of delivering one message to a session, either through its mailbox
-/// or as a queued prompt for an older worker.
+/// Result of delivering one message to a session: through its mailbox, as a
+/// queued prompt for an older worker, or, for a message from the user, as the
+/// user's prompt (`via: "turn"`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionMessageResponse {
@@ -39,11 +40,14 @@ pub struct SessionMessageResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionMessageRequest {
-    /// Stable identity across retries after an uncertain response.
+    /// Stable identity across retries after an uncertain response. For a
+    /// message from the user it is the prompt's command ID.
     pub request_id: String,
     pub text: String,
     /// Session asserted by the local caller, when this process runs inside a
     /// session worker. The daemon verifies that it exists and is top-level.
+    /// Without it the message is from the user and is submitted as the
+    /// user's prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_session_id: Option<String>,
 }

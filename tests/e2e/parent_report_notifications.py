@@ -269,7 +269,7 @@ to {project / 'report-b'}, and give your final answer.
         observe("idle state survives daemon restart", eventually("idle after restart", lambda: waiting(parent)))
         child_b_state = status(child_b["child_session_id"])
         assert child_b_state and child_b_state.get("active_prompt"), child_b_state
-        cli("prompt", "--session", parent, "User steering: write STEERING_ACK_1302 to "
+        cli("message", "--session", parent, "User steering: write STEERING_ACK_1302 to "
             + str(project / "steering-ack") + ". Do this small marker write yourself, spawn no more children, leave B running, then end your turn with a brief waiting status.")
         eventually("steering acknowledged", lambda: (project / "steering-ack").exists())
         second = eventually("parent idle after steering", lambda: waiting(parent))

@@ -181,11 +181,69 @@ async fn authenticated_message_route_passes_sender_and_target_to_daemon_operatio
     assert_eq!(result["via"], "mailbox");
     let requests = backend.message_requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].sender_session_id.as_deref(), Some("sender-1"));
+    assert_eq!(requests[0].sender_session_id, "sender-1");
     assert_eq!(requests[0].target_session_id, "recipient");
     assert_eq!(requests[0].text, "check the final patch");
     assert_eq!(requests[0].request_id, "request-1");
     assert!(requests[0].created_at_ms > 0);
+}
+
+/// A message with no sender comes from the user's own shell, so it is the
+/// user's prompt and takes the prompt endpoint's path: it waits for a session
+/// still starting, and its request id is the command id, so a retry after an
+/// ambiguous reply names the same command and the worker answers the same
+/// turn.
+#[tokio::test]
+async fn a_message_without_a_sender_is_submitted_as_the_users_prompt() {
+    let backend = Arc::new(FakeBackend {
+        live_view: Some(live_view("flash", &["high"])),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), waiting_for_its_worker);
+    let send = || {
+        bearer(Request::post("/api/v1/sessions/session-1/message"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"request_id":"user-message-1","text":"check the final patch"}"#,
+            ))
+            .unwrap()
+    };
+    let held = tokio::spawn(app.clone().oneshot(send()));
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !held.is_finished() && backend.submissions.lock().unwrap().is_empty(),
+        "a message to a session that is still starting waits for it, as a prompt does"
+    );
+
+    snapshot_tx.send_modify(|snapshot| snapshot.sessions[0].capabilities.prompt = true);
+    let first = held.await.unwrap().unwrap();
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    let first = json_body(first).await;
+    assert_eq!(
+        first,
+        serde_json::json!({"session_id":"session-1","via":"turn","turn_id":1})
+    );
+    let again = app.oneshot(send()).await.unwrap();
+    assert_eq!(again.status(), StatusCode::ACCEPTED);
+    assert_eq!(json_body(again).await, first);
+
+    let plain_prompt = mj_core::relay::RelayCommand::Prompt {
+        prompt: vec![agent_client_protocol::schema::v1::ContentBlock::Text(
+            agent_client_protocol::schema::v1::TextContent::new("check the final patch"),
+        )],
+    };
+    assert_eq!(
+        *backend.submissions.lock().unwrap(),
+        vec![
+            ("user-message-1".to_owned(), plain_prompt.clone()),
+            ("user-message-1".to_owned(), plain_prompt),
+        ],
+        "both attempts are the same plain prompt under the request id"
+    );
+    assert!(
+        backend.message_requests.lock().unwrap().is_empty(),
+        "nothing went to the mailbox route"
+    );
 }
 
 #[tokio::test]
@@ -816,7 +874,7 @@ impl SessionHandleBackend for FakeSession {
 }
 
 struct CapturedSessionMessageRequest {
-    sender_session_id: Option<String>,
+    sender_session_id: String,
     target_session_id: String,
     text: String,
     request_id: String,
@@ -1065,9 +1123,12 @@ impl SubagentBackend for FakeBackend {
             Ok(self.prompt_ordinal)
         })
     }
+    fn resolve_message_target(&self, requested_id: String) -> BoxFuture<'_, AnyResult<String>> {
+        Box::pin(async move { Ok(requested_id) })
+    }
     fn deliver_message(
         &self,
-        sender_session_id: Option<String>,
+        sender_session_id: String,
         target_session_id: String,
         text: String,
         request_id: String,

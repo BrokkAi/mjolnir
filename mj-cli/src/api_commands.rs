@@ -220,16 +220,20 @@ pub(crate) struct PromptArgs {
     /// Read the prompt from this file instead.
     #[arg(long)]
     prompt_file: Option<PathBuf>,
-    /// Block until the prompt's turn ends, and print its outcome.
-    #[arg(long)]
+    /// Retired; `mj prompt` always waits.
+    #[arg(long, hide = true)]
+    #[allow(
+        dead_code,
+        reason = "accepted so scripts written for the retired flag keep working"
+    )]
     wait: bool,
-    /// Seconds to wait for with `--wait`.
+    /// Seconds to wait for the turn to end before answering `timeout`.
     #[arg(long)]
     timeout: Option<u64>,
     /// Return when the harness asks for structured input.
     #[arg(long)]
     return_on_input: bool,
-    /// Print the response as JSON instead of text.
+    /// Print the turn's outcome as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
@@ -254,25 +258,46 @@ pub(crate) struct MessageArgs {
     /// Full session ID or unique case-insensitive hexadecimal prefix of at least 8 characters.
     #[arg(long)]
     session: String,
+    /// Stable producer-chosen identity; repeat it after an ambiguous reply.
+    #[arg(long)]
+    command_id: Option<String>,
+    /// Message text. `-` reads it from standard input.
+    text: Option<String>,
+    /// Read the message from this file instead.
+    #[arg(long)]
+    prompt_file: Option<PathBuf>,
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
-    /// Message text.
-    text: String,
 }
 
-pub(crate) async fn message(args: MessageArgs) -> Result<()> {
-    let sender_session_id = match std::env::var_os("MJ_SESSION_ID") {
-        Some(value) => Some(
+/// The session this process runs inside, which Mjolnir names in
+/// `MJ_SESSION_ID` for every harness session; `None` in the user's own shell.
+fn calling_session() -> Result<Option<String>> {
+    std::env::var_os("MJ_SESSION_ID")
+        .map(|value| {
             value
                 .into_string()
-                .map_err(|_| anyhow::anyhow!("MJ_SESSION_ID is not valid Unicode"))?,
-        ),
-        None => None,
-    };
+                .map_err(|_| anyhow::anyhow!("MJ_SESSION_ID is not valid Unicode"))
+        })
+        .transpose()
+}
+
+/// Send a message and return. From the user's own shell the daemon submits
+/// it as the user's prompt, steered into a running turn or queued; from
+/// inside a session it is that session's labelled message to another
+/// session or to one of its own sub-agents.
+pub(crate) async fn message(args: MessageArgs) -> Result<()> {
+    let sender_session_id = calling_session()?;
+    let text = read_prompt(args.text, args.prompt_file)?
+        .context("pass the message text, --prompt-file, or `-` to read standard input")?;
+    let from_the_user = sender_session_id.is_none();
     let request = mj_controller::server::api::SessionMessageRequest {
-        request_id: mj_core::state::new_session_id()?,
-        text: args.text,
+        request_id: match args.command_id {
+            Some(id) => id,
+            None => mj_core::state::new_session_id()?,
+        },
+        text,
         sender_session_id,
     };
     let response = ApiClient::connect()
@@ -283,6 +308,7 @@ pub(crate) async fn message(args: MessageArgs) -> Result<()> {
         return print_json(&response);
     }
     match response.turn_id {
+        Some(turn_id) if from_the_user => println!("turn {turn_id}"),
         Some(turn_id) => println!(
             "message queued for session {} as turn {}",
             response.session_id, turn_id
@@ -1216,8 +1242,19 @@ pub(crate) async fn clear_queue(args: ClearQueueArgs) -> Result<()> {
     }
 }
 
-/// Send a prompt, and with `--wait` block on the turn it became.
+/// Send a prompt as the user and wait for the turn it became.
 pub(crate) async fn prompt(args: PromptArgs) -> Result<()> {
+    prompt_from(args, calling_session()?).await
+}
+
+async fn prompt_from(args: PromptArgs, calling_session: Option<String>) -> Result<()> {
+    // A prompt sent this way reads exactly as the user's own. An agent sends
+    // as itself instead, and its message is labelled with its session.
+    ensure!(
+        calling_session.is_none(),
+        "`mj prompt` sends as the user, so it cannot run inside a session \
+         (MJ_SESSION_ID is set). Send with `mj message`, then follow with `mj wait`."
+    );
     let text = read_prompt(args.text.clone(), args.prompt_file.clone())?
         .context("pass the prompt text, --prompt-file, or `-` to read standard input")?;
     let client = ApiClient::connect().await?;
@@ -1225,14 +1262,10 @@ pub(crate) async fn prompt(args: PromptArgs) -> Result<()> {
         Some(id) => client.prompt_with_id(&args.session, text, Some(id)).await?,
         None => client.prompt(&args.session, text).await?,
     };
-    if !args.wait {
-        return match args.json {
-            true => print_json(&accepted),
-            false => {
-                println!("turn {}", accepted.turn_id);
-                Ok(())
-            }
-        };
+    // Named before the wait, so a caller whose wait is cut off can go on
+    // with `mj wait --turn`.
+    if !args.json {
+        eprintln!("turn {}", accepted.turn_id);
     }
     // Only the wait follows the daemon across an upgrade; the prompt was
     // accepted once and is never sent again.
@@ -1861,7 +1894,8 @@ pub(crate) async fn resume(args: ResumeArgs) -> Result<()> {
 /// The branch is the daemon's: a Mjolnir session Mjolnir still has a record of
 /// is resumed, one it has archived is restored from the indexed transcript,
 /// and another tool's session is imported and then resumed. The output says
-/// which of the three ran, so the caller can follow with `mj prompt`.
+/// which of the three ran, so the caller can follow with `mj prompt` or
+/// `mj message`.
 async fn resume_wiki(args: ResumeArgs, wiki_id: String) -> Result<()> {
     let client = ApiClient::connect().await?;
     let info = client
@@ -3055,7 +3089,7 @@ mod tests {
     /// Launch finding R12-1: `mj wait` printed the harness's stop reason as
     /// the API returns it, "finished (EndTurn) turn 16 in 5.3s", while `mj
     /// sessions` and the parent's sub-agent notice said "completed, end of
-    /// turn". `mj wait` and `mj prompt --wait` use the same words, placed as
+    /// turn". `mj wait` and `mj prompt` use the same words, placed as
     /// the notice places them; `--json` keeps the stop reason unchanged.
     // Hard-won: 5a09877c: wait exposed raw harness stop reasons unlike the existing session summary.
     #[test]
@@ -3247,6 +3281,26 @@ mod tests {
         );
     }
 
+    /// `mj prompt` sends as the user. Inside a session that would let an
+    /// agent's prompt read exactly as the user's own, so it refuses before it
+    /// reads any input or reaches the daemon (this call has no prompt text,
+    /// so anything past the refusal stops at asking for it).
+    #[tokio::test]
+    async fn a_prompt_from_inside_a_session_is_refused_before_it_is_sent() {
+        let cli = Cli::try_parse_from(["mj", "prompt", "--session", "peer-1"]).unwrap();
+        let Some(Command::Prompt(args)) = cli.command else {
+            panic!("expected the prompt subcommand");
+        };
+        let error = prompt_from(args, Some("caller-1".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "`mj prompt` sends as the user, so it cannot run inside a session \
+             (MJ_SESSION_ID is set). Send with `mj message`, then follow with `mj wait`."
+        );
+    }
+
     // Hard-won: 4209cb10: branch export refusal did not name the required --branch flag.
     #[test]
     fn the_session_driving_subcommands_parse_their_selectors() {
@@ -3266,8 +3320,41 @@ mod tests {
         };
         assert_eq!(args.session, "s1");
         assert_eq!(args.text.as_deref(), Some("now add a test"));
-        assert!(args.wait);
         assert_eq!(args.timeout, Some(30));
+        // `mj prompt` always waits. Scripts written for the retired `--wait`
+        // keep working, and help no longer offers it.
+        let command = <Cli as clap::CommandFactory>::command();
+        let retired = command
+            .find_subcommand("prompt")
+            .expect("the prompt command")
+            .get_arguments()
+            .find(|argument| argument.get_long() == Some("wait"))
+            .expect("the retired --wait");
+        assert!(retired.is_hide_set());
+
+        let cli = Cli::try_parse_from([
+            "mj",
+            "message",
+            "--session",
+            "s1",
+            "--command-id",
+            "steer-1",
+            "--prompt-file",
+            "steer.md",
+            "--json",
+        ])
+        .unwrap();
+        let Some(Command::Message(args)) = cli.command else {
+            panic!("expected the message subcommand");
+        };
+        assert_eq!(args.command_id.as_deref(), Some("steer-1"));
+        assert_eq!(args.prompt_file, Some(PathBuf::from("steer.md")));
+        assert_eq!(args.text, None);
+        assert!(args.json);
+        assert!(
+            Cli::try_parse_from(["mj", "message", "--session", "s1", "--wait", "go"]).is_err(),
+            "`mj message` sends and returns; it has no --wait"
+        );
 
         let cli = Cli::try_parse_from(["mj", "wait", "--session", "s1", "--turn", "12"]).unwrap();
         let Some(Command::Wait(args)) = cli.command else {

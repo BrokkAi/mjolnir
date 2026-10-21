@@ -57,7 +57,7 @@ away.
 - **Multi-repo projects.** Bundle several repositories so they provision,
   checkpoint, move, and restore together.
 - **Agent and editor integration.** Drive sessions through `mj new`, `mj prompt`,
-  and `mj wait`, the HTTP API, or `mj acp` for stdio ACP clients.
+  `mj message` and `mj wait`, the HTTP API, or `mj acp` for stdio ACP clients.
 - **Terminal, web, and desktop.** A full terminal dashboard, plus a
   privacy-first web viewer you can reach from your phone over Tailscale, and a
   desktop app. All three share the same live sessions.

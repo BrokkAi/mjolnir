@@ -107,10 +107,12 @@ Sessions and workspaces:
 
 Running a turn:
 
-- `mj message --session <id> <text>` — message another top-level session or
-  one of your own sub-agents. A session sender's ID is carried into the
-  recipient's message so it can reply.
-- `mj prompt` — send a prompt; `--wait` also waits for the turn to end.
+- `mj message --session <id> <text>` — send and return. Inside a session it
+  messages another top-level session or one of your own sub-agents, and your
+  session's ID is carried into the recipient's message so it can reply. From
+  the user's own shell it sends the user's prompt and prints `turn N`.
+- `mj prompt` — send a prompt as the user and wait for its turn to end. It
+  refuses to run inside a session; there, use `mj message`, then `mj wait`.
 - `mj wait` — block until the turn ends and print the outcome, the turn number,
   the elapsed time, and the agent's final message.
 - `mj interrupt-turn` — interrupt the current turn while keeping the environment.
@@ -146,10 +148,11 @@ mj diff --session "$id"
 mj suspend --session "$id"
 ```
 
-`mj new` prints the id, `mj wait` blocks until the turn ends, and
-`mj prompt --wait` does both for every prompt after the first. A prompt comes
-from the positional argument, from `--prompt-file`, or from standard input when
-the argument is `-`.
+`mj new` prints the id and `mj wait` blocks until the turn ends. For each
+prompt after the first, `mj message --session "$id" <text>` sends it and
+returns, and `mj wait --session "$id"` waits for the result; from the user's
+own shell, `mj prompt` does both. The text comes from the positional argument,
+from `--prompt-file`, or from standard input when the argument is `-`.
 
 ## Rules
 

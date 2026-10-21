@@ -2675,6 +2675,24 @@ async fn send_message_resolves_only_authorized_hex_session_prefixes() {
         "{}",
         self_prefix.message
     );
+
+    // A message from the user is the user's prompt, and the user may prompt
+    // any session, so the prefix a session may not use names the sub-agent.
+    assert_eq!(
+        refusals
+            .resolve_message_target("C0FFEE00".into())
+            .await
+            .unwrap(),
+        FOREIGN_CHILD
+    );
+    let ambiguous = refusals
+        .resolve_message_target("deadbeef".into())
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{ambiguous:#}").contains("ambiguous"),
+        "{ambiguous:#}"
+    );
 }
 
 #[tokio::test]
@@ -2726,7 +2744,7 @@ async fn send_message_refuses_stopped_self_foreign_child_unknown_target_and_chil
     }
     let claimed_child_sender = backend
         .deliver_message(
-            Some("child-1".into()),
+            "child-1".into(),
             "peer-1".into(),
             "hello".into(),
             "claimed-child-sender".into(),
