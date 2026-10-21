@@ -238,10 +238,10 @@ diagnosis, design choices, and work with a high risk of subtle bugs. A subtle
 task gets a smarter, more expensive agent. Judge difficulty, not brief length.";
 
 /// The same description when only the straightforward type is configured.
-/// There is no type to choose, so the parent delegates only straightforward
+/// There is no type to choose, so the parent delegates straightforward
 /// work and keeps work that needs judgment.
 const ONE_TASK_TYPE: &str = "Mjolnir supplies the configured
-child model and effort. Delegate only straightforward work: work with a clear
+child model and effort. Delegate straightforward work: work with a clear
 method, including locating code, running commands or test suites, and
 implementing a settled design. Do work that needs judgment yourself, including
 ambiguous diagnosis, design choices, and changes with a high risk of subtle
@@ -2299,7 +2299,7 @@ mod tests {
         // straightforward work and keeps work that needs judgment.
         let one = delegation_policy(4, false);
         assert!(
-            one.contains("`close` tools; Mjolnir supplies the configured\nchild model and effort. Delegate only straightforward work: "),
+            one.contains("`close` tools; Mjolnir supplies the configured\nchild model and effort. Delegate straightforward work: "),
             "{one}"
         );
         assert!(
