@@ -206,7 +206,7 @@ transcript before prompt=true prompt hit=Some(PromptInput)
 ╭ × Overlaid dialog ───────────────────────────────────────────────────────────────────────────────╮
 │Visible dialog message                                                                            │
 │                                       Submit these answers                                       │
-│  Submit all     Skip     Cancel                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -237,7 +237,7 @@ footer=Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then 
 ╭ × Custom title ──────────────────────────────────────────────────────────────╮
 │One short question                                                            │
 │                             Submit these answers                             │
-│  Submit all     Skip     Cancel                                              │
+│  Answer & Next     Previous     Cancel                                       │
 │                                                                              │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions   │
 ╰──────────────────────────────────────────────────────────────────────────────╯
@@ -266,7 +266,7 @@ natural question height=7 actual=7 transcript taller than message=true
 │consumes wrapped rows. The focused answer description also consumes wrapped   │
 │                                                                              │
 │>                                                                             │
-│  Submit all     Skip     Cancel                                              │
+│  Answer & Next     Previous     Cancel                                       │
 │                                                                              │
 │Text 1–4/19 · PgUp/PgDn or wheel scroll · Space toggle · Enter answer · Alt+←/│
 ╰──────────────────────────────────────────────────────────────────────────────╯

@@ -5878,23 +5878,16 @@ function buildElicitationCard(session, request) {
     update();
     focusQuestion();
   };
-  const send = button('Submit all', null, '');
+  const send = button('Answer & Next', null, '');
   send.type = 'submit';
-  const previous = button('←', () => navigate(current - 1));
-  previous.setAttribute('aria-label', 'Previous');
+  const previous = button('Previous', () => navigate(confirming ? unanswered()[0] ?? current : current - 1));
   previous.title = 'Previous question';
-  const next = button('→', () => navigate(current + 1));
-  next.setAttribute('aria-label', 'Next');
-  next.title = 'Next question';
-  const decline = button('Decline', () => submitElicitation(session.id, request.id, { action: 'decline' }));
-  const cancel = button('Cancel', () => submitElicitation(session.id, request.id, { action: 'cancel' }), 'danger');
+  button('Cancel', () => submitElicitation(session.id, request.id, { action: 'cancel' }), 'danger');
   const warning = el('div', 'elicitation-warning');
   warning.setAttribute('role', 'alert');
   const warningText = el('p');
   const warningList = el('ul');
   warning.append(warningText, warningList);
-  const back = button('Go back', () => navigate(unanswered()[0] ?? current));
-  const proceed = button('Submit anyway', () => submit());
   form.append(warning, actions);
 
   function update() {
@@ -5903,13 +5896,8 @@ function buildElicitationCard(session, request) {
       ? `Question ${current + 1}/${questions.length} · ${missing.length} unanswered` : '';
     questions.forEach((question, index) => { question.wrapper.hidden = confirming || index !== current; });
     warning.hidden = !confirming;
-    previous.hidden = next.hidden = confirming || questions.length <= 1;
-    send.hidden = decline.hidden = cancel.hidden = confirming;
-    back.hidden = proceed.hidden = !confirming;
-    send.textContent = current + 1 < questions.length ? 'Answer and next' : 'Submit all';
     for (const control of gated) control.disabled = sent;
-    previous.disabled = sent || current === 0;
-    next.disabled = sent || current + 1 >= questions.length;
+    previous.disabled = sent || (!confirming && current === 0);
   }
   function submit() {
     if (sent) return;
@@ -5920,7 +5908,7 @@ function buildElicitationCard(session, request) {
     event.preventDefault();
     if (sent) return;
     if (confirming) {
-      navigate(unanswered()[0] ?? current);
+      submit();
       return;
     }
     if (questions.length) {
@@ -5945,7 +5933,7 @@ function buildElicitationCard(session, request) {
       warningList.replaceChildren(...missing.map(index => el('li', '', questions[index].field.title)));
       confirming = true;
       update();
-      back.focus();
+      previous.focus();
       return;
     }
     submit();

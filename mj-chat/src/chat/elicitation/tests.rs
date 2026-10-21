@@ -223,7 +223,7 @@ fn six_row_plan_pane_keeps_text_and_page_down_actionable() {
         "plan text is hidden: {before_text}"
     );
     assert!(
-        before_text.contains("Submit"),
+        before_text.contains("Answer & Next"),
         "submit is hidden: {before_text}"
     );
     assert!(
@@ -622,13 +622,44 @@ fn golden_elicitation_dialog() {
         &first,
         &[format!("display fields={}", paired.display_fields.len())],
     );
-    paired.handle_key(KeyCode::Right, KeyModifiers::ALT);
+    paired.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     let second = rendered_in_pane(&paired, 100, 30);
     append_elicitation_golden_state(
         &mut output,
         "paired custom answer advances to question two of three",
         &second,
         &[format!("display fields={}", paired.display_fields.len())],
+    );
+
+    paired.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    append_elicitation_golden_state(
+        &mut output,
+        "last question keeps the same three actions",
+        &rendered_in_pane(&paired, 100, 20),
+        &[],
+    );
+    click_question_button(&mut paired, "Previous");
+    append_elicitation_golden_state(
+        &mut output,
+        "previous returns to the confirmed answer",
+        &rendered_in_pane(&paired, 100, 20),
+        &[],
+    );
+
+    let mut partial = ElicitationDialog::new(paired_request(1, true));
+    partial.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    append_elicitation_golden_state(
+        &mut output,
+        "unanswered warning keeps the same three actions",
+        &rendered_in_pane(&partial, 100, 20),
+        &[],
+    );
+    let response = click_question_button(&mut partial, "Cancel");
+    append_elicitation_golden_state(
+        &mut output,
+        "cancel remains available from the unanswered warning",
+        &rendered_in_pane(&partial, 100, 20),
+        &[format!("action: {response:?}")],
     );
 
     mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "elicitation-dialog", &output);
@@ -783,7 +814,7 @@ fn compact_question_pane_shows_the_focused_field_title_with_its_control() {
             text.contains("☐ No"),
             "boolean control missing at height {height}:\n{text}"
         );
-        assert!(text.contains("Answer and next"), "actions missing:\n{text}");
+        assert!(text.contains("Answer & Next"), "actions missing:\n{text}");
     }
 }
 
@@ -810,7 +841,7 @@ fn compact_question_keeps_validation_errors_and_the_labeled_control_visible() {
         text.contains("Architecture is required"),
         "error missing:\n{text}"
     );
-    assert!(text.contains("Submit"), "actions missing:\n{text}");
+    assert!(text.contains("Answer & Next"), "actions missing:\n{text}");
 }
 
 // Hard-won: 9651f8c: scrolling an option list hid the title identifying its field
@@ -890,7 +921,7 @@ fn navigating_past_defaults_requires_a_separate_deliberate_partial_submission() 
     dialog.handle_key(KeyCode::Right, KeyModifiers::ALT);
     dialog.handle_key(KeyCode::Right, KeyModifiers::ALT);
     assert_eq!(dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE), None);
-    dialog.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    dialog.handle_key(KeyCode::BackTab, KeyModifiers::SHIFT);
     assert_eq!(
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
         Some(ElicitationResponse::Accept {
@@ -1032,11 +1063,13 @@ fn click_question_button(
 #[test]
 fn mouse_navigation_and_submission_share_the_keyboard_confirmation_rules() {
     let mut dialog = ElicitationDialog::new(paired_request(2, false));
-    assert_eq!(click_question_button(&mut dialog, "Next"), None);
-    assert_eq!(click_question_button(&mut dialog, "Submit all"), None);
+    dialog.handle_key(KeyCode::End, KeyModifiers::NONE);
+    dialog.paste(" ");
+    assert_eq!(click_question_button(&mut dialog, "Answer & Next"), None);
+    assert_eq!(click_question_button(&mut dialog, "Answer & Next"), None);
     assert!(dialog.confirming_unanswered);
     assert_eq!(
-        click_question_button(&mut dialog, "Submit anyway"),
+        click_question_button(&mut dialog, "Answer & Next"),
         Some(ElicitationResponse::Accept {
             content: BTreeMap::from([(
                 "question_1".into(),
@@ -1060,7 +1093,7 @@ fn multiline_question_text_wraps_scrolls_and_survives_resize() {
     let first = buffer_text(&rendered_in_pane(&dialog, 48, 16));
     assert!(first.contains("How should we handle JPEG"));
     assert!(first.contains("existing linearization"));
-    assert!(first.contains("Submit all"));
+    assert!(first.contains("Answer & Next"));
     dialog.handle_key(KeyCode::PageDown, KeyModifiers::NONE);
     let before = rendered_in_pane(&dialog, 48, 16);
     let area = dialog.message_area().unwrap();
@@ -1072,7 +1105,7 @@ fn multiline_question_text_wraps_scrolls_and_survives_resize() {
     dialog.scroll_message(isize::MAX);
     let last = buffer_text(&rendered_in_pane(&dialog, 48, 16));
     assert!(last.contains("Final authored line"), "{last}");
-    assert!(last.contains("Submit all"));
+    assert!(last.contains("Answer & Next"));
 }
 
 #[test]
@@ -1085,7 +1118,7 @@ fn warning_buttons_do_not_edit_the_custom_answer_behind_them() {
     assert!(dialog.confirming_unanswered);
     dialog.paste("accidental paste");
     dialog.handle_key(KeyCode::Char('x'), KeyModifiers::NONE);
-    dialog.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    dialog.handle_key(KeyCode::BackTab, KeyModifiers::SHIFT);
     assert_eq!(
         dialog.handle_key(KeyCode::Char(' '), KeyModifiers::NONE),
         Some(ElicitationResponse::Accept {
