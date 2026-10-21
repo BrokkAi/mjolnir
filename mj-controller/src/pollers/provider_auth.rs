@@ -78,10 +78,12 @@ impl ProviderAuthCache {
             .profiles
             .iter()
             .filter_map(|(id, profile)| {
+                // Only a Codex profile's answer needs its parsed files; every
+                // other profile's comes from its auth scheme, which reads none.
                 let scheme = if profile.kind == HarnessKind::Codex {
                     self.files.get(&source(profile))?.1?
                 } else {
-                    false
+                    !profile.auth_scheme().uses_native_login_file()
                 };
                 Some((id.clone(), scheme))
             })
@@ -189,6 +191,42 @@ env_key = "FIXTURE_KEY"
         config.profiles.clear();
         assert!(cache.refresh(&config));
         assert!(cache.files.is_empty());
+    }
+
+    // Hard-won: #1322: the cache never skipped a non-Codex profile, so the poller pulled an OpenCode session's staged logins into the profile home.
+    #[test]
+    fn every_harness_skips_login_file_sync_exactly_as_its_auth_scheme_says() {
+        let home = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        for kind in HarnessKind::ALL {
+            let profile: mj_core::config::HarnessProfile =
+                serde_json::from_value(serde_json::json!({
+                    "kind": kind, "home": home.path().join(kind.id()),
+                }))
+                .unwrap();
+            config.profiles.insert(kind.id().into(), profile);
+        }
+        let bedrock: mj_core::config::HarnessProfile = serde_json::from_value(serde_json::json!({
+            "kind": "claude", "home": home.path().join("bedrock"),
+            "environment": {"CLAUDE_CODE_USE_BEDROCK": "1"},
+        }))
+        .unwrap();
+        config.profiles.insert("bedrock".into(), bedrock);
+
+        let mut cache = ProviderAuthCache::default();
+        assert!(cache.refresh(&config));
+
+        for (id, profile) in &config.profiles {
+            assert_eq!(
+                cache.schemes[id],
+                !profile.auth_scheme().uses_native_login_file(),
+                "{id}"
+            );
+        }
+        assert!(
+            cache.schemes["opencode"],
+            "OpenCode's logins live in its database"
+        );
     }
 
     #[test]
