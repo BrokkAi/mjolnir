@@ -1061,6 +1061,89 @@ mod capture_tests {
         assert!(fourth[0].merged_in.is_empty(), "{:?}", fourth[0].merged_in);
     }
 
+    /// The turn's own work stays pending while the capture lacks it, even
+    /// when a later mainline change conflicts with it, or the turn merged it
+    /// and reverted the merge, whether a review could attribute that or not.
+    /// All of it comes back inside another worktree's commits and is reviewed
+    /// as the turn's.
+    // Hard-won: b4a2db6e6: a conflict with later lines, or a merge the turn reverted, dropped the work from pending.
+    #[test]
+    fn pending_work_the_capture_lacks_is_reviewed_when_it_returns() {
+        let temp = repository();
+        let root = temp.path();
+        let outside = tempfile::tempdir().unwrap();
+        let other = outside.path().join("other");
+        let roots = vec![root.to_path_buf()];
+        let review = |baselines: &BTreeMap<PathBuf, String>| {
+            let start = read_untracked_at_start(&SystemGit, &roots).unwrap();
+            let deltas =
+                capture_repository_deltas(&SystemGit, &roots, baselines, &start, SESSION).unwrap();
+            advance_baselines(&SystemGit, &captured_trees(&deltas)).unwrap();
+            deltas
+        };
+        initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
+        git(root, &["checkout", "-qb", "lost"]);
+        std::fs::write(root.join("tracked.rs"), "fn main() { lost(); }\n").unwrap();
+        git(root, &["commit", "-qam", "lost"]);
+        for branch in ["undone", "again"] {
+            git(root, &["checkout", "-qb", branch, "main"]);
+            let file = format!("{branch}.rs");
+            std::fs::write(root.join(&file), format!("fn {branch}() {{}}\n")).unwrap();
+            git(root, &["add", &file]);
+            git(root, &["commit", "-qm", branch]);
+            git(root, &["checkout", "-q", "main"]);
+        }
+        std::fs::write(root.join("tracked.rs"), "fn main() { kept(); }\n").unwrap();
+        git(root, &["commit", "-qam", "kept"]);
+        let first = review(&BTreeMap::new());
+        assert!(
+            first[0].patch.contains("+fn main() { kept(); }"),
+            "{}",
+            first[0].patch
+        );
+
+        std::fs::remove_file(root.join(".git/logs/HEAD")).unwrap();
+        git(root, &["merge", "-q", "--no-ff", "--no-edit", "undone"]);
+        git(root, &["revert", "-m", "1", "--no-edit", "HEAD"]);
+        let second = review(&captured_trees(&first));
+        assert!(second[0].unattributed.is_some(), "{:?}", second[0]);
+
+        git(root, &["merge", "-q", "--no-ff", "--no-edit", "again"]);
+        git(root, &["revert", "-m", "1", "--no-edit", "HEAD"]);
+        let third = review(&captured_trees(&second));
+        assert_eq!(third[0].unattributed, None);
+
+        git(
+            root,
+            &["worktree", "add", "-q", "--detach", other.to_str().unwrap()],
+        );
+        git(&other, &["cherry-pick", "undone", "again"]);
+        let squash = std::process::Command::new("git")
+            .args(["merge", "-q", "--squash", "lost"])
+            .current_dir(&other)
+            .output()
+            .unwrap();
+        assert!(!squash.status.success(), "the squash conflicts with kept()");
+        std::fs::write(other.join("tracked.rs"), "fn main() { lost(); }\n").unwrap();
+        git(&other, &["add", "tracked.rs"]);
+        git(&other, &["commit", "-qm", "Squash lost"]);
+        let returned = git(&other, &["rev-parse", "HEAD"]);
+        git(root, &["merge", "-q", "--ff-only", &returned]);
+        let fourth = review(&captured_trees(&third));
+        assert_eq!(fourth[0].unattributed, None);
+        for wanted in [
+            "+fn undone() {}",
+            "+fn again() {}",
+            "+fn main() { lost(); }",
+        ] {
+            assert!(
+                fourth[0].patch.contains(wanted),
+                "{wanted:?} is missing: {}",
+                fourth[0].patch
+            );
+        }
+    }
+
     /// When the HEAD reflog no longer explains how HEAD moved, the review
     /// covers every change since the baseline and names why, rather than
     /// guessing which commits are the turn's.
