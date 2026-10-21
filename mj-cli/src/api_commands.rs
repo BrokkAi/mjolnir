@@ -326,12 +326,15 @@ pub(crate) struct WaitArgs {
     /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
-    /// Wait until this turn, as `mj prompt` printed it, or a later one, has
-    /// ended. The answer describes the latest turn that ended (a session keeps
-    /// only that turn's outcome and reply), and `--json` reports it as
-    /// `turn_id` beside `requested_turn_id`. Both forms honor the worker's
-    /// completion assessment, including expected continuation. Omit it to
-    /// wait until the session is idle with nothing queued.
+    /// Wait until this turn, as `mj new` or `mj message` printed it, or a
+    /// later one, has ended, and say how. The wait does not follow what the
+    /// session does after the turn (a turn the agent starts on its own,
+    /// background work, an automatic continuation); the answer names that as
+    /// `next`. It describes the latest turn that ended (a session keeps only
+    /// that turn's outcome and reply), and `--json` reports it as `turn_id`
+    /// beside `requested_turn_id`. Omit it to wait until the session settles:
+    /// idle, with nothing queued, including after turns the agent starts on
+    /// its own.
     #[arg(long)]
     turn: Option<u64>,
     /// Seconds to wait before answering `timeout`.
@@ -1423,6 +1426,30 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
         summary.push_str(&format!(
             " · {tool_calls} tool call{}",
             if tool_calls == 1 { "" } else { "s" }
+        ));
+    }
+    // A wait on a turn answers when that turn ends, whatever the session does
+    // after it; say what that is, in the dashboard's words.
+    if let Some(next) = &response.next {
+        let mut activity = mj_client::usage_format::SessionActivity::of_state(next.clone());
+        activity.capacity_retry =
+            response
+                .capacity_retry
+                .as_ref()
+                .map(|retry| mj_core::relay::CapacityRetry {
+                    attempt: retry.attempt,
+                    retry_at_ms: retry.retry_at_ms,
+                    command_id: String::new(),
+                    submitted: false,
+                });
+        activity.quota_recovery.clone_from(&response.quota_recovery);
+        if let Some(background) = &response.session.background_work {
+            activity.background_commands.clone_from(&background.tasks);
+        }
+        let now = u64::try_from(mj_core::clock::epoch_millis() / 1_000).unwrap_or_default();
+        summary.push_str(&format!(
+            "; the session is not idle: {}",
+            mj_client::usage_format::format_activity_clock(now, None, &activity)
         ));
     }
     lines.push(summary);
@@ -3073,6 +3100,18 @@ mod tests {
             serde_json::json!({"turn_id": 82, "requested_turn_id": 82}),
         );
         assert_eq!(wait_report_lines(&same).len(), 1);
+        // What the session does after the turn, in the dashboard's words.
+        let busy = wait_response(
+            "finished",
+            serde_json::json!({
+                "stop_reason": "EndTurn",
+                "next": {"state": "expecting", "since_ms": 1}
+            }),
+        );
+        assert_eq!(
+            wait_report_lines(&busy)[0],
+            "turn finished (completed, end of turn); the session is not idle: expecting the agent to continue"
+        );
         assert_eq!(
             serde_json::to_value(&finished).unwrap()["stop_reason"],
             "EndTurn",

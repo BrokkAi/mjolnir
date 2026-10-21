@@ -185,10 +185,6 @@ fn inferred_finished_handoff_marks_the_tracked_turn_idle() {
         )
         .unwrap();
     assert!(relay.operational_state().activity_state().is_idle());
-    assert_eq!(
-        relay.operational_state().turn_completion.unwrap().decision,
-        mj_core::activity::verdict::Decision::InferIdle
-    );
 }
 
 #[test]
@@ -5853,20 +5849,48 @@ fn legacy_runtime_receipt_replays_without_constraining_new_prompts() {
     assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
 }
 
+/// A Jev verdict leaves the completion identity a handback reminder is
+/// checked against at the prompt's own completion event, which is the ordinal
+/// the reminder's sender takes from the projected turn outcome. The identity
+/// survives a restart; the process-local inference does not.
+// Hard-won: #1304: a Jev verdict rewrote the completion ordinal, so a parent's handback reminder was refused as stale.
 #[test]
-fn jev_completion_survives_restart_and_later_work_without_restoring_idle_inference() {
-    use mj_core::activity::verdict::Decision;
-    for decision in [
-        Decision::ExpectContinuation,
-        Decision::InferIdle,
-        Decision::AwaitingInput,
+fn a_jev_verdict_keeps_the_completion_identity_a_handback_reminder_names() {
+    use mj_core::activity::verdict::{Decision, TurnCompletion};
+    use mj_core::assessment::{Failure, Input, Judgment, Verdict, Work};
+    let judged = |failure, work| Verdict {
+        failure: Judgment {
+            choice: failure,
+            confidence: 0.99,
+            probabilities: Default::default(),
+        },
+        input: Judgment {
+            choice: Input::None,
+            confidence: 0.99,
+            probabilities: Default::default(),
+        },
+        work: Judgment {
+            choice: work,
+            confidence: 0.99,
+            probabilities: [("finished".into(), 1.0)].into(),
+        },
+        background: None,
+        reply: None,
+    };
+    for (verdict, reason) in [
+        (
+            judged(Failure::None, Work::Waiting),
+            "background_work_pending",
+        ),
+        (judged(Failure::None, Work::Finished), "work_finished"),
+        (judged(Failure::Other, Work::Unclear), "user_input_required"),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
         relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
         submit_relay(&mut relay, "first-command", prompt("work"));
         relay.claim_pending_commands(true).unwrap();
-        relay
+        let completed = relay
             .record_command_completed(
                 "first-command",
                 RelayCommandOutcome::Prompt {
@@ -5876,38 +5900,44 @@ fn jev_completion_survives_restart_and_later_work_without_restoring_idle_inferen
                 },
             )
             .unwrap();
-        let generation = relay.turn_context.generation();
+        relay.prepare_pending_assessment().unwrap();
+        let (revision, _, _) = relay.pending_replied_verdict().unwrap();
         assert_eq!(
-            relay
-                .apply_replied_decision(generation, decision, 200)
-                .unwrap(),
-            "applied"
+            relay.apply_turn_assessment(revision, verdict).unwrap(),
+            reason
         );
-        let completion = relay.operational_state().turn_completion.unwrap();
-        assert_eq!(completion.command_id, "first-command");
-        assert_eq!(completion.decision, decision);
-        let identity = relay.retry_assessment_identity();
-        relay.resolve_retry_assessment(identity, false).unwrap();
         drop(relay);
         let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
-        assert_eq!(
-            relay.operational_state().turn_completion,
-            Some(completion.clone())
-        );
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: vec![],
+            })
+            .unwrap();
         assert_eq!(relay.activity_facts().inferred_idle_since_ms, None);
         assert!(
             relay.pending_replied_verdict().is_none(),
             "a recorded assessment is not polled again after restart"
         );
-        submit_relay(&mut relay, "second-command", prompt("different work"));
-        relay.claim_pending_commands(true).unwrap();
-        assert_ne!(
+        let identity = relay.operational_state().turn_completion;
+        let reminder = RelayCommand::HandbackReminder {
+            completed_command_id: "first-command".into(),
+            completed_ordinal: completed,
+        };
+        assert!(
             relay
-                .apply_replied_decision(generation, Decision::InferIdle, 300)
-                .unwrap(),
-            "applied"
+                .submit_command("handback-reminder-test", reminder)
+                .unwrap()
+                .is_ok(),
+            "{reason}: the reminder names the turn as the projection does"
         );
-        assert_eq!(relay.operational_state().turn_completion, Some(completion));
+        assert_eq!(
+            identity,
+            Some(TurnCompletion {
+                command_id: "first-command".into(),
+                completed_ordinal: completed,
+                decision: Decision::KeepCurrent,
+            })
+        );
     }
 }
 

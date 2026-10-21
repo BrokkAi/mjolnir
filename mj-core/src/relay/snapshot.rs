@@ -628,7 +628,7 @@ pub struct RelayOperationalState {
     pub assessment: Option<Box<crate::assessment::TurnAssessment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment_context: Option<Box<crate::assessment::ContextHistory>>,
-    /// Recorded completion, independent of process-local activity inference.
+    /// The latest prompt's completion identity; see `TurnCompletion`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_completion: Option<crate::activity::verdict::TurnCompletion>,
     #[serde(default)]
@@ -1370,7 +1370,7 @@ pub struct RelaySnapshot {
     pub assessment: Option<crate::assessment::TurnAssessment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment_context: Option<crate::assessment::ContextHistory>,
-    /// Recorded completion, independent of process-local activity inference.
+    /// The latest prompt's completion identity; see `TurnCompletion`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_completion: Option<crate::activity::verdict::TurnCompletion>,
     #[serde(default)]

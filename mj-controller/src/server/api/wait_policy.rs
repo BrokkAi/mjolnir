@@ -23,9 +23,13 @@ pub fn map_stop_reason(stop_reason: &str) -> (WaitOutcome, Option<String>) {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WaitObservation {
     pub assessment: Option<mj_core::assessment::Summary>,
-    /// The shared activity classification, including the worker's Jev inference.
+    /// The worker's assessment record for the turn that ended last, whether a
+    /// prompt or a turn the harness started itself. It owns Jev's verdict on
+    /// that turn.
+    pub turn_assessment: Option<mj_core::assessment::TurnAssessment>,
+    /// The worker's activity state. It alone answers whether the session is
+    /// idle, as it does for the dashboard.
     pub activity: mj_core::activity::ActivityState,
-    pub turn_completion: Option<mj_core::activity::verdict::TurnCompletion>,
     pub background_work: Option<ApiBackgroundWork>,
     pub pending_elicitations: Vec<mj_core::elicitation::ElicitationRequest>,
     pub lifecycle: Option<ViewerLifecycleCategory>,
@@ -54,7 +58,8 @@ pub struct WaitObservation {
     pub execution: MaterializedExecutionState,
     pub active_turn: Option<MaterializedTurn>,
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
-    pub queued: usize,
+    /// Command ids of the prompts queued behind the active turn.
+    pub queued: Vec<String>,
     pub capacity_retry: Option<CapacityRetry>,
     pub retry_assessment_pending: bool,
     pub quota_recovery: Option<mj_core::continuation::QuotaRecovery>,
@@ -71,44 +76,116 @@ pub struct WaitObservation {
 }
 
 impl WaitObservation {
-    fn completed_decision(&self, outcome: &MaterializedTurnOutcome) -> Option<WaitDecision> {
-        use mj_core::activity::verdict::Decision;
-        let mut result = WaitDecision::from_outcome(outcome);
-        // Failure, cancellation, and a native input handoff already have a
-        // terminal meaning; background activity cannot turn them into success.
-        if result.outcome != WaitOutcome::Finished {
-            return Some(result);
-        }
-        let completion = self
-            .turn_completion
-            .as_ref()
-            .filter(|completion| completion.command_id == outcome.command_id);
-        if let Some(completion) = completion
-            && matches!(
-                completion.decision,
-                Decision::InferIdle | Decision::AwaitingInput
-            )
-            && let Some(span) = result.turn.as_mut()
+    /// How the turn that left `outcome` ended, or `None` while it has not.
+    ///
+    /// A turn has ended once the worker has stopped working on its request.
+    /// It has not while the worker is about to send that same request again
+    /// (a server retry armed for it, or that retry queued or running), while
+    /// Jev is still reading its reply, or while a sub-agent child still owes
+    /// its report for it. Nothing that starts a new command holds it: a turn
+    /// the harness starts itself, background work, an expected continuation,
+    /// Mjolnir's automatic continuation, a later prompt or a goal. Those are
+    /// what the session does next.
+    ///
+    /// How it ended is the harness outcome, except where the turn's own
+    /// assessment record says otherwise: Jev read the reply as a question for
+    /// the user, or as a quota stop. A quota recovery recorded for the turn
+    /// answers `quota_limit` with its notice, whether or not a resume is
+    /// scheduled: the resume is a new command.
+    fn turn_end(&self, outcome: &MaterializedTurnOutcome) -> Option<WaitDecision> {
+        use mj_core::assessment::{Action, Status};
+        if self.resubmits(outcome)
+            || self.report_pending_for.as_deref() == Some(outcome.command_id.as_str())
         {
-            span.completed_position = span.completed_position.max(completion.completed_ordinal);
+            return None;
         }
-        match completion.map(|completion| completion.decision) {
-            Some(Decision::ExpectContinuation) => None,
-            Some(Decision::InferIdle) => Some(result),
-            Some(Decision::AwaitingInput) => {
-                result.outcome = WaitOutcome::InputRequired;
-                result.stop_reason = Some(mj_core::acp::AWAITING_INPUT_STOP_REASON.into());
-                Some(result)
-            }
-            Some(Decision::KeepCurrent) | None => {
-                let later_turn = self.active_turn.as_ref().is_some_and(|active| {
-                    active
-                        .accepted_ordinal
-                        .is_some_and(|ordinal| ordinal > outcome.completed_ordinal)
-                });
-                (self.activity.is_idle() || later_turn).then_some(result)
-            }
+        let verdict = self.turn_assessment.as_ref().filter(|assessment| {
+            assessment.turn_id == outcome.command_id
+                && assessment.completed_ordinal == outcome.completed_ordinal
+                && assessment.current()
+        });
+        // Pending until Jev answers; failed until the request is tried again.
+        if verdict
+            .is_some_and(|assessment| matches!(assessment.status, Status::Pending | Status::Failed))
+        {
+            return None;
         }
+        let mut result = WaitDecision::from_outcome(outcome);
+        let action = verdict.and_then(|assessment| assessment.action);
+        let recovery = self
+            .quota_recovery
+            .as_ref()
+            .filter(|recovery| recovery.completed_command_id == outcome.command_id);
+        if recovery.is_some() || action == Some(Action::RecoverQuota) {
+            result.outcome = WaitOutcome::QuotaLimit;
+            if let Some(recovery) = recovery {
+                result.message = Some(recovery.notice.clone());
+            }
+        } else if result.outcome == WaitOutcome::Finished && action == Some(Action::AwaitInput) {
+            result.outcome = WaitOutcome::InputRequired;
+            result.stop_reason = Some(mj_core::acp::AWAITING_INPUT_STOP_REASON.into());
+        }
+        Some(result)
+    }
+
+    /// Whether the worker is sending the request of the turn that left
+    /// `outcome` again. A server retry carries the turn it retries in its
+    /// command id, so this holds while the retry is armed, queued or running,
+    /// and the retry's own ending is what answers for the turn.
+    fn resubmits(&self, outcome: &MaterializedTurnOutcome) -> bool {
+        let retries = |command_id: &str| {
+            mj_core::relay::retried_turn(command_id) == Some(outcome.completed_ordinal)
+        };
+        self.capacity_retry
+            .as_ref()
+            .is_some_and(|retry| !retry.submitted && retries(&retry.command_id))
+            || self
+                .active_turn
+                .as_ref()
+                .is_some_and(|turn| retries(&turn.command_id))
+            || self.queued.iter().any(|command_id| retries(command_id))
+    }
+
+    /// Whether the session has settled. The worker's activity state owns this.
+    /// The rest are facts the worker cannot know: whether the daemon can hand
+    /// the session a prompt, a prompt queued behind the active turn, and a
+    /// prompt handed over at creation that has not ended as a turn yet. That
+    /// prompt may not even show in the worker's view while it is submitted.
+    fn settled(&self) -> bool {
+        let first_prompt_open = match &self.start_status {
+            Some(StartStatus::Pending) => true,
+            Some(StartStatus::Submitted { turn_id }) => self
+                .last_turn_outcome
+                .as_ref()
+                .and_then(|outcome| outcome.accepted_ordinal)
+                .is_none_or(|ordinal| ordinal < *turn_id),
+            _ => false,
+        };
+        self.activity.is_idle()
+            && !self.cannot_take_prompt
+            && !first_prompt_open
+            && self.queued.is_empty()
+    }
+
+    /// What the session does next, for the answer: the worker's activity
+    /// state, unless the session is idle.
+    pub fn next(&self) -> Option<mj_core::activity::ActivityState> {
+        (!self.activity.is_idle()).then(|| self.activity.clone())
+    }
+
+    /// What a `return_on_input` wait answers while the harness asks for
+    /// structured input.
+    fn input_request(&self) -> Option<WaitDecision> {
+        (!self.pending_elicitations.is_empty()).then(|| WaitDecision {
+            outcome: WaitOutcome::InputRequired,
+            stop_reason: None,
+            message: Some("the harness needs a response to a structured input request".into()),
+            turn_id: self
+                .active_turn
+                .as_ref()
+                .and_then(|turn| turn.accepted_ordinal),
+            turn: None,
+        })
     }
 
     /// Fold a child's recorded report into this observation, judged against
@@ -206,11 +283,17 @@ impl WaitDecision {
 
 /// Decide whether this observation ends the wait.
 ///
-/// A wait answers for one turn, so only the turn's own fate ends it. In
-/// particular a session that is carrying an error from some earlier, unrelated
-/// action is not a reason to fail the turn the caller asked about: the session
-/// error badge has no expiry, and reporting it here made every later wait on
-/// that session return `error` while the turn ran on perfectly well.
+/// A wait asks one of two questions, and each has one owner. With a turn
+/// (`--turn N`, and `mj prompt`, which passes the turn it submitted): did
+/// prompted turn N end, and how? [`WaitObservation::turn_end`] answers that.
+/// Without one: has the session settled? [`WaitObservation::settled`] answers
+/// that, from the worker's activity state.
+///
+/// A session that is carrying an error from some earlier, unrelated action is
+/// not a reason to fail the turn the caller asked about: the session error
+/// badge has no expiry, and reporting it here made every later wait on that
+/// session return `error` while the turn ran on perfectly well. A turn that
+/// really did fail reports `error` through its own outcome.
 ///
 /// The rules run in order, and the order is the point:
 ///
@@ -227,25 +310,16 @@ impl WaitDecision {
 ///    any initialization result that raced with the close request.
 /// 2. A launch failure or failed initialization is reported before a turn; a durable
 ///    failed lifecycle ends it as `error` even after a daemon restart.
-/// 3. Otherwise the wait has a target turn: the caller's explicit `turn_id`,
-///    else the turn a create-with-prompt call submitted, else "the newest
-///    one", which additionally requires the session to be idle with an empty
-///    queue — with queued prompts, "idle" alone would return an earlier
-///    prompt's outcome — and able to take a prompt, so a session that is
-///    still provisioning or reattaching is not reported as finished. A
-///    prompt handed over at creation that has not become a turn yet is
-///    queued work too: until it is submitted there is no turn to target,
-///    and an idle session would otherwise read as finished before it.
-/// 4. A session-level wait also requires the shared activity classification to
-///    be idle, including Jev's assessment of background work and continuation.
-///    Both forms use the command-bound Jev completion decision. A recorded
-///    final verdict remains usable while later unrelated work is active.
-/// 5. A completed turn under server assessment or with a retry armed is not an
-///    ending: the worker may submit the retry itself, so the wait keeps waiting.
+/// 3. A wait on turn N answers once the latest turn outcome was accepted at or
+///    after N and that turn has ended. It never waits for what the session
+///    does next; the response names that as `next`. A session keeps only its
+///    latest outcome, so the answer can describe a later turn than N.
+/// 4. A wait without a turn answers once the session has settled, with how
+///    the latest turn ended. A settled session with no turn at all has
+///    nothing to wait for and answers `finished` at once.
 ///
-/// A turn that really did fail still reports `error`: a rejected or interrupted
-/// turn, and an unrecognized stop reason, all come back through the turn record
-/// in rule 3.
+/// Either form with `return_on_input` answers `input_required` while the
+/// harness asks for structured input, unless turn N has already ended.
 pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Option<WaitDecision> {
     let stopping = matches!(
         observation.lifecycle,
@@ -314,103 +388,32 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
             ),
         ));
     }
-    let retry_pending = |outcome: &MaterializedTurnOutcome| {
-        observation.report_pending_for.as_deref() == Some(outcome.command_id.as_str())
-            || observation.retry_assessment_pending
-            || observation
-                .assessment
-                .as_ref()
-                .is_some_and(|a| a.status == mj_core::assessment::Status::Deferred)
-            || observation.capacity_retry.is_some()
-            || observation.quota_recovery.as_ref().is_some_and(|r| {
-                r.retry_at_ms.is_some() && r.completed_command_id == outcome.command_id
-            })
-    };
-    if let Some(recovery) = &observation.quota_recovery
-        && recovery.retry_at_ms.is_none()
-        && observation
+    if let Some(target) = request.turn_id {
+        let ended = observation
             .last_turn_outcome
             .as_ref()
-            .is_some_and(|t| t.command_id == recovery.completed_command_id)
-        && request.turn_id.is_none_or(|target| {
-            observation
-                .last_turn_outcome
-                .as_ref()
-                .and_then(|t| t.accepted_ordinal)
-                .is_some_and(|a| a >= target)
-        })
-    {
-        return Some(WaitDecision::simple(
-            WaitOutcome::QuotaLimit,
-            Some(recovery.notice.clone()),
-        ));
-    }
-    let target = request.turn_id.or(match &observation.start_status {
-        Some(StartStatus::Submitted { turn_id }) => Some(*turn_id),
-        _ => None,
-    });
-    let target_finished = target.is_some_and(|target| {
-        observation
-            .last_turn_outcome
-            .as_ref()
-            .is_some_and(|outcome| {
+            .filter(|outcome| {
                 outcome
                     .accepted_ordinal
                     .is_some_and(|ordinal| ordinal >= target)
-                    && !retry_pending(outcome)
-                    && observation.completed_decision(outcome).is_some()
             })
-    });
-    if request.return_on_input && !target_finished && !observation.pending_elicitations.is_empty() {
-        return Some(WaitDecision {
-            outcome: WaitOutcome::InputRequired,
-            stop_reason: None,
-            message: Some("the harness needs a response to a structured input request".into()),
-            turn_id: observation
-                .active_turn
-                .as_ref()
-                .and_then(|turn| turn.accepted_ordinal),
-            turn: None,
-        });
+            .and_then(|outcome| observation.turn_end(outcome));
+        return match ended {
+            None if request.return_on_input => observation.input_request(),
+            ended => ended,
+        };
     }
-    // Session waits follow the same activity decision as the worker and UI.
-    // Targeted waits use the command-bound completion below; current session
-    // activity may belong to later unrelated work.
-    if request.turn_id.is_none() && !observation.activity.is_idle() {
+    if request.return_on_input
+        && let Some(asking) = observation.input_request()
+    {
+        return Some(asking);
+    }
+    if !observation.settled() {
         return None;
     }
-    match target {
-        Some(target) => {
-            let outcome = observation.last_turn_outcome.as_ref()?;
-            if outcome
-                .accepted_ordinal
-                .is_none_or(|ordinal| ordinal < target)
-            {
-                return None;
-            }
-            if retry_pending(outcome) {
-                return None;
-            }
-            observation.completed_decision(outcome)
-        }
-        None => {
-            if observation.cannot_take_prompt
-                || matches!(observation.start_status, Some(StartStatus::Pending))
-                || observation.execution != MaterializedExecutionState::Idle
-                || observation.active_turn.is_some()
-                || observation.queued > 0
-            {
-                return None;
-            }
-            match observation.last_turn_outcome.as_ref() {
-                Some(outcome) if retry_pending(outcome) => None,
-                Some(outcome) => observation.completed_decision(outcome),
-                // Idle with nothing queued and nothing ever finished: there is
-                // no turn to wait for, so say so immediately rather than block
-                // for the full timeout.
-                None => Some(WaitDecision::simple(WaitOutcome::Finished, None)),
-            }
-        }
+    match observation.last_turn_outcome.as_ref() {
+        Some(outcome) => observation.turn_end(outcome),
+        None => Some(WaitDecision::simple(WaitOutcome::Finished, None)),
     }
 }
 

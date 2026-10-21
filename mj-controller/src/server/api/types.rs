@@ -564,6 +564,14 @@ pub struct WaitResponse {
     /// later one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_turn_id: Option<u64>,
+    /// What the session is doing as the wait answers, as the worker's activity
+    /// state, when that is not idle. A wait on a turn answers when that turn
+    /// ends, so this is where a turn the harness started itself, background
+    /// work or an expected continuation shows. Absent when the session is
+    /// idle. A top-level field because older v1 clients reject unknown fields
+    /// inside the shared turn type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<mj_core::activity::ActivityState>,
     /// One-based position of this turn in the conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_number: Option<u64>,

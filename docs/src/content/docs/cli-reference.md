@@ -417,6 +417,23 @@ prints is the handle `mj wait --turn` takes, not a count. With `--json`, the
 `stop_reason` field keeps the harness's own spelling, such as `EndTurn`, and
 `turn_id` and `tool_calls` are separate fields.
 
+`mj wait` answers one of two questions:
+
+- `mj wait --session <id> --turn <turn-id>` waits until that turn has ended and
+  says how. The turn ID is the number `mj new` and `mj message` print. A server
+  retry of the turn is part of it, but nothing that starts new work is: not a
+  turn the agent starts on its own, background work it left running, or
+  Mjolnir's automatic continuation. When the session is still busy as the wait
+  answers, the first line ends with what it is doing, in the dashboard's words,
+  for example
+  `turn finished (completed, end of turn) in 5.3s; the session is not idle: [BG 2m10s]`.
+  `--json` carries it as `next`.
+- `mj wait --session <id>` without `--turn` waits until the session settles:
+  the agent is idle, nothing is queued, and the session can take a prompt. That
+  includes turns the agent starts on its own, so it can keep waiting long after
+  your prompt's turn ended. To learn when your prompt's turn ended, pass
+  `--turn`, or use `mj prompt`.
+
 `mj resume` continues a session that `mj suspend` suspended. The session keeps its
 id, its transcript, and its work; Mjolnir provisions a fresh target and restores
 the verified checkpoint. Every selector is optional: the session's own record
