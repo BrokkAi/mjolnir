@@ -123,7 +123,8 @@ impl RuntimeState {
                 _ = cancellation_poll.tick() => {
                     if cancelled.load(Ordering::Acquire) {
                         for session_id in &sessions {
-                            // A close past checkpoint commit must finish its teardown.
+                            // A close past its commit refuses this and
+                            // finishes its teardown (#1218).
                             if let Err(error) = self.cancel_lifecycle_with_intent(session_id).await {
                                 tracing::debug!(%session_id, %error, "workspace close cancellation cannot interrupt this session");
                             }
@@ -132,14 +133,26 @@ impl RuntimeState {
                 }
             }
         }
+        // Once the person cancels, a session that stopped before its commit
+        // did what was asked, and one past it finished. Either way the answer
+        // is the cancellation; each session's record says how its own close
+        // ended.
+        if cancelled.load(Ordering::Acquire) {
+            if !failures.is_empty() {
+                tracing::info!(
+                    %workspace_id,
+                    sessions = failures.join("; "),
+                    "workspace close was cancelled; these sessions did not stop"
+                );
+            }
+            bail!(
+                "Workspace deletion cancelled; workspace and drafts retained. Completed suspensions were not undone."
+            );
+        }
         ensure!(
             failures.is_empty(),
             "Workspace retained; some sessions may already be stopped. Retry to close remaining sessions: {}",
             failures.join("; ")
-        );
-        ensure!(
-            !cancelled.load(Ordering::Acquire),
-            "Workspace deletion cancelled; workspace and drafts retained. Completed suspensions were not undone."
         );
         // A resumed session may still have its old workspace id in storage.
         // Exclude admission until the deletion transaction has committed.

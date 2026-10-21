@@ -132,6 +132,7 @@ pub(super) fn write_network_checkpoint_archive(
             metadata: RepositoryMetadata {
                 saved_refs: Default::default(),
                 stash_stack: Vec::new(),
+                git_operation: None,
                 id: "project".into(),
                 relative_destination: "project".into(),
                 checkout_subdirectory: None,
@@ -146,6 +147,7 @@ pub(super) fn write_network_checkpoint_archive(
             staged_patch: Vec::new(),
             unstaged_patch: Vec::new(),
             untracked_tar: Vec::new(),
+            operation_payloads: None,
         }],
         Vec::new(),
     )

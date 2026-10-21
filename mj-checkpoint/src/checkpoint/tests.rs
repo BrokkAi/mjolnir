@@ -696,6 +696,7 @@ fn restore_rewrites_grok_cwd_key_and_session_summary_for_target_workspace() {
         metadata: crate::archive::RepositoryMetadata {
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
+            git_operation: None,
             id: "app".into(),
             relative_destination: "app".into(),
             checkout_subdirectory: None,
@@ -710,6 +711,8 @@ fn restore_rewrites_grok_cwd_key_and_session_summary_for_target_workspace() {
         staged_patch_path: "repositories/app/staged.patch".into(),
         unstaged_patch_path: "repositories/app/unstaged.patch".into(),
         untracked_tar_path: "repositories/app/untracked.tar".into(),
+        conflicted_worktree_tar_path: None,
+        operation_state_tar_path: None,
     }];
     let path = restored_native_relative_path(
         HarnessKind::Grok,
@@ -1012,6 +1015,7 @@ fn restore_rewrites_claude_project_artifacts_for_target_workspace() {
         metadata: crate::archive::RepositoryMetadata {
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
+            git_operation: None,
             id: "app".into(),
             relative_destination: "app".into(),
             checkout_subdirectory: None,
@@ -1026,6 +1030,8 @@ fn restore_rewrites_claude_project_artifacts_for_target_workspace() {
         staged_patch_path: "repositories/app/staged.patch".into(),
         unstaged_patch_path: "repositories/app/unstaged.patch".into(),
         untracked_tar_path: "repositories/app/untracked.tar".into(),
+        conflicted_worktree_tar_path: None,
+        operation_state_tar_path: None,
     }];
     let path = restored_native_relative_path(
         HarnessKind::Claude,
@@ -1054,6 +1060,7 @@ fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
         metadata: crate::archive::RepositoryMetadata {
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
+            git_operation: None,
             id: "app".into(),
             relative_destination: "app".into(),
             checkout_subdirectory: None,
@@ -1068,6 +1075,8 @@ fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
         staged_patch_path: "repositories/app/staged.patch".into(),
         unstaged_patch_path: "repositories/app/unstaged.patch".into(),
         untracked_tar_path: "repositories/app/untracked.tar".into(),
+        conflicted_worktree_tar_path: None,
+        operation_state_tar_path: None,
     }];
     let path = restored_native_relative_path(
             HarnessKind::Kimi,
@@ -1520,6 +1529,7 @@ fn codex_root_archive_throughput() {
             staged_patch: Vec::new(),
             unstaged_patch: Vec::new(),
             untracked_tar: Vec::new(),
+            operation_payloads: None,
         })
         .collect::<Vec<_>>();
     let archive_started = std::time::Instant::now();

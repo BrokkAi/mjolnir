@@ -515,8 +515,7 @@ fn probe_profile(
     let home = profile
         .kind
         .home_from_environment(root.path().join("profile"));
-    super::worker_binary::stage_profile(profile, &home)?;
-    super::worker_binary::stage_codex_catalog(
+    super::worker_binary::stage_profile_with_catalog(
         profile_id,
         profile,
         &home,

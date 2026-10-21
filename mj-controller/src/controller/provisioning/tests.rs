@@ -520,9 +520,11 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
     crate::database::save_lifecycle_session(record).unwrap();
 
     let executor = RecordingExecutor::succeeding();
-    let error = futures::executor::block_on(
-        controller.provision_subagent_session_controlled(&child_id, &executor),
-    )
+    let error = futures::executor::block_on(controller.provision_subagent_session_controlled(
+        &child_id,
+        &executor,
+        || false,
+    ))
     .unwrap_err();
     assert!(
         format!("{error:#}").contains("refusing cleanup: container locator"),
@@ -660,9 +662,12 @@ fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
     let record = controller.state.sessions.get_mut(&child_id).unwrap();
     record.state = SessionState::Provisioning;
     crate::database::save_lifecycle_session(record).unwrap();
-    let error = futures::executor::block_on(
-        controller.provision_subagent_session_controlled(&child_id, &CancelledLaunch),
-    )
+    // Daemon shutdown is what cancels a launch nobody else stops (#1321).
+    let error = futures::executor::block_on(controller.provision_subagent_session_controlled(
+        &child_id,
+        &CancelledLaunch,
+        || true,
+    ))
     .unwrap_err();
     assert!(
         format!("{error:#}").contains("operation cancelled"),
@@ -676,6 +681,16 @@ fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
         "cleanup used a fresh executor despite launch cancellation: {record:?}"
     );
     assert!(record.archived);
+    // The parent reads this cause; "operation cancelled" alone looked like a
+    // fault on the target.
+    let cause = record.last_error.as_deref().unwrap();
+    assert!(
+        cause.starts_with(
+            "sub-agent startup failed: the Mjolnir daemon stopped during this launch; \
+             spawn the sub-agent again: operation cancelled"
+        ),
+        "{cause}"
+    );
     controller
         .ensure_subagent_slot_available(PROVISIONED_SESSION, None)
         .unwrap();

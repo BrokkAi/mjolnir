@@ -1,7 +1,7 @@
 //! Single daemon owner for durable mailbox delivery to relay workers.
 
-use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -28,6 +28,99 @@ fn outbox_notify() -> &'static Notify {
 /// Wake the delivery owner after a producer commits new outbox rows.
 pub(crate) fn notify_mailbox_outbox_changed() {
     outbox_notify().notify_one();
+}
+
+/// The event each session's delivery last stopped at, and why. This only
+/// keeps a held event from being logged on every sweep; a new daemon logs
+/// each waiting event once more.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WaitingNotice {
+    event_key: String,
+    reason: String,
+}
+
+fn waiting_notices() -> &'static Mutex<HashMap<String, WaitingNotice>> {
+    static NOTICES: OnceLock<Mutex<HashMap<String, WaitingNotice>>> = OnceLock::new();
+    NOTICES.get_or_init(Default::default)
+}
+
+fn waited_ms(created_at_ms: u64) -> i64 {
+    mj_core::clock::epoch_millis().saturating_sub(i64::try_from(created_at_ms).unwrap_or(i64::MAX))
+}
+
+/// Log when a session's delivery starts waiting on an event or the reason
+/// changes. The outbox retries every few seconds, so repeating an unchanged
+/// reason would bury the log.
+fn note_waiting(
+    session_id: &str,
+    event_key: &str,
+    created_at_ms: u64,
+    reason: &str,
+    error: Option<&str>,
+) {
+    let notice = WaitingNotice {
+        event_key: event_key.to_owned(),
+        reason: reason.to_owned(),
+    };
+    let mut notices = waiting_notices()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if notices.get(session_id) == Some(&notice) {
+        return;
+    }
+    notices.insert(session_id.to_owned(), notice);
+    drop(notices);
+    let waited_ms = waited_ms(created_at_ms);
+    match error {
+        Some(error) => tracing::info!(
+            %session_id,
+            %event_key,
+            %reason,
+            %error,
+            waited_ms,
+            "mailbox event is waiting for delivery"
+        ),
+        None => tracing::info!(
+            %session_id,
+            %event_key,
+            %reason,
+            waited_ms,
+            "mailbox event is waiting for delivery"
+        ),
+    }
+}
+
+/// Forget a session's waiting notice once its event leaves the outbox, and
+/// say how long an event that had been logged as waiting was held.
+fn note_settled(session_id: &str, event_key: &str, created_at_ms: u64, outcome: &str) {
+    let mut notices = waiting_notices()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if notices
+        .get(session_id)
+        .is_none_or(|notice| notice.event_key != event_key)
+    {
+        return;
+    }
+    notices.remove(session_id);
+    drop(notices);
+    tracing::info!(
+        %session_id,
+        %event_key,
+        %outcome,
+        waited_ms = waited_ms(created_at_ms),
+        "mailbox event stopped waiting"
+    );
+}
+
+/// Drop notices for sessions with nothing left pending, such as after a
+/// `/clear` discarded their events or the session was destroyed.
+fn retain_waiting_notices<'a>(pending_sessions: impl IntoIterator<Item = &'a String>) {
+    let pending: std::collections::HashSet<&String> = pending_sessions.into_iter().collect();
+    waiting_notices()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|session_id, _| pending.contains(session_id));
 }
 
 /// Retry durable events when they are enqueued and periodically after workers
@@ -107,6 +200,7 @@ async fn process_pending(
             .or_insert_with(Vec::new)
             .push(entry);
     }
+    retain_waiting_notices(by_session.keys());
 
     let mut work = by_session.into_iter();
     let mut active = JoinSet::new();
@@ -166,6 +260,7 @@ pub(crate) async fn deliver_session_events(
             }
         };
         let command_id = mailbox_command_id(&entry.event_key);
+        let created_at_ms = event.created_at_ms;
         match deliver_mailbox_event(state.clone(), &sessions, &session_id, event, entry.unpark)
             .await
         {
@@ -177,7 +272,9 @@ pub(crate) async fn deliver_session_events(
                 })
                 .await
                 {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(())) => {
+                        note_settled(&session_id, &entry.event_key, created_at_ms, "accepted");
+                    }
                     Ok(Err(error)) => {
                         tracing::warn!(%session_id, event_key = %entry.event_key, %error, "mailbox command was accepted but its outbox acknowledgement was not recorded; it will retry with the same command id")
                     }
@@ -186,9 +283,13 @@ pub(crate) async fn deliver_session_events(
                     }
                 }
             }
-            Ok(MailboxEventDelivery::Pending) => return,
+            Ok(MailboxEventDelivery::Pending(reason)) => {
+                note_waiting(&session_id, &entry.event_key, created_at_ms, &reason, None);
+                return;
+            }
             Ok(MailboxEventDelivery::Discarded) => {
                 tracing::debug!(%session_id, event_key = %entry.event_key, "mailbox event was discarded by /clear");
+                note_settled(&session_id, &entry.event_key, created_at_ms, "discarded");
             }
             Ok(MailboxEventDelivery::Failed(reason)) => {
                 let key = entry.event_key.clone();
@@ -198,12 +299,15 @@ pub(crate) async fn deliver_session_events(
                 })
                 .await
                 {
-                    Ok(Ok(())) => tracing::warn!(
-                        %session_id,
-                        event_key = %entry.event_key,
-                        %reason,
-                        "mailbox event cannot be delivered to this worker and was marked failed"
-                    ),
+                    Ok(Ok(())) => {
+                        tracing::warn!(
+                            %session_id,
+                            event_key = %entry.event_key,
+                            %reason,
+                            "mailbox event cannot be delivered to this worker and was marked failed"
+                        );
+                        note_settled(&session_id, &entry.event_key, created_at_ms, "failed");
+                    }
                     Ok(Err(error)) => {
                         tracing::warn!(%session_id, event_key = %entry.event_key, %error, "failed to persist mailbox delivery failure; event remains pending");
                         return;
@@ -215,7 +319,15 @@ pub(crate) async fn deliver_session_events(
                 }
             }
             Err(error) => {
+                let error = format!("{error:#}");
                 tracing::debug!(%session_id, event_key = %entry.event_key, %command_id, %error, "mailbox delivery is pending and will retry with the same command id");
+                note_waiting(
+                    &session_id,
+                    &entry.event_key,
+                    created_at_ms,
+                    "the delivery attempt did not finish; it will retry with the same command id",
+                    Some(&error),
+                );
                 return;
             }
         }
@@ -224,7 +336,8 @@ pub(crate) async fn deliver_session_events(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MailboxEventDelivery {
-    Pending,
+    /// Not delivered yet; the text says what delivery waits for.
+    Pending(String),
     Accepted(u64),
     Discarded,
     Failed(String),
@@ -264,24 +377,27 @@ pub(crate) async fn deliver_mailbox_event(
     unpark_parked: bool,
 ) -> Result<MailboxEventDelivery> {
     let Some(record) = state.session_record(session_id) else {
-        return Ok(MailboxEventDelivery::Pending);
+        return Ok(pending("the daemon has no record of the session"));
     };
     if record.state == mj_core::state::SessionState::Parked {
         if !unpark_parked {
-            return Ok(MailboxEventDelivery::Pending);
+            return Ok(pending("the session is parked"));
         }
         std::sync::Arc::clone(&state)
             .unpark_subagent(session_id.to_owned())
             .await?;
     }
     let Some(record) = state.session_record(session_id) else {
-        return Ok(MailboxEventDelivery::Pending);
+        return Ok(pending("the daemon has no record of the session"));
     };
     if !record.state.has_live_worker() {
-        return Ok(MailboxEventDelivery::Pending);
+        return Ok(MailboxEventDelivery::Pending(format!(
+            "the session has no live worker (state {:?})",
+            record.state
+        )));
     }
     let Some(handle) = sessions.find_session(session_id.to_owned()).await? else {
-        return Ok(MailboxEventDelivery::Pending);
+        return Ok(pending("the session manager does not hold the session"));
     };
     let view = handle.view();
     let protocol = published_worker_relay_protocol(&view);
@@ -297,10 +413,17 @@ pub(crate) async fn deliver_mailbox_event(
     if let Some(reason) = protocol_error {
         return Ok(MailboxEventDelivery::Failed(reason.to_owned()));
     }
-    if !view.connected
-        || protocol.is_none_or(|version| version < mj_core::relay::RELAY_LEGACY_MAILBOX_PROTOCOL)
-    {
-        return Ok(MailboxEventDelivery::Pending);
+    if !view.connected {
+        return Ok(pending("the worker is not connected"));
+    }
+    match protocol {
+        None => return Ok(pending("the worker has not published its relay protocol")),
+        Some(version) if version < mj_core::relay::RELAY_LEGACY_MAILBOX_PROTOCOL => {
+            return Ok(MailboxEventDelivery::Pending(format!(
+                "worker relay protocol {version} cannot receive mailbox events"
+            )));
+        }
+        Some(_) => {}
     }
     if matches!(
         event.body,
@@ -316,6 +439,10 @@ pub(crate) async fn deliver_mailbox_event(
         Ok(result) => result,
         Err(_) => anyhow::bail!("mailbox command acknowledgement timed out"),
     }
+}
+
+fn pending(reason: &str) -> MailboxEventDelivery {
+    MailboxEventDelivery::Pending(reason.to_owned())
 }
 
 pub(crate) fn mailbox_command_id(event_key: &str) -> String {

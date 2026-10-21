@@ -1,5 +1,8 @@
 use super::*;
 
+mod operation;
+pub(super) use operation::{validate_operation_state_tar, validate_operation_state_tar_reader};
+
 /// A command boundary that lets Git collection and restore be tested without
 /// invoking the host's Git executable.
 pub trait GitCommandRunner: Sync {
@@ -131,21 +134,31 @@ pub fn collect_git_snapshot_with_progress(
         Some(state) => state.history.clone(),
         None => select_git_history(runner, repository, &spec.history, &identity.head_commit)?,
     };
+    let unmerged_paths = clone_state
+        .as_ref()
+        .and_then(|state| state.operation.as_ref())
+        .map(operation::CollectedOperation::unmerged_paths)
+        .unwrap_or_default();
     let result = collect_git_contents(
         runner,
         &checkout,
         spec,
         identity,
         history,
+        &unmerged_paths,
         include_untracked,
         progress,
     );
     if let Some(state) = clone_state {
-        let cleanup = remove_temporary_stash_refs(runner, repository, &state.temporary_refs);
+        let cleanup = remove_temporary_refs(runner, repository, &state.temporary_refs);
         let mut snapshot = result?;
         cleanup?;
         snapshot.metadata.saved_refs = state.saved_refs;
         snapshot.metadata.stash_stack = state.stash_stack;
+        if let Some(operation) = state.operation {
+            snapshot.metadata.git_operation = Some(operation.metadata);
+            snapshot.operation_payloads = Some(operation.payloads);
+        }
         Ok(snapshot)
     } else {
         result
@@ -166,6 +179,7 @@ pub fn collect_git_metadata_snapshot(
         metadata: RepositoryMetadata {
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
+            git_operation: None,
             id: spec.id.clone(),
             relative_destination: spec.relative_destination.clone(),
             checkout_subdirectory: None,
@@ -180,6 +194,7 @@ pub fn collect_git_metadata_snapshot(
         staged_patch: Vec::new(),
         unstaged_patch: Vec::new(),
         untracked_tar: Vec::new(),
+        operation_payloads: None,
     })
 }
 
@@ -1196,6 +1211,7 @@ struct CloneRefState {
     history: GitHistorySelection,
     saved_refs: std::collections::BTreeMap<String, String>,
     stash_stack: Vec<mj_core::archive::SavedStashEntry>,
+    operation: Option<operation::CollectedOperation>,
     temporary_refs: Vec<String>,
 }
 
@@ -1204,56 +1220,30 @@ fn collect_clone_refs(
     repository: &Path,
     base: &str,
 ) -> Result<CloneRefState> {
-    let unmerged = git_bytes(
-        runner,
-        repository,
-        ["ls-files", "--unmerged", "-z"],
-        &[],
-        "inspect clone merge conflicts",
-    )?;
-    ensure!(
-        unmerged.is_empty(),
-        "cannot checkpoint a clone with unresolved Git conflicts"
-    );
-    for operation in [
-        "MERGE_HEAD",
-        "CHERRY_PICK_HEAD",
-        "REVERT_HEAD",
-        "REBASE_HEAD",
-        "BISECT_START",
-    ] {
-        let present = run_git(
-            runner,
-            repository,
-            ["rev-parse", "--verify", "--quiet", operation],
-            &[],
-        )?;
-        ensure!(
-            matches!(present.status, 0 | 1),
-            "{}",
-            git_failure("inspect Git operation state", &present)
-        );
-        ensure!(
-            present.status != 0,
-            "cannot checkpoint a clone during Git operation {operation}"
-        );
-    }
+    // An unfinished operation is part of the clone's work: it travels in the
+    // snapshot, and its objects in the bundle, like a stash entry's.
+    let operation = operation::collect(runner, repository)?;
     git_text(
         runner,
         repository,
         ["rev-parse", "--verify", &format!("{base}^{{commit}}")],
     )
     .context("managed clone source commit is unavailable")?;
-    let lines = git_text(
-        runner,
-        repository,
-        [
-            "for-each-ref",
-            "--format=%(refname) %(objectname)",
-            "refs/heads",
-            "refs/tags",
-            "refs/notes",
-        ],
+    let mut list_refs = [
+        "for-each-ref",
+        "--format=%(refname) %(objectname)",
+        "refs/heads",
+        "refs/tags",
+        "refs/notes",
+    ]
+    .map(String::from)
+    .to_vec();
+    if operation.is_some() {
+        list_refs.extend(operation::OPERATION_REF_NAMESPACES.map(String::from));
+    }
+    let lines = trim_output(
+        &git_bytes_owned(runner, repository, &list_refs, "list the clone's refs")?,
+        "decode the clone's refs",
     )?;
     let mut saved_refs = std::collections::BTreeMap::new();
     for line in lines.lines() {
@@ -1299,6 +1289,14 @@ fn collect_clone_refs(
             )?;
             temporary_refs.push(name);
         }
+        if let Some(operation) = &operation {
+            operation.carry_objects(
+                runner,
+                repository,
+                &format!("refs/mj/checkpoint/{capture_id}/operation"),
+                &mut temporary_refs,
+            )?;
+        }
         let mut tips = vec!["HEAD".to_owned()];
         tips.extend(saved_refs.keys().cloned());
         tips.extend(temporary_refs.iter().cloned());
@@ -1320,7 +1318,10 @@ fn collect_clone_refs(
             .map(|(_, oid)| git_text(runner, repository, ["cat-file", "-t", oid]))
             .collect::<Result<Vec<_>>>()?
             .iter()
-            .any(|kind| kind == "tag");
+            .any(|kind| kind == "tag")
+            || operation
+                .as_ref()
+                .is_some_and(operation::CollectedOperation::carries_tags);
         let bundle_arguments = (count > 0 || annotated_tag).then(|| {
             let mut args = vec!["bundle".to_owned(), "create".to_owned(), "-".to_owned()];
             args.extend(tips);
@@ -1337,16 +1338,19 @@ fn collect_clone_refs(
             history,
             saved_refs,
             stash_stack,
+            operation,
             temporary_refs,
         }),
         Err(error) => {
-            remove_temporary_stash_refs(runner, repository, &temporary_refs)?;
+            remove_temporary_refs(runner, repository, &temporary_refs)?;
             Err(error)
         }
     }
 }
 
-fn remove_temporary_stash_refs(
+/// Removes the refs a capture made so the committed bundle carries stash
+/// entries and operation objects.
+fn remove_temporary_refs(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     names: &[String],
@@ -1357,7 +1361,7 @@ fn remove_temporary_stash_refs(
             repository,
             ["update-ref", "-d", name],
             &[],
-            "remove temporary stash checkpoint ref",
+            "remove temporary checkpoint ref",
         )?;
     }
     Ok(())
@@ -1425,12 +1429,14 @@ fn select_git_history(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_git_contents(
     runner: &dyn GitCommandRunner,
     checkout: &CheckoutLocation,
     spec: &GitCollectionSpec,
     identity: CollectedGitIdentity,
     history: GitHistorySelection,
+    unmerged_paths: &[PathBuf],
     include_untracked: bool,
     progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
 ) -> Result<RepositorySnapshot> {
@@ -1439,6 +1445,24 @@ fn collect_git_contents(
         base_commit,
         bundle_arguments,
     } = history;
+    // Git describes an unmerged path as "Unmerged path" or as a combined
+    // diff, neither of which `git apply` accepts. The operation capture
+    // carries those paths, so both patches leave them out and keep
+    // everything else, such as the files a merge staged cleanly.
+    let patch_command = |arguments: &[&str]| GitCommand {
+        arguments: arguments
+            .iter()
+            .map(OsString::from)
+            .chain((!unmerged_paths.is_empty()).then(|| OsString::from("--")))
+            .chain(unmerged_paths.iter().map(|path| {
+                let mut pathspec = OsString::from(":(exclude,literal)");
+                pathspec.push(path);
+                pathspec
+            }))
+            .collect(),
+        stdin: Vec::new(),
+        env: Vec::new(),
+    };
     // These commands only inspect repository state and produce independent
     // payloads. Nested joins share Rayon's bounded worker pool, including when
     // several repositories are being collected at once.
@@ -1455,11 +1479,10 @@ fn collect_git_contents(
                     None => Ok(Vec::new()),
                 },
                 || {
-                    git_bytes(
+                    git_success(
                         runner,
                         repository,
-                        ["diff", "--binary", "--cached", "--no-ext-diff"],
-                        &[],
+                        patch_command(&["diff", "--binary", "--cached", "--no-ext-diff"]),
                         "collect staged Git patch",
                     )
                 },
@@ -1468,11 +1491,10 @@ fn collect_git_contents(
         || {
             rayon::join(
                 || {
-                    git_bytes(
+                    git_success(
                         runner,
                         repository,
-                        ["diff", "--binary", "--no-ext-diff"],
-                        &[],
+                        patch_command(&["diff", "--binary", "--no-ext-diff"]),
                         "collect unstaged Git patch",
                     )
                 },
@@ -1501,6 +1523,7 @@ fn collect_git_contents(
         metadata: RepositoryMetadata {
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
+            git_operation: None,
             id: spec.id.clone(),
             relative_destination: spec.relative_destination.clone(),
             checkout_subdirectory: checkout.subdirectory.clone(),
@@ -1515,6 +1538,7 @@ fn collect_git_contents(
         staged_patch,
         unstaged_patch,
         untracked_tar,
+        operation_payloads: None,
     })
 }
 
@@ -1536,6 +1560,14 @@ pub fn restore_git_snapshot(
     if let Some(branch) = &snapshot.metadata.branch {
         ensure_branch_available_for_checkout(runner, repository, branch)?;
     }
+    let operation = match (
+        &snapshot.metadata.git_operation,
+        &snapshot.operation_payloads,
+    ) {
+        (None, None) => None,
+        (Some(operation), Some(payloads)) => Some((operation, payloads)),
+        _ => bail!("the snapshot's Git operation metadata and payloads disagree"),
+    };
     if !snapshot.committed_bundle.is_empty() {
         let mut bundle = tempfile::NamedTempFile::new_in(repository)
             .with_context(|| format!("create temporary Git bundle in {}", repository.display()))?;
@@ -1564,6 +1596,9 @@ pub fn restore_git_snapshot(
             },
             "import committed delta bundle",
         )?;
+    }
+    if let Some((operation, _)) = operation {
+        operation::verify_objects(runner, repository, operation)?;
     }
     let clone_refs =
         !snapshot.metadata.saved_refs.is_empty() || !snapshot.metadata.stash_stack.is_empty();
@@ -1605,7 +1640,11 @@ pub fn restore_git_snapshot(
             ensure!(
                 name.starts_with("refs/heads/")
                     || name.starts_with("refs/tags/")
-                    || name.starts_with("refs/notes/"),
+                    || name.starts_with("refs/notes/")
+                    || (operation.is_some()
+                        && operation::OPERATION_REF_NAMESPACES
+                            .iter()
+                            .any(|namespace| name.starts_with(namespace))),
                 "saved Git ref has an unsupported namespace: {name}"
             );
             git_bytes(
@@ -1673,7 +1712,11 @@ pub fn restore_git_snapshot(
             "restore unstaged Git patch",
         )?;
     }
-    restore_untracked_tar(repository, &snapshot.untracked_tar)
+    restore_untracked_tar(repository, &snapshot.untracked_tar)?;
+    if let Some((operation, payloads)) = operation {
+        operation::restore(runner, repository, operation, payloads)?;
+    }
+    Ok(())
 }
 
 /// Rebuild the Git configuration that makes a managed network workspace
@@ -1931,6 +1974,29 @@ fn git_failure(action: &str, output: &GitOutput) -> anyhow::Error {
     )
 }
 
+/// Which working-tree files a tar holds, which decides the rules it is built,
+/// checked and restored under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorktreeTar {
+    /// Untracked files. Credential-like names are left out, a symbolic link
+    /// must point inside the checkout, and a restore never replaces a file.
+    Untracked,
+    /// The working-tree files of unmerged paths. They are tracked content and
+    /// travel as exactly as the patches carry the rest of the tracked tree:
+    /// nothing is left out, a link keeps its target, and a restore replaces
+    /// the file the checkout wrote at the path.
+    Conflicted,
+}
+
+impl WorktreeTar {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Untracked => "untracked",
+            Self::Conflicted => "conflicted",
+        }
+    }
+}
+
 pub(super) fn build_untracked_tar(
     repository: &Path,
     nul_paths: &[u8],
@@ -1961,31 +2027,93 @@ pub(super) fn build_untracked_tar(
             ensure_no_symlink_ancestors(repository, &relative)?;
             let metadata = fs::symlink_metadata(&source)
                 .with_context(|| format!("stat untracked path {}", source.display()))?;
-            if metadata.file_type().is_symlink() {
-                let target = fs::read_link(&source)
-                    .with_context(|| format!("read symlink {}", source.display()))?;
-                validate_symlink_target(&relative, &target)?;
-                let mut header = tar::Header::new_gnu();
-                header.set_entry_type(tar::EntryType::Symlink);
-                header.set_size(0);
-                header.set_mode(0o777);
-                header.set_link_name(&target)?;
-                header.set_cksum();
-                builder.append_data(&mut header, &relative, std::io::empty())?;
-            } else if metadata.is_file() {
-                let mut header = tar::Header::new_gnu();
-                header.set_metadata(&metadata);
-                header.set_cksum();
-                let mut file = File::open(&source)
-                    .with_context(|| format!("open untracked file {}", source.display()))?;
-                builder.append_data(&mut header, &relative, &mut file)?;
-            } else {
-                bail!("unsupported untracked file type at {}", source.display());
-            }
+            append_worktree_entry(
+                &mut builder,
+                repository,
+                &relative,
+                &metadata,
+                WorktreeTar::Untracked,
+            )?;
         }
         builder.finish().context("finish untracked-file tar")?;
     }
     Ok(output)
+}
+
+/// Archives the working-tree files of unmerged paths, and returns the tar and
+/// the paths that had no file.
+pub(super) fn build_conflicted_worktree_tar(
+    repository: &Path,
+    paths: &[PathBuf],
+) -> Result<(Vec<u8>, Vec<PathBuf>)> {
+    let mut output = Vec::new();
+    let mut missing = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut output);
+        for relative in paths {
+            validate_archive_relative_path(relative)?;
+            ensure_no_symlink_ancestors(repository, relative)?;
+            let source = repository.join(relative);
+            let metadata = match fs::symlink_metadata(&source) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    missing.push(relative.clone());
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("stat conflicted path {}", source.display()));
+                }
+            };
+            append_worktree_entry(
+                &mut builder,
+                repository,
+                relative,
+                &metadata,
+                WorktreeTar::Conflicted,
+            )?;
+        }
+        builder.finish().context("finish conflicted-file tar")?;
+    }
+    Ok((output, missing))
+}
+
+fn append_worktree_entry(
+    builder: &mut tar::Builder<&mut Vec<u8>>,
+    repository: &Path,
+    relative: &Path,
+    metadata: &fs::Metadata,
+    kind: WorktreeTar,
+) -> Result<()> {
+    let source = repository.join(relative);
+    if metadata.file_type().is_symlink() {
+        let target =
+            fs::read_link(&source).with_context(|| format!("read symlink {}", source.display()))?;
+        if kind == WorktreeTar::Untracked {
+            validate_symlink_target(relative, &target)?;
+        }
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_link_name(&target)?;
+        header.set_cksum();
+        builder.append_data(&mut header, relative, std::io::empty())?;
+    } else if metadata.is_file() {
+        let mut header = tar::Header::new_gnu();
+        header.set_metadata(metadata);
+        header.set_cksum();
+        let mut file = File::open(&source)
+            .with_context(|| format!("open {} file {}", kind.label(), source.display()))?;
+        builder.append_data(&mut header, relative, &mut file)?;
+    } else {
+        bail!(
+            "unsupported {} file type at {}",
+            kind.label(),
+            source.display()
+        );
+    }
+    Ok(())
 }
 
 pub(super) fn validate_untracked_tar(bytes: &[u8]) -> Result<()> {
@@ -1993,36 +2121,68 @@ pub(super) fn validate_untracked_tar(bytes: &[u8]) -> Result<()> {
 }
 
 pub(super) fn validate_untracked_tar_reader(reader: impl Read) -> Result<()> {
+    validate_worktree_tar_reader(reader, WorktreeTar::Untracked)
+}
+
+pub(super) fn validate_conflicted_worktree_tar(bytes: &[u8]) -> Result<()> {
+    validate_conflicted_worktree_tar_reader(Cursor::new(bytes))
+}
+
+pub(super) fn validate_conflicted_worktree_tar_reader(reader: impl Read) -> Result<()> {
+    validate_worktree_tar_reader(reader, WorktreeTar::Conflicted)
+}
+
+fn validate_worktree_tar_reader(reader: impl Read, kind: WorktreeTar) -> Result<()> {
+    let label = kind.label();
     let mut archive = tar::Archive::new(reader);
-    for entry in archive.entries().context("read untracked-file tar")? {
-        let entry = entry.context("read untracked-file tar entry")?;
-        let relative = entry.path().context("read untracked-file tar path")?;
+    for entry in archive
+        .entries()
+        .with_context(|| format!("read {label}-file tar"))?
+    {
+        let entry = entry.with_context(|| format!("read {label}-file tar entry"))?;
+        let relative = entry
+            .path()
+            .with_context(|| format!("read {label}-file tar path"))?;
         validate_archive_relative_path(&relative)?;
-        ensure_not_secret_path(&relative)?;
+        if kind == WorktreeTar::Untracked {
+            ensure_not_secret_path(&relative)?;
+        }
         let entry_type = entry.header().entry_type();
         ensure!(
             entry_type.is_file() || entry_type.is_symlink(),
-            "untracked tar contains unsupported entry type for '{}'",
+            "{label} tar contains unsupported entry type for '{}'",
             relative.display()
         );
         if entry_type.is_symlink() {
             let target = entry
                 .link_name()
-                .context("read untracked symlink target")?
-                .ok_or_else(|| {
-                    anyhow!("untracked symlink '{}' has no target", relative.display())
-                })?;
-            validate_symlink_target(&relative, &target)?;
+                .with_context(|| format!("read {label} symlink target"))?
+                .ok_or_else(|| anyhow!("{label} symlink '{}' has no target", relative.display()))?;
+            if kind == WorktreeTar::Untracked {
+                validate_symlink_target(&relative, &target)?;
+            }
         }
     }
     Ok(())
 }
 
 pub(super) fn restore_untracked_tar(repository: &Path, bytes: &[u8]) -> Result<()> {
-    validate_untracked_tar(bytes)?;
+    restore_worktree_tar(repository, bytes, WorktreeTar::Untracked)
+}
+
+pub(super) fn restore_worktree_tar(
+    repository: &Path,
+    bytes: &[u8],
+    kind: WorktreeTar,
+) -> Result<()> {
+    let label = kind.label();
+    validate_worktree_tar_reader(Cursor::new(bytes), kind)?;
     let mut archive = tar::Archive::new(Cursor::new(bytes));
-    for entry in archive.entries().context("read untracked-file tar")? {
-        let mut entry = entry.context("read untracked-file tar entry")?;
+    for entry in archive
+        .entries()
+        .with_context(|| format!("read {label}-file tar"))?
+    {
+        let mut entry = entry.with_context(|| format!("read {label}-file tar entry"))?;
         let relative = entry.path()?.into_owned();
         ensure_no_symlink_ancestors(repository, &relative)?;
         let destination = repository.join(&relative);
@@ -2031,22 +2191,27 @@ pub(super) fn restore_untracked_tar(repository: &Path, bytes: &[u8]) -> Result<(
                 .with_context(|| format!("create directory {}", parent.display()))?;
             ensure_no_symlink_ancestors(repository, &relative)?;
         }
-        ensure!(
-            !destination.exists(),
-            "refusing to overwrite restored untracked path '{}'",
-            destination.display()
-        );
+        match kind {
+            WorktreeTar::Untracked => ensure!(
+                !destination.exists(),
+                "refusing to overwrite restored untracked path '{}'",
+                destination.display()
+            ),
+            // The checkout wrote the path's committed version, which the
+            // conflicted file replaces.
+            WorktreeTar::Conflicted => remove_worktree_file(&destination)?,
+        }
         if entry.header().entry_type().is_symlink() {
-            let target = entry.link_name()?.ok_or_else(|| {
-                anyhow!("untracked symlink '{}' has no target", relative.display())
-            })?;
+            let target = entry
+                .link_name()?
+                .ok_or_else(|| anyhow!("{label} symlink '{}' has no target", relative.display()))?;
             create_symlink(&target, &destination)?;
         } else {
             let mut output = OpenOptions::new()
                 .create_new(true)
                 .write(true)
                 .open(&destination)
-                .with_context(|| format!("create untracked file {}", destination.display()))?;
+                .with_context(|| format!("create {label} file {}", destination.display()))?;
             std::io::copy(&mut entry, &mut output)?;
             output.sync_all()?;
             #[cfg(unix)]
@@ -2057,6 +2222,23 @@ pub(super) fn restore_untracked_tar(repository: &Path, bytes: &[u8]) -> Result<(
         }
     }
     Ok(())
+}
+
+/// Removes the file or symbolic link at `path`, if there is one. A directory
+/// there is an error: the restored tree disagrees with the archived one.
+pub(super) fn remove_worktree_file(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            ensure!(
+                !metadata.is_dir(),
+                "refusing to replace directory '{}' with a conflicted file",
+                path.display()
+            );
+            fs::remove_file(path).with_context(|| format!("remove {}", path.display()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
+    }
 }
 
 /// Refuse a path whose already-existing intermediate directories include a

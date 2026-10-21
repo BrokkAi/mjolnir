@@ -79,14 +79,14 @@ impl GitCommandRunner for CollectionGit {
 
 use crate::test_support::{git, git_line};
 
-fn initialize_repository(path: &Path) {
+pub(super) fn initialize_repository(path: &Path) {
     fs::create_dir_all(path).unwrap();
     git(path, &["init", "-q", "-b", "main"]);
     git(path, &["config", "user.name", "Hel Test"]);
     git(path, &["config", "user.email", "hel@example.test"]);
 }
 
-fn clone_repository(parent: &Path, origin: &Path, name: &str) -> PathBuf {
+pub(super) fn clone_repository(parent: &Path, origin: &Path, name: &str) -> PathBuf {
     let destination = parent.join(name);
     git(
         parent,
@@ -128,6 +128,7 @@ fn repository(id: &str) -> RepositorySnapshot {
         metadata: RepositoryMetadata {
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
+            git_operation: None,
             id: id.to_string(),
             relative_destination: PathBuf::from(id),
             checkout_subdirectory: None,
@@ -142,6 +143,7 @@ fn repository(id: &str) -> RepositorySnapshot {
         staged_patch: format!("staged-{id}").into_bytes(),
         unstaged_patch: format!("unstaged-{id}").into_bytes(),
         untracked_tar: tar_with_file("scripts/tool.sh", b"#!/bin/sh\n", 0o755),
+        operation_payloads: None,
     }
 }
 
@@ -150,6 +152,7 @@ fn checkpoint_bundle(head: &str, contents: impl Into<Vec<u8>>) -> CheckpointRepo
         metadata: RepositoryMetadata {
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
+            git_operation: None,
             id: "project".into(),
             relative_destination: "project".into(),
             checkout_subdirectory: None,
@@ -225,7 +228,7 @@ fn checkpoint_without_a_bundle_uses_its_head_as_the_source_boundary() {
     );
 }
 
-fn input() -> ArchiveInput {
+pub(super) fn input() -> ArchiveInput {
     ArchiveInput {
         session: SessionManifest {
             id: "session-1".into(),
@@ -548,18 +551,15 @@ fn git_bundles_are_stored_and_other_payloads_use_zstandard() {
     );
 }
 
-/// Replaces a repository's untracked tar in an already prepared archive,
-/// resharding it so the manifest and the payload body stay consistent.
-fn replace_untracked_tar(
+/// Replaces a tar payload in an already prepared archive, resharding it so
+/// the manifest and the payload body stay consistent.
+fn replace_tar_payload(
     manifest: &mut ArchiveManifest,
     payloads: &mut [PendingPayload<'_>],
-    repository_id: &str,
+    role: PayloadRole,
     tar: Vec<u8>,
     part_bytes: usize,
 ) {
-    let role = PayloadRole::GitUntrackedTar {
-        repository_id: repository_id.to_string(),
-    };
     let descriptor = manifest
         .payloads
         .iter_mut()
@@ -587,10 +587,12 @@ fn streaming_verification_parses_a_sharded_untracked_tar_for_safety() {
         prepare_archive_with_part_size(&archive_input, TEST_PART_BYTES).unwrap();
     let malicious = tar_with_file(".env", &b"secret\n".repeat(2_000), 0o600);
     assert!(malicious.len() > TEST_PART_BYTES);
-    replace_untracked_tar(
+    replace_tar_payload(
         &mut manifest,
         &mut payloads,
-        "hel",
+        PayloadRole::GitUntrackedTar {
+            repository_id: "hel".into(),
+        },
         malicious,
         TEST_PART_BYTES,
     );
@@ -600,6 +602,48 @@ fn streaming_verification_parses_a_sharded_untracked_tar_for_safety() {
 
     let error = format!("{:#}", verify_archive_streaming(&path).unwrap_err());
     assert!(error.contains("credential/config path"), "{error}");
+}
+
+/// A restore writes the operation state tar into the Git directory, so the
+/// verifier must refuse anything in it that is not Git operation state: a
+/// hook written there would run on the restored clone's next Git command.
+#[test]
+fn streaming_verification_refuses_operation_state_that_is_not_git_operation_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("unsafe-operation-state.hel.zip");
+    let mut archive_input = input();
+    let repository = &mut archive_input.repositories[0];
+    repository.metadata.saved_refs =
+        BTreeMap::from([("refs/heads/feature/hel".into(), "b".repeat(40))]);
+    repository.metadata.git_operation = Some(SavedGitOperation {
+        unmerged: Vec::new(),
+        missing_worktree_paths: Vec::new(),
+        objects: vec!["c".repeat(40)],
+    });
+    repository.operation_payloads = Some(GitOperationPayloads {
+        conflicted_worktree_tar: tar::Builder::new(Vec::new()).into_inner().unwrap(),
+        state_tar: tar_with_file(
+            "MERGE_HEAD",
+            format!("{}\n", "c".repeat(40)).as_bytes(),
+            0o644,
+        ),
+    });
+    let (mut manifest, mut payloads) = prepare_archive(&archive_input).unwrap();
+    replace_tar_payload(
+        &mut manifest,
+        &mut payloads,
+        PayloadRole::GitOperationStateTar {
+            repository_id: "hel".into(),
+        },
+        tar_with_file("hooks/post-checkout", b"#!/bin/sh\n", 0o755),
+        PAYLOAD_PART_BYTES,
+    );
+    let mut file = File::create(&path).unwrap();
+    write_zip(&mut file, &manifest, &payloads).unwrap();
+    drop(file);
+
+    let error = format!("{:#}", verify_archive_streaming(&path).unwrap_err());
+    assert!(error.contains("not Git operation state"), "{error}");
 }
 
 #[test]
@@ -760,6 +804,39 @@ fn writing_the_same_input_twice_produces_identical_archives() {
     write_archive_installed_with_part_size(&second, &archive_input, TEST_PART_BYTES).unwrap();
     assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
     assert_eq!(zip_entry_names(&first), zip_entry_names(&second));
+}
+
+/// The manifest an independent clone with saved refs and a stash, and no
+/// unfinished Git operation, is written with. Archives that carry no operation
+/// must stay readable by every build that reads clone refs, so this layout may
+/// not change when operation capture does.
+#[test]
+fn clone_manifest_without_a_git_operation_matches_golden() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("clone.hel.zip");
+    let mut archive_input = input();
+    let metadata = &mut archive_input.repositories[0].metadata;
+    metadata.saved_refs = BTreeMap::from([
+        ("refs/heads/feature/hel".into(), "b".repeat(40)),
+        ("refs/tags/v1".into(), "c".repeat(40)),
+    ]);
+    metadata.stash_stack = vec![SavedStashEntry {
+        commit: "d".repeat(40),
+        message: "On feature/hel: draft".into(),
+    }];
+    write_archive_atomic(&path, &archive_input).unwrap();
+    let mut archive = zip::ZipArchive::new(File::open(&path).unwrap()).unwrap();
+    let mut manifest = String::new();
+    archive
+        .by_name(MANIFEST_PATH)
+        .unwrap()
+        .read_to_string(&mut manifest)
+        .unwrap();
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "clone-archive-manifest",
+        &manifest,
+    );
 }
 
 #[test]

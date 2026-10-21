@@ -27,7 +27,7 @@ impl CapacityRetry {
         Self {
             attempt,
             retry_at_ms: now_ms.saturating_add(delay_ms),
-            command_id: format!("server-retry-{ordinal}"),
+            command_id: format!("{SERVER_RETRY_PREFIX}{ordinal}"),
             submitted: false,
         }
     }
@@ -48,8 +48,21 @@ pub fn is_capacity_stop_reason(stop_reason: &str) -> bool {
 }
 
 pub fn is_capacity_retry_command(command_id: &str) -> bool {
-    command_id
+    retried_turn(command_id).is_some()
+}
+
+const SERVER_RETRY_PREFIX: &str = "server-retry-";
+
+/// The completion ordinal of the turn a worker retry command sends again.
+///
+/// The worker names each retry after the turn it retries: its id carries the
+/// ordinal at which that turn completed. Older workers used the
+/// `capacity-retry-` prefix. `None` when the command is not a retry.
+pub fn retried_turn(command_id: &str) -> Option<u64> {
+    let ordinal = command_id
         .strip_prefix("capacity-retry-")
-        .or_else(|| command_id.strip_prefix("server-retry-"))
-        .is_some_and(|ordinal| !ordinal.is_empty() && ordinal.bytes().all(|b| b.is_ascii_digit()))
+        .or_else(|| command_id.strip_prefix(SERVER_RETRY_PREFIX))?;
+    (!ordinal.is_empty() && ordinal.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| ordinal.parse().ok())
+        .flatten()
 }

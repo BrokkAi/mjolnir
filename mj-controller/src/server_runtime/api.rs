@@ -963,7 +963,7 @@ impl ApiBackend {
             } => {
                 let delivery = self
                     .deliver_session_message(
-                        Some(parent_session_id.to_owned()),
+                        parent_session_id.to_owned(),
                         child_session_id.clone(),
                         message.clone(),
                         request.request_id.clone(),
@@ -1570,6 +1570,16 @@ fn subagent_status(
     }
     if closing && record.is_some_and(|record| record.state != SessionState::Stopped) {
         return ("stopping".into(), None, false);
+    }
+    // A closed child is stopped, whatever its first prompt did. The close
+    // cleared the launch failure from the record, so a failed first prompt's
+    // message would otherwise replace it, keep the child `error`, and reach
+    // the parent as a second failure (#1321). A stopped record that holds an
+    // error is a failed resume, which still reports below.
+    if record
+        .is_some_and(|record| record.state == SessionState::Stopped && record.last_error.is_none())
+    {
+        return ("stopped".into(), None, true);
     }
     // A record that failed to start holds the cause; the follow-up's own
     // message only says that the session would not take a prompt, which is
@@ -2551,9 +2561,16 @@ impl SubagentBackend for ApiBackend {
         })
     }
 
+    fn resolve_message_target(&self, requested_id: String) -> BoxFuture<'_, Result<String>> {
+        Box::pin(blocking("resolve the user's message target", move || {
+            let state = Controller::load()?.state;
+            subagent_input::resolve_session_message_target(&state, None, &requested_id)
+        }))
+    }
+
     fn deliver_message(
         &self,
-        sender_session_id: Option<String>,
+        sender_session_id: String,
         target_session_id: String,
         text: String,
         request_id: String,

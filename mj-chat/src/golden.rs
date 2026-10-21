@@ -17,7 +17,7 @@ pub fn buffer_lines(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
 #[cfg(test)]
 fn normalize_clocked_activity(line: String) -> String {
     // The composer's top border starts with the microphone chip.
-    let composer_border = format!("╭ {} ", crate::theme::UNICODE_GLYPHS.microphone);
+    let composer_border = format!("╭  {} ", crate::theme::UNICODE_GLYPHS.microphone);
     if !line.contains(&composer_border) && !line.contains("Reviewing") {
         return line;
     }

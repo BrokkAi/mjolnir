@@ -2130,6 +2130,7 @@ fn staging_a_muse_profile_hands_its_saved_model_list_to_the_session_data_directo
     );
 }
 
+// Hard-won: #1320: a reviewer staged its profile without the provider's model catalog and offered OpenAI's model names
 #[test]
 fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from() {
     let home = tempfile::tempdir().unwrap();
@@ -2139,8 +2140,8 @@ fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from(
     let cache = IsolatedCatalogCache(cache.path().join("cache.sqlite3"));
     let asked = std::cell::RefCell::new(Vec::new());
 
-    stage_profile(&profile, staged.path()).unwrap();
-    stage_codex_catalog(
+    // The one staging call every session, reviewer and probe makes.
+    stage_profile_with_catalog(
         "glm",
         &profile,
         staged.path(),

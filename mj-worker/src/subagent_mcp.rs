@@ -622,8 +622,8 @@ fn tool_definitions(_harness: Option<HarnessKind>) -> Vec<Value> {
 const SPAWN_TWO_TASK_TYPES: &str = "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type.";
 
 /// How `spawn` opens when only the straightforward type is configured: the
-/// parent delegates only straightforward work and keeps work needing judgment.
-const SPAWN_ONE_TASK_TYPE: &str = "Start a child in your target and filesystem using the configured model and effort. Delegate only straightforward work: work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Do work that needs judgment yourself, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. Judge by difficulty, not by the length of the brief. The user configures the model and effort.";
+/// parent delegates straightforward work and keeps work needing judgment.
+const SPAWN_ONE_TASK_TYPE: &str = "Start a child in your target and filesystem using the configured model and effort. Delegate straightforward work: work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Do work that needs judgment yourself, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. Judge by difficulty, not by the length of the brief. The user configures the model and effort.";
 
 /// The parent's `spawn` tool. With only the straightforward type configured
 /// there is no choice to make, so it has no `task_type`.
@@ -760,7 +760,7 @@ mod tests {
         assert!(!description.contains("task type"), "{description}");
         assert!(
             description.starts_with(
-                "Start a child in your target and filesystem using the configured model and effort. Delegate only straightforward work: "
+                "Start a child in your target and filesystem using the configured model and effort. Delegate straightforward work: "
             ),
             "{description}"
         );

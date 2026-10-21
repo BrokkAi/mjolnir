@@ -87,6 +87,8 @@ class SteerLab:
             "CODEX_API_KEY", "OPENAI_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
             "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "MJ_DAEMON_OWNER_PID",
             "MJ_DAEMON_EXIT_WHEN_IDLE",
+            # This script sends as the user, even when run inside a session.
+            "MJ_SESSION_ID",
             "CONTAINERS_STORAGE_CONF", "CONTAINERS_STORAGE_CONF_OVERRIDE",
             "CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE", "CONTAINER_HOST",
             "CONTAINER_CONNECTION", "STORAGE_DRIVER",
@@ -590,7 +592,7 @@ class SteerLab:
 
     def prompt(self, session: str, command_id: str, text: str, case: str) -> None:
         self.cli(
-            "prompt", "--session", session, "--command-id", command_id,
+            "message", "--session", session, "--command-id", command_id,
             "--json", text, timeout=45, case=case,
         )
 

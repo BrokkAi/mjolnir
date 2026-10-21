@@ -68,11 +68,24 @@ pub(super) async fn prompt(
     Path(session_id): Path<String>,
     Json(request): Json<PromptRequest>,
 ) -> Result<(StatusCode, Json<PromptResponse>), ApiFailure> {
-    let backend = backend(&state)?.clone();
+    let turn_id = submit_prompt(&state, session_id, request.text, request.command_id).await?;
+    Ok((StatusCode::ACCEPTED, Json(PromptResponse { turn_id })))
+}
+
+/// Submit the user's prompt, answering its relay acceptance ordinal. This is
+/// the one path a prompt from the user takes, whether it came to the prompt
+/// endpoint or as a message with no sender.
+pub(super) async fn submit_prompt(
+    state: &ServerState,
+    session_id: String,
+    text: String,
+    command_id: Option<String>,
+) -> Result<u64, ApiFailure> {
+    let backend = backend(state)?.clone();
     let action = ControllerAction::Prompt {
-        command_id: request.command_id.clone(),
+        command_id: command_id.clone(),
         session_id: session_id.clone(),
-        text: request.text.clone(),
+        text: text.clone(),
         images: Vec::new(),
     };
     // A session that is still coming up takes its prompt once its worker
@@ -129,10 +142,7 @@ pub(super) async fn prompt(
     if hold.is_some_and(|held| !held.release()) {
         return Err(withdrawn_prompt());
     }
-    let turn_id = backend
-        .prompt_with_id(session_id, request.text, request.command_id)
-        .await?;
-    Ok((StatusCode::ACCEPTED, Json(PromptResponse { turn_id })))
+    Ok(backend.prompt_with_id(session_id, text, command_id).await?)
 }
 
 fn withdrawn_prompt() -> ApiFailure {

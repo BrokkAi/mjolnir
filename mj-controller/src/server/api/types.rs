@@ -20,8 +20,9 @@ pub struct MailboxEventResponse {
     pub inserted: bool,
 }
 
-/// Result of delivering one message to a session, either through its mailbox
-/// or as a queued prompt for an older worker.
+/// Result of delivering one message to a session: through its mailbox, as a
+/// queued prompt for an older worker, or, for a message from the user, as the
+/// user's prompt (`via: "turn"`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionMessageResponse {
@@ -39,11 +40,14 @@ pub struct SessionMessageResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionMessageRequest {
-    /// Stable identity across retries after an uncertain response.
+    /// Stable identity across retries after an uncertain response. For a
+    /// message from the user it is the prompt's command ID.
     pub request_id: String,
     pub text: String,
     /// Session asserted by the local caller, when this process runs inside a
     /// session worker. The daemon verifies that it exists and is top-level.
+    /// Without it the message is from the user and is submitted as the
+    /// user's prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_session_id: Option<String>,
 }
@@ -564,6 +568,14 @@ pub struct WaitResponse {
     /// later one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_turn_id: Option<u64>,
+    /// What the session is doing as the wait answers, as the worker's activity
+    /// state, when that is not idle. A wait on a turn answers when that turn
+    /// ends, so this is where a turn the harness started itself, background
+    /// work or an expected continuation shows. Absent when the session is
+    /// idle. A top-level field because older v1 clients reject unknown fields
+    /// inside the shared turn type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<mj_core::activity::ActivityState>,
     /// One-based position of this turn in the conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_number: Option<u64>,
