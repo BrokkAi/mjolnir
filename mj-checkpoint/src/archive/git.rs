@@ -2012,7 +2012,7 @@ pub(super) fn build_untracked_tar(
         let mut builder = tar::Builder::new(&mut output);
         for (index, raw_path) in paths.into_iter().enumerate() {
             let relative = mj_core::path_input::from_git_bytes(raw_path)?;
-            validate_archive_relative_path(&relative)?;
+            validate_worktree_relative_path(&relative)?;
             // In addition to Git's ignore rules, skip conventional credential
             // paths so they can never enter the untracked payload.
             if ensure_not_secret_path(&relative).is_err() {
@@ -2051,7 +2051,7 @@ pub(super) fn build_conflicted_worktree_tar(
     {
         let mut builder = tar::Builder::new(&mut output);
         for relative in paths {
-            validate_archive_relative_path(relative)?;
+            validate_worktree_relative_path(relative)?;
             ensure_no_symlink_ancestors(repository, relative)?;
             let source = repository.join(relative);
             let metadata = match fs::symlink_metadata(&source) {
@@ -2143,7 +2143,7 @@ fn validate_worktree_tar_reader(reader: impl Read, kind: WorktreeTar) -> Result<
         let relative = entry
             .path()
             .with_context(|| format!("read {label}-file tar path"))?;
-        validate_archive_relative_path(&relative)?;
+        validate_worktree_relative_path(&relative)?;
         if kind == WorktreeTar::Untracked {
             ensure_not_secret_path(&relative)?;
         }

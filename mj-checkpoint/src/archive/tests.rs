@@ -646,6 +646,77 @@ fn streaming_verification_refuses_operation_state_that_is_not_git_operation_stat
     assert!(error.contains("not Git operation state"), "{error}");
 }
 
+/// A restore writes the untracked and conflicted tars into the working tree
+/// and removes the missing unmerged paths there, so none of them may reach
+/// into the Git directory: a planted hook would run on the restored clone's
+/// next Git command, and a removed `.git/index` would wreck the clone.
+// Hard-won: 5a3457a30: restored working-tree paths could write into or remove from `.git`
+#[test]
+fn streaming_verification_refuses_working_tree_paths_inside_the_git_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    for tampered in ["untracked", "conflicted", "missing"] {
+        let mut archive_input = input();
+        let repository = &mut archive_input.repositories[0];
+        repository.metadata.git_operation = Some(SavedGitOperation {
+            unmerged: Vec::new(),
+            missing_worktree_paths: Vec::new(),
+            objects: vec!["c".repeat(40)],
+        });
+        repository.operation_payloads = Some(GitOperationPayloads {
+            conflicted_worktree_tar: tar::Builder::new(Vec::new()).into_inner().unwrap(),
+            state_tar: tar_with_file(
+                "MERGE_HEAD",
+                format!("{}\n", "c".repeat(40)).as_bytes(),
+                0o644,
+            ),
+        });
+        let (mut manifest, mut payloads) = prepare_archive(&archive_input).unwrap();
+        match tampered {
+            "untracked" => replace_tar_payload(
+                &mut manifest,
+                &mut payloads,
+                PayloadRole::GitUntrackedTar {
+                    repository_id: "hel".into(),
+                },
+                tar_with_file(".git/hooks/post-checkout", b"#!/bin/sh\n", 0o755),
+                PAYLOAD_PART_BYTES,
+            ),
+            "conflicted" => replace_tar_payload(
+                &mut manifest,
+                &mut payloads,
+                PayloadRole::GitConflictedWorktreeTar {
+                    repository_id: "hel".into(),
+                },
+                tar_with_file(".GIT/hooks/post-checkout", b"#!/bin/sh\n", 0o755),
+                PAYLOAD_PART_BYTES,
+            ),
+            _ => {
+                let index = PathBuf::from(".git/index");
+                manifest.repositories[0].metadata.git_operation = Some(SavedGitOperation {
+                    unmerged: vec![SavedUnmergedEntry {
+                        path: index.clone(),
+                        stage: 2,
+                        mode: "100644".into(),
+                        object: "c".repeat(40),
+                    }],
+                    missing_worktree_paths: vec![index],
+                    objects: vec!["c".repeat(40)],
+                });
+            }
+        }
+        let path = directory.path().join(format!("{tampered}.hel.zip"));
+        let mut file = File::create(&path).unwrap();
+        write_zip(&mut file, &manifest, &payloads).unwrap();
+        drop(file);
+
+        let error = format!("{:#}", verify_archive_streaming(&path).unwrap_err());
+        assert!(
+            error.contains("inside a Git directory"),
+            "{tampered}: {error}"
+        );
+    }
+}
+
 #[test]
 fn sharded_manifests_reject_reordered_or_missing_parts() {
     let directory = tempfile::tempdir().unwrap();

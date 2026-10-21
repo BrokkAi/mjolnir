@@ -1661,7 +1661,7 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
 fn validate_saved_git_operation(operation: &SavedGitOperation) -> Result<()> {
     let mut unmerged_paths = BTreeSet::new();
     for entry in &operation.unmerged {
-        validate_archive_relative_path(&entry.path)?;
+        validate_worktree_relative_path(&entry.path)?;
         ensure!(
             (1..=3).contains(&entry.stage),
             "unmerged entry '{}' has stage {}",
@@ -1802,6 +1802,22 @@ fn validate_archive_relative_path(path: &Path) -> Result<()> {
             path.display()
         );
     }
+    Ok(())
+}
+
+/// Checks a path a restore writes or removes in a working tree. Besides the
+/// archive path rules, it refuses a `.git` component in any case, as Git does
+/// for every path it tracks: a hook written into the Git directory would run
+/// on the restored clone's next Git command.
+fn validate_worktree_relative_path(path: &Path) -> Result<()> {
+    validate_archive_relative_path(path)?;
+    ensure!(
+        !path
+            .components()
+            .any(|component| component.as_os_str().eq_ignore_ascii_case(".git")),
+        "refusing working-tree path '{}' inside a Git directory",
+        path.display()
+    );
     Ok(())
 }
 

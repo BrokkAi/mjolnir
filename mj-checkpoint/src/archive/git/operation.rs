@@ -210,7 +210,7 @@ pub(super) fn collect(
     let mut unmerged = Vec::new();
     for path in unmerged_paths(&listed)? {
         let relative = mj_core::path_input::from_git_bytes(&path.path)?;
-        validate_archive_relative_path(&relative)?;
+        validate_worktree_relative_path(&relative)?;
         for (index, stage) in path.stages.iter().enumerate() {
             if let Some(stage) = stage {
                 unmerged.push(SavedUnmergedEntry {
