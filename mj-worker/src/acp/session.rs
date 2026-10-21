@@ -701,14 +701,11 @@ pub(super) async fn serve_session(
     let mut logins_check = tokio::time::interval(super::opencode_logins::CHECK_INTERVAL);
     logins_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
+        // This task owns these; only the open questions change beside it.
         let may_reload = spec.imported_logins.is_some()
             && goal_controls.is_empty()
             && config_recovery.is_none()
-            && goal_question.is_none()
-            && pending_elicitations
-                .lock()
-                .expect("pending elicitation lock poisoned")
-                .is_empty();
+            && goal_question.is_none();
         let request = tokio::select! {
             event = goal_controls.next(), if !goal_controls.is_empty() => {
                 emit_runtime_event(events, event).await?;
@@ -716,7 +713,16 @@ pub(super) async fn serve_session(
             }
             _ = logins_check.tick(), if may_reload => {
                 let imported = spec.imported_logins.as_ref().expect("guarded by may_reload");
-                if imported.changed().await? {
+                // Decided under the lock that registers questions, with nothing
+                // awaited in between: a question registered first holds the
+                // reload back, and one registered later belongs to a bridge
+                // being replaced, which cancels it as every replacement does.
+                if imported.changed().await?
+                    && pending_elicitations
+                        .lock()
+                        .expect("pending elicitation lock poisoned")
+                        .is_empty()
+                {
                     return Ok(Some(SessionRestart::ReloadLogins(session_id.to_string())));
                 }
                 continue;
