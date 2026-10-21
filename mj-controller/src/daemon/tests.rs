@@ -2981,6 +2981,41 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
         Some(mj_core::state::ContainerSettings::requested(&session));
     crate::database::save_session(&session).unwrap();
     assert!(!load().container_recreation_required("session-1").unwrap());
+
+    // A container created from an older Mjolnir's default image follows the
+    // default to this build's once an upgrade moved it; the stored record has
+    // to say so. A configured image is not the default and never moves.
+    for (image, moved) in [
+        ("ghcr.io/brokkai/mjolnir/agent-dev:0.1.0", true),
+        (mj_core::config::DEFAULT_CONTAINER_IMAGE, false),
+        ("registry.example.test/custom:1", false),
+    ] {
+        let mut applied = mj_core::state::ContainerSettings::applied(&session, image);
+        if moved {
+            // `applied` records only this build's default, as provisioning
+            // does; an older build recorded its own.
+            applied.default_image = Some(image.to_owned());
+        }
+        session.target_runtime.as_mut().unwrap().container_settings = Some(applied);
+        crate::database::save_session(&session).unwrap();
+        let controller = load();
+        let record = &controller.state.sessions["session-1"];
+        assert_eq!(
+            mj_core::state::ContainerSettings::default_image_moved(record),
+            moved,
+            "{image}"
+        );
+        assert_eq!(
+            controller
+                .container_recreation_required("session-1")
+                .unwrap(),
+            moved,
+            "{image}"
+        );
+    }
+    session.target_runtime.as_mut().unwrap().container_settings =
+        Some(mj_core::state::ContainerSettings::requested(&session));
+    crate::database::save_session(&session).unwrap();
     // A replacement may own a newly dispatched turn before Running is published.
     // Its creation snapshot therefore forbids repeating source teardown.
     assert_eq!(

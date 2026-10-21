@@ -777,8 +777,18 @@ impl Controller {
                 };
             }
             Ok((locator, remainder, bundle, build_cache)) => {
+                let image = self
+                    .config
+                    .targets
+                    .get(&session.target_template_id)
+                    .and_then(TargetTemplate::container)
+                    .map(|container| container.image.as_str());
                 let container_settings = backend_locator(&locator, &self.state.sessions[session_id], &self.config)?
-                    .container_engine().map(|_| mj_core::state::ContainerSettings::requested(&session));
+                    .container_engine()
+                    .map(|_| match image {
+                        Some(image) => mj_core::state::ContainerSettings::applied(&session, image),
+                        None => mj_core::state::ContainerSettings::requested(&session),
+                    });
                 apply_new_session_provisioning_result(&mut self.state, session_id, Ok(locator))?;
                 self.state.sessions.get_mut(session_id)
                     .expect("session retained after target creation")

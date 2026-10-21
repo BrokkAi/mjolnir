@@ -1438,7 +1438,7 @@ pub(crate) fn confirmation_body(
                 session_line(session_id, session_name, width),
                 Line::raw(""),
                 Line::styled(
-                    "Restart will replace this container because its settings changed or are unknown.",
+                    "Restart will replace this container because its settings or its Mjolnir image changed, or are unknown.",
                     Style::default().fg(theme::palette().warning),
                 ),
                 Line::raw("The conversation and workspace recovery copy will be restored."),

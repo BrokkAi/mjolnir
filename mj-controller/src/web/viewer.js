@@ -7997,7 +7997,7 @@ async function runSessionAction(dataset, errorNode, extra) {
   if (dataset.action === 'restart') {
     const session = sessionById(dataset.id);
     const question = session?.restart_recreates_container
-      ? 'Recreate container on Restart?\n\nRestart will replace this container because its settings changed or are unknown. The conversation and workspace recovery copy will be restored.\n\nFiles outside the recovery copy may be lost, including temporary files and installed tools.\n\nAny running turn will be interrupted.'
+      ? 'Recreate container on Restart?\n\nRestart will replace this container because its settings or its Mjolnir image changed, or are unknown. The conversation and workspace recovery copy will be restored.\n\nFiles outside the recovery copy may be lost, including temporary files and installed tools.\n\nAny running turn will be interrupted.'
       : 'Restart session?\n\nRestart the worker in the existing environment. Any running turn will be interrupted.';
     if (!confirm(question)) return false;
     if (session?.restart_recreates_container) extra = { ...extra, acknowledge_container_recreation: true };

@@ -48,10 +48,16 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
       Validated by the workflow alignment tests, a Podman build of the worker stage, the Docker
       integration test, and a real session created, suspended and resumed in an isolated instance on
       a derived image (see Outcomes).
-- [ ] Milestone 4: a container records the default image it was created from; Restart recreates a
-      container whose default image moved, and a quiet session whose worker is stale because its
-      default image moved is recreated automatically (checkpoint, new container, restore) instead of
-      having a worker copied in. Running work is never interrupted.
+- [x] (2026-10-21 14:10Z) Milestone 4, first part: a container's applied settings record the default
+      image it was created from (`ContainerSettings::default_image`); `recreation_required` follows
+      the default to this build's, so Restart offers recreation once an upgrade moved it, and
+      `default_image_moved` names that case. Breaking migration 87 (older writers would drop the
+      field). Restart confirmation wording updated in the TUI, the web viewer and both goldens.
+- [ ] Milestone 4, second part: a quiet session whose worker is stale because its default image
+      moved is recreated automatically through Restart's container recreation, with a checkpoint
+      that defers instead of interrupting work and never restarts the worker, and a durable
+      "automatic" marker so a recovered intent keeps those rules; the worker-upgrade coordinator
+      owns the retry policy for it.
 - [ ] Milestone 5: no in-place worker replacement for a container whose default image moved;
       preflight lets a release's own image supply the worker without a host copy; `mj doctor`
       reports which image and worker a container target would use and why; documentation.
@@ -191,6 +197,18 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
   image built from the same commit, and Cargo needs every member's sources to resolve the
   workspace. `.dockerignore` admits exactly the members, and a test keeps both lists equal to
   `Cargo.toml`. Date/Author: 2026-10-21, Claude.
+
+- Decision: record only the default image a container was created from
+  (`ContainerSettings::default_image`), and derive the requested value as "this build's default"
+  when one was recorded. Rationale: the default is the only image that moves with an upgrade, and
+  the comparison then needs no configuration: `ContainerSettings::recreation_required` is called
+  from the database admission check and the dashboard projections, which have the session record
+  but not the configuration. A configured image changes only when the person edits it, which
+  Restart does not track today and this issue does not ask for. Date/Author: 2026-10-21, Claude.
+- Decision: classify migration 87 as breaking and raise the compatibility floor to 87, exactly as
+  migrations 79 and 83 did for earlier `target_runtime_json` fields. Rationale: an older daemon
+  rewrites that JSON without the new field, after which the container would never be recognized as
+  due for recreation. Date/Author: 2026-10-21, Claude.
 
 ## Outcomes & Retrospective
 

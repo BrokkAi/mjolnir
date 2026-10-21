@@ -307,7 +307,7 @@ Save
 === Restart recreation warning ===
 Recreate container on Restart?
 
-Restart will replace this container because its settings changed or are unknown. The conversation and workspace recovery copy will be restored.
+Restart will replace this container because its settings or its Mjolnir image changed, or are unknown. The conversation and workspace recovery copy will be restored.
 
 Files outside the recovery copy may be lost, including temporary files and installed tools.
 
