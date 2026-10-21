@@ -45,14 +45,21 @@ impl ImportedLogins {
                 .map(PathBuf::from)
                 .with_context(|| format!("the OpenCode launch sets no {name}"))
         };
-        let path = kind
-            .home_from_environment(variable(kind.home_env())?)
-            .join(kind.credential_file_name());
-        let database = variable("XDG_DATA_HOME")?
-            .join(kind.id())
-            .join("opencode.db");
+        let home = kind.home_from_environment(variable(kind.home_env())?);
+        let path = home.join(kind.credential_file_name());
+        // OpenCode reads its database from `XDG_DATA_HOME`, which a staged
+        // home places inside itself
+        // ([`HarnessKind::configure_home_environment`]); only a database there
+        // is the session's own.
+        let data = variable("XDG_DATA_HOME")?;
+        anyhow::ensure!(
+            data == home.join(".data"),
+            "the OpenCode launch keeps its data in {}, outside its staged home {}",
+            data.display(),
+            home.display()
+        );
         let entries = read_entries(&path)?;
-        reconcile_database_logins(&database, &entries)?;
+        reconcile_database_logins(&home, &entries)?;
         Ok(Self { path, entries })
     }
 
@@ -98,23 +105,27 @@ struct Staged<'a> {
 /// selecting as staged. A login the profile no longer has is removed.
 ///
 /// The previous bridge has been stopped before this one is prepared, and its
-/// server child ends with it. A database reached through a link is refused,
-/// as a credential file is, so a session home cannot point this at another
-/// database.
-fn reconcile_database_logins(path: &Path, entries: &[Value]) -> Result<()> {
-    for checked in [path.parent(), Some(path)].into_iter().flatten() {
-        match std::fs::symlink_metadata(checked) {
-            Ok(metadata) if metadata.file_type().is_symlink() => anyhow::bail!(
-                "refusing to change OpenCode logins through the link {}",
-                checked.display()
-            ),
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => {
-                return Err(error).with_context(|| format!("inspect {}", checked.display()));
-            }
-        }
+/// server child ends with it. The database is the regular file at
+/// `.data/opencode/opencode.db` in the staged `home`, reached without a link
+/// anywhere from the home down, so a session home cannot point this at
+/// another database.
+fn reconcile_database_logins(home: &Path, entries: &[Value]) -> Result<()> {
+    let relative = Path::new(".data")
+        .join(HarnessKind::OpenCode.id())
+        .join("opencode.db");
+    mj_core::confined_path::reject_symlinks(home, &relative, true)
+        .context("refusing to change OpenCode logins")?;
+    let path = home.join(&relative);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => anyhow::bail!(
+            "refusing to change OpenCode logins: {} is not a regular file",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
     }
+    let path = path.as_path();
     let staged: BTreeMap<&str, Staged<'_>> = entries
         .iter()
         .filter_map(|entry| {
@@ -323,34 +334,42 @@ mod tests {
         );
     }
 
-    /// A session home whose database is a link to another database is
-    /// refused, and the other database keeps its logins.
+    /// A session home that reaches another database through a link, at the
+    /// database, its directory or the data directory above it, is refused,
+    /// and the other database keeps its logins.
     #[cfg(unix)]
     #[test]
-    fn a_linked_session_database_is_refused_and_left_alone() {
-        let root = tempfile::tempdir().unwrap();
-        let other = root.path().join("other.db");
-        let connection = rusqlite::Connection::open(&other).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE credential (id text, integration_id text, value text);
-                 INSERT INTO credential VALUES ('cred', 'deepseek', '{}');",
-            )
-            .unwrap();
-        let environment = session_home(root.path(), &serde_json::json!([]));
-        let data = PathBuf::from(&environment["XDG_DATA_HOME"]).join("opencode");
-        std::fs::create_dir_all(&data).unwrap();
-        std::os::unix::fs::symlink(&other, data.join("opencode.db")).unwrap();
+    fn a_session_database_reached_through_a_link_is_refused_and_left_alone() {
+        for link in [".data/opencode/opencode.db", ".data/opencode", ".data"] {
+            let root = tempfile::tempdir().unwrap();
+            let other = root.path().join("other/.data/opencode/opencode.db");
+            std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+            let connection = rusqlite::Connection::open(&other).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE credential (id text, integration_id text, value text);
+                     INSERT INTO credential VALUES ('cred', 'deepseek', '{}');",
+                )
+                .unwrap();
+            let environment = session_home(root.path(), &serde_json::json!([]));
+            let home = HarnessKind::OpenCode.home_from_environment(&environment["XDG_CONFIG_HOME"]);
+            let planted = home.join(link);
+            if planted.exists() {
+                std::fs::remove_dir_all(&planted).unwrap();
+            }
+            std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(root.path().join("other").join(link), &planted).unwrap();
 
-        let error = ImportedLogins::prepare(&environment).unwrap_err();
+            let error = ImportedLogins::prepare(&environment).unwrap_err();
 
-        assert!(
-            format!("{error:#}").contains("through the link"),
-            "{error:#}"
-        );
-        let rows: i64 = connection
-            .query_row("SELECT count(*) FROM credential", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(rows, 1);
+            assert!(
+                format!("{error:#}").contains("refusing to change OpenCode logins"),
+                "{link}: {error:#}"
+            );
+            let rows: i64 = connection
+                .query_row("SELECT count(*) FROM credential", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(rows, 1, "{link}");
+        }
     }
 }
