@@ -3,12 +3,22 @@ name: Publish agent-dev image
 on:
   push:
     branches: [ 'master' ]
+    # The image bakes in the session worker, so :latest is rebuilt whenever
+    # anything the worker compiles from changes: every entry in
+    # mj-core/worker-build-inputs.txt (scripts/release-workflow.test.mjs checks).
     paths:
       - 'containers/**'
       - '.dockerignore'
-      - 'mj-worker/assets/muse/**'
       - 'scripts/install-muse.py'
       - '.github/workflows/publish-agent-dev-image.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+      - 'mj-checkpoint/**'
+      - 'mj-core/**'
+      - 'mj-review/**'
+      - 'mj-transcript/**'
+      - 'mj-worker/**'
   workflow_dispatch: {}
   # Called by release.yml so a tagged release publishes agent-dev:<version>
   # from the same workflow that publishes :latest from master. The push,
@@ -69,6 +79,20 @@ jobs:
           owner="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
           echo "name=ghcr.io/$owner/mjolnir/agent-dev" >> "$GITHUB_OUTPUT"
 
+      # The worker stage cannot see Git, so compute here the identities
+      # mj-core/build.rs reads from it, the same way scripts/build-linux-worker.sh
+      # and scripts/build-agent-dev-image.sh do. The release's own worker jobs
+      # compute the same identity from the same commit.
+      - name: Resolve worker build identity
+        id: worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          inputs="$(python3 mj-core/worker_build_inputs.py --package-root mj-core --fallback-revision "$GITHUB_SHA")"
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          echo "inputs=$inputs" >> "$GITHUB_OUTPUT"
+          echo "build=$version+$inputs" >> "$GITHUB_OUTPUT"
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -105,6 +129,10 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.description=Mjolnir agent development environment with Node, Rust, cargo-nextest, OpenJDK, and the pinned ACP bridges
             org.opencontainers.image.licenses=GPL-3.0-only
+          build-args: |
+            MJ_BUILD_REVISION=${{ github.sha }}
+            MJ_WORKER_INPUTS_ID=${{ steps.worker.outputs.inputs }}
+            MJ_WORKER_BUILD_ID=${{ steps.worker.outputs.build }}
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest

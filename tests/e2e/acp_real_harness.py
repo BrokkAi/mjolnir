@@ -155,6 +155,8 @@ class Lab:
                         MJOLNIR_NO_UPDATE_CHECK="1")
         self.env.pop("MJ_DAEMON_OWNER_PID", None)
         self.env.pop("MJ_DAEMON_EXIT_WHEN_IDLE", None)
+        # `mj prompt` sends as the user, so it refuses inside a session.
+        self.env.pop("MJ_SESSION_ID", None)
         config = self.root / "config"
         config.mkdir()
         with socket.socket() as listener:
@@ -303,7 +305,7 @@ repositories = [{{ id = "fixture", github = {quote(args.repository)}, destinatio
                     session, lambda row: row["lifecycle"] == "suspended"))
                 self.cli("resume", "--session", session, "--json")
                 self.idle(session)
-                reply = self.cli("prompt", "--session", session, "--wait", "--json",
+                reply = self.cli("prompt", "--session", session, "--json",
                                  "--timeout", str(self.timeout),
                                  f"Reply with exactly {marker}RESUMED. Do not run tools.")
                 assert reply["outcome"] == "finished", reply

@@ -2,7 +2,9 @@ use super::*;
 use mj_core::hex::lower_hex;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Replace `{worker_root}/hel` with the controller's current worker binary.
+/// Replace `{worker_root}/hel` with the worker this controller would install:
+/// a link to the container image's own worker when it is this build, else a
+/// copy of the host binary.
 ///
 /// Checkpoint export starts that path as a new process. A live daemon already
 /// has the previous inode mapped, so this does not restart it. Writing through
@@ -11,10 +13,10 @@ pub(in crate::controller) fn replace_installed_worker_binary(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
-    worker_binary: &Path,
+    worker: &WorkerInstall,
 ) -> Result<()> {
     let _owner = crate::worker_lifecycle::require(session_id)?;
-    let plan = installed_worker_binary_replacement_plan(locator, session_id, worker_binary)?;
+    let plan = installed_worker_binary_replacement_plan(locator, session_id, worker)?;
     for command in plan.commands {
         execute_checked(executor, command)?;
     }
@@ -130,12 +132,25 @@ impl<E: CommandExecutor> PreparedWorkerBinary<'_, E> {
 }
 
 /// Resolve and transfer before the daemon admits a bounded recovery swap.
+///
+/// A container whose image carries this build gets a fresh link to it: the
+/// image's worker and a host copy never share bytes, so the digest gate below
+/// would otherwise copy a host worker over a current one.
 pub(crate) fn prepare_recovery_worker_binary<'a, E: CommandExecutor>(
     executor: &'a E,
     refresh: &DeferredWorkerBinaryRefresh,
 ) -> Result<Option<PreparedWorkerBinary<'a, E>>> {
-    let source = worker_binary_for(&refresh.locator, executor)?;
-    let expected = mj_core::worker_launch::worker_executable_digest(&source)?;
+    let worker = WorkerInstall::for_target(&refresh.locator, executor)?;
+    let WorkerInstall::Host(source) = &worker else {
+        return stage_worker_binary_for_upgrade(
+            executor,
+            &refresh.locator,
+            &refresh.session_id,
+            &worker,
+        )
+        .map(Some);
+    };
+    let expected = mj_core::worker_launch::worker_executable_digest(source)?;
     if crate::session_manager::installed_digest_matches(
         executor,
         &refresh.installed_digest,
@@ -143,7 +158,7 @@ pub(crate) fn prepare_recovery_worker_binary<'a, E: CommandExecutor>(
     ) {
         return Ok(None);
     }
-    stage_worker_binary_for_upgrade(executor, &refresh.locator, &refresh.session_id, &source)
+    stage_worker_binary_for_upgrade(executor, &refresh.locator, &refresh.session_id, &worker)
         .map(Some)
 }
 
@@ -173,20 +188,22 @@ pub(in crate::controller) fn stage_worker_binary_for_upgrade<'a, E: CommandExecu
     executor: &'a E,
     locator: &targets::TargetLocator,
     session_id: &str,
-    worker_binary: &Path,
+    worker: &WorkerInstall,
 ) -> Result<PreparedWorkerBinary<'a, E>> {
     let staging = format!(
         "hel.prepared-{}",
         crate::session_manager::new_command_id("upgrade-stage")?
     );
-    let plan = worker_binary_replacement_plan(locator, session_id, worker_binary, &staging)?;
+    let plan = worker_binary_replacement_plan(locator, session_id, worker, &staging)?;
     let root = targets::worker_root(locator, session_id)?;
-    crate::target_storage::ensure_room_for(
-        locator,
-        [format!("{root}/{staging}.next").as_str()],
-        || file_size(worker_binary),
-        "stage the replacement Mjolnir worker",
-    )?;
+    if let Some(worker_binary) = worker.host_binary() {
+        crate::target_storage::ensure_room_for(
+            locator,
+            [format!("{root}/{staging}.next").as_str()],
+            || file_size(worker_binary),
+            "stage the replacement Mjolnir worker",
+        )?;
+    }
     let (live, live_names) = LiveStaging::register(session_id, &staging);
     // The guard exists before the first byte is written, so a failed or
     // cancelled upload removes its partial `.next` file on the way out.
@@ -272,7 +289,7 @@ pub(in crate::controller) fn prepare_managed_harness_for_upgrade(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
-    worker_binary: &Path,
+    worker: &WorkerInstall,
     launch: &WorkerLaunchConfig,
 ) -> Result<()> {
     if !launch.requires_harness_preparation() {
@@ -285,18 +302,17 @@ pub(in crate::controller) fn prepare_managed_harness_for_upgrade(
             crate::target_storage::harness_cache_path(locator).as_str(),
             launch.harness_home.to_string_lossy().as_ref(),
         ],
-        || file_size(worker_binary),
+        || worker.host_binary().map_or(Ok(0), file_size),
         "prepare the managed harness",
     )?;
     if locator.container_engine().is_some() {
         return prepare_container_harness_for_upgrade(
-            executor,
-            locator,
-            session_id,
-            worker_binary,
-            launch,
+            executor, locator, session_id, worker, launch,
         );
     }
+    let worker_binary = worker
+        .host_binary()
+        .context("only a container target can run its image's worker")?;
     let worker_root = targets::worker_root(locator, session_id)?;
     let staging_root = format!(
         "{worker_root}/{}",
@@ -395,7 +411,7 @@ fn prepare_container_harness_for_upgrade(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
-    worker_binary: &Path,
+    worker: &WorkerInstall,
     launch: &WorkerLaunchConfig,
 ) -> Result<()> {
     let staging = tempfile::Builder::new()
@@ -411,7 +427,7 @@ fn prepare_container_harness_for_upgrade(
     let staging_binary = format!("{staging_root}/hel");
     let staging_config = format!("{staging_root}/launch.json");
     let upload =
-        worker_binary_replacement_plan(locator, session_id, worker_binary, &format!("{name}/hel"))?;
+        worker_binary_replacement_plan(locator, session_id, worker, &format!("{name}/hel"))?;
     let result = (|| -> Result<()> {
         execute_checked(
             executor,
@@ -505,21 +521,52 @@ pub(super) fn prepare_installed_managed_harness(
 pub(super) fn installed_worker_binary_replacement_plan(
     locator: &targets::TargetLocator,
     session_id: &str,
-    worker_binary: &Path,
+    worker: &WorkerInstall,
 ) -> Result<CommandPlan> {
-    worker_binary_replacement_plan(locator, session_id, worker_binary, "hel")
+    worker_binary_replacement_plan(locator, session_id, worker, "hel")
 }
 
 fn worker_binary_replacement_plan(
     locator: &targets::TargetLocator,
     session_id: &str,
-    worker_binary: &Path,
+    worker: &WorkerInstall,
     installed_name: &str,
 ) -> Result<CommandPlan> {
-    verify_worker_build(worker_binary)?;
     let worker_root = targets::worker_root(locator, session_id)?;
     let installed = format!("{worker_root}/{installed_name}");
     let staged = format!("{installed}.next");
+    let worker_binary = match worker {
+        WorkerInstall::Host(worker_binary) => worker_binary,
+        WorkerInstall::Image => {
+            ensure!(
+                locator.container_engine().is_some(),
+                "only a container target can run its image's worker"
+            );
+            // A link renamed into place, like a copied binary: the image owns
+            // the file, so there is nothing to re-own or make private.
+            return Ok(CommandPlan {
+                description: format!("link the image's Mjolnir worker for session {session_id}"),
+                commands: vec![
+                    targets::locator_command(
+                        locator,
+                        vec![
+                            "ln".into(),
+                            "-sfn".into(),
+                            IMAGE_WORKER.into(),
+                            staged.clone(),
+                        ],
+                    )
+                    .purpose("stage a link to the image's Mjolnir worker"),
+                    targets::locator_command(
+                        locator,
+                        vec!["mv".into(), "-f".into(), "--".into(), staged, installed],
+                    )
+                    .purpose("replace installed Mjolnir worker"),
+                ],
+            });
+        }
+    };
+    verify_worker_build(worker_binary)?;
     let commands = match locator {
         targets::TargetLocator::LocalBare { .. } => vec![
             CommandSpec::new(
@@ -753,14 +800,22 @@ pub(crate) fn refresh_target_worker_binary_if_stale(
     executor: &impl CommandExecutor,
     refresh: &DeferredWorkerBinaryRefresh,
 ) -> Result<()> {
-    let source = worker_binary_for(&refresh.locator, executor)
-        .context("resolve the worker binary for the recovering target")?;
+    let worker = WorkerInstall::for_target(&refresh.locator, executor)
+        .context("resolve the worker for the recovering target")?;
+    let WorkerInstall::Host(source) = &worker else {
+        // Relinking is cheap and idempotent; digests cannot tell an image's
+        // worker from a host copy of the same build.
+        installed_worker_binary_replacement_plan(&refresh.locator, &refresh.session_id, &worker)?
+            .execute(executor)
+            .context("link the image's Mjolnir worker")?;
+        return Ok(());
+    };
     replace_target_worker_binary_if_stale(
         executor,
         &refresh.locator,
         &refresh.session_id,
         &refresh.installed_digest,
-        &source,
+        source,
     )
     .map(|_| ())
 }
@@ -813,8 +868,12 @@ pub(super) fn replace_target_worker_binary_if_stale(
         || file_size(source),
         "replace the stale Mjolnir worker",
     )?;
-    installed_worker_binary_replacement_plan(locator, session_id, source)?
-        .execute(executor)
-        .context("replace stale relay worker binary")?;
+    installed_worker_binary_replacement_plan(
+        locator,
+        session_id,
+        &WorkerInstall::Host(source.to_owned()),
+    )?
+    .execute(executor)
+    .context("replace stale relay worker binary")?;
     Ok(true)
 }

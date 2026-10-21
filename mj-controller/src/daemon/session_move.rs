@@ -102,9 +102,10 @@ impl RuntimeState {
             super::lifecycle::LifecycleStart {
                 resume_workspace_id: None,
                 request_key: Some(key),
-                create_control: None,
+                control: None,
                 phase: LifecyclePhase::Executing,
                 move_operation_id: Some(operation_id.clone()),
+                deferrable_admission: None,
             },
             move |state, session_id, cancelled| async move {
                 let result = state
@@ -194,9 +195,10 @@ impl RuntimeState {
                 super::lifecycle::LifecycleStart {
                     resume_workspace_id: None,
                     request_key: Some(key),
-                    create_control: None,
+                    control: None,
                     phase,
                     move_operation_id: None,
+                    deferrable_admission: None,
                 },
                 move |state, session_id, cancelled| async move {
                     state
@@ -437,7 +439,7 @@ mod admission_tests {
             [
                 "-c".to_owned(),
                 format!(
-                    "echo $$ > '{0}/pid'; while [ ! -e '{0}/release' ]; do sleep 0.05; done",
+                    "echo $$ > '{0}/pid.part' && mv '{0}/pid.part' '{0}/pid' && while [ ! -e '{0}/release' ]; do sleep 0.05; done",
                     directory.display()
                 ),
             ],
@@ -489,6 +491,7 @@ mod admission_tests {
     /// interrupted for the next daemon to resume, as `finish_move_result`
     /// does for a Move with a workspace transfer.
     // Hard-won: 571e8aa0: a handoff waited through a resumable Move copy because duplicate admission stayed held.
+    // Hard-won: 5ca468627: reading the pid before its write finished hung panic cleanup.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_handoff_does_not_wait_for_a_slow_path_move_copy() {
         const NAME: &str = "a_handoff_does_not_wait_for_a_slow_path_move_copy";

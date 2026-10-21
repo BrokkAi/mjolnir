@@ -32,12 +32,65 @@ pub struct ContainerSettings {
     pub resource_allocation: Option<SessionResourceAllocation>,
     pub cpus: Option<String>,
     pub memory: Option<String>,
+    /// The image the container was created from, recorded only when it was
+    /// the default image of the Mjolnir that created it. A release's default
+    /// is its own version's image, so upgrading Mjolnir moves the default away
+    /// from this one and the container is due to be recreated from the new
+    /// image. A configured image moves only when the person edits it, and is
+    /// not recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_image: Option<String>,
 }
 
 impl ContainerSettings {
     /// One policy for Restart and the daemon's confirmation projections.
     pub fn recreation_required(session: &SessionRecord) -> bool {
-        let owns_container = matches!(
+        Self::owns_container(session)
+            && Self::applied_to(session) != Some(&Self::requested(session))
+    }
+
+    /// Whether the session's container was created from a default image this
+    /// Mjolnir no longer names: its image, and the worker baked into it, are
+    /// an older release's.
+    pub fn default_image_moved(session: &SessionRecord) -> bool {
+        Self::owns_container(session)
+            && Self::applied_to(session)
+                .and_then(|applied| applied.default_image.as_deref())
+                .is_some_and(|image| image != crate::config::DEFAULT_CONTAINER_IMAGE)
+    }
+
+    pub fn requested(session: &SessionRecord) -> Self {
+        Self {
+            additional_mounts: session.additional_mounts.clone(),
+            resource_allocation: session.resource_allocation.clone(),
+            cpus: session.container_cpus.clone(),
+            memory: session.container_memory.clone(),
+            // A container on the default image follows the default to the one
+            // this Mjolnir names.
+            default_image: Self::applied_to(session)
+                .and_then(|applied| applied.default_image.as_ref())
+                .map(|_| crate::config::DEFAULT_CONTAINER_IMAGE.to_owned()),
+        }
+    }
+
+    /// The snapshot to record for a container just created from `image`.
+    pub fn applied(session: &SessionRecord, image: &str) -> Self {
+        Self {
+            default_image: (image == crate::config::DEFAULT_CONTAINER_IMAGE)
+                .then(|| image.to_owned()),
+            ..Self::requested(session)
+        }
+    }
+
+    fn applied_to(session: &SessionRecord) -> Option<&Self> {
+        session
+            .target_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.container_settings.as_ref())
+    }
+
+    fn owns_container(session: &SessionRecord) -> bool {
+        matches!(
             session.target,
             Some(
                 TargetLocator::LocalPodman {
@@ -57,22 +110,7 @@ impl ContainerSettings {
                     ..
                 }
             )
-        );
-        owns_container
-            && session
-                .target_runtime
-                .as_ref()
-                .and_then(|runtime| runtime.container_settings.as_ref())
-                != Some(&Self::requested(session))
-    }
-
-    pub fn requested(session: &SessionRecord) -> Self {
-        Self {
-            additional_mounts: session.additional_mounts.clone(),
-            resource_allocation: session.resource_allocation.clone(),
-            cpus: session.container_cpus.clone(),
-            memory: session.container_memory.clone(),
-        }
+        )
     }
 }
 

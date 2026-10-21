@@ -50,10 +50,13 @@ pin; Claude accepts the image's installed bridge. Selection and installation
 finish before the worker starts an ACP session. The worker executes the resolved
 bridge and provider.
 
-Kimi Code, Grok Build, and OpenCode run their official installers when the
-image does not already contain the command. MiMo Code can fall back to
-`npx -y @mimo-ai/cli@0.1.15 acp`, so an unbaked image needs Node.js 22, npm,
-and npx. Bake `@mimo-ai/cli@0.1.15` and set
+Kimi Code, Grok Build, and OpenCode have no npm bridge:
+Mjolnir runs their official installer with `curl` piped to Bash instead, which
+needs both tools in the image. An image-baked `opencode` must be OpenCode 2,
+because each session imports its logins with `opencode auth import` before it
+starts.
+MiMo Code can fall back to `npx -y @mimo-ai/cli@0.1.15 acp`, so an unbaked
+image needs Node.js 22, npm, and npx. Bake `@mimo-ai/cli@0.1.15` and set
 `MIMOCODE_DISABLE_AUTOUPDATE=1` for a stable managed runtime.
 
 Baking the bridges in, the way the reference image does, avoids that

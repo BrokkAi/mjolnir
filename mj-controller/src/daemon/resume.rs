@@ -578,9 +578,10 @@ impl RuntimeState {
     /// record as it unwinds and would otherwise resurrect the row this
     /// operation deletes. A lifecycle that ignores cancellation for longer
     /// than [`FORCE_DESTROY_PREEMPT_TIMEOUT`] is reported instead of destroyed
-    /// under.
+    /// under. A teardown, and an operation that has committed, is waited for
+    /// rather than cancelled; one that has committed is never cancelled.
     pub(super) async fn preempt_active_lifecycle(self: &Arc<Self>, session_id: &str) -> Result<()> {
-        let (mut result, tearing_down, restart_intent) = {
+        let (mut result, tearing_down, restart_intent, label) = {
             let mut lifecycle_owner = self.owner();
             let lifecycle = &mut lifecycle_owner.lifecycle;
             let Some(active) = lifecycle.get_mut(session_id) else {
@@ -590,8 +591,11 @@ impl RuntimeState {
                 return Ok(());
             }
             let restart_intent = active.restart_intent.clone();
+            // A committed close is a teardown too: its checkpoint is sealed or
+            // about to be, and cancelling it only strands the target (#1218).
             let tearing_down = active.kind.is_teardown()
-                || matches!(active.phase, LifecyclePhase::RetiringContainer);
+                || matches!(active.phase, LifecyclePhase::RetiringContainer)
+                || active.control.is_committed();
             // A teardown already under way is the fact this destroy wants, so
             // it is waited for, not cancelled half way: cancelling it is what
             // left a sub-agent's destroy "cancelled before its parent" when
@@ -600,15 +604,26 @@ impl RuntimeState {
             if !tearing_down {
                 active.request_cancel();
             }
-            (active.result.clone(), tearing_down, restart_intent)
+            (
+                active.result.clone(),
+                tearing_down,
+                restart_intent,
+                active.kind.label(),
+            )
         };
         let mut finished = wait_for_lifecycle_result(&mut result).await;
         if finished.is_err() && tearing_down {
-            {
-                let mut lifecycle_owner = self.owner();
-                if let Some(active) = lifecycle_owner.lifecycle.get_mut(session_id) {
-                    active.request_cancel();
-                }
+            // The control refuses this for a committed operation, which is
+            // then reported as still running rather than waited for again.
+            let cancelled = self
+                .owner()
+                .lifecycle
+                .get_mut(session_id)
+                .is_some_and(|active| active.request_cancel());
+            if !cancelled && result.borrow().is_none() {
+                bail!(
+                    "session {session_id} is still finishing its {label}, which can no longer be cancelled; try again when it ends"
+                );
             }
             finished = wait_for_lifecycle_result(&mut result).await;
         }

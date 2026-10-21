@@ -251,12 +251,19 @@ pub enum Decision {
     KeepCurrent,
 }
 
-/// A worker-owned completion decision for one physical prompt boundary.
-/// KeepCurrent preserves the harness outcome; other decisions are Jev verdicts.
+/// The latest prompt that ended: its command and the ordinal of its
+/// completion event. `HandbackReminder` names a turn by this identity, and its
+/// sender takes `completed_ordinal` from the projected turn outcome, so the two
+/// must stay equal.
+///
+/// Jev's verdict on a turn lives in the worker's assessment record
+/// (`mj_core::assessment::TurnAssessment`), and nothing reads `decision`.
+/// It is still written, always as `KeepCurrent`, because the relay protocol
+/// lets a newer worker serve an older daemon: daemons before #1304 require the
+/// field, and read anything but `KeepCurrent` as a verdict on this turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct TurnCompletion {
     pub command_id: String,
-    /// Transcript frontier the completion decision covers, including autonomous work.
     pub completed_ordinal: u64,
     pub decision: Decision,
 }

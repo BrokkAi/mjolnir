@@ -67,6 +67,9 @@ pub struct LaunchSpec {
     /// [`LaunchSpec::startup_model`].
     pub initial_model: Option<String>,
     pub harness: HarnessKind,
+    /// For OpenCode, the staged logins this bridge's launch imported; the
+    /// idle session reloads once they change. Set when the bridge starts.
+    pub imported_logins: Option<super::ImportedLogins>,
     pub execution_policy: ExecutionPolicy,
     pub acp_activity: AcpActivityClock,
     /// When the step the agent is on began. Marked from the same handlers as

@@ -722,6 +722,18 @@ fn harness_profile_check(
     if profile.auth_scheme() == mj_core::config::AuthScheme::AwsCredentialChain {
         return aws_harness_authentication_check(id, profile, executor);
     }
+    // OpenCode keeps its logins in its own database; a database it cannot
+    // read is reported as itself, not as a missing login.
+    if profile.auth_scheme() == mj_core::config::AuthScheme::NativeLoginStore
+        && let Err(error) = crate::opencode_logins::profile_logins(profile)
+    {
+        return DoctorCheck::fixable(
+            format!("harness.{id}"),
+            title,
+            format!("{error:#}"),
+            "Check that the OpenCode database is readable by this user. Sessions on this profile fail to start until it is.",
+        );
+    }
     if !harness_is_authenticated_with_executor(profile, executor) {
         return DoctorCheck::fixable(
             format!("harness.{id}"),
@@ -1244,13 +1256,16 @@ fn podman_image_check(
         };
     }
 
-    let command = CommandSpec::new("podman", ["image", "exists", image])
+    let command = CommandSpec::new("podman", ["image", "inspect", image])
         .purpose("check Podman image presence");
     match executor.execute(&command) {
         Ok(output) if output.status == 0 => DoctorCheck::ready(
             check_id,
             title,
-            format!("Image {image} is present in local Podman storage."),
+            format!(
+                "Image {image} is present in local Podman storage.{}",
+                image_worker_summary(&output.stdout)
+            ),
         ),
         Ok(_) => DoctorCheck::fixable(
             check_id,
@@ -1266,6 +1281,28 @@ fn podman_image_check(
             ),
             missing_image_remediation(image),
         ),
+    }
+}
+
+/// What an image's inspection says about the worker baked into it, as a
+/// sentence to append, or nothing when the inspection cannot be read.
+/// Sessions decide by asking the worker itself; this reads the label the
+/// image build verified against it.
+fn image_worker_summary(inspection: &[u8]) -> String {
+    if serde_json::from_slice::<Vec<serde_json::Value>>(inspection)
+        .map_or(true, |images| images.is_empty())
+    {
+        return String::new();
+    }
+    match crate::controller::image_worker_label(inspection).as_deref() {
+        Some(build) if build == mj_core::worker_build::WORKER_BUILD_ID => format!(
+            " It carries this Mjolnir's worker (build {build}), which sessions run directly."
+        ),
+        Some(build) => format!(
+            " It carries worker build {build}, not this Mjolnir's {}, so sessions install the host worker.",
+            mj_core::worker_build::WORKER_BUILD_ID
+        ),
+        None => " It carries no Mjolnir worker, so sessions install the host worker.".to_owned(),
     }
 }
 
@@ -1413,7 +1450,10 @@ fn docker_image_check(
         Ok(output) if output.status == 0 => DoctorCheck::ready(
             check_id,
             title,
-            format!("Image {image} is present in Docker storage."),
+            format!(
+                "Image {image} is present in Docker storage.{}",
+                image_worker_summary(&output.stdout)
+            ),
         ),
         Ok(_) => DoctorCheck::fixable(
             check_id,
@@ -2189,8 +2229,9 @@ fn ssh_docker_check(
             check_id,
             title,
             format!(
-                "Remote Docker {} is available via {destination}; image {image} is present. Run `mj doctor --json --smoke` to verify remote OverlayFS attachments.",
-                preflight.version
+                "Remote Docker {} is available via {destination}; image {image} is present.{} Run `mj doctor --json --smoke` to verify remote OverlayFS attachments.",
+                preflight.version,
+                image_worker_summary(&output.stdout)
             ),
         ),
         Ok(output) => DoctorCheck::fixable(
@@ -2738,6 +2779,17 @@ fn ssh_bare_worker_checks(
 
 fn worker_binary_check(id: &str, container: &ContainerTemplate) -> DoctorCheck {
     let title = format!("Container worker binary for target {id}");
+    let image = container.image.as_str();
+    let default_image = image == mj_core::config::DEFAULT_CONTAINER_IMAGE;
+    if default_image && mj_core::config::RELEASE_IMAGE_CARRIES_WORKER {
+        return DoctorCheck::ready(
+            format!("worker.{id}"),
+            title,
+            format!(
+                "Sessions run the worker baked into {image}, this release's own image, so no host worker is needed."
+            ),
+        );
+    }
     let arch = match container_architecture(container.platform.as_deref()) {
         Ok(arch) => arch,
         Err(reason) => {
@@ -2745,12 +2797,23 @@ fn worker_binary_check(id: &str, container: &ContainerTemplate) -> DoctorCheck {
         }
     };
     let triple = format!("{arch}-unknown-linux-musl");
-    worker_source_check(
+    let mut check = worker_source_check(
         format!("worker.{id}"),
         title,
         &triple,
         worker_binary_prerequisite_for_arch(arch),
-    )
+    );
+    let provenance = if default_image {
+        "the development image published from master"
+    } else {
+        "a configured image"
+    };
+    check.detail = format!(
+        "{image} is {provenance}: sessions run its worker when it is this Mjolnir's build ({}), and otherwise install the host worker. {}",
+        mj_core::worker_build::WORKER_BUILD_ID,
+        check.detail
+    );
+    check
 }
 
 fn worker_source_check(

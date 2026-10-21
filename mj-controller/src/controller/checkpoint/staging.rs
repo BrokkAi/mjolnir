@@ -144,15 +144,12 @@ pub(super) fn replace_stale_export_worker(
         session_id,
         "target worker does not support this checkpoint export protocol; replacing the installed Mjolnir binary and retrying"
     );
-    let owned_binary;
-    let binary = if let Some(path) = worker_binary {
-        path
-    } else {
-        owned_binary = crate::controller::worker_binary::worker_binary_for(locator, executor)?;
-        owned_binary.as_path()
+    let worker = match worker_binary {
+        Some(path) => crate::controller::worker_binary::WorkerInstall::Host(path.to_owned()),
+        None => crate::controller::worker_binary::WorkerInstall::for_target(locator, executor)?,
     };
     crate::controller::worker_binary::replace_installed_worker_binary(
-        executor, locator, session_id, binary,
+        executor, locator, session_id, &worker,
     )?;
     *replaced_worker = true;
     Ok(true)

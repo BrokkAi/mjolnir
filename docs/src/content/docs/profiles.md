@@ -17,7 +17,7 @@ when offered, effort for **Straightforward** tasks. **Subtle** is optional; if
 you set it, choose a smarter model or higher effort than Straightforward. Subtle
 cannot be set without Straightforward. These choices apply globally. With both
 set, parents choose a task type each time they delegate work. With only
-Straightforward, parents delegate only straightforward work and do work that
+Straightforward, parents delegate straightforward work and do work that
 needs judgment themselves.
 
 **Create** and **Move…** offer **Native** or **Mjolnir** delegation. Mjolnir
@@ -56,7 +56,7 @@ marks models or counters that cannot be priced from the recorded information.
 | Kimi Code | `kimi` | `KIMI_CODE_HOME` | `~/.kimi-code` | `credentials/kimi-code.json` | no |
 | Grok Build | `grok` | `GROK_HOME` | `~/.grok` | `auth.json` | yes |
 | Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
-| OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | `.data/opencode/auth.json` | yes |
+| OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db` | yes |
 | MiMo Code | `mimo` | `MIMOCODE_HOME` | `~/.mimocode` | `data/auth.json` | yes |
 
 There are seven harness kinds. Codex can use its built-in Amazon Bedrock
@@ -430,10 +430,22 @@ tree, including on a bare runtime on this machine. Do not override `XDG_CONFIG_H
 For OpenCode, configure `kind = "opencode"` and a home ending in `opencode`,
 for example `home = "/home/me/.config/opencode"` or
 `/home/me/accounts/work/opencode`. Discovery uses `$XDG_CONFIG_HOME/opencode`
-when set. Mjolnir gives each session a private configuration copy and stores
-its login and session database under that copy's `.data/opencode/` tree,
-including on a bare runtime on this machine. Do not override
-`XDG_CONFIG_HOME` or `XDG_DATA_HOME` in the profile environment.
+when set. OpenCode 2 keeps its logins in its database, `opencode.db`, in its
+data directory: `$XDG_DATA_HOME/opencode` (or `~/.local/share/opencode`) for
+your own `~/.config/opencode`, and `<home>/.data/opencode` for any other home.
+That database also holds every OpenCode session, so Mjolnir reads only the
+logins from it, read-only. An OpenCode 1 login in `auth.json`, in the data
+directory or under `<home>/.data/opencode` where Mjolnir kept it for OpenCode
+1, still reaches sessions until OpenCode 2 takes that directory over, the way
+OpenCode 2's own upgrade carries it. Mjolnir gives each session a private configuration
+copy with those logins, which the session imports when it starts, and keeps the
+session's own database under that copy's `.data/opencode/` tree, including on
+a bare runtime on this machine. A login you add, change or remove reaches
+running sessions within about a minute: each one reloads its OpenCode session
+once it is idle, never during a turn, and continues the same conversation.
+Logins come only from the profile; one made inside a session lasts until that
+session next reloads. Checkpoints keep the session database without its logins. Do
+not override `XDG_CONFIG_HOME` or `XDG_DATA_HOME` in the profile environment.
 
 For MiMo Code, configure `kind = "mimo"` and a home that is used as its
 `MIMOCODE_HOME`, for example `home = "/home/me/.mimocode"` or
@@ -516,7 +528,7 @@ from the profile home:
 | Kimi Code | `credentials/`, `config.toml`, `device_id`, `AGENTS.md`, `SYSTEM.md`, `mcp.json`, `skills/`, `agents/`, `plugins/` |
 | Grok Build | `auth.json`, `config.toml`, `AGENTS.md`, `agent_id`, `skills/`, `plugins/` |
 | Muse Code | `auth.json`, `settings.json`, `trust.json`, `AGENTS.md`, `skills/`, `rules/` |
-| OpenCode | `opencode.json`, `opencode.jsonc`, `.data/opencode/auth.json`, `AGENTS.md`, `skills/` |
+| OpenCode | `opencode.json`, `opencode.jsonc`, `AGENTS.md`, `skills/`, and the logins from `opencode.db`, as `.data/opencode/mjolnir-credentials.json` |
 | MiMo Code | `config/`, `data/auth.json` |
 
 Staging follows symbolic links: a linked file or directory is copied with the
@@ -732,8 +744,9 @@ Muse requires Node.js 22 or newer, npm, and curl; Mjolnir launches the pinned
 `muse-acp` adapter through npx and downloads the pinned native Muse binary,
 verifying its SHA-256 checksum. Linux and macOS, on x86-64 and ARM64, are
 supported. The native Muse binary retains its own upstream terms.
-OpenCode requires curl and tar; Mjolnir downloads the pinned OpenCode archive
-from its GitHub releases and verifies its SHA-256 checksum. Linux and macOS, on
+OpenCode requires curl and tar; Mjolnir downloads the pinned OpenCode 2 package
+for the platform from npm (`@opencode/cli-<platform>`), the same package
+OpenCode's own installer fetches, and verifies its SHA-256 checksum. Linux and macOS, on
 x86-64 and ARM64, are supported. The pinned installation disables OpenCode's
 self-update so a running session never replaces its own binary.
 MiMo Code installs from the pinned `@mimo-ai/cli` npm package. Its managed

@@ -347,16 +347,26 @@ fn upgrade_preparation_leaves_the_installed_worker_unchanged_until_promotion() {
             &executor,
             &locator,
             session_id,
-            &directory.path().join("missing")
+            &WorkerInstall::Host(directory.path().join("missing"))
         )
         .is_err()
     );
     assert_eq!(std::fs::read(&installed).unwrap(), b"running-worker");
-    let staging =
-        stage_worker_binary_for_upgrade(&executor, &locator, session_id, &source).unwrap();
+    let staging = stage_worker_binary_for_upgrade(
+        &executor,
+        &locator,
+        session_id,
+        &WorkerInstall::Host(source.clone()),
+    )
+    .unwrap();
     assert_eq!(std::fs::read(&installed).unwrap(), b"running-worker");
-    let abandoned =
-        stage_worker_binary_for_upgrade(&executor, &locator, session_id, &source).unwrap();
+    let abandoned = stage_worker_binary_for_upgrade(
+        &executor,
+        &locator,
+        session_id,
+        &WorkerInstall::Host(source.clone()),
+    )
+    .unwrap();
     assert_ne!(&*staging, &*abandoned);
     let abandoned_path = worker_root.join(&*abandoned);
     assert!(abandoned_path.exists());
@@ -416,12 +426,23 @@ fn failed_worker_staging_leaves_no_partial_upload_and_sweeps_stale_ones() {
     let executor = FullDiskUpload {
         fail: std::cell::Cell::new(false),
     };
-    let held = stage_worker_binary_for_upgrade(&executor, &locator, session_id, &source).unwrap();
+    let held = stage_worker_binary_for_upgrade(
+        &executor,
+        &locator,
+        session_id,
+        &WorkerInstall::Host(source.clone()),
+    )
+    .unwrap();
     assert!(!stale.exists(), "a stale partial upload survived staging");
     executor.fail.set(true);
-    let error = stage_worker_binary_for_upgrade(&executor, &locator, session_id, &source)
-        .err()
-        .expect("the upload fails");
+    let error = stage_worker_binary_for_upgrade(
+        &executor,
+        &locator,
+        session_id,
+        &WorkerInstall::Host(source.clone()),
+    )
+    .err()
+    .expect("the upload fails");
     assert!(format!("{error:#}").contains("No space left on device"));
     let mut remaining = std::fs::read_dir(&worker_root)
         .unwrap()
@@ -1276,7 +1297,7 @@ fn install_on_ssh_host(
         session,
         &root,
         &format!("{root}/profile"),
-        &fixture.worker_binary,
+        &WorkerInstall::Host(fixture.worker_binary.clone()),
         &fixture.launch_config,
         &fixture.ownership,
         &fixture.profile_stage,
@@ -1447,7 +1468,7 @@ fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
             &session,
             &root,
             &profile,
-            &fixture.worker_binary,
+            &WorkerInstall::Host(fixture.worker_binary.clone()),
             &fixture.launch_config,
             &fixture.ownership,
             &fixture.profile_stage,
@@ -1463,7 +1484,7 @@ fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
                 &ProcessExecutor,
                 &locator,
                 &session,
-                &fixture.worker_binary,
+                &WorkerInstall::Host(fixture.worker_binary.clone()),
             )
         })?;
         execute_checked(
@@ -1640,6 +1661,175 @@ fn stopped_docker_session_recovers_with_the_current_worker_build() {
 }
 
 #[test]
+#[ignore = "requires Docker, the agent-dev image and a portable MJ_WORKER_BINARY of this build"]
+fn a_container_runs_its_images_worker_through_the_hel_link() {
+    let source =
+        PathBuf::from(std::env::var_os("MJ_WORKER_BINARY").expect("portable Linux worker"));
+    verify_worker_build(&source).unwrap();
+    let fixture = podman_install_fixture();
+    let session = mj_core::state::new_session_id().unwrap();
+    let container_id = targets::resource_name(&session).unwrap();
+    let locator = targets::TargetLocator::LocalDocker {
+        borrowed_from: None,
+        container_id: container_id.clone(),
+    };
+    execute_checked(
+        &ProcessExecutor,
+        CommandSpec::new(
+            "docker",
+            [
+                "run",
+                "--pull=never",
+                "-d",
+                "--name",
+                &container_id,
+                "ghcr.io/brokkai/mjolnir/agent-dev:latest",
+                "sleep",
+                "infinity",
+            ],
+        ),
+    )
+    .unwrap();
+    let as_root = |script: &str| {
+        execute_checked(
+            &ProcessExecutor,
+            CommandSpec::new(
+                "docker",
+                ["exec", "--user", "0", &container_id, "sh", "-c", script],
+            ),
+        )
+    };
+    let result = (|| -> Result<()> {
+        ensure!(
+            image_worker_build(&locator, &ProcessExecutor)?.is_none(),
+            "an image without a worker must say so"
+        );
+        ensure!(
+            WorkerInstall::for_target(&locator, &ProcessExecutor)?
+                .host_binary()
+                .is_some(),
+            "an image without a worker gets the host worker"
+        );
+        // A worker that is present but cannot run is a failure, never "absent".
+        as_root(
+            "mkdir -p /opt/mjolnir && printf 'not a worker' > /opt/mjolnir/mj-worker && chmod 644 /opt/mjolnir/mj-worker",
+        )?;
+        ensure!(
+            WorkerInstall::for_target(&locator, &ProcessExecutor).is_err(),
+            "an unusable image worker must not be mistaken for a missing one"
+        );
+        execute_checked(
+            &ProcessExecutor,
+            CommandSpec::new(
+                "docker",
+                [
+                    "cp".to_owned(),
+                    source.to_string_lossy().into_owned(),
+                    format!("{container_id}:{IMAGE_WORKER}"),
+                ],
+            ),
+        )?;
+        as_root("chown 0:0 /opt/mjolnir/mj-worker && chmod 755 /opt/mjolnir/mj-worker")?;
+        ensure!(
+            image_worker_build(&locator, &ProcessExecutor)?.as_deref()
+                == Some(mj_core::worker_build::WORKER_BUILD_ID),
+            "the image's worker reports this build"
+        );
+
+        // Checkpoint-only mode starts the worker without a harness.
+        let root = targets::worker_root(&locator, &session)?;
+        let relay = tempfile::tempdir()?;
+        drop(mj_worker::relay::DurableRelay::open(
+            relay.path(),
+            &session,
+            "2.0.0",
+        )?);
+        as_root(&format!("mkdir -p {root}"))?;
+        execute_checked(
+            &ProcessExecutor,
+            CommandSpec::new(
+                "docker",
+                [
+                    "cp".to_owned(),
+                    relay.path().join(".").to_string_lossy().into_owned(),
+                    format!("{container_id}:{root}"),
+                ],
+            ),
+        )?;
+        as_root(&format!("chown -R hel:hel {root}"))?;
+        let launch: WorkerLaunchConfig = serde_json::from_value(serde_json::json!({
+            "session_id": session, "harness": "codex", "bridge_command": "/not-used",
+            "bridge_args": [], "environment": {}, "target_environment": {},
+            "cwd": "/tmp", "execution_policy": "configured_approvals", "run_mode": "checkpoint_only"
+        }))?;
+        launch.write(&fixture.launch_config)?;
+        install_worker_files(
+            &ProcessExecutor,
+            &locator,
+            &session,
+            &root,
+            &format!("{root}/profile"),
+            &WorkerInstall::Image,
+            &fixture.launch_config,
+            &fixture.ownership,
+            &fixture.profile_stage,
+            None,
+        )?;
+        execute_checked(
+            &ProcessExecutor,
+            CommandSpec::new(
+                "docker",
+                [
+                    "exec",
+                    &container_id,
+                    "sh",
+                    "-c",
+                    "test \"$(id -u)\" != 0 && test \"$(readlink \"$1/hel\")\" = /opt/mjolnir/mj-worker && test -x \"$1/hel\"",
+                    "sh",
+                    &root,
+                ],
+            ),
+        )
+        .context("the session's hel must be a link to the image's worker")?;
+        execute_checked(&ProcessExecutor, start_worker_command(&locator, &root))?;
+        let reconnect = targets::reconnect_plan(&locator, &session)?
+            .commands
+            .remove(0);
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(async {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            let connection = loop {
+                match crate::worker_client::RelayClient::connect(&reconnect, &session).await {
+                    Ok(connection) => break connection,
+                    Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+                }
+            };
+            ensure!(
+                connection.worker_build() == Some(mj_core::worker_build::WORKER_BUILD_ID),
+                "the image's worker must report this controller's build"
+            );
+            Ok::<_, anyhow::Error>(())
+        })?;
+        // The daemon identifies its worker by `hel worker run --root`; the
+        // link keeps that name on the process started through it.
+        let liveness = execute_checked(&ProcessExecutor, worker_liveness_command(&locator, &root))?;
+        ensure!(
+            String::from_utf8_lossy(&liveness.stdout).trim() == "alive",
+            "the worker started through the link must be recognized as alive, got {:?}",
+            String::from_utf8_lossy(&liveness.stdout)
+        );
+        Ok(())
+    })();
+    let cleanup = execute_checked(
+        &ProcessExecutor,
+        CommandSpec::new("docker", ["rm", "-f", &container_id]),
+    );
+    result.unwrap();
+    cleanup.unwrap();
+}
+
+#[test]
 fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
     struct RecordingExecutor {
         commands: RefCell<Vec<CommandSpec>>,
@@ -1672,7 +1862,12 @@ fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
             .unwrap();
     owner
         .scope_blocking(|| {
-            replace_installed_worker_binary(&executor, &locator, session, &fixture.worker_binary)
+            replace_installed_worker_binary(
+                &executor,
+                &locator,
+                session,
+                &WorkerInstall::Host(fixture.worker_binary.clone()),
+            )
         })
         .unwrap();
 
@@ -1735,8 +1930,12 @@ fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
             "{kind} worker start must inherit the configured container user: {start_text}"
         );
 
-        let upgrade =
-            installed_worker_binary_replacement_plan(&locator, session, source.path()).unwrap();
+        let upgrade = installed_worker_binary_replacement_plan(
+            &locator,
+            session,
+            &WorkerInstall::Host(source.path().to_path_buf()),
+        )
+        .unwrap();
         let commands = rendered(&upgrade.commands);
         let ownership = commands
             .iter()
@@ -2156,6 +2355,7 @@ fn staging_a_muse_profile_hands_its_saved_model_list_to_the_session_data_directo
     );
 }
 
+// Hard-won: #1320: a reviewer staged its profile without the provider's model catalog and offered OpenAI's model names
 #[test]
 fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from() {
     let home = tempfile::tempdir().unwrap();
@@ -2165,8 +2365,8 @@ fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from(
     let cache = IsolatedCatalogCache(cache.path().join("cache.sqlite3"));
     let asked = std::cell::RefCell::new(Vec::new());
 
-    stage_profile(&profile, staged.path()).unwrap();
-    stage_codex_catalog(
+    // The one staging call every session, reviewer and probe makes.
+    stage_profile_with_catalog(
         "glm",
         &profile,
         staged.path(),
@@ -4009,7 +4209,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         &executor,
         &ssh_bare_locator(session),
         session,
-        Path::new("/controller/hel"),
+        &WorkerInstall::Host("/controller/hel".into()),
         &launch,
     )
     .unwrap();
@@ -4241,7 +4441,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         &executor,
         &locator,
         "session-local",
-        Path::new("/controller/hel"),
+        &WorkerInstall::Host("/controller/hel".into()),
         &launch,
     )
     .unwrap();
@@ -4276,7 +4476,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         &failing,
         &locator,
         "session-local",
-        Path::new("/controller/hel"),
+        &WorkerInstall::Host("/controller/hel".into()),
         &launch,
     )
     .unwrap_err();
@@ -4574,11 +4774,13 @@ fn fixture_home_entries(kind: HarnessKind) -> &'static [(&'static str, bool)] {
             ("cache/models.json", false),
             ("logs/muse.log", false),
         ],
+        // OpenCode 2's login is a row of its database, which also holds every
+        // session; staging exports the row and leaves the database behind.
         HarnessKind::OpenCode => &[
             ("opencode.json", true),
             ("AGENTS.md", true),
-            (".data/opencode/auth.json", true),
             ("skills/review/SKILL.md", true),
+            (".data/opencode/auth.json", false),
             (".data/opencode/opencode.db", false),
             (".data/opencode/opencode.db-wal", false),
             (".data/opencode/log/opencode.log", false),
@@ -4636,6 +4838,12 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, br#"{"fixture":true}"#).unwrap();
         }
+        if kind == HarnessKind::OpenCode {
+            write_opencode_database(
+                &home.path().join(".data/opencode/opencode.db"),
+                "sk-fixture",
+            );
+        }
         let profile = mj_core::config::HarnessProfile {
             enabled: true,
             kind,
@@ -4649,17 +4857,63 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
 
         stage_profile(&profile, staged.path()).unwrap();
 
-        let expected = fixture_home_entries(kind)
+        let mut expected = fixture_home_entries(kind)
             .iter()
             .filter(|(_, staged)| *staged)
             .map(|(path, _)| (*path).to_owned())
             .collect::<std::collections::BTreeSet<_>>();
+        if kind == HarnessKind::OpenCode {
+            expected.insert(kind.credential_file_name().to_owned());
+            let logins: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(staged.path().join(kind.credential_file_name())).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                logins,
+                serde_json::json!([{
+                    "id": "cred_fixture",
+                    "integrationID": "deepseek",
+                    "label": "DeepSeek",
+                    "active": true,
+                    "value": {"type": "key", "key": "sk-fixture"},
+                }])
+            );
+        }
         assert_eq!(files_under(staged.path()), expected, "{kind:?}");
         assert!(
             mj_core::config::harness_authentication_marker(kind, staged.path()).is_file(),
             "{kind:?} is signed in from its staged home"
         );
     }
+}
+
+/// An OpenCode 2 database holding one session and one API-key login with
+/// `key`, in the `credential` table layout OpenCode 2.1 creates, replacing any
+/// file at `path`.
+fn write_opencode_database(path: &Path, key: &str) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("remove {}: {error}", path.display()),
+    }
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let database = rusqlite::Connection::open(path).unwrap();
+    database
+        .execute_batch(
+            "PRAGMA journal_mode = WAL;
+             CREATE TABLE credential (id text PRIMARY KEY, integration_id text, label text NOT NULL,
+                 value text NOT NULL, connector_id text, method_id text, active integer,
+                 time_created integer NOT NULL, time_updated integer NOT NULL);
+             CREATE TABLE session_v2 (id text PRIMARY KEY, title text);
+             INSERT INTO session_v2 VALUES ('ses_fixture', 'native history');",
+        )
+        .unwrap();
+    database
+        .execute(
+            "INSERT INTO credential VALUES ('cred_fixture', 'deepseek', 'DeepSeek', ?1, NULL, NULL, 1, 1, 1)",
+            [format!(r#"{{"type":"key","key":"{key}"}}"#)],
+        )
+        .unwrap();
 }
 
 /// A login as each harness writes it. A higher `generation` is a fresher copy
@@ -4694,16 +4948,20 @@ fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
             }
         }),
         HarnessKind::Muse => serde_json::json!({ "token": format!("token-{generation}") }),
-        // OpenCode stores one grant per provider under the provider id, with
-        // the OAuth expiry in epoch milliseconds.
-        HarnessKind::OpenCode => serde_json::json!({
-            "anthropic": {
+        // A staged OpenCode home carries its logins as `auth export` prints
+        // them.
+        HarnessKind::OpenCode => serde_json::json!([{
+            "id": "cred_anthropic",
+            "integrationID": "anthropic",
+            "label": "OAuth",
+            "active": true,
+            "value": {
                 "type": "oauth",
                 "refresh": format!("refresh-{generation}"),
                 "access": format!("access-{generation}"),
                 "expires": 1_790_000_000_000_i64 + generation * 1000,
-            }
-        }),
+            },
+        }]),
         HarnessKind::Mimo => serde_json::json!({
             "xiaomi": {
                 "type": "oauth",
@@ -4730,7 +4988,7 @@ fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
 fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
     use mj_core::config::harness_authentication_marker;
     use mj_core::credentials::{
-        SyncAction, read_credential_file, reconcile, write_credential_file,
+        CredentialSnapshot, SyncAction, read_credential_file, reconcile, write_credential_file,
     };
 
     let directory = tempfile::tempdir().unwrap();
@@ -4750,8 +5008,13 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             codex_profile: None,
         };
         let canonical = profile.authentication_marker();
-        std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
-        std::fs::write(&canonical, login_bytes(kind, 1)).unwrap();
+        let database = home.join(".data/opencode/opencode.db");
+        if kind.keeps_logins_in_database() {
+            write_opencode_database(&database, "sk-generation-1");
+        } else {
+            std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+            std::fs::write(&canonical, login_bytes(kind, 1)).unwrap();
+        }
         let worker_root = directory.path().join("workers").join(&session_id);
         let locator = targets::TargetLocator::LocalBare {
             worker_root: worker_root.to_string_lossy().into_owned(),
@@ -4804,6 +5067,29 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
         // exchange is the same for it, except that Muse stores no refresh
         // time, so the sync never orders two different Muse copies.
         if kind == HarnessKind::Muse {
+            continue;
+        }
+        // OpenCode's logins live in its database: the sync pushes its export
+        // into the staged home, and never copies a session's back.
+        if kind.keeps_logins_in_database() {
+            stage_profile(&profile, &launch.harness_home).unwrap();
+            write_opencode_database(&database, "sk-generation-2");
+            let export = crate::opencode_logins::profile_logins(&profile)
+                .unwrap()
+                .unwrap();
+            let profile_copy = CredentialSnapshot::of(kind, &export);
+            let (session_copy, _) = read_credential_file(kind, &endpoint).unwrap();
+            let push =
+                crate::worker_client::stored_logins_push(&profile_copy, &export, &session_copy)
+                    .expect("the rotated login is pushed");
+            write_credential_file(kind, &endpoint, push).unwrap();
+            assert_eq!(std::fs::read(&endpoint).unwrap(), export);
+            let (session_copy, _) = read_credential_file(kind, &endpoint).unwrap();
+            assert_eq!(
+                crate::worker_client::stored_logins_push(&profile_copy, &export, &session_copy),
+                None
+            );
+            assert!(!canonical.exists(), "the profile home holds no copy");
             continue;
         }
         stage_profile(&profile, &launch.harness_home).unwrap();
@@ -5357,7 +5643,11 @@ mod container_runtime {
                     fail_prepare,
                 };
                 let result = prepare_managed_harness_for_upgrade(
-                    &executor, &locator, &session, &worker, &launch,
+                    &executor,
+                    &locator,
+                    &session,
+                    &WorkerInstall::Host(worker.clone()),
+                    &launch,
                 );
                 assert_eq!(result.is_err(), fail_prepare);
                 let commands = executor.commands.borrow();

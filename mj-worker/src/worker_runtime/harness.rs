@@ -193,6 +193,24 @@ async fn resolve_at_async(
             PathBuf::from("sh"),
             vec!["-c".to_owned(), bridge.bootstrap_script()],
         )
+    } else if harness == HarnessKind::OpenCode {
+        // OpenCode imports the session's staged logins before its ACP server
+        // starts; the script replaces itself with the pinned executable.
+        (
+            PathBuf::from("sh"),
+            vec![
+                "-c".to_owned(),
+                format!(
+                    "opencode=\"$1\"; {}",
+                    mj_core::harness_runtime::opencode_acp_script()
+                ),
+                "mj-opencode".to_owned(),
+                install
+                    .join(selected.entrypoint)
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
+        )
     } else {
         (
             install.join(selected.entrypoint),
@@ -421,10 +439,10 @@ async fn install_muse_native(staging: &Path, environment: &BTreeMap<String, Stri
     Ok(())
 }
 
-/// Install the pinned OpenCode release from its own published archive.
-///
-/// The Linux archive is a gzipped tarball and the macOS archive is a zip;
-/// macOS `tar` is bsdtar, which reads both, and GNU tar reads the tarball.
+/// Install the pinned OpenCode release from the per-platform npm package its
+/// official installer downloads. OpenCode 2 publishes no other archive: each
+/// `@opencode/cli-<target>` tarball holds the executable at
+/// `package/bin/opencode`.
 async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
     use mj_core::harness_runtime::OPENCODE_VERSION;
     let metadata: serde_json::Value =
@@ -442,31 +460,32 @@ async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>
             .as_str()
             .with_context(|| format!("missing OpenCode artifact field {name}"))
     };
-    let file = field("file")?;
-    let url = format!(
-        "https://github.com/anomalyco/opencode/releases/download/v{OPENCODE_VERSION}/{file}"
-    );
-    let archive = staging.join(file);
+    let target = field("target")?;
+    let file = format!("cli-{target}-{OPENCODE_VERSION}.tgz");
+    let url = format!("https://registry.npmjs.org/@opencode/cli-{target}/-/{file}");
+    let archive = staging.join(&file);
     download_verified_async(&url, &archive, field("sha256")?, environment).await?;
     let mut tar = tokio::process::Command::new("tar");
-    tar.arg("-xf")
+    tar.arg("-xzf")
         .arg(&archive)
         .arg("-C")
         .arg(staging)
+        .arg("package/bin/opencode")
         .env_clear()
         .envs(environment);
     run_bounded_checked(
         &mut tar,
-        "extract verified OpenCode archive",
+        "extract verified OpenCode package",
         HARNESS_COMMAND_TIMEOUT,
     )
     .await?;
     std::fs::remove_file(&archive)?;
+    let entrypoint = staging.join("opencode");
+    std::fs::rename(staging.join("package/bin/opencode"), &entrypoint)
+        .context("move the OpenCode executable out of its npm package")?;
+    std::fs::remove_dir_all(staging.join("package"))?;
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(
-        staging.join("opencode"),
-        std::fs::Permissions::from_mode(0o755),
-    )?;
+    std::fs::set_permissions(&entrypoint, std::fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
 

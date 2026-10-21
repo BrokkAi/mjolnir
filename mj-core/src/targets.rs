@@ -1749,7 +1749,8 @@ impl ImageHost {
         }
     }
 
-    fn command(&self, args: Vec<String>, purpose: String) -> CommandSpec {
+    /// Run `args` (an engine command line) on this host.
+    pub fn command(&self, args: Vec<String>, purpose: String) -> CommandSpec {
         match self {
             Self::LocalPodman | Self::LocalDocker | Self::AppleContainer => {
                 CommandSpec::new(args[0].clone(), args[1..].iter().cloned())

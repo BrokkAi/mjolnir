@@ -47,6 +47,10 @@ enum WorkerCommand {
     /// Move-only inventory and disk-backed workspace transfer utilities.
     #[command(hide = true)]
     MoveWorkspace,
+    /// Print this worker's compatibility identity. The controller asks an
+    /// image's worker this before linking a session to it.
+    #[command(hide = true)]
+    BuildId,
     /// Discover profile model choices without submitting a prompt.
     DiscoverConfig {
         #[arg(long)]
@@ -476,6 +480,10 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
         WorkerCommand::MoveWorkspace => {
             let command = serde_json::from_reader(std::io::stdin().lock())?;
             println!("{}", mj_worker::move_workspace::execute(command)?);
+            Ok(())
+        }
+        WorkerCommand::BuildId => {
+            println!("{}", mj_core::worker_build::WORKER_BUILD_ID);
             Ok(())
         }
         WorkerCommand::ExportCheckpoint { spec } => {

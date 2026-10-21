@@ -54,6 +54,10 @@ pub(crate) struct SessionRestartIntent {
     pub checkpoint_sha256: Option<String>,
     pub checkpoint_started: bool,
     pub container_recreation_acknowledged: bool,
+    /// Started by an upgrade rather than by a person. An automatic Restart
+    /// recreates the container and never interrupts work: a session that is
+    /// working makes it stand down, including when a later daemon recovers it.
+    pub automatic: bool,
 }
 
 /// Create one intent, or return the unfinished intent the session already owns.
@@ -62,6 +66,35 @@ pub(crate) fn begin_session_restart(
     operation_id: &str,
     cancelled: Arc<AtomicBool>,
     container_recreation_acknowledged: bool,
+) -> Result<SessionRestartIntent> {
+    begin_session_restart_with(
+        session_id,
+        operation_id,
+        cancelled,
+        container_recreation_acknowledged,
+        false,
+    )
+}
+
+/// Create the intent for a container recreation an upgrade starts on its own,
+/// or return the unfinished automatic intent the session already owns. `None`
+/// when the session owns a Restart a person asked for: that one keeps its own
+/// rules, and the automatic recreation does not run under them.
+pub(crate) fn begin_automatic_session_restart(
+    session_id: &str,
+    operation_id: &str,
+    cancelled: Arc<AtomicBool>,
+) -> Result<Option<SessionRestartIntent>> {
+    let intent = begin_session_restart_with(session_id, operation_id, cancelled, true, true)?;
+    Ok(intent.automatic.then_some(intent))
+}
+
+fn begin_session_restart_with(
+    session_id: &str,
+    operation_id: &str,
+    cancelled: Arc<AtomicBool>,
+    container_recreation_acknowledged: bool,
+    automatic: bool,
 ) -> Result<SessionRestartIntent> {
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();
@@ -90,9 +123,9 @@ pub(crate) fn begin_session_restart(
             "Restart was cancelled before its durable intent was recorded"
         );
         tx.execute(
-            "INSERT INTO session_restart_intents(session_id, operation_id, phase, updated_at, container_recreation_acknowledged)
-             VALUES (?1, ?2, 'stopping', ?3, ?4)",
-            params![session_id, operation_id, Utc::now().to_rfc3339(), container_recreation_acknowledged],
+            "INSERT INTO session_restart_intents(session_id, operation_id, phase, updated_at, container_recreation_acknowledged, automatic)
+             VALUES (?1, ?2, 'stopping', ?3, ?4, ?5)",
+            params![session_id, operation_id, Utc::now().to_rfc3339(), container_recreation_acknowledged, automatic],
         )?;
         tx.commit()?;
         Ok(SessionRestartIntent {
@@ -102,6 +135,7 @@ pub(crate) fn begin_session_restart(
             checkpoint_sha256: None,
             checkpoint_started: false,
             container_recreation_acknowledged,
+            automatic,
         })
     })
 }
@@ -109,7 +143,7 @@ pub(crate) fn begin_session_restart(
 pub(crate) fn load_session_restarts() -> Result<Vec<SessionRestartIntent>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(
-        "SELECT session_id, operation_id, phase, checkpoint_sha256, checkpoint_started, container_recreation_acknowledged
+        "SELECT session_id, operation_id, phase, checkpoint_sha256, checkpoint_started, container_recreation_acknowledged, automatic
          FROM session_restart_intents ORDER BY session_id",
     )?;
     statement
@@ -121,6 +155,7 @@ pub(crate) fn load_session_restarts() -> Result<Vec<SessionRestartIntent>> {
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, bool>(4)?,
                 row.get::<_, bool>(5)?,
+                row.get::<_, bool>(6)?,
             ))
         })?
         .map(|row| {
@@ -131,6 +166,7 @@ pub(crate) fn load_session_restarts() -> Result<Vec<SessionRestartIntent>> {
                 checkpoint_sha256,
                 checkpoint_started,
                 container_recreation_acknowledged,
+                automatic,
             ) = row?;
             Ok(SessionRestartIntent {
                 session_id,
@@ -139,6 +175,7 @@ pub(crate) fn load_session_restarts() -> Result<Vec<SessionRestartIntent>> {
                 checkpoint_sha256,
                 checkpoint_started,
                 container_recreation_acknowledged,
+                automatic,
             })
         })
         .collect()
@@ -330,7 +367,7 @@ fn load_session_restart_with(
 ) -> Result<Option<SessionRestartIntent>> {
     let row = connection
         .query_row(
-            "SELECT operation_id, phase, checkpoint_sha256, checkpoint_started, container_recreation_acknowledged
+            "SELECT operation_id, phase, checkpoint_sha256, checkpoint_started, container_recreation_acknowledged, automatic
          FROM session_restart_intents WHERE session_id=?1",
             [session_id],
             |row| {
@@ -340,6 +377,7 @@ fn load_session_restart_with(
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, bool>(3)?,
                     row.get::<_, bool>(4)?,
+                    row.get::<_, bool>(5)?,
                 ))
             },
         )
@@ -351,6 +389,7 @@ fn load_session_restart_with(
             checkpoint_sha256,
             checkpoint_started,
             container_recreation_acknowledged,
+            automatic,
         )| {
             Ok(SessionRestartIntent {
                 session_id: session_id.to_owned(),
@@ -359,6 +398,7 @@ fn load_session_restart_with(
                 checkpoint_sha256,
                 checkpoint_started,
                 container_recreation_acknowledged,
+                automatic,
             })
         },
     )

@@ -844,10 +844,16 @@ pub(crate) fn prompt_title_line(
     let effort = chat.current_effort();
     let prefix_count = usize::from(model.is_some()) + usize::from(effort.is_some());
     let suffix = parts[prefix_count.min(parts.len())..].join(" · ");
-    let mut spans = vec![Span::raw(format!(" {} ", voice_button_glyph()))];
+    // A blank cell after the corner, as other border titles have, then the
+    // microphone chip, which `voice_button_area` places on the same cells.
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::raw(format!(" {} ", voice_button_glyph())),
+    ];
     // The title begins just inside the border corner; each chip keeps the exact
     // cells of its span, and only a chip that fits inside the border is kept.
-    let mut chip_x = usize::from(prompt_area.x.saturating_add(1)) + spans[0].width();
+    let mut chip_x =
+        usize::from(prompt_area.x.saturating_add(1)) + spans.iter().map(Span::width).sum::<usize>();
     let activity_reserve = if chat.needs_animation() { 4 } else { 0 };
     let chip_limit = usize::from(prompt_area.right().saturating_sub(1 + activity_reserve));
     let mut chips = Vec::new();

@@ -59,6 +59,7 @@ for line in sys.stdin:
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let runtime = tokio::spawn(run(
         LaunchSpec {
+            imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,
@@ -186,6 +187,7 @@ for line in sys.stdin:
 #[test]
 fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
     let mut spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -674,6 +676,7 @@ fn only_updates_for_tool_calls_created_on_the_live_connection_are_relayed() {
 #[test]
 fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
     let mut spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -761,6 +764,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
 #[test]
 fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
     let mut spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -865,6 +869,7 @@ fn worker_socket(role: SubagentMcpRole) -> SubagentMcpSocket {
 #[test]
 fn a_child_socket_serves_handback_and_hides_native_tools() {
     let mut spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::None,
         subagent_mcp_socket: Some(worker_socket(SubagentMcpRole::Child)),
@@ -1028,6 +1033,7 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
         let step_clock = crate::acp::StepClock::default();
         let observed_step_clock = step_clock.clone();
         let spec = LaunchSpec {
+            imported_logins: None,
             bridge_spec_path: None,
             tools_in_flight: Default::default(),
             turn_context: Default::default(),
@@ -1471,6 +1477,7 @@ async fn answer_to_ext_request(
     // Drain events so a full channel can never be mistaken for silence.
     let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     let spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -1714,6 +1721,7 @@ async fn answer_architecture_form(
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -2229,6 +2237,7 @@ async fn policy_is_enforced_before_session_is_reported(
     let (request_tx, mut request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -2425,6 +2434,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
     let (request_tx, mut request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -2689,6 +2699,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -3093,6 +3104,7 @@ async fn silent_after_prompt_bridge_with_late_reply(
 
 pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -> LaunchSpec {
     LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -3578,6 +3590,7 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -3812,6 +3825,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -3952,6 +3966,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -4046,6 +4061,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
 async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
     fn scripted_spec(resume_session: Option<String>) -> LaunchSpec {
         LaunchSpec {
+            imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,
@@ -4382,6 +4398,7 @@ mod terminals {
             }
         });
         let spec = LaunchSpec {
+            imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,
@@ -4820,6 +4837,7 @@ for line in sys.stdin:
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let runtime = tokio::spawn(run(
         LaunchSpec {
+            imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,
@@ -4999,6 +5017,7 @@ for line in sys.stdin:
     let (request_tx, request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: Some(SubagentMcpSocket {
@@ -5160,6 +5179,7 @@ while True:
     let (request_tx, request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -5307,6 +5327,7 @@ while True:
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -5416,6 +5437,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
     let (_request_tx, request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -5497,6 +5519,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
         let (_request_tx, request_rx) = mpsc::channel(1);
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let spec = LaunchSpec {
+            imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,
@@ -5734,6 +5757,7 @@ async fn session_reload_rejecting_bridge(
 
 fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
     LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -5817,6 +5841,7 @@ async fn codex_still_fails_when_the_recorded_session_cannot_be_reloaded() {
 fn resume_failures_report_a_missing_native_session_per_harness() {
     fn spec(harness: HarnessKind) -> LaunchSpec {
         LaunchSpec {
+            imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,
@@ -5955,6 +5980,7 @@ fn missing_native_session_spec(
     native_session_may_have_history: bool,
 ) -> LaunchSpec {
     LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -6327,6 +6353,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
         let (event_tx, mut event_rx) = mpsc::channel(32);
         let step_clock = crate::acp::StepClock::default();
         let spec = LaunchSpec {
+            imported_logins: None,
             bridge_spec_path: None,
             tools_in_flight: Default::default(),
             turn_context: Default::default(),
@@ -6767,6 +6794,7 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
     let (commands, mut requests) = mpsc::channel(16);
     let (event_tx, mut events) = mpsc::channel(256);
     let spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -7035,6 +7063,7 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
     let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     let opened = Arc::new(Mutex::new(None));
     let spec = LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
@@ -7371,4 +7400,139 @@ async fn a_typed_bridge_failure_fails_the_turn_with_the_providers_reason() {
         bridge.await.unwrap(),
         "a Codex worker asks the bridge for typed failures"
     );
+}
+
+/// A fake OpenCode that opens one session and holds each prompt until
+/// `release` fires.
+async fn held_prompt_bridge(
+    stream: tokio::io::DuplexStream,
+    observed: mpsc::UnboundedSender<String>,
+    mut release: mpsc::UnboundedReceiver<()>,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (read, mut write) = tokio::io::split(stream);
+    let mut lines = BufReader::new(read).lines();
+    while let Some(line) = lines.next_line().await.expect("read fake adapter input") {
+        let request: serde_json::Value =
+            serde_json::from_str(&line).expect("fake adapter input is JSON-RPC");
+        let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let _ = observed.send(method.to_owned());
+        let id = request
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let result = match method {
+            "initialize" => serde_json::json!({"protocolVersion": 1}),
+            "session/new" => serde_json::json!({"sessionId": "ses_opencode"}),
+            "session/prompt" => {
+                release.recv().await;
+                serde_json::json!({"stopReason": "end_turn"})
+            }
+            _ if !id.is_null() => serde_json::json!({}),
+            _ => continue,
+        };
+        let response = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
+        if write
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+/// Wait until the fake bridge has seen `method`.
+async fn wait_for(observed: &mut mpsc::UnboundedReceiver<String>, method: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(seen) = observed.recv().await {
+            if seen == method {
+                return;
+            }
+        }
+        panic!("the fake bridge stopped before {method}");
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no {method}"));
+}
+
+/// When the profile's OpenCode logins change, the session reloads on a fresh
+/// bridge to import them: never in the middle of a turn, and always the same
+/// native session.
+#[tokio::test]
+async fn opencode_reloads_its_session_for_changed_logins_only_between_turns() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("profile/opencode");
+    let logins = home.join(HarnessKind::OpenCode.credential_file_name());
+    std::fs::create_dir_all(logins.parent().unwrap()).unwrap();
+    std::fs::write(&logins, r#"[{"id":"cred_first"}]"#).unwrap();
+    let environment = BTreeMap::from([
+        (
+            "XDG_CONFIG_HOME".to_owned(),
+            root.path().join("profile").to_string_lossy().into_owned(),
+        ),
+        (
+            "XDG_DATA_HOME".to_owned(),
+            home.join(".data").to_string_lossy().into_owned(),
+        ),
+    ]);
+    let mut spec = reload_fallback_spec(HarnessKind::OpenCode);
+    spec.resume_session = None;
+    spec.imported_logins =
+        Some(super::opencode_logins::ImportedLogins::prepare(&environment).unwrap());
+    spec.environment = environment;
+
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = mpsc::unbounded_channel();
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let bridge = tokio::spawn(held_prompt_bridge(bridge_stream, observed_tx, release_rx));
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let (request_tx, mut request_rx) = mpsc::channel(1);
+    let (event_tx, mut event_rx) = mpsc::channel(256);
+    let driver = tokio::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+    wait_for(&mut observed_rx, "session/new").await;
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "turn".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new("work"))],
+        })
+        .await
+        .unwrap();
+    wait_for(&mut observed_rx, "session/prompt").await;
+
+    // The logins change while the turn runs; the turn is left alone.
+    std::fs::write(&logins, r#"[{"id":"cred_second"}]"#).unwrap();
+    tokio::time::sleep(super::opencode_logins::CHECK_INTERVAL * 10).await;
+    assert!(!driver.is_finished(), "a reload interrupted the turn");
+
+    release_tx.send(()).unwrap();
+    let restart = tokio::time::timeout(Duration::from_secs(5), driver)
+        .await
+        .expect("the idle session reloads")
+        .expect("the runtime task does not panic")
+        .expect("the reload is not an error");
+    assert!(
+        matches!(&restart, Some(SessionRestart::ReloadLogins(session)) if session == "ses_opencode"),
+        "{restart:?}"
+    );
+    let mut finished = false;
+    while let Ok(event) = event_rx.try_recv() {
+        finished |= matches!(event, RuntimeEvent::PromptFinished { request_id, .. } if request_id == "turn");
+    }
+    assert!(finished, "the turn finished before the reload");
+    bridge.abort();
 }

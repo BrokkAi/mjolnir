@@ -57,15 +57,38 @@ pub(super) async fn send_message(
     Json(request): Json<SessionMessageRequest>,
 ) -> Result<(StatusCode, Json<SessionMessageResponse>), ApiFailure> {
     super::super::validate_public_id(&request.request_id)?;
+    let backend = backend(&state)?.clone();
+    let Some(sender_session_id) = request.sender_session_id else {
+        // No sender means the user's own shell, so this is the user's
+        // prompt: it takes the prompt endpoint's path, steered into a
+        // running turn or queued, with the request id as its command id so
+        // a retry names the same turn.
+        let session_id = backend.resolve_message_target(session_id).await?;
+        let turn_id = submit_prompt(
+            &state,
+            session_id.clone(),
+            request.text,
+            Some(request.request_id),
+        )
+        .await?;
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(SessionMessageResponse {
+                session_id,
+                via: "turn".into(),
+                turn_id: Some(turn_id),
+                managed_child: false,
+            }),
+        ));
+    };
     if request.text.trim().is_empty() || request.text.len() > MAX_EVENT_TEXT_BYTES {
         return Err(ApiFailure::bad_request(format!(
             "message text must contain 1 to {MAX_EVENT_TEXT_BYTES} bytes"
         )));
     }
-    let response = backend(&state)?
-        .clone()
+    let response = backend
         .deliver_message(
-            request.sender_session_id,
+            sender_session_id,
             session_id,
             request.text,
             request.request_id,

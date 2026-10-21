@@ -66,11 +66,13 @@ pub(super) fn ensure_subagent_child_can_receive_work(
 
 impl ApiBackend {
     /// One authorization and routing operation shared by MCP and the
-    /// authenticated HTTP/CLI surface. Sender identity is supplied by the
-    /// caller context, never by MCP tool arguments.
+    /// authenticated HTTP/CLI surface for a message one session sends.
+    /// Sender identity is supplied by the caller context, never by MCP tool
+    /// arguments. A message from the user has no sender and is the user's
+    /// prompt, which the HTTP route submits as one.
     pub(super) async fn deliver_session_message(
         &self,
-        sender_session_id: Option<String>,
+        sender_session_id: String,
         requested_target_id: String,
         text: String,
         request_id: String,
@@ -78,28 +80,22 @@ impl ApiBackend {
     ) -> Result<crate::server::api::SessionMessageResponse> {
         let requested_target_for_auth = requested_target_id.clone();
         let sender_for_auth = sender_session_id.clone();
-        let (target_session_id, own_child, sender_record) =
+        let (target_session_id, own_child, sender_title) =
             blocking("authorize session message", move || {
             let state = Controller::load()?.state;
-            let sender = match sender_for_auth.as_deref() {
-                Some(sender_id) => {
-                    let sender = state.sessions.get(sender_id).ok_or_else(|| {
-                        anyhow::Error::new(mj_core::refusal::Refusal::unusable(format!(
-                            "sender session {sender_id} does not exist"
-                        )))
-                    })?;
-                    if state.is_subagent_session(sender_id) {
-                        anyhow::bail!(mj_core::refusal::Refusal::unusable(
-                            "only a top-level session can send messages"
-                        ));
-                    }
-                    Some(sender)
-                }
-                None => None,
-            };
+            let sender = state.sessions.get(&sender_for_auth).ok_or_else(|| {
+                anyhow::Error::new(mj_core::refusal::Refusal::unusable(format!(
+                    "sender session {sender_for_auth} does not exist"
+                )))
+            })?;
+            if state.is_subagent_session(&sender_for_auth) {
+                anyhow::bail!(mj_core::refusal::Refusal::unusable(
+                    "only a top-level session can send messages"
+                ));
+            }
             let target_id = resolve_session_message_target(
                 &state,
-                sender_for_auth.as_deref(),
+                Some(&sender_for_auth),
                 &requested_target_for_auth,
             )?;
             let target = state.sessions.get(&target_id).cloned().ok_or_else(|| {
@@ -108,18 +104,16 @@ impl ApiBackend {
                     requested_target_for_auth
                 )))
             })?;
-            if sender_for_auth.as_deref() == Some(target_id.as_str()) {
+            if sender_for_auth == target_id {
                 anyhow::bail!(mj_core::refusal::Refusal::unusable(
                     "a session cannot send a message to itself"
                 ));
             }
             let own_child = state.is_subagent_session(&target_id)
-                && sender_for_auth.as_deref().is_some_and(|sender_id| {
-                    state
-                        .subagents
-                        .get(&target_id)
-                        .is_some_and(|relation| relation.parent_session_id == sender_id)
-                });
+                && state
+                    .subagents
+                    .get(&target_id)
+                    .is_some_and(|relation| relation.parent_session_id == sender_for_auth);
             if state.is_subagent_session(&target_id) && !own_child {
                 anyhow::bail!(mj_core::refusal::Refusal::unusable(
                     "a session cannot message another session's sub-agent"
@@ -151,14 +145,11 @@ impl ApiBackend {
                     )));
                 }
             }
-            Ok((target_id, own_child, sender.cloned()))
+            Ok((target_id, own_child, sender.title.clone()))
         })
         .await?;
 
         if own_child {
-            let parent = sender_session_id
-                .as_deref()
-                .context("an owned child message requires its parent session")?;
             let request = SubagentToolRequest {
                 originating_command_id: None,
                 request_id: request_id.clone(),
@@ -169,7 +160,7 @@ impl ApiBackend {
                 },
             };
             let delivery = self
-                .deliver_subagent_input(parent, &target_session_id, &text, &request)
+                .deliver_subagent_input(&sender_session_id, &target_session_id, &text, &request)
                 .await?;
             let (via, turn_id) = match delivery {
                 SubagentInputDelivery::Mailbox => ("mailbox", None),
@@ -183,13 +174,9 @@ impl ApiBackend {
             });
         }
 
-        let sender = match (sender_session_id, sender_record.as_ref()) {
-            (Some(id), Some(record)) => mj_core::mailbox::Sender::Session {
-                id,
-                title: record.title.clone(),
-            },
-            (None, _) => mj_core::mailbox::Sender::User,
-            _ => unreachable!("sender record accompanies every session sender id"),
+        let sender = mj_core::mailbox::Sender::Session {
+            id: sender_session_id,
+            title: sender_title,
         };
         // The request id is the durable mailbox idempotency key; the row's
         // target is the resolved full session ID.
@@ -575,6 +562,8 @@ impl ApiBackend {
 /// Resolve a message recipient without widening the sender's existing target
 /// scope. Exact IDs are passed through so the authorization checks below keep
 /// returning their established refusals for self and foreign-child targets.
+/// With no sender the message is the user's prompt, and the user may prompt
+/// any session, a sub-agent included.
 pub(super) fn resolve_session_message_target(
     state: &mj_core::state::State,
     sender_session_id: Option<&str>,
@@ -608,7 +597,7 @@ pub(super) fn resolve_session_message_target(
             let is_own_child = state.subagents.get(id).is_some_and(|relation| {
                 Some(relation.parent_session_id.as_str()) == sender_session_id
             });
-            if is_subagent && !is_own_child {
+            if is_subagent && !is_own_child && sender_session_id.is_some() {
                 refused_matches.push((id.as_str(), record, "foreign_subagent"));
             } else if !is_subagent && Some(id.as_str()) == sender_session_id {
                 refused_matches.push((id.as_str(), record, "self"));

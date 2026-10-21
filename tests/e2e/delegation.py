@@ -615,15 +615,20 @@ def main():
         # Hard-won: d3312d34: a failed child's report turn can remain unfinished during destroy.
         # Hard-won: #1302: startup cleanup can settle after initial report reconciliation.
         wait_report(parent, child, "fixture startup failure")
+        # From the user's shell, `mj message` is the user's own prompt, and a
+        # retry with the same command id names the same turn, not a second one.
         message_text = "check the last change from the user"
-        message = json.loads(
-            cli("message", "--session", parent, "--json", message_text)
-        )
-        assert message["session_id"] == parent, message
-        assert message["via"] in ("mailbox", "turn"), message
-        wait_prompt(parent, "Message from the user:")
-        wait_prompt(parent, message_text)
+        send_message = ("message", "--session", parent, "--command-id",
+                        "user-message-check", "--json", message_text)
+        message = json.loads(cli(*send_message))
+        assert message == {"session_id": parent, "via": "turn",
+                           "turn_id": message["turn_id"]}, message
+        marker = wait_prompt(parent, message_text)
+        assert json.loads(cli(*send_message)) == message
         wait_recorded_parent_turn()
+        received = marker.read_text()
+        assert received.count(message_text) == 1, received
+        assert "Message from the user:" not in received, received
 
         retained = json.loads(cli("usage", "--parent", parent, "--json"))
         for session in [child, legacy, subtle, parent]:

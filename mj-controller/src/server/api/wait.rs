@@ -300,6 +300,7 @@ fn timeout_response(
                 .and_then(|turn| turn.accepted_ordinal)
         }),
         requested_turn_id: request.turn_id,
+        next: observation.next(),
         turn_number: None,
         elapsed_ms: None,
         tool_calls: None,
@@ -384,6 +385,15 @@ pub(super) fn build_observation(
                 snapshot.materialized.last_activity_at_ms(),
             )
         };
+        // The daemon's continuation check is published as the session's
+        // activity on top of the worker's, and that is the state the
+        // dashboard shows. The actor's own view never carries it.
+        if observation.activity.is_idle()
+            && session.activity_state
+                == Some(mj_core::activity::ActivityState::CheckingContinuation)
+        {
+            observation.activity = mj_core::activity::ActivityState::CheckingContinuation;
+        }
         observation
             .pending_elicitations
             .clone_from(&snapshot.materialized.pending_elicitations);
@@ -392,14 +402,17 @@ pub(super) fn build_observation(
         observation
             .last_turn_outcome
             .clone_from(&snapshot.materialized.last_turn_outcome);
-        observation.queued = snapshot.materialized.queued_prompts.len();
+        observation.queued = snapshot
+            .materialized
+            .queued_prompts
+            .iter()
+            .map(|prompt| prompt.command_id.clone())
+            .collect();
         observation
             .capacity_retry
             .clone_from(&snapshot.operational.capacity_retry);
         observation.retry_assessment_pending = snapshot.operational.retry_assessment_pending;
-        observation
-            .turn_completion
-            .clone_from(&snapshot.operational.turn_completion);
+        observation.turn_assessment = snapshot.operational.assessment.as_deref().cloned();
         observation.quota_recovery = snapshot
             .operational
             .continuation
@@ -515,6 +528,7 @@ pub(super) async fn finish_wait(
         report_source,
         turn_id: decision.turn_id,
         requested_turn_id: None,
+        next: observation.next(),
         turn_number: summary.as_ref().map(|summary| summary.turn_number),
         elapsed_ms: summary
             .as_ref()

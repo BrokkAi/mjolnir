@@ -36,9 +36,7 @@ use mj_core::relay::RelayCommand;
 use mj_core::workspace::WorkspaceRecord;
 
 use crate::controller::config_only_controller;
-use crate::daemon::{
-    CreateSessionControl, CreateSessionRequest, ResumeSessionRequest, RuntimeState,
-};
+use crate::daemon::{CreateSessionRequest, LifecycleControl, ResumeSessionRequest, RuntimeState};
 use crate::pollers::{
     QUOTA_STALE_AFTER, QuotaRefreshBatch, apply_worker_record_update, projected_queued_prompts,
     queued_prompt_projection, quota_refresh_profiles,

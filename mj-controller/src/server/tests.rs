@@ -2162,9 +2162,13 @@ fn no_web_module_builds_markup_from_a_string() {
 // Hard-won: a6567c51: snapshot polling erased typed elicitation answers before submission.
 #[test]
 fn embedded_viewer_keeps_elicitation_answers_across_snapshot_polls() {
-    let source = viewer_source(
-        "const elicitationCards = new Map()",
-        "async function submitElicitation",
+    let source = format!(
+        "{}\n{}",
+        viewer_source("function reconcileChildren(", "function epochMs("),
+        viewer_source(
+            "const elicitationCards = new Map()",
+            "async function submitElicitation",
+        ),
     );
     let dom = r#"
 let replaceCalls = 0;
@@ -2190,6 +2194,18 @@ append(...kids) {
 replaceChildren(...kids) {
   replaceCalls += 1;
   this.children = kids;
+},
+removeChild(child) {
+  replaceCalls += 1;
+  this.children.splice(this.children.indexOf(child), 1);
+  return child;
+},
+insertBefore(child, reference) {
+  if (this.children.includes(child)) this.removeChild(child);
+  replaceCalls += 1;
+  const index = reference == null ? this.children.length : this.children.indexOf(reference);
+  this.children.splice(index, 0, child);
+  return child;
 },
 addEventListener() {},
 setAttribute(name, value) { this[name] = value; },

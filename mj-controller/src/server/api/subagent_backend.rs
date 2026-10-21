@@ -178,11 +178,19 @@ pub trait SubagentBackend: Send + Sync {
     /// Submit a prompt, returning its relay acceptance ordinal.
     fn prompt(&self, session_id: String, text: String) -> BoxFuture<'_, AnyResult<u64>>;
 
-    /// Deliver a session message using the daemon's shared authorization and
-    /// mailbox/turn routing operation.
+    /// The full session ID a message from the user names: the ID itself, or
+    /// the one session whose ID starts with this hexadecimal prefix.
+    fn resolve_message_target(&self, _requested_id: String) -> BoxFuture<'_, AnyResult<String>> {
+        Box::pin(async { anyhow::bail!("session messaging is unavailable") })
+    }
+
+    /// Deliver one session's message to another session, or to one of its
+    /// own sub-agents, using the daemon's shared authorization and
+    /// mailbox/turn routing operation. A message from the user is a prompt
+    /// and does not come here.
     fn deliver_message(
         &self,
-        _sender_session_id: Option<String>,
+        _sender_session_id: String,
         _target_session_id: String,
         _text: String,
         _request_id: String,

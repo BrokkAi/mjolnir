@@ -113,6 +113,143 @@ fn mimo_checkpoint_keeps_the_database_and_wal_without_runtime_state() {
     );
 }
 
+/// OpenCode 2 keeps its logins in the same database as its sessions. A
+/// checkpoint taken while OpenCode runs carries the sessions, including the
+/// pages still only in the write-ahead log, and no byte of any login. Resuming
+/// it into a home that kept its files, log included, restores those sessions
+/// without replaying the old log over them.
+#[test]
+fn an_opencode_checkpoint_keeps_live_sessions_and_no_login_secret() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    spec.session.harness_kind = HarnessKind::OpenCode;
+    spec.harness_home = temp.path().join("opencode");
+    let data = spec.harness_home.join(".data/opencode");
+    fs::create_dir_all(&data).unwrap();
+    let secrets = [
+        "sk-checkpoint-api-key",
+        "access-checkpoint-token",
+        "refresh-checkpoint-token",
+        "sk-checkpoint-newer-key",
+    ];
+    // OpenCode's open connection keeps the newest pages in its log.
+    let live = rusqlite::Connection::open(data.join("opencode.db")).unwrap();
+    live.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA wal_autocheckpoint = 0;
+         CREATE TABLE credential (id text PRIMARY KEY, integration_id text, label text NOT NULL,
+             value text NOT NULL, connector_id text, method_id text, active integer,
+             time_created integer NOT NULL, time_updated integer NOT NULL);
+         CREATE TABLE account (id text PRIMARY KEY, email text, url text, access_token text,
+             refresh_token text, token_expiry integer, time_created integer, time_updated integer);
+         CREATE TABLE control_account (email text, url text, access_token text, refresh_token text,
+             token_expiry integer, active integer, time_created integer, time_updated integer);
+         CREATE TABLE session_v2 (id text PRIMARY KEY, title text);",
+    )
+    .unwrap();
+    let credential = |id: &str, key: &str| {
+        live.execute(
+            "INSERT INTO credential VALUES (?1, 'deepseek', 'DeepSeek', ?2, NULL, NULL, 1, 1, 1)",
+            [id.to_owned(), format!(r#"{{"type":"key","key":"{key}"}}"#)],
+        )
+        .unwrap();
+    };
+    credential("cred", secrets[0]);
+    live.execute(
+        "INSERT INTO account VALUES ('acct', 'me@example.com', 'https://opencode.ai', ?1, ?2, 0, 1, 1)",
+        [secrets[1], secrets[2]],
+    )
+    .unwrap();
+    live.execute(
+        "INSERT INTO control_account VALUES ('me@example.com', 'https://opencode.ai', ?1, ?2, 0, 1, 1, 1)",
+        [secrets[1], secrets[2]],
+    )
+    .unwrap();
+    live.execute(
+        "INSERT INTO session_v2 VALUES ('ses_old', 'in the file')",
+        [],
+    )
+    .unwrap();
+    // These logins reach the database file itself; the newest login and
+    // session are only in the log.
+    live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+    credential("cred_newer", secrets[3]);
+    live.execute(
+        "INSERT INTO session_v2 VALUES ('ses_live', 'still in the log')",
+        [],
+    )
+    .unwrap();
+    assert!(data.join("opencode.db-wal").metadata().unwrap().len() > 0);
+    // The home a resume finds: the files as they stood while OpenCode ran.
+    let retained = temp.path().join("retained");
+    fs::create_dir_all(retained.join(".data/opencode")).unwrap();
+    for file in ["opencode.db", "opencode.db-wal", "opencode.db-shm"] {
+        fs::copy(data.join(file), retained.join(".data/opencode").join(file)).unwrap();
+    }
+
+    export_checkpoint(&spec).unwrap();
+    drop(live);
+
+    let archive = read_archive_verified(&spec.output_path).unwrap();
+    let native = archive
+        .manifest
+        .payloads
+        .iter()
+        .filter_map(|descriptor| match &descriptor.role {
+            PayloadRole::NativeArtifact { relative_path } => Some(relative_path.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(native, [PathBuf::from(".data/opencode/opencode.db")]);
+    for descriptor in &archive.manifest.payloads {
+        let payload = archive.payload(descriptor).unwrap();
+        for secret in secrets {
+            assert!(
+                !payload
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes()),
+                "the checkpoint carries {secret} in {:?}",
+                descriptor.role
+            );
+        }
+    }
+
+    restore_checkpoint(
+        &CheckpointRestoreSpec {
+            archive_path: spec.output_path.clone(),
+            workspace_root: spec.workspace_root.clone(),
+            relay_root: temp.path().join("restored-relay"),
+            harness_home: retained.clone(),
+            restore_repositories: false,
+            restore_native: true,
+            queue_policy: QueueRestorePolicy::Restore,
+            primary_repository_root: None,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+
+    let restored = rusqlite::Connection::open(retained.join(".data/opencode/opencode.db")).unwrap();
+    let mut sessions = restored
+        .prepare("SELECT id FROM session_v2 ORDER BY id")
+        .unwrap();
+    let sessions = sessions
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(sessions, ["ses_live", "ses_old"]);
+    for table in ["credential", "account", "control_account"] {
+        let rows: i64 = restored
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0, "{table}");
+    }
+}
+
 /// R4-5: a Codex session whose only turn failed at the usage limit, followed
 /// by `/clear`, could not be suspended ("no session artifacts found"). The
 /// clear had replaced the native session with one that never received a
@@ -598,6 +735,7 @@ fn restore_rewrites_grok_cwd_key_and_session_summary_for_target_workspace() {
         metadata: crate::archive::RepositoryMetadata {
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
+            git_operation: None,
             id: "app".into(),
             relative_destination: "app".into(),
             checkout_subdirectory: None,
@@ -612,6 +750,8 @@ fn restore_rewrites_grok_cwd_key_and_session_summary_for_target_workspace() {
         staged_patch_path: "repositories/app/staged.patch".into(),
         unstaged_patch_path: "repositories/app/unstaged.patch".into(),
         untracked_tar_path: "repositories/app/untracked.tar".into(),
+        conflicted_worktree_tar_path: None,
+        operation_state_tar_path: None,
     }];
     let path = restored_native_relative_path(
         HarnessKind::Grok,
@@ -925,6 +1065,7 @@ fn restore_rewrites_claude_project_artifacts_for_target_workspace() {
         metadata: crate::archive::RepositoryMetadata {
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
+            git_operation: None,
             id: "app".into(),
             relative_destination: "app".into(),
             checkout_subdirectory: None,
@@ -939,6 +1080,8 @@ fn restore_rewrites_claude_project_artifacts_for_target_workspace() {
         staged_patch_path: "repositories/app/staged.patch".into(),
         unstaged_patch_path: "repositories/app/unstaged.patch".into(),
         untracked_tar_path: "repositories/app/untracked.tar".into(),
+        conflicted_worktree_tar_path: None,
+        operation_state_tar_path: None,
     }];
     let path = restored_native_relative_path(
         HarnessKind::Claude,
@@ -967,6 +1110,7 @@ fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
         metadata: crate::archive::RepositoryMetadata {
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
+            git_operation: None,
             id: "app".into(),
             relative_destination: "app".into(),
             checkout_subdirectory: None,
@@ -981,6 +1125,8 @@ fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
         staged_patch_path: "repositories/app/staged.patch".into(),
         unstaged_patch_path: "repositories/app/unstaged.patch".into(),
         untracked_tar_path: "repositories/app/untracked.tar".into(),
+        conflicted_worktree_tar_path: None,
+        operation_state_tar_path: None,
     }];
     let path = restored_native_relative_path(
             HarnessKind::Kimi,
@@ -1433,6 +1579,7 @@ fn codex_root_archive_throughput() {
             staged_patch: Vec::new(),
             unstaged_patch: Vec::new(),
             untracked_tar: Vec::new(),
+            operation_payloads: None,
         })
         .collect::<Vec<_>>();
     let archive_started = std::time::Instant::now();

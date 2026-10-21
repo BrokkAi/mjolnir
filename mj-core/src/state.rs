@@ -2241,6 +2241,21 @@ pub fn live_session_ids(
 }
 
 impl State {
+    /// Whether a sub-agent of `parent_session_id` still has a target. A
+    /// child's worker, parked or live, runs in its parent's container, so
+    /// recreating that container would end it.
+    #[must_use]
+    pub fn subagents_occupy_container(&self, parent_session_id: &str) -> bool {
+        self.subagents
+            .values()
+            .filter(|child| child.parent_session_id == parent_session_id)
+            .any(|child| {
+                self.sessions
+                    .get(&child.child_session_id)
+                    .is_some_and(|session| session.target.is_some())
+            })
+    }
+
     /// Derive the checkout location and its owner for a session.
     ///
     /// Raw directory sessions with no managed-worktree descriptor are

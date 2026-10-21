@@ -622,8 +622,8 @@ fn tool_definitions(_harness: Option<HarnessKind>) -> Vec<Value> {
 const SPAWN_TWO_TASK_TYPES: &str = "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type.";
 
 /// How `spawn` opens when only the straightforward type is configured: the
-/// parent delegates only straightforward work and keeps work needing judgment.
-const SPAWN_ONE_TASK_TYPE: &str = "Start a child in your target and filesystem using the configured model and effort. Delegate only straightforward work: work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Do work that needs judgment yourself, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. Judge by difficulty, not by the length of the brief. The user configures the model and effort.";
+/// parent delegates straightforward work and keeps work needing judgment.
+const SPAWN_ONE_TASK_TYPE: &str = "Start a child in your target and filesystem using the configured model and effort. Delegate straightforward work: work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Do work that needs judgment yourself, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. Judge by difficulty, not by the length of the brief. The user configures the model and effort.";
 
 /// The parent's `spawn` tool. With only the straightforward type configured
 /// there is no choice to make, so it has no `task_type`.
@@ -670,11 +670,11 @@ fn tool_definitions_with_options(
     let child = json!({"type":"object","properties":{"child_session_id":{"type":"string"}},"required":["child_session_id"],"additionalProperties":false});
     vec![
         spawn_tool(options.subtle_subagents),
-        tool(
+        read_only(tool(
             "list_agents",
             "List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing. A finished child has parked true when its processes were released. A refused login reports failure kind login_invalid; its output names `mj login` and is not about the task.",
             json!({"type":"object","additionalProperties":false}),
-        ),
+        )),
         send_message_tool(),
         tool(
             "close",
@@ -714,6 +714,13 @@ fn child_tool_definitions() -> Vec<Value> {
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
     json!({"name":name,"description":description,"inputSchema":input_schema})
+}
+
+/// Marks a tool that changes nothing. Claude's plan mode asks before every MCP
+/// tool without this hint, even one its allowed tools list names.
+fn read_only(mut tool: Value) -> Value {
+    tool["annotations"] = json!({"readOnlyHint":true});
+    tool
 }
 
 #[cfg(test)]
@@ -760,7 +767,7 @@ mod tests {
         assert!(!description.contains("task type"), "{description}");
         assert!(
             description.starts_with(
-                "Start a child in your target and filesystem using the configured model and effort. Delegate only straightforward work: "
+                "Start a child in your target and filesystem using the configured model and effort. Delegate straightforward work: "
             ),
             "{description}"
         );
@@ -777,6 +784,16 @@ mod tests {
             spawn["inputSchema"]["required"],
             json!(["task_name", "instructions"])
         );
+    }
+
+    #[test]
+    fn only_list_agents_is_read_only() {
+        let read_only = tool_definitions(None)
+            .into_iter()
+            .filter(|tool| tool["annotations"]["readOnlyHint"] == true)
+            .map(|tool| tool["name"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(read_only, vec![json!("list_agents")]);
     }
 
     #[test]

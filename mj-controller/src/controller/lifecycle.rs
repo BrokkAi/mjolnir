@@ -63,11 +63,12 @@ pub(super) enum SourceTargetDisposition {
 }
 
 /// Work a close runs once the session is about to close: its checkpoint is
-/// verified and recorded, and its relay is not sealed yet. A daemon suspend
-/// stops the session's sub-agents here, so a close that fails at its
-/// checkpoint leaves them running. When this fails, the close does not
-/// proceed: the session returns to its previous state with its relay
-/// unsealed.
+/// verified and recorded, and its relay is not sealed yet. This is the
+/// close's point of no return. A daemon suspend commits its lifecycle here,
+/// so a cancel that arrives later is refused, and stops the session's
+/// sub-agents, so a close that fails at its checkpoint leaves them running.
+/// When this fails, the close does not proceed: the session returns to its
+/// previous state with its relay unsealed.
 pub type BeforeClose = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
 
 impl Controller {
@@ -96,6 +97,7 @@ impl Controller {
                 true,
                 None,
                 None,
+                LatchExclusivity::HoldThroughClose,
             )
             .await?
         {
@@ -122,18 +124,24 @@ impl Controller {
             acknowledge_unpublished_work,
             before_close,
             None,
+            LatchExclusivity::HoldThroughClose,
         )
         .await
     }
 
     /// Seal a restart checkpoint while retaining the existing target. Unlike
     /// a Move, Restart does not change profile or destination configuration.
+    ///
+    /// An `automatic` Restart, which nobody asked for, never interrupts work:
+    /// a session that is working makes it fail with a deferral instead (see
+    /// [`super::checkpoint::checkpoint_was_deferred`]) and stays running.
     pub(crate) async fn suspend_session_for_restart(
         &mut self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
         before_close: Option<BeforeClose>,
+        automatic: bool,
     ) -> Result<()> {
         self.suspend_session_controlled_with_manager(
             session_id,
@@ -145,6 +153,11 @@ impl Controller {
             true,
             before_close,
             None,
+            if automatic {
+                LatchExclusivity::HoldThroughIdleClose
+            } else {
+                LatchExclusivity::HoldThroughClose
+            },
         )
         .await?;
         Ok(())
@@ -200,6 +213,7 @@ impl Controller {
                     true,
                     None,
                     source_relay.take(),
+                    LatchExclusivity::HoldThroughClose,
                 )
                 .await
             },
@@ -222,6 +236,7 @@ impl Controller {
         acknowledge_unpublished_work: bool,
         before_close: Option<BeforeClose>,
         held_relay: Option<super::checkpoint::ControllerRelayLease>,
+        exclusivity: LatchExclusivity,
     ) -> Result<bool> {
         crate::worker_lifecycle::run(session_id, "suspend session controlled with manager", executor, async {
             crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
@@ -249,7 +264,7 @@ impl Controller {
                 session_id,
                 executor,
                 manager,
-                LatchExclusivity::HoldThroughClose,
+                exclusivity,
                 checkpoint_export_policy,
                 None,
                 held_relay,
@@ -259,10 +274,20 @@ impl Controller {
             Ok(latched) => latched,
             Err(error) => {
                 let record = self.state.sessions.get_mut(session_id).unwrap();
-                // The target is kept even when the restart left no worker: a
-                // forced destroy and a resume's pre-clean both use it to tear
-                // down the dead container.
-                apply_close_checkpoint_failure(record, &previous, &error, now());
+                if exclusivity == LatchExclusivity::HoldThroughIdleClose
+                    && super::checkpoint::checkpoint_was_deferred(&error)
+                {
+                    // Nothing failed: the session is working, so the close
+                    // nobody asked for stands down and leaves no error behind.
+                    record.state = state_after_unsealed_close(&previous);
+                    record.last_checkpoint_error = previous.last_checkpoint_error.clone();
+                    record.updated_at = now();
+                } else {
+                    // The target is kept even when the restart left no worker:
+                    // a forced destroy and a resume's pre-clean both use it to
+                    // tear down the dead container.
+                    apply_close_checkpoint_failure(record, &previous, &error, now());
+                }
                 return Err(
                     self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error)
                 );
@@ -386,7 +411,12 @@ impl Controller {
             }
             let record = self.state.sessions.get_mut(session_id).unwrap();
             record.state = state_after_unsealed_close(&previous);
-            record.last_error = Some(format!("{error:#}"));
+            // An automatic close that stands down did not fail.
+            if exclusivity != LatchExclusivity::HoldThroughIdleClose
+                || !super::checkpoint::checkpoint_was_deferred(&error)
+            {
+                record.last_error = Some(format!("{error:#}"));
+            }
             record.updated_at = now();
             self.persist_session_transition_or_restore(
                 session_id,
@@ -594,6 +624,7 @@ impl Controller {
                         acknowledge_unpublished_work,
                         before_close,
                         None,
+                        LatchExclusivity::HoldThroughClose,
                     )
                     .await;
             }

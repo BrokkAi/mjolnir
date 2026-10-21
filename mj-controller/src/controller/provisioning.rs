@@ -166,10 +166,14 @@ impl Controller {
 
     /// Start a child worker inside an already-provisioned parent target.
     /// Repository, target, and mount setup belong exclusively to the parent.
+    ///
+    /// `stopped_for_shutdown` says whether daemon shutdown cancelled the
+    /// launch, so the recorded failure can name that cause.
     pub async fn provision_subagent_session_controlled(
         &mut self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
+        stopped_for_shutdown: impl Fn() -> bool + Send + Sync,
     ) -> Result<()> {
         crate::worker_lifecycle::run(
             session_id,
@@ -210,6 +214,17 @@ impl Controller {
                                 .map(|(index, error)| format!("attempt {}: {error}", index + 1))
                                 .collect::<Vec<_>>()
                                 .join("; ")
+                        )
+                    } else {
+                        error
+                    };
+                    // An explicit daemon stop does not wait for a launch, and
+                    // the executor reports only that it was cancelled. Without
+                    // the cause, the parent cannot tell a restart from a fault
+                    // on the target (#1321).
+                    let error = if stopped_for_shutdown() {
+                        error.context(
+                            "the Mjolnir daemon stopped during this launch; spawn the sub-agent again",
                         )
                     } else {
                         error
@@ -777,8 +792,18 @@ impl Controller {
                 };
             }
             Ok((locator, remainder, bundle, build_cache)) => {
+                let image = self
+                    .config
+                    .targets
+                    .get(&session.target_template_id)
+                    .and_then(TargetTemplate::container)
+                    .map(|container| container.image.as_str());
                 let container_settings = backend_locator(&locator, &self.state.sessions[session_id], &self.config)?
-                    .container_engine().map(|_| mj_core::state::ContainerSettings::requested(&session));
+                    .container_engine()
+                    .map(|_| match image {
+                        Some(image) => mj_core::state::ContainerSettings::applied(&session, image),
+                        None => mj_core::state::ContainerSettings::requested(&session),
+                    });
                 apply_new_session_provisioning_result(&mut self.state, session_id, Ok(locator))?;
                 self.state.sessions.get_mut(session_id)
                     .expect("session retained after target creation")

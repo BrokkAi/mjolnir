@@ -80,9 +80,9 @@ fn grok_credentials(expiries: &[&str]) -> Vec<u8> {
     serde_json::to_vec(&serde_json::Value::Object(grants)).unwrap()
 }
 
-fn opencode_credentials(expires: i64) -> Vec<u8> {
+fn mimo_credentials(expires: i64) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
-        "anthropic": {
+        "xiaomi": {
             "type": "oauth",
             "refresh": "refresh",
             "access": "access",
@@ -158,15 +158,17 @@ fn every_harness_reports_expiry_only_where_hel_can_refresh_ahead_of_it() {
             Some(1_786_933_141_724),
             None,
         ),
+        // OpenCode's logins live in its database; the staged export orders
+        // nothing, even when it carries an OAuth expiry.
         (
             HarnessKind::OpenCode,
-            opencode_credentials(1_756_000_000_000),
-            Some(1_756_000_000_000),
+            br#"[{"id":"cred_1","integrationID":"anthropic","label":"OAuth","active":true,"value":{"type":"oauth","refresh":"r","access":"a","expires":1756000000000}}]"#.to_vec(),
+            None,
             None,
         ),
         (
             HarnessKind::Mimo,
-            opencode_credentials(1_756_000_000_000),
+            mimo_credentials(1_756_000_000_000),
             Some(1_756_000_000_000),
             None,
         ),

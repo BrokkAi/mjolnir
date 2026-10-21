@@ -324,7 +324,7 @@ login link keeps working, and it does not collide with the default instance's
 port 3765. If the port is taken anyway, for example by another named instance
 whose name maps to the same port, the viewer reports the conflict and gives the
 exact `bind` line to add under `[phone]`. The `mj` commands that use the HTTP API,
-such as `mj sessions` and `mj prompt`, need the viewer's listener and fail until
+such as `mj sessions`, `mj prompt` and `mj message`, need the viewer's listener and fail until
 the conflict is resolved.
 
 A non-loopback `bind` is rejected unless both explicit TLS paths are present.
@@ -521,7 +521,7 @@ implementing a settled design; `subtle` for judgment, ambiguous diagnosis,
 design choices, or risk of subtle bugs. A subtle task gets a smarter, more
 expensive agent. Judge difficulty, not brief length. With only straightforward
 configured, `spawn` has no `task_type` and every child uses the straightforward
-choice. The parent is told to delegate only straightforward work and to do work
+choice. The parent is told to delegate straightforward work and to do work
 that needs judgment itself. Mjolnir chooses the eligible profile offering that task type's
 model and effort with the most quota. The agent cannot override the selection.
 Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to

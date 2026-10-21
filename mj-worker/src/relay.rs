@@ -737,20 +737,6 @@ impl DurableRelay {
         };
     }
 
-    /// Every fact that bears on whether this session is working.
-    ///
-    /// The idle clock runs on every journal append, so this assembles the
-    /// facts directly rather than through a whole operational state, which
-    /// would clone the session's configuration once per streamed chunk. It
-    /// must stay identical to `RelayOperationalState::facts`, which is what
-    /// the daemon reads; `worker_facts_match_the_published_state` pins them
-    /// together.
-    fn clear_context_started_at_ms(&self) -> Option<i64> {
-        self.clear_context_in_progress()
-            .then_some(self.snapshot.activity_turn_started_at_ms)
-            .flatten()
-    }
-
     /// The relay-owned turn boundary shared by command promotion, checkpoint
     /// admission, and background-work accounting. Activity classification
     /// also presents an in-progress `/clear` as a turn, but that command must
@@ -759,6 +745,14 @@ impl DurableRelay {
         self.snapshot.active_prompt.is_some() || self.snapshot.harness_turn.is_some()
     }
 
+    /// Every fact that bears on whether this session is working.
+    ///
+    /// The idle clock runs on every journal append, so this assembles the
+    /// facts directly rather than through a whole operational state, which
+    /// would clone the session's configuration once per streamed chunk. It
+    /// must stay identical to `RelayOperationalState::facts`, which is what
+    /// the daemon reads; `worker_facts_match_the_published_state` pins them
+    /// together.
     pub fn activity_facts(&self) -> mj_core::activity::ActivityFacts {
         let background_commands = self.background_commands().len() + self.native_agent_count();
         self.turn_context
@@ -781,7 +775,7 @@ impl DurableRelay {
                 .active_prompt
                 .as_ref()
                 .map(|prompt| prompt.started_at_ms)
-                .or_else(|| self.clear_context_started_at_ms()),
+                .or_else(|| self.snapshot.clear_context_started_at_ms()),
             harness_turn_started_at_ms: self.snapshot.harness_turn.map(|turn| turn.started_at_ms),
             turn_started_at_ms: self.snapshot.activity_turn_started_at_ms,
             expected_continuation: None,

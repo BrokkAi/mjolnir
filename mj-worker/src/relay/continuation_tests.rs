@@ -193,6 +193,101 @@ fn quota_resume(relay: &DurableRelay) -> RelayCommand {
     }
 }
 
+// Hard-won: 3c8973b87: a mailbox wake hit Kimi's quota with no recoverable request after restore.
+#[test]
+fn mailbox_quota_recovery_survives_missing_user_request_and_prior_cancellation() {
+    for no_user_request in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let mut relay = open(root.path());
+        if !no_user_request {
+            submit_relay(&mut relay, "user-request", prompt("Implement and test"));
+            completed(&mut relay, "user-request");
+            for attempt in 1..=3 {
+                let cmd = request(&relay);
+                let id = format!("auto-continue-{attempt}");
+                submit_relay(&mut relay, &id, cmd);
+                completed(&mut relay, &id);
+            }
+        }
+        submit_relay(&mut relay, "cancel-old-work", RelayCommand::CancelTurn);
+        relay.claim_pending_commands(true).unwrap();
+        relay
+            .record_command_completed("cancel-old-work", RelayCommandOutcome::Cancelled)
+            .unwrap();
+        assert!(relay.snapshot.continuation.quota_suppressed);
+        let event = mj_core::mailbox::MailboxEvent {
+            key: "merged-pr".into(),
+            source: "github".into(),
+            wake: true,
+            created_at_ms: 1,
+            body: mj_core::mailbox::MailboxEventBody::PlainText {
+                text: "Your PR was merged.".into(),
+            },
+        };
+        submit_relay(
+            &mut relay,
+            "deliver-merge",
+            RelayCommand::DeliverMailboxEvent { event },
+        );
+        let claimed = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(claimed.len(), 1);
+        let wake_id = claimed[0].command_id.clone();
+        assert!(matches!(
+            claimed[0].command,
+            RelayCommand::MailboxWake { .. }
+        ));
+        relay
+            .record_command_completed(
+                &wake_id,
+                RelayCommandOutcome::Prompt {
+                    stop_reason: mj_core::diagnostic::QUOTA_STOP_REASON.into(),
+                    usage: None,
+                    diagnostic: Some(mj_core::diagnostic::TurnDiagnostic {
+                        message: "429 You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends.".into(),
+                        code: Some("provider.api_error".into()),
+                        http_status: Some(429),
+                        reset_at: None,
+                    }),
+                },
+            )
+            .unwrap();
+        drop(relay);
+        let mut relay = open(root.path());
+        assert_eq!(
+            relay.snapshot.continuation.completed_command_id.as_deref(),
+            Some(wake_id.as_str())
+        );
+        assert_eq!(
+            relay.snapshot.continuation.user_command_id.as_deref(),
+            Some(if no_user_request {
+                wake_id.as_str()
+            } else {
+                "user-request"
+            })
+        );
+        assert!(!relay.snapshot.continuation.eligible());
+        let cmd = quota_schedule(&mut relay, Some(epoch_millis() - 60_001));
+        submit_relay(&mut relay, "quota-schedule", cmd);
+        drop(relay);
+        let mut relay = open(root.path());
+        let cmd = quota_resume(&relay);
+        submit_relay(&mut relay, "quota-retry", cmd);
+        assert_eq!(
+            relay.snapshot.continuation.attempts,
+            if no_user_request { 0 } else { 3 }
+        );
+        completed(&mut relay, "quota-retry");
+        assert!(!relay.snapshot.continuation.eligible());
+        let cmd = request(&relay);
+        assert!(
+            relay
+                .submit_command("auto-continue-unearned", cmd)
+                .unwrap()
+                .is_err()
+        );
+    }
+}
+
 #[test]
 fn quota_retry_survives_restart_and_does_not_consume_or_renew_ordinary_allowance() {
     let root = tempfile::tempdir().unwrap();

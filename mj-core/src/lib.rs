@@ -11,6 +11,7 @@ pub mod bounded_frame;
 pub mod codex_catalog;
 pub mod codex_provider;
 pub mod config;
+pub mod confined_path;
 pub mod credentials;
 pub mod diagnostic;
 pub mod diff;

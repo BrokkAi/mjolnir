@@ -286,7 +286,7 @@ pub(super) fn apply_read_receipt(state: &mut State, session_id: &str, receipt: u
 #[derive(Clone)]
 pub(super) struct PhoneActionControl {
     pub(super) cancelled: Arc<AtomicBool>,
-    pub(super) create: Option<CreateSessionControl>,
+    pub(super) create: Option<LifecycleControl>,
 }
 
 impl PhoneActionControl {
@@ -295,7 +295,7 @@ impl PhoneActionControl {
             action,
             ControllerAction::New { .. } | ControllerAction::Restart { .. }
         )
-        .then(CreateSessionControl::default);
+        .then(LifecycleControl::default);
         let cancelled = create.as_ref().map_or_else(
             || Arc::new(AtomicBool::new(false)),
             |control| control.cancelled.clone(),

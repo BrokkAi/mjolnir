@@ -692,21 +692,31 @@ pub(super) fn install_worker_files(
     session_id: &str,
     worker_root: &str,
     profile_home: &str,
-    worker_binary: &Path,
+    worker: &WorkerInstall,
     launch_config: &Path,
     ownership: &Path,
     profile_stage: &Path,
     shared_login: Option<&SharedLogin>,
 ) -> Result<()> {
-    verify_worker_build(worker_binary)?;
-    crate::target_storage::ensure_room_for(
-        locator,
-        [worker_root],
-        || super::file_size(worker_binary),
-        "install the Mjolnir worker",
-    )?;
+    let installed = format!("{worker_root}/hel");
+    if let Some(binary) = worker.host_binary() {
+        verify_worker_build(binary)?;
+        crate::target_storage::ensure_room_for(
+            locator,
+            [worker_root],
+            || super::file_size(binary),
+            "install the Mjolnir worker",
+        )?;
+    }
+    // Bare hosts have no image, so only a container can run its image's worker.
+    let host_binary = || {
+        worker
+            .host_binary()
+            .context("only a container target can run its image's worker")
+    };
     match locator {
         targets::TargetLocator::LocalBare { .. } => {
+            let worker_binary = host_binary()?;
             if profile_stage.is_dir() {
                 // A staged home that is a link to a profile home, left for a
                 // session an earlier release started there, is replaced by a
@@ -729,7 +739,7 @@ pub(super) fn install_worker_files(
                     "cp",
                     [
                         worker_binary.to_string_lossy().into_owned(),
-                        format!("{worker_root}/hel"),
+                        installed.clone(),
                     ],
                 )
                 .purpose("install local Mjolnir worker"),
@@ -749,7 +759,7 @@ pub(super) fn install_worker_files(
                     ],
                 )
                 .purpose("install local worker ownership marker"),
-                CommandSpec::new("chmod", ["700", &format!("{worker_root}/hel")])
+                CommandSpec::new("chmod", ["700", &installed])
                     .purpose("make local Mjolnir worker executable"),
             ] {
                 execute_checked(executor, command)?;
@@ -764,7 +774,43 @@ pub(super) fn install_worker_files(
                 targets::TargetLocator::AppleContainer { .. } => "container",
                 _ => unreachable!("matched local container target"),
             };
-            for command in [
+            let install_worker = match worker {
+                WorkerInstall::Host(worker_binary) => CommandSpec::new(
+                    engine,
+                    [
+                        "cp".into(),
+                        worker_binary.to_string_lossy().into_owned(),
+                        format!("{container_id}:{installed}"),
+                    ],
+                )
+                .purpose("upload Mjolnir worker"),
+                WorkerInstall::Image => CommandSpec::new(
+                    engine,
+                    [
+                        "exec".into(),
+                        container_id.clone(),
+                        "ln".into(),
+                        "-sfn".into(),
+                        IMAGE_WORKER.into(),
+                        installed.clone(),
+                    ],
+                )
+                .purpose("link the image's Mjolnir worker"),
+            };
+            // The image's worker belongs to the image: its link is neither
+            // re-owned nor made private like a copied binary.
+            let copied = worker.host_binary().map(|_| installed.as_str());
+            let launch_installed = format!("{worker_root}/launch.json");
+            let ownership_installed = format!("{worker_root}/ownership.json");
+            let owned = copied
+                .into_iter()
+                .chain([
+                    launch_installed.as_str(),
+                    ownership_installed.as_str(),
+                    profile_home,
+                ])
+                .collect::<Vec<_>>();
+            let mut commands = vec![
                 CommandSpec::new(
                     engine,
                     [
@@ -777,21 +823,13 @@ pub(super) fn install_worker_files(
                     ],
                 )
                 .purpose("create target worker directories"),
-                CommandSpec::new(
-                    engine,
-                    [
-                        "cp".into(),
-                        worker_binary.to_string_lossy().into_owned(),
-                        format!("{container_id}:{worker_root}/hel"),
-                    ],
-                )
-                .purpose("upload Mjolnir worker"),
+                install_worker,
                 CommandSpec::new(
                     engine,
                     [
                         "cp".into(),
                         launch_config.to_string_lossy().into_owned(),
-                        format!("{container_id}:{worker_root}/launch.json"),
+                        format!("{container_id}:{launch_installed}"),
                     ],
                 )
                 .purpose("upload worker launch configuration"),
@@ -800,7 +838,7 @@ pub(super) fn install_worker_files(
                     [
                         "cp".into(),
                         ownership.to_string_lossy().into_owned(),
-                        format!("{container_id}:{worker_root}/ownership.json"),
+                        format!("{container_id}:{ownership_installed}"),
                     ],
                 )
                 .purpose("upload worker ownership marker"),
@@ -815,30 +853,26 @@ pub(super) fn install_worker_files(
                 .purpose("upload harness profile allowlist"),
                 CommandSpec::new(
                     engine,
-                    container_upload_ownership_args(
-                        engine,
-                        container_id,
-                        worker_root,
-                        &[
-                            &format!("{worker_root}/hel"),
-                            &format!("{worker_root}/launch.json"),
-                            &format!("{worker_root}/ownership.json"),
-                            profile_home,
-                        ],
-                    ),
+                    container_upload_ownership_args(engine, container_id, worker_root, &owned),
                 )
                 .purpose("match uploaded files to the worker directory owner"),
-                CommandSpec::new(
-                    engine,
-                    [
-                        "exec".into(),
-                        container_id.clone(),
-                        "chmod".into(),
-                        "700".into(),
-                        format!("{worker_root}/hel"),
-                    ],
-                )
-                .purpose("make Mjolnir worker executable"),
+            ];
+            if let Some(copied) = copied {
+                commands.push(
+                    CommandSpec::new(
+                        engine,
+                        [
+                            "exec".into(),
+                            container_id.clone(),
+                            "chmod".into(),
+                            "700".into(),
+                            copied.into(),
+                        ],
+                    )
+                    .purpose("make Mjolnir worker executable"),
+                );
+            }
+            commands.push(
                 CommandSpec::new(
                     engine,
                     [
@@ -851,7 +885,8 @@ pub(super) fn install_worker_files(
                     ],
                 )
                 .purpose("restrict harness profile permissions"),
-            ] {
+            );
+            for command in commands {
                 execute_checked(executor, command)?;
             }
         }
@@ -864,13 +899,14 @@ pub(super) fn install_worker_files(
                 None,
                 worker_root,
                 profile_home,
-                worker_binary,
+                host_binary()?,
                 launch_config,
                 ownership,
                 profile_stage,
             )?;
         }
         targets::TargetLocator::SshBare { ssh, .. } => {
+            let worker_binary = host_binary()?;
             let cached_worker = cache_worker_on_ssh_host(executor, ssh, session_id, worker_binary)?;
             install_worker_over_ssh(
                 executor,
@@ -895,7 +931,23 @@ pub(super) fn install_worker_files(
                 targets::TargetLocator::SshDocker { .. } => "docker",
                 _ => unreachable!("matched remote container target"),
             };
-            let cached_worker = cache_worker_on_ssh_host(executor, ssh, session_id, worker_binary)?;
+            let install_worker = match worker {
+                WorkerInstall::Host(worker_binary) => vec![
+                    engine.into(),
+                    "cp".into(),
+                    cache_worker_on_ssh_host(executor, ssh, session_id, worker_binary)?,
+                    format!("{container_id}:{installed}"),
+                ],
+                WorkerInstall::Image => vec![
+                    engine.into(),
+                    "exec".into(),
+                    container_id.clone(),
+                    "ln".into(),
+                    "-sfn".into(),
+                    IMAGE_WORKER.into(),
+                    installed.clone(),
+                ],
+            };
             let upload = format!("{}/{session_id}", targets::REMOTE_UPLOAD_STAGING);
             execute_checked(
                 executor,
@@ -917,7 +969,18 @@ pub(super) fn install_worker_files(
                 crate::targets::scp_upload(ssh, profile_stage, &format!("{upload}/profile"), true)
                     .purpose("upload remote container profile allowlist"),
             )?;
-            let remote = [
+            let copied = worker.host_binary().map(|_| installed.as_str());
+            let launch_installed = format!("{worker_root}/launch.json");
+            let ownership_installed = format!("{worker_root}/ownership.json");
+            let owned = copied
+                .into_iter()
+                .chain([
+                    launch_installed.as_str(),
+                    ownership_installed.as_str(),
+                    profile_home,
+                ])
+                .collect::<Vec<_>>();
+            let mut remote = vec![
                 vec![
                     engine.into(),
                     "exec".into(),
@@ -927,23 +990,18 @@ pub(super) fn install_worker_files(
                     worker_root.into(),
                     profile_home.into(),
                 ],
-                vec![
-                    engine.into(),
-                    "cp".into(),
-                    cached_worker.clone(),
-                    format!("{container_id}:{worker_root}/hel"),
-                ],
+                install_worker,
                 vec![
                     engine.into(),
                     "cp".into(),
                     format!("{upload}/launch.json"),
-                    format!("{container_id}:{worker_root}/launch.json"),
+                    format!("{container_id}:{launch_installed}"),
                 ],
                 vec![
                     engine.into(),
                     "cp".into(),
                     format!("{upload}/ownership.json"),
-                    format!("{container_id}:{worker_root}/ownership.json"),
+                    format!("{container_id}:{ownership_installed}"),
                 ],
                 vec![
                     engine.into(),
@@ -956,22 +1014,21 @@ pub(super) fn install_worker_files(
                         engine,
                         container_id,
                         worker_root,
-                        &[
-                            &format!("{worker_root}/hel"),
-                            &format!("{worker_root}/launch.json"),
-                            &format!("{worker_root}/ownership.json"),
-                            profile_home,
-                        ],
+                        &owned,
                     ))
                     .collect(),
-                vec![
+            ];
+            if let Some(copied) = copied {
+                remote.push(vec![
                     engine.into(),
                     "exec".into(),
                     container_id.clone(),
                     "chmod".into(),
                     "700".into(),
-                    format!("{worker_root}/hel"),
-                ],
+                    copied.into(),
+                ]);
+            }
+            remote.extend([
                 vec![
                     engine.into(),
                     "exec".into(),
@@ -982,7 +1039,7 @@ pub(super) fn install_worker_files(
                     profile_home.into(),
                 ],
                 vec!["rm".into(), "-rf".into(), "--".into(), upload.clone()],
-            ];
+            ]);
             for args in remote {
                 execute_checked(
                     executor,

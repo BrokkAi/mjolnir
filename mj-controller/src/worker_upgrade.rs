@@ -59,6 +59,22 @@ pub struct WorkerUpgradeObservation {
     pub quiet: bool,
 }
 
+/// How the daemon's container recreation for one session ended, after an
+/// attempt returned [`WorkerUpgradeOutcome::RecreateContainer`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerRecreationReport {
+    pub session_id: String,
+    pub outcome: Result<ContainerRecreated, String>,
+}
+
+/// Whether a recreation that did not fail replaced the container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerRecreated {
+    Recreated,
+    /// The session was working, or something else owned it; nothing changed.
+    StoodDown,
+}
+
 /// Reports session activity to the upgrade coordinator.
 ///
 /// Like the recovery observer, this is a queued hand-off: the caller is an
@@ -66,12 +82,20 @@ pub struct WorkerUpgradeObservation {
 #[derive(Clone)]
 pub struct WorkerUpgradeObserver {
     observations: ObservationSender<WorkerUpgradeObservation>,
+    recreations: ObservationSender<ContainerRecreationReport>,
 }
 
 impl WorkerUpgradeObserver {
     pub fn observe(&self, observation: WorkerUpgradeObservation) {
         self.observations
             .send(observation.session.id.clone(), observation, |_, _| {});
+    }
+
+    /// Hand back how a container recreation ended. The coordinator owns the
+    /// retry policy, so it learns the outcome of the work it asked for.
+    pub fn report_recreation(&self, report: ContainerRecreationReport) {
+        self.recreations
+            .send(report.session_id.clone(), report, |_, _| {});
     }
 }
 
@@ -110,6 +134,8 @@ impl WorkerUpgradeCoordinator {
     pub fn spawn(session_manager: SessionManagerControl, recovery: &RecoveryObserver) -> Self {
         let (observations_tx, mut observations_rx) =
             observation_channel::<WorkerUpgradeObservation>();
+        let (recreations_tx, mut recreations_rx) =
+            observation_channel::<ContainerRecreationReport>();
         let (results_tx, results_rx) = observation_channel();
         let gate = recovery.gate.clone();
         let coordinator_gate = gate.clone();
@@ -123,6 +149,16 @@ impl WorkerUpgradeCoordinator {
                 }
                 tokio::select! {
                     _ = coordinator_gate.closed(), if !closing => { closing = true; }
+                    reported = recreations_rx.recv(), if !closing => {
+                        let Some(report) = reported else { continue };
+                        policies
+                            .entry(report.session_id.clone())
+                            .or_default()
+                            .record_recreation(&report, Utc::now());
+                        if let Err(error) = &report.outcome {
+                            tracing::warn!(session_id = %report.session_id, %error, "container recreation for the upgrade failed");
+                        }
+                    }
                     observed = observations_rx.recv(), if !closing => {
                         let Some(observation) = observed else { coordinator_gate.close(); closing = true; continue; };
                         let session_id = observation.session.id.clone();
@@ -208,6 +244,7 @@ impl WorkerUpgradeCoordinator {
             supervisor: Some(supervisor),
             observer: WorkerUpgradeObserver {
                 observations: observations_tx,
+                recreations: recreations_tx,
             },
             results: results_rx,
             gate,
@@ -244,6 +281,9 @@ struct PolicyState {
     failed_at: Option<DateTime<Utc>>,
     deferred_at: Option<DateTime<Utc>>,
     consecutive_failures: u32,
+    /// The daemon is recreating this session's container. Nothing else is
+    /// due until it reports how that ended.
+    recreation_pending: bool,
 }
 
 impl PolicyState {
@@ -254,7 +294,12 @@ impl PolicyState {
         if !observation.quiet || observation.session.state != SessionState::Running {
             return false;
         }
-        if self.worker_is_known_current(observation.worker_build.as_deref()) {
+        // A container an upgrade left on an older image is due to move even
+        // when its worker is current.
+        let moved = mj_core::state::ContainerSettings::default_image_moved(&observation.session);
+        if self.recreation_pending
+            || (!moved && self.worker_is_known_current(observation.worker_build.as_deref()))
+        {
             return false;
         }
         if self.deferred_at.is_some_and(|deferred| {
@@ -313,6 +358,9 @@ impl PolicyState {
                 // repeat preparation on every unchanged quiet observation.
                 self.deferred_at = Some(now);
             }
+            Ok(WorkerUpgradeOutcome::RecreateContainer) => {
+                self.recreation_pending = true;
+            }
             Ok(outcome @ WorkerUpgradeOutcome::AlreadyCurrent { .. }) => {
                 self.failed_at = None;
                 self.consecutive_failures = 0;
@@ -331,6 +379,23 @@ impl PolicyState {
                 self.consecutive_failures = self.consecutive_failures.saturating_add(1);
                 self.failed_at = Some(now);
             }
+            Err(_) => {
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                self.failed_at = Some(now);
+            }
+        }
+    }
+
+    /// Fold in how the recreation an attempt asked for ended. A failure
+    /// takes the same widening backoff a failed in-place upgrade does.
+    fn record_recreation(&mut self, report: &ContainerRecreationReport, now: DateTime<Utc>) {
+        self.recreation_pending = false;
+        match &report.outcome {
+            Ok(ContainerRecreated::Recreated) => {
+                self.failed_at = None;
+                self.consecutive_failures = 0;
+            }
+            Ok(ContainerRecreated::StoodDown) => self.deferred_at = Some(now),
             Err(_) => {
                 self.consecutive_failures = self.consecutive_failures.saturating_add(1);
                 self.failed_at = Some(now);
@@ -513,6 +578,39 @@ mod tests {
         assert!(policy.due(&observation(Some("build-a"), true), now + interval * 2));
     }
 
+    /// A recreation the daemon owns is not asked for again while it runs, and
+    /// what it reports decides the next attempt: a stand-down waits like a
+    /// deferral, a failure takes the widening backoff, and a recreated
+    /// container is due at once, so its new worker can prove its build.
+    #[test]
+    fn a_recreation_holds_further_attempts_until_the_daemon_reports_it() {
+        let now = Utc::now();
+        let stale = observation(Some("build-a"), true);
+        let report = |outcome| ContainerRecreationReport {
+            session_id: "session-1".into(),
+            outcome,
+        };
+        let mut policy = PolicyState::default();
+        policy.record(&success(WorkerUpgradeOutcome::RecreateContainer), now);
+        assert!(!policy.due(&stale, now + chrono::Duration::days(1)));
+
+        policy.record_recreation(&report(Ok(ContainerRecreated::StoodDown)), now);
+        let deferred = chrono::Duration::from_std(WORKER_UPGRADE_DEFERRED_INTERVAL).unwrap();
+        assert!(!policy.due(&stale, now + deferred - chrono::Duration::seconds(1)));
+        assert!(policy.due(&stale, now + deferred));
+
+        policy.record(&success(WorkerUpgradeOutcome::RecreateContainer), now);
+        policy.record_recreation(&report(Err("provision the new container".into())), now);
+        let retry = chrono::Duration::from_std(WORKER_UPGRADE_RETRY_INTERVAL).unwrap();
+        assert!(!policy.due(&stale, now + retry - chrono::Duration::seconds(1)));
+        assert!(policy.due(&stale, now + retry));
+
+        policy.record(&success(WorkerUpgradeOutcome::RecreateContainer), now);
+        policy.record_recreation(&report(Ok(ContainerRecreated::Recreated)), now);
+        assert_eq!(policy.consecutive_failures, 0);
+        assert!(policy.due(&observation(Some("build-b"), true), now));
+    }
+
     /// A successful upgrade stops the session being probed again: the worker
     /// that answers next is the new one, and confirming it clears the failure
     /// run the upgrade itself was guarded by.
@@ -611,7 +709,11 @@ mod tests {
     #[test]
     fn observing_hands_off_without_waiting() {
         let (observations, mut queued) = observation_channel();
-        let observer = WorkerUpgradeObserver { observations };
+        let (recreations, _) = observation_channel();
+        let observer = WorkerUpgradeObserver {
+            observations,
+            recreations,
+        };
 
         for _ in 0..64 {
             observer.observe(observation(Some("build-a"), true));

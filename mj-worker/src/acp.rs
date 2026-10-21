@@ -8,6 +8,7 @@ mod claude_tasks;
 mod drive;
 mod launch;
 mod native_agents;
+mod opencode_logins;
 mod permissions;
 mod session;
 mod session_config;
@@ -16,6 +17,7 @@ use claude_tasks::*;
 use drive::*;
 use launch::*;
 pub use launch::{ContextReset, LaunchSpec, ReviewerMcpServer, SubagentMcpSocket};
+pub use opencode_logins::ImportedLogins;
 use permissions::*;
 use session::*;
 use session_config::*;
@@ -76,7 +78,7 @@ use crate::terminal::{
 use mj_core::config::{ExecutionEnforcement, ExecutionPolicy, HarnessKind};
 use mj_core::elicitation::{
     ElicitationField, ElicitationFieldKind, ElicitationOption, ElicitationRequest,
-    ElicitationResponse, ElicitationValue,
+    ElicitationResponse, ElicitationValue, ToolPermissionForm,
 };
 use mj_core::relay::{AcpActivityClock, ClaimedSteeringPrompt};
 use mj_core::worker_launch::{ProjectMemoryLaunchConfig, ProjectMemoryMcpDelivery};
@@ -341,6 +343,9 @@ struct OpenedSession {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum SessionRestart {
     Resume(String),
+    /// Reload the idle native session on a fresh bridge that imports the
+    /// changed staged logins (OpenCode).
+    ReloadLogins(String),
     Clear {
         reset: ContextReset,
         previous: String,
@@ -476,6 +481,18 @@ async fn run_bridge(
         )
         .context("pin this session's model into the ACP bridge launch")?;
     }
+    let mut spec = spec.clone();
+    if spec.harness.keeps_logins_in_database() {
+        let environment = spec.environment.clone();
+        spec.imported_logins = Some(
+            tokio::task::spawn_blocking(move || {
+                opencode_logins::ImportedLogins::prepare(&environment)
+            })
+            .await
+            .context("prepare the OpenCode session's logins")??,
+        );
+    }
+    let spec = &spec;
     let mut child = Command::new(&spec.command)
         .args(&spec.args)
         .env_clear()
@@ -622,18 +639,25 @@ async fn run_bridge(
             session_age: Duration::ZERO,
             message: "Clearing context",
         })),
-        Ok(Some(SessionRestart::Resume(native_session_id))) => Ok(Some(BridgeRestart {
-            clear_context: None,
-            resume_session: Some(native_session_id),
-            native_session_used: opened_now
-                .as_ref()
-                .is_some_and(|opened| opened.native_session_used.load(Ordering::Acquire)),
-            unexpected: false,
-            session_age: opened_now
-                .map(|opened| opened.started_at.elapsed())
-                .unwrap_or(Duration::ZERO),
-            message: ACP_BRIDGE_RESTART_WARNING,
-        })),
+        Ok(Some(restart @ (SessionRestart::Resume(_) | SessionRestart::ReloadLogins(_)))) => {
+            let (native_session_id, message) = match restart {
+                SessionRestart::Resume(id) => (id, ACP_BRIDGE_RESTART_WARNING),
+                SessionRestart::ReloadLogins(id) => (id, OPENCODE_LOGINS_RELOAD_MESSAGE),
+                SessionRestart::Clear { .. } => unreachable!("matched above"),
+            };
+            Ok(Some(BridgeRestart {
+                clear_context: None,
+                resume_session: Some(native_session_id),
+                native_session_used: opened_now
+                    .as_ref()
+                    .is_some_and(|opened| opened.native_session_used.load(Ordering::Acquire)),
+                unexpected: false,
+                session_age: opened_now
+                    .map(|opened| opened.started_at.elapsed())
+                    .unwrap_or(Duration::ZERO),
+                message,
+            }))
+        }
         Err(error) => match opened_now {
             None => Err(error),
             Some(opened) => Ok(Some(BridgeRestart {
@@ -837,6 +861,8 @@ async fn read_stderr_tail(mut stderr: tokio::process::ChildStderr) -> Result<Str
 
 const ACP_BRIDGE_LOST_WARNING: &str = "ACP bridge exited; reloading the native session";
 const ACP_BRIDGE_RESTART_WARNING: &str = "ACP bridge restarting; reloading the native session";
+const OPENCODE_LOGINS_RELOAD_MESSAGE: &str =
+    "The profile's OpenCode logins changed; reloading the session to use them";
 
 #[cfg(all(test, unix))]
 pub(crate) mod muse_tests;

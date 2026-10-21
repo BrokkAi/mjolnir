@@ -438,17 +438,9 @@ impl DurableRelay {
         if decision == Decision::KeepCurrent {
             return Ok("keep_current");
         }
-        // Commit the turn's decision before publishing activity. The worker owns
-        // both under the relay lock; readers cannot see a half-applied verdict.
-        if let Some(completion) = self.snapshot.turn_completion.as_ref() {
-            let mut next = self.snapshot.clone();
-            next.turn_completion = Some(mj_core::activity::verdict::TurnCompletion {
-                command_id: completion.command_id.clone(),
-                completed_ordinal: self.snapshot.latest_ordinal,
-                decision,
-            });
-            self.commit_snapshot(next)?;
-        }
+        // Jev's verdict on the turn is its assessment record, or the stop
+        // reason a classifier handoff ended it with. This sets only the
+        // process-local inference that the activity state reads.
         *self
             .replied_verdict
             .inference
@@ -873,6 +865,125 @@ mod settled_task_tests {
         assert!(quiet.is_yes(), "{}", quiet.reason());
         relay.prepare_pending_assessment().unwrap();
         assert!(relay.pending_replied_verdict().is_none());
+    }
+
+    /// Session 979dc, through the worker: prompt turn 20 ends while a build
+    /// runs in the background and Jev says Wait; the build finishes, Claude
+    /// Code runs and ends a turn of its own, and Jev says Uncertain about it.
+    /// The assessment record holds each verdict for its own turn. The worker
+    /// publishes no other copy of a verdict: daemons older than #1304 still
+    /// read `turn_completion.decision`, and a Wait left there for turn 20 kept
+    /// their waits open for good.
+    // Hard-won: #1304: the worker kept turn 20's Wait verdict after the session went idle.
+    #[test]
+    fn a_verdict_stays_with_its_own_turn_in_the_published_state() {
+        use crate::relay::test_support::{prompt, submit_relay};
+        use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, TextContent};
+        use mj_core::activity::verdict::{Decision, TurnCompletion};
+        use mj_core::assessment::{Action, Failure, Input, Judgment, Verdict, Work};
+        use mj_core::relay::RelayCommandOutcome;
+        let verdict = |work| Verdict {
+            failure: Judgment {
+                choice: Failure::None,
+                confidence: 0.99,
+                probabilities: Default::default(),
+            },
+            input: Judgment {
+                choice: Input::None,
+                confidence: 0.99,
+                probabilities: Default::default(),
+            },
+            work: Judgment {
+                choice: work,
+                confidence: 0.99,
+                probabilities: Default::default(),
+            },
+            background: None,
+            reply: None,
+        };
+        let say = |relay: &mut DurableRelay, text: &str| {
+            relay
+                .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                    ContentBlock::Text(TextContent::new(text)),
+                )))
+                .unwrap();
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.acp_ready = true;
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: vec![],
+            })
+            .unwrap();
+        submit_relay(&mut relay, "api-turn-20", prompt("Build it and report."));
+        relay.claim_pending_commands(true).unwrap();
+        relay
+            .claude_background_tasks_changed(vec![task("build")])
+            .unwrap();
+        say(&mut relay, "The build is running in the background.");
+        let completed = relay
+            .record_command_completed(
+                "api-turn-20",
+                RelayCommandOutcome::Prompt {
+                    diagnostic: None,
+                    stop_reason: "end_turn".into(),
+                    usage: None,
+                },
+            )
+            .unwrap();
+        relay.prepare_pending_assessment().unwrap();
+        let (revision, _, _) = relay.pending_replied_verdict().unwrap();
+        assert_eq!(
+            relay
+                .apply_turn_assessment(revision, verdict(Work::Waiting))
+                .unwrap(),
+            "background_work_pending"
+        );
+
+        // The build finishes and Claude Code answers it with its own turn.
+        relay
+            .claude_async_task_control_changed("build".into(), false, true)
+            .unwrap();
+        relay.claude_background_tasks_changed(Vec::new()).unwrap();
+        relay
+            .record_observation(RelayObservation::HarnessTurnStarted {
+                started_at_ms: epoch_millis(),
+            })
+            .unwrap();
+        say(&mut relay, "The build passed.");
+        relay.settle_harness_turn(Some("end_turn".into())).unwrap();
+        relay.prepare_pending_assessment().unwrap();
+        let (revision, _, identity) = relay.pending_replied_verdict().unwrap();
+        assert!(
+            identity.is_some_and(|(turn_id, _)| turn_id.starts_with("harness-turn-")),
+            "Jev is asked about the harness's own turn"
+        );
+        assert_eq!(
+            relay
+                .apply_turn_assessment(revision, verdict(Work::Unclear))
+                .unwrap(),
+            "assessment_uncertain"
+        );
+
+        let state = relay.operational_state();
+        assert!(
+            state.activity_state().is_idle(),
+            "{:?}",
+            state.activity_state()
+        );
+        let assessment = state.assessment.as_deref().unwrap();
+        assert!(assessment.turn_id.starts_with("harness-turn-"));
+        assert_eq!(assessment.action, Some(Action::Uncertain));
+        assert_eq!(
+            state.turn_completion,
+            Some(TurnCompletion {
+                command_id: "api-turn-20".into(),
+                completed_ordinal: completed,
+                decision: Decision::KeepCurrent,
+            }),
+            "the prompt's completion identity, with no verdict copied into it"
+        );
     }
 
     // Hard-won: 1ee54bfa: a disabled continuation left its unconsumed Continue verdict holding `mj wait` open.

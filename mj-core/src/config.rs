@@ -539,6 +539,13 @@ pub const CONTAINER_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/agent-dev"
 /// development build names the floating image published from master.
 /// `mj-core/build.rs` resolves which one this build is and bakes the answer in.
 pub const DEFAULT_CONTAINER_IMAGE: &str = env!("MJ_AGENT_DEV_IMAGE");
+/// Whether this is a release build whose [`DEFAULT_CONTAINER_IMAGE`] carries
+/// its own worker. The release workflow publishes that image with the worker
+/// built from the same commit, whose identity equals this build's, so a
+/// container on it needs no worker from the host. Neither a development build
+/// nor a crates.io package, whose identity falls back to the commit, is.
+pub const RELEASE_IMAGE_CARRIES_WORKER: bool =
+    matches!(env!("MJ_RELEASE_IMAGE_CARRIES_WORKER").as_bytes(), b"1");
 /// The image name every configuration up to [`LEGACY_DEFAULT_IMAGE_LAST_VERSION`]
 /// wrote into a container target a user had touched.
 ///

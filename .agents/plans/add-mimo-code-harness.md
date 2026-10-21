@@ -76,19 +76,29 @@ The separate architectural request to preserve unknown harness sessions across d
   Rationale: Its built-in primary agents are named `build` and `plan`; treating the normal mode as `default` would make Mjolnir's Plan toggle fail to restore execution mode.
   Date/Author: 2026-10-21 / Codex
 
+- Decision: Renumber the MiMo harness migration from revision 87 to revision
+  90 when integrating the latest `origin/master`.
+  Rationale: revisions 87 through 89 shipped concurrently upstream. MiMo's
+  reconstructed harness-kind tables must include their schema, and its ledger
+  entry must follow those migrations rather than collide with them.
+  Date/Author: 2026-10-21 / Codex
+
 ## Outcomes & Retrospective
 
-Implementation is complete. The harness is discoverable, installable, launchable
+Implementation is complete and merged with the latest upstream OpenCode 2,
+container-image, checkpoint, and migration work. The harness is discoverable, installable, launchable
 through ACP, represented in persisted sessions, checkpointed with its SQLite
 database and WAL, exposed in TUI and documentation, and covered by focused
 regressions. The pinned package's real `mimo acp` process returned a valid ACP
 initialize response outside the restricted sandbox.
 
-Validation passed for the full core, checkpoint, worker, client, and controller
+Validation passed for the full core, checkpoint, worker, client, controller, and TUI
 suites; controller validation skipped one unrelated host-tool digest test
 because this host lacks `shasum`. TUI validation passed apart from one stale
-expected diagnostic, which was corrected and rerun successfully. The CLI suite
-passed except the pre-existing PTY auto-theme test, which failed identically on
+expected diagnostic, which was corrected and rerun successfully. After the
+merge, the controller suite had one timing-sensitive cancellation test fail
+once and pass on immediate focused rerun. The CLI suite passed except the
+pre-existing PTY auto-theme test, which failed identically on
 rerun while the fixture's restricted `PATH` could not find `awk` or `dirname`.
 Clippy passed with `-D warnings` for every touched crate. The reference
 container image was not built locally.
@@ -109,7 +119,7 @@ First, extend `HarnessKind` and its metadata. Add `Mimo`, its display and stable
 
 Second, add the runtime pin and installation. Define `MIMO_CLI_VERSION = "0.1.15"` and a pin whose entrypoint is `node_modules/.bin/mimo`. Add package and lock assets under `mj-worker/assets/harnesses/mimo/`. Install them with the existing `install_npm` path, require Node 22 or newer, set the launch environment to disable auto-update, and validate the executable after relocation. Unconstrained execution uses `MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS=1`, which avoids the unreliable precedence of a staged JSON permission string. Add the same npm package to `containers/Containerfile.agent-dev` and verify `mimo --version`.
 
-Third, integrate ACP and persistence. Map MiMo's `build`/`plan` modes in `mj-core/src/acp/surface.rs`. Use the generic ACP permission, MCP, streaming, model discovery, cancellation, and resume behavior. Add MiMo to credential freshness parsing, native import labels and unsupported locator, SessionWiki tool-name mapping, quota's unavailable branch, and checkpoint capture/restore validation. Add a new breaking database migration after revision 86 that admits `mimo` in both harness-kind constraints and raises the compatibility floor.
+Third, integrate ACP and persistence. Map MiMo's `build`/`plan` modes in `mj-core/src/acp/surface.rs`. Use the generic ACP permission, MCP, streaming, model discovery, cancellation, and resume behavior. Add MiMo to credential freshness parsing, native import labels and unsupported locator, SessionWiki tool-name mapping, quota's unavailable branch, and checkpoint capture/restore validation. Add a new breaking database migration after upstream revision 89 that admits `mimo` in both harness-kind constraints and raises the compatibility floor.
 
 Fourth, expose the harness. Add `mimo` to the TUI profile-kind choices. Stage the full `config` directory and `data/auth.json` into a session profile. Update the runtime, profile, quota, container, and custom-image documentation. Extend the container pin test and the harness mapping tests.
 
@@ -147,7 +157,7 @@ Acceptance requires all of the following:
 - A recorded or real ACP probe completes `initialize`, `session/new`, model selection, and a prompt without a prompt during discovery.
 - The Plan toggle selects `plan` and restores `build` for MiMo.
 - A checkpoint captures and restores `data/mimocode.db` and its `-wal` file while omitting `-shm`.
-- A store at revision 86 upgrades to the new revision without losing existing sessions, and the fresh-store harness constraint admits `mimo`.
+- A store at revision 89 upgrades to revision 90 without losing existing sessions, and the fresh-store harness constraint admits `mimo`.
 - The reference image installs exactly `@mimo-ai/cli@0.1.15` and exposes `mimo acp`.
 - Workspace tests and clippy pass, and the final commit includes only task-related changes.
 
@@ -155,7 +165,7 @@ Acceptance requires all of the following:
 
 The npm asset generation is repeatable. Managed installation uses the existing content-addressed cache, staging rename, manifest receipt, and lease; an interrupted install is removed on retry. The database migration is additive to the enum constraint but wraps table rebuilds and foreign-key checks in a transaction. Tests use temporary isolated stores, and no validation may point at the default instance.
 
-If a test database migration fails halfway, discard only that test temporary directory and rerun from a revision-86 fixture. Do not rewrite an already-applied migration; any correction after shipping must use a later revision.
+If a test database migration fails halfway, discard only that test temporary directory and rerun from a revision-89 fixture. Do not rewrite an already-applied migration; any correction after shipping must use a later revision.
 
 ## Artifacts and Notes
 

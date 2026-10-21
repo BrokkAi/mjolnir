@@ -135,8 +135,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle  pod  ╭ × Recreate container on Restart? ────────────────────────────────────╮             │
 │  │ No mess  │Session: ACP pretty name                                              │  on.        │
 │  │          │                                                                      │             │
-│             │Restart will replace this container because its settings changed or   │             │
-│             │are unknown.                                                          │             │
+│             │Restart will replace this container because its settings or its       │             │
+│             │Mjolnir image changed, or are unknown.                                │             │
 │             │The conversation and workspace recovery copy will be restored.        │             │
 │             │Files outside the recovery copy may be lost, including temporary files│             │
 │             │and installed tools.                                                  │             │

@@ -46,6 +46,18 @@ pub struct RepositorySnapshot {
     pub staged_patch: Vec<u8>,
     pub unstaged_patch: Vec<u8>,
     pub untracked_tar: Vec<u8>,
+    /// Present exactly when `metadata.git_operation` is.
+    pub operation_payloads: Option<GitOperationPayloads>,
+}
+
+/// The files of an unfinished Git operation that are not index entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitOperationPayloads {
+    /// The working-tree files of the unmerged paths.
+    pub conflicted_worktree_tar: Vec<u8>,
+    /// The operation's state files, named as `git rev-parse --git-path`
+    /// names them.
+    pub state_tar: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,12 +381,13 @@ pub fn read_archive_verified(path: &Path) -> Result<VerifiedArchive> {
 }
 
 /// Verify an archive without materializing repository or native payloads.
-/// Every ZIP entry is still fully read, hashed, and checked; Git untracked
-/// payloads are parsed through the same path-safety validator while streaming.
+/// Every ZIP entry is still fully read, hashed, and checked; the Git tar
+/// payloads (untracked files, and an unfinished operation's files) are parsed
+/// through the same path-safety validators while streaming.
 ///
-/// A sharded untracked tar is the one exception to streaming: its parts are
-/// held in memory long enough to reassemble and parse the tar, because tar
-/// safety is a property of the whole payload rather than of one part.
+/// A sharded tar is the one exception to streaming: its parts are held in
+/// memory long enough to reassemble and parse the tar, because tar safety is
+/// a property of the whole payload rather than of one part.
 pub fn verify_archive_streaming(path: &Path) -> Result<VerifiedArchiveMetadata> {
     let contents = read_verified_zip(path, PayloadRetention::CanonicalOnly)?;
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
@@ -646,8 +659,24 @@ fn prepare_archive_view_with_part_size(
             );
         }
         validate_untracked_tar(&repository.untracked_tar)?;
-
         let root = format!("repositories/{}", repository.metadata.id);
+        let operation = match (
+            &repository.metadata.git_operation,
+            &repository.operation_payloads,
+        ) {
+            (None, None) => None,
+            (Some(operation), Some(operation_payloads)) => {
+                validate_saved_git_operation(operation)?;
+                validate_conflicted_worktree_tar(&operation_payloads.conflicted_worktree_tar)?;
+                validate_operation_state_tar(&operation_payloads.state_tar)?;
+                Some(operation_payloads)
+            }
+            _ => bail!(
+                "repository '{}' Git operation metadata and payloads disagree",
+                repository.metadata.id
+            ),
+        };
+
         let committed_bundle_path = format!("{root}/committed.bundle");
         let staged_patch_path = format!("{root}/staged.patch");
         let unstaged_patch_path = format!("{root}/unstaged.patch");
@@ -690,12 +719,40 @@ fn prepare_archive_view_with_part_size(
                 role,
             )?;
         }
+        let (conflicted_worktree_tar_path, operation_state_tar_path) = match operation {
+            None => (None, None),
+            Some(operation) => {
+                let worktree_path = format!("{root}/conflicted-worktree.tar");
+                let state_path = format!("{root}/operation-state.tar");
+                push_payload(
+                    &mut payloads,
+                    worktree_path.clone(),
+                    Cow::Borrowed(operation.conflicted_worktree_tar.as_slice()),
+                    0o600,
+                    PayloadRole::GitConflictedWorktreeTar {
+                        repository_id: repository.metadata.id.clone(),
+                    },
+                )?;
+                push_payload(
+                    &mut payloads,
+                    state_path.clone(),
+                    Cow::Borrowed(operation.state_tar.as_slice()),
+                    0o600,
+                    PayloadRole::GitOperationStateTar {
+                        repository_id: repository.metadata.id.clone(),
+                    },
+                )?;
+                (Some(worktree_path), Some(state_path))
+            }
+        };
         repositories.push(RepositoryManifest {
             metadata: repository.metadata.clone(),
             committed_bundle_path,
             staged_patch_path,
             unstaged_patch_path,
             untracked_tar_path,
+            conflicted_worktree_tar_path,
+            operation_state_tar_path,
         });
     }
 
@@ -787,7 +844,28 @@ fn payload_compression(role: &PayloadRole) -> CompressionMethod {
         | PayloadRole::NativeArtifact { .. }
         | PayloadRole::GitStagedPatch { .. }
         | PayloadRole::GitUnstagedPatch { .. }
-        | PayloadRole::GitUntrackedTar { .. } => CompressionMethod::Zstd,
+        | PayloadRole::GitUntrackedTar { .. }
+        | PayloadRole::GitConflictedWorktreeTar { .. }
+        | PayloadRole::GitOperationStateTar { .. } => CompressionMethod::Zstd,
+    }
+}
+
+/// The tar payloads whose entries are checked while an archive is verified,
+/// with the checker for each.
+fn tar_payload_validator(role: &PayloadRole) -> Option<fn(&mut dyn Read) -> Result<()>> {
+    match role {
+        PayloadRole::GitUntrackedTar { .. } => Some(|reader| validate_untracked_tar_reader(reader)),
+        PayloadRole::GitConflictedWorktreeTar { .. } => {
+            Some(|reader| validate_conflicted_worktree_tar_reader(reader))
+        }
+        PayloadRole::GitOperationStateTar { .. } => {
+            Some(|reader| validate_operation_state_tar_reader(reader))
+        }
+        PayloadRole::CanonicalSession
+        | PayloadRole::NativeArtifact { .. }
+        | PayloadRole::GitBundle { .. }
+        | PayloadRole::GitStagedPatch { .. }
+        | PayloadRole::GitUnstagedPatch { .. } => None,
     }
 }
 
@@ -978,10 +1056,10 @@ fn retains_payload(retention: PayloadRetention, role: &PayloadRole) -> bool {
 }
 
 /// Part bodies the reader has to hold until reassembly. Tar safety is a
-/// property of the whole payload, so a sharded untracked tar is reassembled
-/// even when the caller does not want the bytes.
+/// property of the whole payload, so a sharded tar is reassembled even when
+/// the caller does not want the bytes.
 fn retains_parts(retention: PayloadRetention, role: &PayloadRole) -> bool {
-    retains_payload(retention, role) || matches!(role, PayloadRole::GitUntrackedTar { .. })
+    retains_payload(retention, role) || tar_payload_validator(role).is_some()
 }
 
 fn read_verified_zip(path: &Path, retention: PayloadRetention) -> Result<VerifiedZipContents> {
@@ -1118,10 +1196,10 @@ fn read_verified_zip(path: &Path, retention: PayloadRetention) -> Result<Verifie
     let mut canonical_session = None;
     for descriptor in &manifest.payloads {
         let bytes = reassemble_payload(descriptor, &mut bodies, retention)?;
-        if matches!(descriptor.role, PayloadRole::GitUntrackedTar { .. })
+        if let Some(validate) = tar_payload_validator(&descriptor.role)
             && let Some(bytes) = bytes.as_deref()
         {
-            validate_untracked_tar(bytes)
+            validate(&mut Cursor::new(bytes))
                 .with_context(|| format!("validate payload '{}'", descriptor.path))?;
         }
         if descriptor.role == PayloadRole::CanonicalSession {
@@ -1190,11 +1268,10 @@ fn read_verified_entry(
     };
     ensure!(meta.size == expected_size, "size mismatch for {label}");
     ensure!(meta.mode == payload.mode, "mode mismatch for {label}");
-    // Only a whole untracked tar can be parsed while it streams past; sharded
-    // ones are reassembled after every part is verified.
-    let stream_untracked_tar = !retain
-        && matches!(expectation, EntryExpectation::Whole(_))
-        && matches!(payload.role, PayloadRole::GitUntrackedTar { .. });
+    // Only a whole tar can be parsed while it streams past; sharded ones are
+    // reassembled after every part is verified.
+    let stream_tar = tar_payload_validator(&payload.role)
+        .filter(|_| !retain && matches!(expectation, EntryExpectation::Whole(_)));
 
     let name = meta.name.as_str();
     let mut entry = archive
@@ -1218,9 +1295,8 @@ fn read_verified_entry(
         digesting
             .read_to_end(bytes)
             .with_context(|| format!("read ZIP entry '{name}'"))?;
-    } else if stream_untracked_tar {
-        validate_untracked_tar_reader(&mut digesting)
-            .with_context(|| format!("validate payload '{}'", payload.path))?;
+    } else if let Some(validate) = stream_tar {
+        validate(&mut digesting).with_context(|| format!("validate payload '{}'", payload.path))?;
         std::io::copy(&mut digesting, &mut std::io::sink())
             .with_context(|| format!("finish reading ZIP entry '{name}'"))?;
     } else {
@@ -1505,7 +1581,36 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
                 },
             ),
         ];
-        for (path, role) in expected {
+        let operation_payloads = match (
+            &metadata.git_operation,
+            &repository.conflicted_worktree_tar_path,
+            &repository.operation_state_tar_path,
+        ) {
+            (None, None, None) => Vec::new(),
+            (Some(operation), Some(worktree_path), Some(state_path)) => {
+                validate_saved_git_operation(operation)
+                    .with_context(|| format!("repository '{}'", metadata.id))?;
+                vec![
+                    (
+                        worktree_path.as_str(),
+                        PayloadRole::GitConflictedWorktreeTar {
+                            repository_id: metadata.id.clone(),
+                        },
+                    ),
+                    (
+                        state_path.as_str(),
+                        PayloadRole::GitOperationStateTar {
+                            repository_id: metadata.id.clone(),
+                        },
+                    ),
+                ]
+            }
+            _ => bail!(
+                "repository '{}' Git operation metadata and payloads disagree",
+                metadata.id
+            ),
+        };
+        for (path, role) in expected.into_iter().chain(operation_payloads) {
             ensure!(
                 manifest
                     .payloads
@@ -1523,6 +1628,19 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
             | PayloadRole::GitStagedPatch { repository_id }
             | PayloadRole::GitUnstagedPatch { repository_id }
             | PayloadRole::GitUntrackedTar { repository_id } => Some(repository_id),
+            PayloadRole::GitConflictedWorktreeTar { repository_id }
+            | PayloadRole::GitOperationStateTar { repository_id } => {
+                ensure!(
+                    manifest.repositories.iter().any(|repository| {
+                        &repository.metadata.id == repository_id
+                            && repository.metadata.git_operation.is_some()
+                    }),
+                    "payload '{}' holds a Git operation repository '{}' does not record",
+                    payload.path,
+                    repository_id
+                );
+                Some(repository_id)
+            }
             PayloadRole::CanonicalSession | PayloadRole::NativeArtifact { .. } => None,
         };
         if let Some(repository_id) = repository_id {
@@ -1533,6 +1651,51 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
                 repository_id
             );
         }
+    }
+    Ok(())
+}
+
+/// Checks the index side of an archived Git operation: every path is a safe
+/// relative path, and every stage, mode and object id is one Git can have
+/// written.
+fn validate_saved_git_operation(operation: &SavedGitOperation) -> Result<()> {
+    let mut unmerged_paths = BTreeSet::new();
+    for entry in &operation.unmerged {
+        validate_worktree_relative_path(&entry.path)?;
+        ensure!(
+            (1..=3).contains(&entry.stage),
+            "unmerged entry '{}' has stage {}",
+            entry.path.display(),
+            entry.stage
+        );
+        ensure!(
+            matches!(
+                entry.mode.as_str(),
+                "100644" | "100755" | "120000" | "160000"
+            ),
+            "unmerged entry '{}' has mode {}",
+            entry.path.display(),
+            entry.mode
+        );
+        ensure!(
+            mj_core::remote_git::is_object_id(&entry.object),
+            "unmerged entry '{}' has an invalid object id",
+            entry.path.display()
+        );
+        unmerged_paths.insert(entry.path.as_path());
+    }
+    for path in &operation.missing_worktree_paths {
+        ensure!(
+            unmerged_paths.contains(path.as_path()),
+            "missing working-tree path '{}' is not unmerged",
+            path.display()
+        );
+    }
+    for object in &operation.objects {
+        ensure!(
+            mj_core::remote_git::is_object_id(object),
+            "Git operation names an invalid object id {object:?}"
+        );
     }
     Ok(())
 }
@@ -1639,6 +1802,22 @@ fn validate_archive_relative_path(path: &Path) -> Result<()> {
             path.display()
         );
     }
+    Ok(())
+}
+
+/// Checks a path a restore writes or removes in a working tree. Besides the
+/// archive path rules, it refuses a `.git` component in any case, as Git does
+/// for every path it tracks: a hook written into the Git directory would run
+/// on the restored clone's next Git command.
+fn validate_worktree_relative_path(path: &Path) -> Result<()> {
+    validate_archive_relative_path(path)?;
+    ensure!(
+        !path
+            .components()
+            .any(|component| component.as_os_str().eq_ignore_ascii_case(".git")),
+        "refusing working-tree path '{}' inside a Git directory",
+        path.display()
+    );
     Ok(())
 }
 
@@ -1829,18 +2008,23 @@ mod git;
 pub(crate) use git::ensure_no_symlink_ancestors;
 pub use git::{
     EXPORT_REFUSED_EXIT_CODE, GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode,
-    GitOutput, GitSnapshotProgress, NON_INTERACTIVE_GIT_ENV, NON_INTERACTIVE_GIT_SSH_COMMAND,
-    PushBranchError, PushedBranch, REVIEW_BASELINE_REF, ReviewPoint, SessionDiff,
-    SessionExportError, SystemGit, capture_paths, capture_worktree_tree,
-    collect_git_metadata_snapshot, collect_git_snapshot, collect_git_snapshot_with_progress,
-    diff_between_trees, empty_tree_id, has_origin_refs, merge_trees, numstat_between_trees,
-    pin_review_tree, push_branch, read_review_point, record_review_point, remote_workspace_base,
-    remove_departed_worktree_pins, restore_git_snapshot, review_baseline_ref, session_diff,
-    session_diff_details, validate_symlink_target,
+    GitOutput, GitSnapshotProgress, MergeConflicts, NON_INTERACTIVE_GIT_ENV,
+    NON_INTERACTIVE_GIT_SSH_COMMAND, PushBranchError, PushedBranch, REVIEW_BASELINE_REF,
+    ReflogAnchor, ReflogEntry, ReviewPoint, SessionDiff, SessionExportError, SystemGit,
+    capture_paths, capture_worktree_tree, collect_git_metadata_snapshot, collect_git_snapshot,
+    collect_git_snapshot_with_progress, diff_between_trees, empty_tree_id, has_origin_refs,
+    merge_trees, numstat_between_trees, pin_review_tree, push_branch, read_head_reflog,
+    read_review_point, record_review_point, remote_workspace_base, remove_departed_worktree_pins,
+    restore_git_snapshot, review_baseline_ref, session_diff, session_diff_details,
+    validate_symlink_target,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};
-use git::{validate_untracked_tar, validate_untracked_tar_reader};
+use git::{
+    validate_conflicted_worktree_tar, validate_conflicted_worktree_tar_reader,
+    validate_operation_state_tar, validate_operation_state_tar_reader, validate_untracked_tar,
+    validate_untracked_tar_reader,
+};
 
 #[cfg(test)]
 mod tests;

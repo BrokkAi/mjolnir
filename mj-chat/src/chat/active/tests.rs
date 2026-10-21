@@ -461,6 +461,7 @@ fn transcript_wheel_scrolls_the_reduced_viewport_independently() {
             title: None,
             description: None,
             fields: Vec::new(),
+            tool_permission: None,
         },
     ));
     chat.task_dialog_open = true;
@@ -533,6 +534,7 @@ fn question_pointer_capture_wins_when_dragged_into_transcript() {
                     default: Some(false),
                 },
             }],
+            tool_permission: None,
         },
     ));
     drawn_transcript(&mut chat, 80, 24);
@@ -749,6 +751,7 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
         title: None,
         description: None,
         fields: Vec::new(),
+        tool_permission: None,
     };
     let mut reviewer = ChatState::new(&snapshot(), &[]);
     assert!(reviewer.show_review_role_elicitation(Some("reviewer-a".into()), request.clone(),));
@@ -790,6 +793,7 @@ async fn an_external_review_removal_closes_its_visible_question() {
         title: None,
         description: None,
         fields: Vec::new(),
+        tool_permission: None,
     };
     assert!(
         chat.state
@@ -1021,6 +1025,7 @@ async fn second_opinion_ignores_stale_preparation_and_uses_resolved_settings() {
         title: None,
         description: None,
         fields: Vec::new(),
+        tool_permission: None,
     };
     chat.state.open_second_opinion(CapturedProposal {
         request,
@@ -2475,6 +2480,7 @@ async fn a_question_opened_during_clipboard_read_receives_no_stray_content() {
             title: None,
             description: None,
             fields: Vec::new(),
+            tool_permission: None,
         });
         assert!(chat.state.clipboard_is_text_only());
         chat.apply_io_update(pending);
@@ -2698,6 +2704,7 @@ async fn golden_active_chat_render() {
             title: Some("Overlaid dialog".into()),
             description: None,
             fields: Vec::new(),
+            tool_permission: None,
         },
     ));
     chat.task_dialog_open = true;
@@ -2747,6 +2754,7 @@ async fn golden_active_chat_render() {
             title: Some("Custom title".into()),
             description: None,
             fields: Vec::new(),
+            tool_permission: None,
         },
     ));
     let buffer = active_golden_buffer(&mut short, 80, 24);
@@ -2799,6 +2807,7 @@ async fn golden_active_chat_render() {
                     format: None,
                 },
             }],
+            tool_permission: None,
         },
     ));
     let natural = tall.elicitation.as_ref().unwrap().natural_height(80);
@@ -3164,6 +3173,7 @@ async fn golden_active_chat_render() {
             title: None,
             description: None,
             fields: Vec::new(),
+            tool_permission: None,
         },
         "the plan".into(),
     );

@@ -25,9 +25,29 @@ pub struct ElicitationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub fields: Vec<ElicitationField>,
+    /// Set when the form shows a tool permission request. Its Skip rejects
+    /// only that tool call and its Cancel stops the agent's turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_permission: Option<ToolPermissionForm>,
+}
+
+/// What a tool permission form offers beyond the request's own options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolPermissionForm {
+    /// Whether the request has a one-time rejection for Skip to select. A
+    /// request without one offers no Skip.
+    pub skip: bool,
 }
 
 impl ElicitationRequest {
+    /// Whether the form offers Skip (the `decline` action). Every surface
+    /// asks this, and [`Self::harness_response`] refuses a Skip it denies.
+    #[must_use]
+    pub fn offers_skip(&self) -> bool {
+        self.tool_permission.is_none_or(|form| form.skip)
+    }
+
     pub fn from_acp_params(id: impl Into<String>, params: Value) -> Result<Self> {
         let encoded = serde_json::to_vec(&params).context("serialize ACP elicitation request")?;
         ensure!(
@@ -79,6 +99,7 @@ impl ElicitationRequest {
             title,
             description,
             fields,
+            tool_permission: None,
         })
     }
 
@@ -122,6 +143,13 @@ impl ElicitationRequest {
         response: ElicitationResponse,
     ) -> Result<ElicitationResponse, String> {
         let ElicitationResponse::Accept { mut content } = response else {
+            if response == ElicitationResponse::Decline && !self.offers_skip() {
+                return Err(
+                    "this permission request offers no one-time rejection to skip with; \
+                     choose one of its options, or cancel to stop the turn"
+                        .to_owned(),
+                );
+            }
             return Ok(response);
         };
         for (id, value) in &content {

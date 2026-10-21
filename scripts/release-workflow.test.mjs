@@ -98,6 +98,41 @@ test('a release publishes its version image and leaves :latest to master', () =>
   assert.match(releaseJob, /needs: \[[^\]]*publish-agent-dev-image\]/);
 });
 
+// The image bakes in the session worker, so :latest has to be rebuilt whenever
+// anything the worker compiles from changes on master. Otherwise development
+// builds find an image whose worker trails master and install a host copy.
+test('every worker input republishes the agent-dev image', () => {
+  const paths = publishImage.split('    paths:\n')[1].split(/\n  \w/)[0];
+  const filters = [...paths.matchAll(/^      - '([^']+)'$/gm)].map(match => match[1]);
+  const inputs = readFileSync(join(root, 'mj-core/worker-build-inputs.txt'), 'utf8')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line && !line.startsWith('#'));
+  assert.ok(inputs.length > 0);
+  for (const input of inputs) {
+    const directory = statSync(join(root, input)).isDirectory();
+    assert.ok(filters.includes(directory ? `${input}/**` : input), `${input} is not in the publish path filter`);
+  }
+});
+
+// Cargo resolves the whole workspace even to build one package, so the image's
+// worker stage needs every member: admitted by .dockerignore and copied in.
+test("the image's worker stage receives every workspace member", () => {
+  const manifest = readFileSync(join(root, 'Cargo.toml'), 'utf8');
+  const members = [...manifest.match(/^members = \[([^\]]*)\]/m)[1].matchAll(/"([^"]+)"/g)].map(match => match[1]);
+  const dockerignore = readFileSync(join(root, '.dockerignore'), 'utf8').split('\n');
+  const containerfile = readFileSync(join(root, 'containers/Containerfile.agent-dev'), 'utf8');
+  const stage = containerfile.split(/^FROM .* AS worker$/m)[1].split(/^FROM /m)[0];
+  for (const file of ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml']) {
+    assert.ok(dockerignore.includes(`!${file}`), `.dockerignore excludes ${file}`);
+    assert.match(stage, new RegExp(`^COPY .*\\b${file.replace('.', '\\.')}\\b`, 'm'), `the worker stage does not copy ${file}`);
+  }
+  for (const member of members) {
+    assert.ok(dockerignore.includes(`!${member}/`), `.dockerignore excludes ${member}`);
+    assert.ok(stage.includes(`COPY ${member}/ ${member}/`), `the worker stage does not copy ${member}`);
+  }
+});
+
 for (const { label, publishLatest, extraTags, expectedTags, absentTags } of [
   {
     label: 'master keeps moving :latest',

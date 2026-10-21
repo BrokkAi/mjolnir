@@ -1,8 +1,6 @@
 //! One resolver for turn review and plan second opinion.
 use crate::controller::Controller;
-use crate::review_settings::{
-    ReviewCapabilityChoices, ReviewDiscoveryOutcome, ReviewDiscoveryRequest,
-};
+use crate::server_runtime::profile_catalog::ProfileCatalog;
 use crate::session_manager::ManagedSessionHandle;
 use crate::utility_llm::{UtilityLlmRuntime, UtilityQuotaClass, classify_quota};
 use anyhow::{Context, Result, bail, ensure};
@@ -11,10 +9,12 @@ use mj_core::review::settings::{
     ResolvedReviewSettings, ReviewModelSettings, ReviewProvider, model_matches_family,
     model_version_cmp,
 };
+use mj_core::worker_launch::ProfileConfig;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 
 #[derive(Debug)]
 struct Candidate {
@@ -76,13 +76,16 @@ fn rank(candidates: &mut [Candidate]) {
     });
 }
 
+/// `catalog` is the daemon's profile catalog. A chat view outside the daemon
+/// has none and reads the same cache through [`offered_choices`].
 pub(crate) async fn resolve(
     handle: ManagedSessionHandle,
     settings: Option<ReviewConfig>,
     cancelled: Arc<AtomicBool>,
-    offered: Option<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>,
+    catalog: Option<Arc<ProfileCatalog>>,
 ) -> Result<ResolvedReviewSettings> {
-    let controller = Arc::new(tokio::task::spawn_blocking(Controller::load).await??);
+    let offered = catalog.as_ref().map(|catalog| catalog.snapshot());
+    let controller = tokio::task::spawn_blocking(Controller::load).await??;
     let settings = settings.unwrap_or_else(|| controller.config.review.clone());
     let session = controller
         .state
@@ -196,24 +199,13 @@ pub(crate) async fn resolve(
             !cancelled.load(Ordering::Acquire),
             "review preparation cancelled"
         );
-        let result = resolve_candidate(
-            controller.clone(),
-            &handle,
-            &candidate,
-            &settings,
-            &cancelled,
-        )
-        .await;
+        let result = resolve_candidate(catalog.as_ref(), &candidate, &settings, &cancelled).await;
         match result {
             Ok(mut resolved) => {
                 resolved.same_provider = candidate.provider == primary_provider;
                 return Ok(resolved);
             }
             Err(error) if settings.profile.is_some() => return Err(error),
-            // The session was busy, not the candidate: stop here so the
-            // caller waits for that operation and asks again, instead of
-            // refusing every candidate while a checkpoint holds the worker.
-            Err(error) if preempted_by_lifecycle(&format!("{error:#}")) => return Err(error),
             Err(error) => {
                 tracing::warn!(profile = %candidate.id, %error, "Auto reviewer candidate unavailable");
                 reasons.push(format!("{}: {error:#}", candidate.id));
@@ -226,47 +218,45 @@ pub(crate) async fn resolve(
     bail!("No usable Auto reviewer: {}", reasons.join("; "))
 }
 
-async fn discover(
-    controller: Arc<Controller>,
-    handle: &ManagedSessionHandle,
+/// The models and efforts `profile` offers, with the efforts of `model` (or
+/// of its default model), from the daemon's profile catalog: the same cached
+/// answer `mj models` and the profile configuration endpoint give, so Auto
+/// never judges a profile by different facts (#1320). Without the daemon's
+/// catalog, the cached discovery that catalog is built on answers.
+async fn offered_choices(
+    catalog: Option<&Arc<ProfileCatalog>>,
     profile: &str,
     model: Option<String>,
-    cancelled: &Arc<AtomicBool>,
-) -> Result<ReviewCapabilityChoices> {
-    let (progress, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let request = ReviewDiscoveryRequest {
-        profile: profile.into(),
-        model,
-        preferred_session: Some(handle.session_id().into()),
-    };
-    let result = crate::review_settings::discover_selected_worker(
-        controller,
-        handle.session_id().into(),
-        crate::review_host::next_review_generation().map_err(anyhow::Error::msg)?,
-        handle.clone(),
-        &request,
-        cancelled,
-        &progress,
-    )
-    .await
-    .map_err(anyhow::Error::msg)?;
-    match result {
-        ReviewDiscoveryOutcome::Available {
-            choices,
-            cleanup_warning,
-        } => {
-            if let Some(warning) = cleanup_warning {
-                bail!("{warning}");
+    cancelled: &AtomicBool,
+) -> Result<ProfileConfig> {
+    let lookup = async {
+        match (catalog, model) {
+            (Some(catalog), Some(model)) => {
+                catalog.model_capabilities(profile.to_owned(), model).await
             }
-            Ok(choices)
+            (Some(catalog), None) => {
+                Ok(catalog.capabilities(&[profile.to_owned()]).await?.remove(0))
+            }
+            (None, model) => {
+                crate::controller::profile_config::discover(profile.to_owned(), model, false).await
+            }
         }
-        ReviewDiscoveryOutcome::Unavailable => bail!("review worker is unavailable"),
+    };
+    tokio::select! {
+        biased;
+        _ = async {
+            let mut interval = tokio::time::interval(Duration::from_millis(50));
+            while !cancelled.load(Ordering::Acquire) {
+                interval.tick().await;
+            }
+        } => bail!("review preparation cancelled"),
+        result = lookup => result,
     }
 }
 
-fn family_model(choices: &ReviewCapabilityChoices, family: &str) -> Result<String> {
-    choices
-        .model_choices
+fn family_model(offered: &ProfileConfig, family: &str) -> Result<String> {
+    offered
+        .models
         .iter()
         .filter(|c| model_matches_family(&c.value, family))
         .max_by(|a, b| model_version_cmp(&a.value, &b.value))
@@ -274,42 +264,10 @@ fn family_model(choices: &ReviewCapabilityChoices, family: &str) -> Result<Strin
         .with_context(|| format!("no advertised {family} model"))
 }
 
-async fn validate_model(
-    controller: Arc<Controller>,
-    handle: &ManagedSessionHandle,
-    profile: &str,
-    settings: &ReviewModelSettings,
-    cancelled: &Arc<AtomicBool>,
-) -> Result<()> {
-    let choices = discover(
-        controller,
-        handle,
-        profile,
-        settings.model.clone(),
-        cancelled,
-    )
-    .await?;
-    if let Some(model) = &settings.model {
-        ensure!(
-            choices.model_choices.iter().any(|c| &c.value == model),
-            "reviewer {profile} does not advertise model {model}"
-        );
-    }
-    if let Some(effort) = &settings.effort {
-        ensure!(
-            choices.effort_capabilities_discovered
-                && choices.effort_choices.iter().any(|c| &c.value == effort),
-            "reviewer {profile} does not advertise effort {effort} for {}",
-            settings.model.as_deref().unwrap_or("its default model")
-        );
-    }
-    Ok(())
-}
-
 fn select_models(
     provider: ReviewProvider,
     settings: &ReviewConfig,
-    catalog: &ReviewCapabilityChoices,
+    offered: &ProfileConfig,
 ) -> Result<ReviewModelSettings> {
     let automatic = settings.profile.is_none();
     let main = if automatic {
@@ -319,12 +277,12 @@ fn select_models(
         let model = match &settings.model {
             Some(model) => {
                 ensure!(
-                    catalog.model_choices.iter().any(|c| &c.value == model),
+                    offered.models.iter().any(|c| &c.value == model),
                     "does not advertise model {model}"
                 );
                 model.clone()
             }
-            None => family_model(catalog, policy.context("provider is manual-only")?.0)?,
+            None => family_model(offered, policy.context("provider is manual-only")?.0)?,
         };
         ReviewModelSettings {
             model: Some(model),
@@ -345,17 +303,36 @@ fn select_models(
 }
 
 async fn resolve_candidate(
-    controller: Arc<Controller>,
-    handle: &ManagedSessionHandle,
+    catalog: Option<&Arc<ProfileCatalog>>,
     candidate: &Candidate,
     settings: &ReviewConfig,
-    cancelled: &Arc<AtomicBool>,
+    cancelled: &AtomicBool,
 ) -> Result<ResolvedReviewSettings> {
     let automatic = settings.profile.is_none();
-    let catalog = discover(controller.clone(), handle, &candidate.id, None, cancelled).await?;
-    let main = select_models(candidate.provider, settings, &catalog)?;
-    if main.model.is_some() || main.effort.is_some() {
-        validate_model(controller.clone(), handle, &candidate.id, &main, cancelled).await?;
+    let profile = candidate.id.as_str();
+    let offered = offered_choices(catalog, profile, None, cancelled).await?;
+    let main = select_models(candidate.provider, settings, &offered)?;
+    if let Some(model) = &main.model {
+        ensure!(
+            offered.models.iter().any(|c| &c.value == model),
+            "reviewer {profile} does not advertise model {model}"
+        );
+    }
+    if let Some(effort) = &main.effort {
+        // Efforts belong to one model. The profile's own entry lists those of
+        // its default model; any other model has an entry of its own.
+        let for_model = match &main.model {
+            Some(model) if offered.model.as_ref() != Some(model) => {
+                offered_choices(catalog, profile, Some(model.clone()), cancelled).await?
+            }
+            _ => offered,
+        };
+        ensure!(
+            (main.model.is_none() || for_model.model == main.model)
+                && for_model.efforts.iter().any(|c| &c.value == effort),
+            "reviewer {profile} does not advertise effort {effort} for {}",
+            main.model.as_deref().unwrap_or("its default model")
+        );
     }
     Ok(ResolvedReviewSettings {
         profile: candidate.id.clone(),
@@ -409,14 +386,12 @@ mod tests {
                     let choices = match state {
                         CapabilityState::Pending => CapabilityState::Pending,
                         CapabilityState::Failed(error) => CapabilityState::Failed(error.clone()),
-                        CapabilityState::Ready(models) => {
-                            CapabilityState::Ready(mj_core::worker_launch::ProfileConfig {
-                                model: None,
-                                models: catalog(models).model_choices,
-                                efforts: Vec::new(),
-                                observed_at: 0,
-                            })
-                        }
+                        CapabilityState::Ready(models) => CapabilityState::Ready(ProfileConfig {
+                            model: None,
+                            models: choices(models),
+                            efforts: Vec::new(),
+                            observed_at: 0,
+                        }),
                     };
                     (
                         (*key).to_owned(),
@@ -502,13 +477,14 @@ mod tests {
                 "../tests/fixtures/review-acp-config-options.json"
             ))
             .expect("ACP v1 session config options");
-        let catalog = ReviewCapabilityChoices {
-            model_choices: mj_core::acp::session_config_choices(&options, "model"),
-            effort_choices: mj_core::acp::session_config_choices(&options, "effort"),
-            effort_capabilities_discovered: true,
+        let offered = ProfileConfig {
+            model: None,
+            models: mj_core::acp::session_config_choices(&options, "model"),
+            efforts: mj_core::acp::session_config_choices(&options, "effort"),
+            observed_at: 0,
         };
 
-        let reviewer = select_models(ReviewProvider::Codex, &ReviewConfig::default(), &catalog)
+        let reviewer = select_models(ReviewProvider::Codex, &ReviewConfig::default(), &offered)
             .expect("select the advertised Codex review model");
 
         assert_eq!(reviewer.model.as_deref(), Some("gpt-6.10-astra"));
@@ -516,18 +492,100 @@ mod tests {
         assert!(!reviewer.fast_mode);
     }
 
-    fn catalog(ids: &[&str]) -> ReviewCapabilityChoices {
-        ReviewCapabilityChoices {
-            model_choices: ids
-                .iter()
-                .map(|id| mj_core::acp::SessionConfigChoice {
-                    value: (*id).into(),
-                    name: (*id).into(),
-                    description: None,
-                })
-                .collect(),
-            ..Default::default()
+    /// A DeepSeek-backed Codex profile as the catalog holds it: the default
+    /// entry describes `deepseek-v4-pro`, and each model has its own efforts.
+    fn deepseek_catalog() -> Arc<ProfileCatalog> {
+        use crate::server_runtime::profile_catalog::test_config;
+        let offered = |model: &str| ProfileConfig {
+            model: Some(model.to_owned()),
+            models: choices(&["deepseek-flash", "deepseek-v4-pro"]),
+            efforts: choices(if model == "deepseek-flash" {
+                &["low", "high", "max"]
+            } else {
+                &["high"]
+            }),
+            observed_at: 0,
+        };
+        let catalog = ProfileCatalog::with_probes(
+            Arc::new(move |_| Box::pin(async move { Ok(offered("deepseek-v4-pro")) })),
+            Arc::new(move |_, model| Box::pin(async move { Ok(offered(&model)) })),
+        );
+        catalog.sync(&test_config(
+            &[("deepseek", mj_core::config::HarnessKind::Codex)],
+            &[],
+        ));
+        catalog
+    }
+
+    fn deepseek() -> Candidate {
+        Candidate {
+            advertised: true,
+            ..candidate(
+                "deepseek",
+                ReviewProvider::DeepSeek,
+                1,
+                UtilityQuotaClass::Unknown,
+                0,
+            )
         }
+    }
+
+    // Hard-won: #1320: Auto read a reviewer staged in the session's worker instead of the profile catalog, so a DeepSeek profile "did not advertise" the model every other surface listed
+    #[tokio::test]
+    async fn auto_takes_a_pinned_model_and_its_effort_from_the_profile_catalog() {
+        let catalog = deepseek_catalog();
+        let settings = ReviewConfig {
+            model: Some("deepseek-flash".into()),
+            effort: Some("max".into()),
+            ..ReviewConfig::default()
+        };
+
+        let resolved = resolve_candidate(
+            Some(&catalog),
+            &deepseek(),
+            &settings,
+            &AtomicBool::new(false),
+        )
+        .await
+        .expect("the catalog offers deepseek-flash at max");
+
+        assert_eq!(resolved.profile, "deepseek");
+        assert_eq!(resolved.main.model.as_deref(), Some("deepseek-flash"));
+        assert_eq!(resolved.main.effort.as_deref(), Some("max"));
+        assert!(resolved.automatic);
+    }
+
+    #[tokio::test]
+    async fn an_effort_is_judged_by_the_pinned_models_own_entry_not_the_default_models() {
+        let catalog = deepseek_catalog();
+        // `max` exists for deepseek-flash only; the default entry, for
+        // deepseek-v4-pro, lists `high` alone.
+        let refused = resolve_candidate(
+            Some(&catalog),
+            &deepseek(),
+            &ReviewConfig {
+                model: Some("deepseek-v4-pro".into()),
+                effort: Some("max".into()),
+                ..ReviewConfig::default()
+            },
+            &AtomicBool::new(false),
+        )
+        .await
+        .expect_err("deepseek-v4-pro offers no max effort");
+        assert_eq!(
+            format!("{refused:#}"),
+            "reviewer deepseek does not advertise effort max for deepseek-v4-pro"
+        );
+    }
+
+    fn choices(ids: &[&str]) -> Vec<mj_core::acp::SessionConfigChoice> {
+        ids.iter()
+            .map(|id| mj_core::acp::SessionConfigChoice {
+                value: (*id).into(),
+                name: (*id).into(),
+                description: None,
+            })
+            .collect()
     }
 }
 

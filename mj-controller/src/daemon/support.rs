@@ -3,7 +3,7 @@ use super::*;
 /// Log one finished worker upgrade, and tell the surfaces about the one that
 /// changed something.
 pub(super) async fn report_worker_upgrade(
-    state: &RuntimeState,
+    state: &Arc<RuntimeState>,
     result: &crate::worker_upgrade::WorkerUpgradeResult,
 ) {
     use crate::controller::WorkerUpgradeOutcome;
@@ -34,6 +34,9 @@ pub(super) async fn report_worker_upgrade(
         Ok(WorkerUpgradeOutcome::Deferred) => {
             tracing::debug!(%session_id, "worker upgrade deferred: the session is working");
         }
+        Ok(WorkerUpgradeOutcome::RecreateContainer) => {
+            spawn_container_recreation(state.clone(), session_id.clone());
+        }
         Err(error) => {
             tracing::warn!(%session_id, %error, "could not upgrade the session worker");
             if let Some(failure) = &result.preparation_failure {
@@ -47,6 +50,59 @@ pub(super) async fn report_worker_upgrade(
             }
         }
     }
+}
+
+/// Recreate a session's container for an upgrade, off the serving loop, and
+/// hand the outcome back to the upgrade coordinator, which owns the retry
+/// policy. A panic is reported as a failure, never dropped.
+fn spawn_container_recreation(state: Arc<RuntimeState>, session_id: String) {
+    use crate::worker_upgrade::{ContainerRecreated, ContainerRecreationReport};
+
+    tokio::spawn(async move {
+        let recreation = tokio::spawn({
+            let state = state.clone();
+            let session_id = session_id.clone();
+            async move { state.recreate_container_for_upgrade(session_id).await }
+        })
+        .await;
+        let outcome = match recreation {
+            Ok(Ok(super::restart::ContainerRecreationOutcome::Recreated)) => {
+                let name = state
+                    .owner()
+                    .controller()
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .map_or_else(
+                        || session_id.clone(),
+                        |session| session.display_title().to_owned(),
+                    );
+                tracing::info!(%session_id, image = mj_core::config::DEFAULT_CONTAINER_IMAGE, "recreated the session container from this Mjolnir's image");
+                state.push_notice(
+                    &session_id,
+                    format!("Moved {name} to a new container from this Mjolnir's image."),
+                );
+                Ok(ContainerRecreated::Recreated)
+            }
+            Ok(Ok(super::restart::ContainerRecreationOutcome::StoodDown)) => {
+                Ok(ContainerRecreated::StoodDown)
+            }
+            Ok(Err(error)) => Err(format!("{error:#}")),
+            Err(error) => Err(format!("container recreation task failed: {error}")),
+        };
+        if let Err(error) = &outcome {
+            state.push_notice(
+                &session_id,
+                format!("Could not move this session to the upgraded image yet: {error}"),
+            );
+        }
+        state
+            .worker_upgrade_observer
+            .report_recreation(ContainerRecreationReport {
+                session_id,
+                outcome,
+            });
+    });
 }
 
 /// Children of `parent_session_id` whose session is still active, in the

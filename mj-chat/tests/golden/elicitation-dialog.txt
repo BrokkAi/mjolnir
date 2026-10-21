@@ -15,7 +15,7 @@
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -37,7 +37,7 @@
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -59,7 +59,7 @@
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│  Submit all     Previous     Next     Skip     Cancel                                            │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -83,7 +83,7 @@ harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing ac
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -105,7 +105,7 @@ harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing ac
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -127,7 +127,7 @@ harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing ac
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│  Submit all     Previous     Next     Skip     Cancel                                            │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -149,7 +149,7 @@ harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing ac
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│  Submit all     Previous     Next     Skip     Cancel                                            │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -173,11 +173,11 @@ harness: Ok(Accept { content: {"question_0": String("Redis"), "question_0_custom
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-submitted: Accept { content: {"question_0_custom": String("Valkey")} }
+submitted: Cancel
 
 === Claude clicks and Space toggle the pick (100x20) ===
 ╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
@@ -196,7 +196,7 @@ submitted: Accept { content: {"question_0_custom": String("Valkey")} }
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -224,7 +224,7 @@ click Other, write Valkey: Ok({"question_0_custom": String("Valkey")})
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│  Submit all     Previous     Next     Skip     Cancel                                            │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -248,18 +248,52 @@ with Dragonfly after Memcached: second click lands on "○ Dragonfly"; Ok({"ques
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter on Memcached, nothing picked, Other blank: Ok({"question_0": String("Memcached")})
 Enter on Memcached, nothing picked, Other holds Valkey: Ok({"question_0_custom": String("Valkey")})
 
+=== Claude permission form uses the same three actions (100x14) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Permission (required)                                                                             │
+│                                                                                                  │
+│Claude Code requests permission:                                                                  │
+│Run cargo test                                                                                    │
+│● Yes                                                                                             │
+│○ Yes, and don't ask again for `cargo test` commands                                              │
+│○ No                                                                                              │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+skip: Ok(Decline)
+
+=== persistent permission form uses the same three actions (100x14) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Permission (required)                                                                             │
+│                                                                                                  │
+│Codex requests permission:                                                                        │
+│Reach crates.io                                                                                   │
+│● Yes, and allow this host in the future                                                          │
+│○ No, and block this host in the future                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+skip: Err("this permission request offers no one-time rejection to skip with; choose one of its options, or cancel to stop the turn")
+
 === small question pane keeps the focused custom answer and actions (60x6) ===
 ╭ × Question 1/1 · 1 unanswered ───────────────────────────╮
 │Question 1                                                │
 │> custom draft                                            │
-│  Submit all     Skip     Cancel                          │
+│  Answer & Next     Previous     Cancel                   │
 │Text 1–1/4 · PgUp/PgDn or wheel scroll · Space toggle · En│
 ╰──────────────────────────────────────────────────────────╯
 focused value=[Multi({}), Text(TextInput { value: "custom draft", cursor: 12, kill_buffer: "", chain_kill: false, max_chars: None, filter: Any, multiline: false, preferred_column: None, history: None })]
@@ -291,7 +325,7 @@ focused value=[Multi({}), Text(TextInput { value: "custom draft", cursor: 12, ki
 │● Implement                                                                                       │
 │    Approve and continue                                                                          │
 │○ Revise                                                                                          │
-│  Submit all     Skip     Cancel                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Text 1–21/80 · PgUp/PgDn or wheel scroll · Space toggle · Enter answer · Alt+←/→ questions        │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -324,7 +358,7 @@ focus index=0
 │● Implement                                                                                       │
 │    Approve and continue                                                                          │
 │○ Revise                                                                                          │
-│  Submit all     Skip     Cancel                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Text 60–80/80 · PgUp/PgDn or wheel scroll · Space toggle · Enter answer · Alt+←/→ questions       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -357,7 +391,7 @@ focus index=0
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│  Submit all     Skip     Cancel                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -390,7 +424,7 @@ field value=Boolean(true)
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│  Submit all     Skip     Cancel                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -423,7 +457,7 @@ field value=Boolean(true)
 │● Implement                                                                                       │
 │    Approve and continue                                                                          │
 │○ Revise                                                                                          │
-│  Submit all     Skip     Cancel                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -455,7 +489,7 @@ field value=Boolean(true)
 │● Revise                                                                                          │
 │    Describe what the agent should change                                                         │
 │>                                                                                                 │
-│  Submit all     Skip     Cancel                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -487,7 +521,7 @@ field value=Boolean(true)
 │● Revise                                                                                          │
 │    Describe what the agent should change                                                         │
 │> add a regression test                                                                           │
-│  Submit all     Skip     Cancel                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -520,14 +554,14 @@ action: Some(Accept { content: {"feedback": String("add a regression test"), "qu
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 display fields=3
 
 === paired custom answer advances to question two of three (100x30) ===
-╭ × Question 2/3 · 3 unanswered ───────────────────────────────────────────────────────────────────╮
+╭ × Question 2/3 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
 │Question 2                                                                                        │
 │Prompt 2                                                                                          │
 │                                                                                                  │
@@ -553,8 +587,97 @@ display fields=3
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 display fields=3
+
+=== last question keeps the same three actions (100x20) ===
+╭ × Question 3/3 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Question 3                                                                                        │
+│Prompt 3                                                                                          │
+│                                                                                                  │
+│Input requested                                                                                   │
+│● Alpha                                                                                           │
+│    Choose alpha                                                                                  │
+│○ Beta                                                                                            │
+│○ Other                                                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== previous returns to the confirmed answer (100x20) ===
+╭ × Question 2/3 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Question 2                                                                                        │
+│Prompt 2                                                                                          │
+│                                                                                                  │
+│Input requested                                                                                   │
+│● Alpha                                                                                           │
+│    Choose alpha                                                                                  │
+│○ Beta                                                                                            │
+│○ Other                                                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== unanswered warning keeps the same three actions (100x20) ===
+╭ × Unanswered questions ──────────────────────────────────────────────────────────────────────────╮
+│Submit with 1 unanswered questions?                                                               │
+│                                                                                                  │
+│1. Question 1                                                                                     │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Enter confirm · Esc go back                                                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== cancel remains available from the unanswered warning (100x20) ===
+╭ × Unanswered questions ──────────────────────────────────────────────────────────────────────────╮
+│Submit with 1 unanswered questions?                                                               │
+│                                                                                                  │
+│1. Question 1                                                                                     │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Enter confirm · Esc go back                                                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+action: Some(Cancel)

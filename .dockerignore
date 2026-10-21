@@ -3,7 +3,24 @@
 !containers/Containerfile.agent-dev
 !scripts/
 !scripts/install-muse.py
+# The image's worker stage compiles mj-worker, and Cargo resolves the whole
+# workspace, so it needs every member. Keep this list equal to the workspace
+# members in Cargo.toml and the worker stage's COPY lines in
+# containers/Containerfile.agent-dev; scripts/release-workflow.test.mjs checks.
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!mj-core/
+!mj-review/
+!mj-checkpoint/
+!mj-transcript/
 !mj-worker/
-!mj-worker/assets/
-!mj-worker/assets/muse/
-!mj-worker/assets/muse/runtime.json
+!mj-client/
+!mj-controller/
+!mj-chat/
+!mj-tui/
+!mj-cli/
+!mj-desktop/
+!voice-worker/
+**/target/
+**/node_modules/
