@@ -816,6 +816,30 @@ impl ReflogEntry {
                 .iter()
                 .any(|step| action.ends_with(step))
     }
+
+    /// Whether this entry records an amend, which replaces the commit HEAD
+    /// held before it.
+    #[must_use]
+    pub fn amends(&self) -> bool {
+        self.action().ends_with("(amend)")
+    }
+
+    /// Whether this entry records a commit replaying another one: a rebase
+    /// step or a cherry-pick. Such a commit keeps the author, the authoring
+    /// time and, unless it was reworded, the subject of the one it replays.
+    #[must_use]
+    pub fn replays(&self) -> bool {
+        let action = self.action();
+        action.starts_with("rebase")
+            || action.contains("--rebase")
+            || action.starts_with("cherry-pick")
+    }
+
+    fn action(&self) -> &str {
+        self.message
+            .split_once(": ")
+            .map_or(self.message.as_str(), |(action, _)| action)
+    }
 }
 
 /// The worktree's HEAD reflog, oldest entry first, or no entries when HEAD has

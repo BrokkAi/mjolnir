@@ -75,6 +75,14 @@ pub(crate) fn reflog_anchor(reflog: &[ReflogEntry], head: Option<&str>) -> Optio
 ///   below it, and otherwise has its own change replayed onto its parent's
 ///   reduced tree.
 ///
+/// A commit the turn made by amending, rebasing or cherry-picking a commit
+/// that is not its own in this span, such as one an earlier review covered,
+/// is the turn's only for what it changed beyond that counterpart: the
+/// counterpart's change is replayed into the reduced tree. An amend names its
+/// counterpart in the reflog, the commit HEAD held before it. A rebase step or
+/// cherry-pick keeps its counterpart's author, authoring time and subject,
+/// which are matched among the commits HEAD has left since the baseline.
+///
 /// HEAD's reduced tree still holds the turn's commits that HEAD no longer
 /// reaches but that came back in someone else's squash or rebase, so those
 /// are reverted out of it, settling conflicts to the base's side. The turn's
@@ -93,6 +101,8 @@ pub(crate) fn review_base(
     capture: &str,
 ) -> Result<ReviewBase> {
     let point = read_review_point(git, repository, baseline)?;
+    // A fallback still carries the pending commits: the whole-tree diff
+    // shows only those the capture holds.
     let plain = |unattributed: Option<String>, pending: Vec<String>| {
         if let Some(reason) = &unattributed {
             tracing::warn!(
@@ -119,7 +129,7 @@ pub(crate) fn review_base(
                  earlier release, or while HEAD had no reflog"
                     .to_owned()
             }),
-            Vec::new(),
+            point.pending.clone(),
         ));
     };
     if let Some(since) = &point.head
@@ -131,7 +141,7 @@ pub(crate) fn review_base(
             Some(format!(
                 "the baseline's commit {since} is no longer in the repository"
             )),
-            Vec::new(),
+            point.pending.clone(),
         ));
     }
     let reflog = match reflog {
@@ -139,14 +149,14 @@ pub(crate) fn review_base(
         Err(error) => {
             return Ok(plain(
                 Some(format!("the HEAD reflog could not be read: {error}")),
-                Vec::new(),
+                point.pending.clone(),
             ));
         }
     };
     let Some((before, since)) = entries_since(reflog, anchor, point.head.as_deref()) else {
         return Ok(plain(
             Some("the HEAD reflog no longer holds the entry the baseline was taken at".to_owned()),
-            Vec::new(),
+            point.pending.clone(),
         ));
     };
     if since
@@ -156,7 +166,7 @@ pub(crate) fn review_base(
     {
         return Ok(plain(
             Some("HEAD moved without a reflog entry since the baseline".to_owned()),
-            Vec::new(),
+            point.pending.clone(),
         ));
     }
     if since.is_empty() {
@@ -164,7 +174,7 @@ pub(crate) fn review_base(
     }
     let made = match commits_made(before, since) {
         Ok(made) => made,
-        Err(reason) => return Ok(plain(Some(reason), Vec::new())),
+        Err(reason) => return Ok(plain(Some(reason), point.pending.clone())),
     };
 
     let mut history = History::new(git, repository);
@@ -173,18 +183,25 @@ pub(crate) fn review_base(
     }
     let pending = history.read_existing(&point.pending)?;
     let mut own = pending;
-    for commit in made {
-        if !own.contains(&commit) {
-            own.push(commit);
+    for made in &made {
+        if !own.contains(&made.commit) {
+            own.push(made.commit.clone());
         }
     }
     let own_set = own.iter().cloned().collect::<HashSet<_>>();
+    let positions = before
+        .last()
+        .into_iter()
+        .chain(since)
+        .map(|entry| entry.commit.as_str())
+        .collect::<Vec<_>>();
+    let counterparts = counterparts(&mut history, &made, &own_set, &positions, head)?;
     let Some(order) = history.walk(head, point.head.as_deref())? else {
         return Ok(plain(
             Some(format!(
                 "HEAD's history since the baseline is longer than {HISTORY_LIMIT} commits"
             )),
-            Vec::new(),
+            point.pending.clone(),
         ));
     };
     let reachable = order.iter().cloned().collect::<HashSet<_>>();
@@ -198,24 +215,20 @@ pub(crate) fn review_base(
         if !mine && !parents.iter().any(|parent| reduced.contains_key(parent)) {
             continue;
         }
-        let tree = if mine {
-            match parents.as_slice() {
-                [] => history.empty_tree()?,
-                [parent] => history.reduced(&reduced, parent)?,
-                _ => history.merge_parents(&parents, Some(&reduced))?,
-            }
-        } else if let [parent] = parents.as_slice() {
-            let ancestor = history.tree(parent)?;
-            let ours = history.reduced(&reduced, parent)?;
-            let theirs = history.tree(commit)?;
-            history.merge3(&ancestor, &ours, &theirs, MergeConflicts::Mark)?
+        // The parents' reduced trees, merged for a merge commit.
+        let start = match parents.as_slice() {
+            [] => history.empty_tree()?,
+            [parent] => history.reduced(&reduced, parent)?,
+            _ => history.merge_parents(&parents, Some(&reduced))?,
+        };
+        let tree = if !mine {
+            history.replay(commit, &start)?
+        } else if let Some(counterpart) = counterparts.get(commit)
+            && parents.len() <= 1
+        {
+            history.replay(counterpart, &start)?
         } else {
-            // Someone else's merge over the turn's work: its parents merged
-            // without the turn's commits, then its own resolution on top.
-            let ancestor = history.merge_parents(&parents, None)?;
-            let ours = history.merge_parents(&parents, Some(&reduced))?;
-            let theirs = history.tree(commit)?;
-            history.merge3(&ancestor, &ours, &theirs, MergeConflicts::Mark)?
+            start
         };
         reduced.insert(commit.clone(), tree);
     }
@@ -228,11 +241,17 @@ pub(crate) fn review_base(
         .filter(|commit| !reachable.contains(*commit))
     {
         let parents = history.parents(commit)?;
-        let before = match parents.as_slice() {
-            [] => history.empty_tree()?,
-            [parent] => history.tree(parent)?,
+        let before = match (counterparts.get(commit), parents.as_slice()) {
+            (Some(counterpart), []) => {
+                let empty = history.empty_tree()?;
+                history.replay(counterpart, &empty)?
+            }
+            (Some(counterpart), [parent]) => {
+                let start = history.tree(parent)?;
+                history.replay(counterpart, &start)?
+            }
             // A merge the turn made contributes only its resolution.
-            _ => history.merge_parents(&parents, None)?,
+            _ => history.change_base(commit)?,
         };
         let after = history.tree(commit)?;
         if before == after {
@@ -300,13 +319,23 @@ fn entries_since<'a>(
     Some(reflog.split_at(index + 1))
 }
 
+/// A commit this worktree made, and what the reflog says it replaced.
+struct Made {
+    commit: String,
+    /// The commit HEAD held before an amend, which the amend replaced.
+    amended: Option<String>,
+    /// Whether it replays another commit, as a rebase step or cherry-pick
+    /// does.
+    replays: bool,
+}
+
 /// The commits this worktree made in `since`, oldest first, or why the
 /// entries do not account for HEAD's movement.
 ///
 /// Every commit made here sits on the commit HEAD held before it, or on that
 /// commit's parent when it replaced it, as an amend or a rebase squash does.
 /// A commit that sits elsewhere means HEAD moved without an entry in between.
-fn commits_made(before: &[ReflogEntry], since: &[ReflogEntry]) -> Result<Vec<String>, String> {
+fn commits_made(before: &[ReflogEntry], since: &[ReflogEntry]) -> Result<Vec<Made>, String> {
     let mut previous = before.last();
     let mut made = Vec::new();
     for entry in since {
@@ -326,11 +355,66 @@ fn commits_made(before: &[ReflogEntry], since: &[ReflogEntry]) -> Result<Vec<Str
                     entry.commit
                 ));
             }
-            made.push(entry.commit.clone());
+            made.push(Made {
+                commit: entry.commit.clone(),
+                amended: entry
+                    .amends()
+                    .then(|| previous.map(|previous| previous.commit.clone()))
+                    .flatten(),
+                replays: entry.replays(),
+            });
         }
         previous = Some(entry);
     }
     Ok(made)
+}
+
+/// The commit each of the turn's rewrites replaced, where that commit is not
+/// the turn's: a reviewed commit, or someone else's, whose change the rewrite
+/// carries and the review must not show as the turn's.
+///
+/// An amend of one of the turn's own commits inherits that commit's
+/// counterpart. A rebase step or cherry-pick is matched by author, authoring
+/// time and subject among the commits HEAD held since the baseline and no
+/// longer reaches; a match that is not unique is left unmatched, which
+/// reviews the commit whole.
+fn counterparts(
+    history: &mut History<'_>,
+    made: &[Made],
+    own: &HashSet<String>,
+    positions: &[&str],
+    head: &str,
+) -> Result<HashMap<String, String>> {
+    let replaying = made
+        .iter()
+        .filter(|made| made.replays)
+        .map(|made| made.commit.as_str())
+        .collect::<Vec<_>>();
+    let (identities, left) = if replaying.is_empty() {
+        (HashMap::new(), HashMap::new())
+    } else {
+        (
+            history.identities(&replaying)?,
+            history.left_behind(positions, head, own)?,
+        )
+    };
+    let mut counterparts = HashMap::<String, String>::new();
+    for made in made {
+        let counterpart = match &made.amended {
+            Some(previous) if own.contains(previous) => counterparts.get(previous).cloned(),
+            Some(previous) => Some(previous.clone()),
+            None if made.replays => identities
+                .get(&made.commit)
+                .and_then(|identity| left.get(identity))
+                .cloned()
+                .flatten(),
+            None => None,
+        };
+        if let Some(counterpart) = counterpart {
+            counterparts.insert(made.commit.clone(), counterpart);
+        }
+    }
+    Ok(counterparts)
 }
 
 /// What the attribution knows of the repository's commits, read in as few
@@ -440,6 +524,88 @@ impl<'a> History<'a> {
         Ok(self.known(commit)?.1.clone())
     }
 
+    /// The author, authoring time and subject of each of `commits`, which a
+    /// rebase or cherry-pick keeps.
+    fn identities(&mut self, commits: &[&str]) -> Result<HashMap<String, String>> {
+        let mut arguments = vec!["log", "--no-walk=unsorted"];
+        arguments.extend(IDENTITY_FORMAT);
+        arguments.extend(commits);
+        Ok(self
+            .read_identities(&arguments, "read the turn's rewritten commits")?
+            .into_iter()
+            .collect())
+    }
+
+    /// The commits HEAD held at `positions` that `head` no longer reaches and
+    /// that are not in `own`, by identity; `None` marks an identity two of
+    /// them share. Empty when there are more than [`HISTORY_LIMIT`], which
+    /// leaves every rewrite unmatched.
+    fn left_behind(
+        &mut self,
+        positions: &[&str],
+        head: &str,
+        own: &HashSet<String>,
+    ) -> Result<HashMap<String, Option<String>>> {
+        let limit = format!("--max-count={}", HISTORY_LIMIT + 1);
+        let exclude = format!("^{head}");
+        let mut arguments = vec!["log", limit.as_str()];
+        arguments.extend(IDENTITY_FORMAT);
+        arguments.extend(positions);
+        arguments.push(&exclude);
+        let commits = self.read_identities(&arguments, "list the commits HEAD left")?;
+        let mut left = HashMap::<String, Option<String>>::new();
+        if commits.len() > HISTORY_LIMIT {
+            return Ok(left);
+        }
+        for (commit, identity) in commits {
+            if own.contains(&commit) {
+                continue;
+            }
+            left.entry(identity)
+                .and_modify(|found| *found = None)
+                .or_insert(Some(commit));
+        }
+        Ok(left)
+    }
+
+    fn read_identities(&self, arguments: &[&str], action: &str) -> Result<Vec<(String, String)>> {
+        let output = run(self.git, self.repository, arguments)?;
+        anyhow::ensure!(
+            output.status == 0,
+            "{action} failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter_map(|record| {
+                let record = String::from_utf8_lossy(record);
+                let (commit, identity) = record.trim_start().split_once('\x1f')?;
+                Some((commit.to_owned(), identity.to_owned()))
+            })
+            .collect())
+    }
+
+    /// The tree `commit`'s own change is measured from: its parent's tree, the
+    /// empty tree for a root commit, or the unresolved merge of a merge's
+    /// parents.
+    fn change_base(&mut self, commit: &str) -> Result<String> {
+        let parents = self.parents(commit)?;
+        match parents.as_slice() {
+            [] => self.empty_tree(),
+            [parent] => self.tree(parent),
+            _ => self.merge_parents(&parents, None),
+        }
+    }
+
+    /// `onto` with `commit`'s own change applied, keeping conflict markers.
+    fn replay(&mut self, commit: &str, onto: &str) -> Result<String> {
+        let ancestor = self.change_base(commit)?;
+        let theirs = self.tree(commit)?;
+        self.merge3(&ancestor, onto, &theirs, MergeConflicts::Mark)
+    }
+
     /// `commit`'s reduced tree: its entry in `reduced`, or its own tree when
     /// none of the turn's commits are below it.
     fn reduced(&mut self, reduced: &HashMap<String, String>, commit: &str) -> Result<String> {
@@ -515,6 +681,15 @@ const LOG_FORMAT: [&str; 4] = [
     "--no-decorate",
     "-z",
     "--format=%H%x1f%T%x1f%P",
+];
+
+/// The `git log` options that print a commit and its author, authoring time
+/// and subject per NUL-separated record.
+const IDENTITY_FORMAT: [&str; 4] = [
+    "--no-show-signature",
+    "--no-decorate",
+    "-z",
+    "--format=%H%x1f%ae%x1f%at%x1f%s",
 ];
 
 /// The best common ancestor of two commits, or `None` for unrelated histories.

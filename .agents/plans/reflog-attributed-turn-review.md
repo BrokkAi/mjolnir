@@ -18,6 +18,8 @@ After this change the base holds every commit the turn did not create in its own
 - [x] (2026-10-21 13:20Z) Attribution in `mj-worker/src/review/attribution.rs`, wired into `capture_repository_deltas` and `initialize_review_baselines`; the first-parent merge folding is gone.
 - [x] (2026-10-21 13:25Z) Protocol `RepoDelta.unattributed`, prompt text in `mj-review/src/lanes.rs`, driver mapping.
 - [x] (2026-10-21 13:45Z) Tests: the #1285 regression with its upstream moved to another worktree, `a_pulled_or_squashed_upstream_is_not_the_turns_work`, `work_left_on_another_branch_is_reviewed_when_it_returns`, `a_head_move_the_reflog_cannot_explain_is_reviewed_whole_and_says_why`. Each guard was checked by disabling it: with no attribution the #1285 and squash tests fail; without the revert of unreachable commits the squash test fails; without the pending carry the left-branch test fails; with conflict markers instead of `--ours` in that revert the squash test fails on `draft`.
+- [x] (2026-10-21 15:40Z) Review round: a rewrite of a reviewed commit (amend, rebase step, cherry-pick) is the turn's only beyond its counterpart; fallbacks keep the pending commits; relay protocol 42 for `RepoDelta.unattributed`. Tests `a_rewrite_of_reviewed_commits_reviews_only_what_it_changed` and the extended `work_left_on_another_branch_is_reviewed_when_it_returns`; disabling counterparts, amend inheritance, replay matching, or the pending carry on fallback each fails one of them.
+- [x] (2026-10-21 16:10Z) Full suites of the touched crates and workspace clippy after the review round: mj-checkpoint 144, mj-core 503, mj-review 27, mj-worker 686 plus its integration tests, mj-controller 2007 of 2008, with the same host-only `shasum` failure as before.
 - [x] (2026-10-21 14:30Z) Full suites of the touched crates and workspace clippy: mj-checkpoint 144, mj-core 503, mj-review 27, mj-worker 685 plus its integration tests, mj-controller 2007 of 2008. The one failure, `installed_digest_matches_bytes_on_linux_and_darwin_with_quoted_paths`, needs `shasum`, which this Fedora host lacks; it touches no code this change edits.
 
 ## Surprises & Discoveries
@@ -32,6 +34,9 @@ After this change the base holds every commit the turn did not create in its own
 
 - Observation: `git cherry-pick --ff` records `cherry-pick: fast-forward`, which reads the same as picking a commit whose subject is "fast-forward". Only `merge` and `pull` fast-forwards count as moves; the cherry-pick case counts as a commit, which reviews one extra commit at worst. A rebase with nothing to replay records `rebase (start)` and `rebase (finish)`.
   Evidence: `git log -g --format=%gs HEAD` in a scratch repository after `git rebase main`, `git cherry-pick --ff main`, `git pull . main` and `git merge --ff-only main`.
+
+- Observation: The first version reduced every commit the turn made to its parent's tree, so an amend or rebase of a commit an earlier review covered put that whole commit back in the review. The plain tree diff before this change had shown only the amend's change. Found by the turn review of commit 424f97670.
+  Evidence: amending the reviewed commit `two` after `git rebase main` produced a patch with `+fn one() {}` and all of `feature.rs`.
 
 - Observation: With the HEAD reflog deleted, `git log -g HEAD` still prints one entry, the current commit, and on an unborn branch it fails with status 128. The reader therefore asks `git reflog exists HEAD` first.
   Evidence: a scratch repository after `rm .git/logs/HEAD` printed its HEAD commit from `git log -g --format=%H HEAD` with status 0.
@@ -53,6 +58,14 @@ After this change the base holds every commit the turn did not create in its own
   Rationale: The turn's work can return inside a squash commit someone else made, and without the revert it would be hidden. Resolving conflicts to the base keeps amended and rebased originals from adding marker noise. Work committed on a branch the turn then left was never in any capture. Without the carry, it would be counted as someone else's when it came back.
   Date/Author: 2026-10-21, Claude.
 
+- Decision: A commit the turn made that rewrites a commit outside the turn's own set (amend, rebase step, cherry-pick) keeps that counterpart's change in its reduced tree, so only what the rewrite changed is the turn's. An amend's counterpart is the commit HEAD held before it, inherited through amends of amends. A rebase step's or cherry-pick's is the unique commit HEAD left since the baseline with the same author email, authoring time and subject; none or several leave the commit reviewed whole.
+  Rationale: Fixing a review finding with `git commit --amend` is common, and re-reviewing the whole commit buries the fix. Git records no source for a rebase step in HEAD's reflog, but a rebase keeps the author, authoring time and message. Reworded rebase steps, squashes of several reviewed commits, and amends with `--reset-author` are not matched and are reviewed whole, which reviews too much, not too little.
+  Date/Author: 2026-10-21, Claude.
+
+- Decision: Every fallback carries the baseline's pending commits into the new point, and relay protocol 42 marks the worker that can send `RepoDelta.unattributed`.
+  Rationale: A whole-tree diff shows only the pending work the capture holds, so dropping the list would let work on a left branch be counted as someone else's once attribution resumes. `RepoDelta` refuses unknown fields, so a protocol-41 controller attached to a new worker would fail to decode a fallback capture. With the bump it refuses the worker at hello instead, which the controller already tests (`mj-controller/src/worker_client/tests.rs`, `future_protocol`). `tests/e2e/parent_report_notifications.py` now takes its protocol from hello.
+  Date/Author: 2026-10-21, Claude.
+
 - Decision: A review point records where it sits in the HEAD reflog as `reflog <entry count> <timestamp of the newest entry>`. A review finds its baseline's entry at that index from the oldest end, or, after reflog expiry removed old entries, by searching backward for that timestamp and commit.
   Rationale: Entries expire only from the old end, so the count locates the entry exactly even when one second holds several entries on one commit. The point stays deterministic: equal states give equal ids.
   Date/Author: 2026-10-21, Claude.
@@ -69,7 +82,7 @@ After this change the base holds every commit the turn did not create in its own
 
 A turn's review now holds the commits its own worktree made, its merge resolutions and its uncommitted edits. Commits it pulled, fast-forwarded, merged or switched to stay out, and so do other people's squash commits, even when those carry the turn's own work: that work is reverted back out of the base so it is still reviewed. Work left on another branch is carried as pending until it returns. The review point stays one tag naming the captured tree, so the daemon's records did not change; the relay protocol gained one optional field.
 
-Remaining limits are deliberate. A commit the turn writes with `cherry-pick` or `merge --squash` from other history counts as its own. A reset or checkout that discards reviewed commits is not shown as a deletion. A session whose baseline predates this release, and whose HEAD has moved, gets one whole-tree review, with the reason in the prompt. The replay does no rename detection, as before.
+Remaining limits are deliberate. A commit the turn writes with `merge --squash` from other history, or by cherry-picking a commit HEAD never held, counts as its own. A reworded rebase step, a squash of several reviewed commits, and an amend with `--reset-author` are reviewed whole. A reset or checkout that discards reviewed commits is not shown as a deletion. A session whose baseline predates this release, and whose HEAD has moved, gets one whole-tree review, with the reason in the prompt. The replay does no rename detection, as before.
 
 ## Context and Orientation
 
