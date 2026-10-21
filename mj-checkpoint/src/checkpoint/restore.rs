@@ -149,6 +149,21 @@ pub fn restore_checkpoint_with_native_state(
                 &spec.workspace_root,
             )
         });
+        // A restored OpenCode database replaces the one in the home, and
+        // SQLite would replay a write-ahead log left beside the old one over
+        // it. An archive from before snapshots carries its own log, which the
+        // loop below writes after this.
+        let opencode_database = Path::new(super::native_scan::OPENCODE_DATABASE);
+        if archive.manifest.session.harness_kind == HarnessKind::OpenCode
+            && archive.manifest.payloads.iter().any(|descriptor| {
+                matches!(&descriptor.role, PayloadRole::NativeArtifact { relative_path }
+                    if relative_path == opencode_database)
+            })
+        {
+            for sidecar in super::native_scan::OPENCODE_DATABASE_SIDECARS {
+                remove_private_file(&spec.harness_home, Path::new(sidecar))?;
+            }
+        }
         for descriptor in &archive.manifest.payloads {
             let PayloadRole::NativeArtifact { relative_path } = &descriptor.role else {
                 continue;
@@ -507,6 +522,19 @@ fn restore_subagent_reports(
         )?;
     }
     Ok(())
+}
+
+/// Remove `relative` from `root` if it is there, under the same rules as
+/// [`write_private_file`]: never through a symlinked directory.
+fn remove_private_file(root: &Path, relative: &Path) -> Result<()> {
+    validate_relative_path(relative)?;
+    ensure_no_symlink_ancestors(root, relative)?;
+    let path = root.join(relative);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
 }
 
 pub(super) fn write_private_file(

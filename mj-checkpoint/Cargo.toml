@@ -24,6 +24,7 @@ dirs.workspace = true
 flate2.workspace = true
 libc.workspace = true
 rayon.workspace = true
+rusqlite.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 sha2.workspace = true

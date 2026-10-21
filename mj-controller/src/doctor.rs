@@ -722,6 +722,18 @@ fn harness_profile_check(
     if profile.auth_scheme() == mj_core::config::AuthScheme::AwsCredentialChain {
         return aws_harness_authentication_check(id, profile, executor);
     }
+    // OpenCode keeps its logins in its own database; a database it cannot
+    // read is reported as itself, not as a missing login.
+    if profile.auth_scheme() == mj_core::config::AuthScheme::NativeLoginStore
+        && let Err(error) = crate::opencode_logins::profile_logins(profile)
+    {
+        return DoctorCheck::fixable(
+            format!("harness.{id}"),
+            title,
+            format!("{error:#}"),
+            "Check that the OpenCode database is readable by this user. Sessions on this profile fail to start until it is.",
+        );
+    }
     if !harness_is_authenticated_with_executor(profile, executor) {
         return DoctorCheck::fixable(
             format!("harness.{id}"),
