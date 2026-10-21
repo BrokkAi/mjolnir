@@ -170,6 +170,8 @@ impl Controller {
             .into_iter()
             .next()
             .context("reconnect plan is empty")?;
+        let installed = mj_core::worker_build::WORKER_BUILD_ID.to_owned();
+        let current = worker_runs_installed_build(reported_build, &installed);
         // Asked first, so a container whose worker a recovery already
         // replaced still moves: its image and tools are an older release's.
         if self
@@ -178,11 +180,18 @@ impl Controller {
             .get(session_id)
             .is_some_and(mj_core::state::ContainerSettings::default_image_moved)
         {
-            // Nothing is patched into a container an upgrade left behind.
-            return Ok(WorkerUpgradeOutcome::RecreateContainer);
-        }
-        let installed = mj_core::worker_build::WORKER_BUILD_ID.to_owned();
-        if worker_runs_installed_build(reported_build, &installed) {
+            if !Controller::load()?
+                .state
+                .subagents_occupy_container(session_id)
+            {
+                return Ok(WorkerUpgradeOutcome::RecreateContainer);
+            }
+            // A sub-agent's worker in this container would end with it. Keep
+            // the worker current in place meanwhile, and ask again later.
+            if current {
+                return Ok(WorkerUpgradeOutcome::Deferred);
+            }
+        } else if current {
             return Ok(WorkerUpgradeOutcome::AlreadyCurrent { build: installed });
         }
         let worker = WorkerInstall::for_target(&backend, executor)

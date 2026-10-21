@@ -51,13 +51,14 @@ session speed. A profile flag applies to every binary a script builds, so pass
 
 Container sessions of a development build use `ghcr.io/brokkai/mjolnir/agent-dev:latest`,
 which master republishes whenever anything the worker compiles from changes. A
-session runs the worker baked into that image when it is exactly your build;
-otherwise, including whenever you have changed the worker locally, it installs
-the musl worker these scripts built, and refuses a worker of any other build.
-To exercise the baked-in path itself, build the image from your checkout with
-`scripts/build-agent-dev-image.sh podman localhost/mjolnir/agent-dev:dev` and
-set that as the target's `image`. A release instead runs `agent-dev:<version>`,
-published with that release's worker.
+development build installs the musl worker these scripts built and refuses one
+of any other build: a worker's build identity covers committed inputs only, so
+an image's worker that reports your build can still lack uncommitted changes.
+It runs the worker baked into the image only when it finds no worker of its own.
+To exercise that path, build the image from your checkout with
+`scripts/build-agent-dev-image.sh podman localhost/mjolnir/agent-dev:dev`, set it
+as the target's `image`, and start `mj` without a portable worker beside it. A
+release instead runs `agent-dev:<version>` and the worker published in it.
 
 Native Windows builds the controller only. Windows runs no worker, so it has no
 `localhost` target; its sessions run on Linux, in Docker Desktop's Linux engine

@@ -77,14 +77,16 @@ pub(crate) fn begin_session_restart(
 }
 
 /// Create the intent for a container recreation an upgrade starts on its own,
-/// or return the unfinished intent the session already owns, which may be one
-/// a person asked for.
+/// or return the unfinished automatic intent the session already owns. `None`
+/// when the session owns a Restart a person asked for: that one keeps its own
+/// rules, and the automatic recreation does not run under them.
 pub(crate) fn begin_automatic_session_restart(
     session_id: &str,
     operation_id: &str,
     cancelled: Arc<AtomicBool>,
-) -> Result<SessionRestartIntent> {
-    begin_session_restart_with(session_id, operation_id, cancelled, true, true)
+) -> Result<Option<SessionRestartIntent>> {
+    let intent = begin_session_restart_with(session_id, operation_id, cancelled, true, true)?;
+    Ok(intent.automatic.then_some(intent))
 }
 
 fn begin_session_restart_with(

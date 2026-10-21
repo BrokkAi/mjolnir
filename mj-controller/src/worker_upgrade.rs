@@ -294,8 +294,11 @@ impl PolicyState {
         if !observation.quiet || observation.session.state != SessionState::Running {
             return false;
         }
+        // A container an upgrade left on an older image is due to move even
+        // when its worker is current.
+        let moved = mj_core::state::ContainerSettings::default_image_moved(&observation.session);
         if self.recreation_pending
-            || self.worker_is_known_current(observation.worker_build.as_deref())
+            || (!moved && self.worker_is_known_current(observation.worker_build.as_deref()))
         {
             return false;
         }

@@ -105,25 +105,6 @@ fn spawn_container_recreation(state: Arc<RuntimeState>, session_id: String) {
     });
 }
 
-/// Whether a sub-agent of `parent_session_id` still has a target. A child's
-/// worker, parked or live, runs in its parent's container, so recreating that
-/// container would end it.
-pub(super) fn subagents_occupy_container(
-    state: &mj_core::state::State,
-    parent_session_id: &str,
-) -> bool {
-    state
-        .subagents
-        .values()
-        .filter(|child| child.parent_session_id == parent_session_id)
-        .any(|child| {
-            state
-                .sessions
-                .get(&child.child_session_id)
-                .is_some_and(|session| session.target.is_some())
-        })
-}
-
 /// Children of `parent_session_id` whose session is still active, in the
 /// order they should be stopped before the parent. A child that already
 /// stopped needs nothing and would make `force_stop` fail on it.

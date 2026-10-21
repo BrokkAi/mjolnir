@@ -1272,28 +1272,17 @@ fn podman_image_check(
     }
 }
 
-/// The label Containerfile.agent-dev gives the worker it bakes in. The image
-/// build fails unless the worker reports exactly this build.
-const WORKER_BUILD_LABEL: &str = "org.brokk.mjolnir.worker-build";
-
 /// What an image's inspection says about the worker baked into it, as a
 /// sentence to append, or nothing when the inspection cannot be read.
 /// Sessions decide by asking the worker itself; this reads the label the
 /// image build verified against it.
 fn image_worker_summary(inspection: &[u8]) -> String {
-    let Ok(images) = serde_json::from_slice::<Vec<serde_json::Value>>(inspection) else {
+    if serde_json::from_slice::<Vec<serde_json::Value>>(inspection)
+        .map_or(true, |images| images.is_empty())
+    {
         return String::new();
-    };
-    let Some(image) = images.first() else {
-        return String::new();
-    };
-    let build = ["/Config/Labels", "/Labels"]
-        .into_iter()
-        .filter_map(|labels| image.pointer(labels))
-        .find_map(|labels| labels.get(WORKER_BUILD_LABEL))
-        .and_then(serde_json::Value::as_str)
-        .filter(|build| !build.is_empty());
-    match build {
+    }
+    match crate::controller::image_worker_label(inspection).as_deref() {
         Some(build) if build == mj_core::worker_build::WORKER_BUILD_ID => format!(
             " It carries this Mjolnir's worker (build {build}), which sessions run directly."
         ),
@@ -2780,7 +2769,7 @@ fn worker_binary_check(id: &str, container: &ContainerTemplate) -> DoctorCheck {
     let title = format!("Container worker binary for target {id}");
     let image = container.image.as_str();
     let default_image = image == mj_core::config::DEFAULT_CONTAINER_IMAGE;
-    if default_image && mj_core::config::DEFAULT_CONTAINER_IMAGE_IS_RELEASE {
+    if default_image && mj_core::config::RELEASE_IMAGE_CARRIES_WORKER {
         return DoctorCheck::ready(
             format!("worker.{id}"),
             title,

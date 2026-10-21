@@ -68,6 +68,7 @@ pub(super) use harness::*;
 mod catalog;
 pub(super) use catalog::*;
 mod image_worker;
+pub(crate) use image_worker::image_worker_label;
 pub(super) use image_worker::*;
 mod install;
 pub(super) use install::*;

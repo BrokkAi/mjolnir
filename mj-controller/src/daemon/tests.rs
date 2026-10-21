@@ -2831,6 +2831,45 @@ fn startup_prompt_test_store(name: &str) -> Option<crate::database::DatabaseWrit
     Some(crate::database::install_isolated_test_writer())
 }
 
+// Hard-won: #1139 review: a failed automatic recreation kept its Restart intent, so its stuck lifecycle stood down every retry and blocked continuation.
+#[tokio::test]
+async fn a_failed_automatic_recreation_gives_back_its_intent_and_records_no_failure() {
+    const NAME: &str = "a_failed_automatic_recreation_gives_back_its_intent_and_records_no_failure";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let worker_root = tempfile::tempdir().unwrap();
+    let mut session = runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    // A bare target needs no image, and the configuration has no profile for
+    // the session, so its checkpoint fails for an ordinary reason.
+    session.target_template_id = "localhost".into();
+    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: worker_root.path().join("session-1"),
+    });
+    crate::database::save_session(&session).unwrap();
+    let state = test_runtime_state();
+
+    let error = state
+        .recreate_container_for_upgrade("session-1".into())
+        .await
+        .expect_err("the checkpoint cannot succeed");
+    assert!(
+        format!("{error:#}").contains("stopped before changing anything"),
+        "{error:#}"
+    );
+    assert!(crate::database::load_session_restarts().unwrap().is_empty());
+    assert!(!state.owner().lifecycle.contains_key("session-1"));
+    let record = crate::database::load_session_record("session-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.state, SessionState::Running);
+    assert_eq!(record.last_error, None);
+}
+
 // Hard-won: 955f4204: Restart reused a container after its mount settings changed.
 #[tokio::test]
 async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits() {

@@ -71,6 +71,11 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
       what worker each present image carries; CONTRIBUTING and the container docs describe the dev
       loop and the upgrade behavior.
 
+- [x] (2026-10-21 16:10Z) Independent review of the four commits found eight defects in the
+      automatic recreation and the release shortcut; all are fixed in a fifth commit (see
+      Surprises and Decision Log), with a daemon regression for the abandoned recreation and an
+      isolated-instance run of release-channel builds A, C (unpullable image) and B.
+
 ## Surprises & Discoveries
 
 - Observation: the repository owner is mixed case (`BrokkAi`) but GHCR requires lowercase, so the
@@ -142,6 +147,22 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
 - Observation: a container session needs its repository to have a network remote; a local-only
   fixture is refused with "needs valid default network Git remotes". A clone of a small public
   repository works as the fixture.
+
+- Observation (review): a crates.io build counts as a release for its image name, but its worker
+  identity falls back to the commit (`.cargo_vcs_info.json`), while the image's worker carries the
+  Git-tree identity of its inputs. The two can never match, so the release shortcut (skip the host
+  preflight, "no host worker is needed" in doctor) was wrong for it. Evidence: `worker_inputs_id`
+  in `mj-core/build.rs` returns `fallback_revision` when `.cargo_vcs_info.json` exists.
+- Observation (review): a Restart that fails keeps its intent, and `remove_completed_lifecycle`
+  keeps a failed lifecycle whose intent is still set. A failed automatic recreation therefore left
+  the session owned by a failed Restart: every later attempt stood down on the lifecycle entry and
+  automatic continuation refused the session, until a person acted.
+- Observation (review): a worker's identity covers committed inputs only, so on a development
+  checkout with uncommitted worker edits the image's worker and the developer's report the same
+  build; preferring the image would silently run master's worker.
+- Observation (review): Restart retires the old container before provisioning the new one, so an
+  automatic recreation on a host that cannot pull the new image would have stopped idle sessions
+  nobody asked to touch.
 
 ## Decision Log
 
@@ -273,7 +294,7 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
   would have copied a host worker over a current image worker on every recovery; `ln -sfn` to a
   staged name and a rename are cheap, atomic and idempotent. Date/Author: 2026-10-21, Claude.
 - Decision: skip the host-worker preflight only for a release build whose template names its own
-  default image (`release_image_supplies_worker`, from `DEFAULT_CONTAINER_IMAGE_IS_RELEASE`).
+  default image (`release_image_supplies_worker`, from `RELEASE_IMAGE_CARRIES_WORKER`).
   Rationale: preflight runs before the image is even pulled, so it cannot ask the image; the
   release workflow is what guarantees that image carries the release's worker. Installation still
   asks the image's worker and fails, naming both, if neither it nor a host worker is this build.
@@ -282,6 +303,23 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
   which for Podman replaces `image exists`) instead of starting a container. Rationale: doctor
   predicts, and must not create containers outside `--smoke`; the label is verified against the
   binary when the image is built. Date/Author: 2026-10-21, Claude.
+
+- Decision (review fixes): `MJ_RELEASE_IMAGE_CARRIES_WORKER` / `RELEASE_IMAGE_CARRIES_WORKER` is
+  set only for a release whose worker identity came from its inputs, and it alone enables the
+  release shortcut and the image-first choice. Every other build prefers the worker it was built
+  with and runs the image's worker only when it has none. Date/Author: 2026-10-21, Claude.
+- Decision (review fixes): before an automatic recreation is admitted,
+  `Controller::prepare_container_recreation` pulls the new image under the shared pull lock and
+  confirms a worker (the image's label, or the host preflight); a failure takes the coordinator's
+  backoff and touches nothing. An automatic recreation that fails before sealing releases its
+  intent and reports through the coordinator (`AutomaticRecreationAbandoned`), not as a failed
+  close on the session. Its checkpoint releases handoff admission (`begin_resumable_work`) and
+  re-takes it before teardown, because until then it restarts from its durable intent. It joins a
+  person's Restart (same workspace key) and stands down when a person's intent already owns the
+  session. A parent whose sub-agents occupy its container is upgraded in place meanwhile and is
+  recreated once they are gone; the coordinator no longer trusts its "known current" cache for a
+  container whose default image moved. The occupancy predicate is `State::subagents_occupy_container`.
+  Date/Author: 2026-10-21, Claude.
 
 ## Outcomes & Retrospective
 
@@ -394,6 +432,20 @@ release built from them is the first whose image carries its worker.
 Lesson: the worker's name `<root>/hel` is load-bearing far beyond installation (process identity,
 reconnect, staged MCP commands), so a change of where the worker comes from has to keep that name.
 A link did, and made the rest of the change local.
+
+Review fixes, evidence from the isolated instance `issue-1139-release` with release-channel builds
+(`MJ_BUILD_CHANNEL=release`): under A, a session started with no host worker configured and ran
+`hel -> /opt/mjolnir/mj-worker` reporting `2.51.0+aaaa...` with no worker upload. Handing off to C,
+whose image `localhost/mjolnir/agent-dev:issue-1139-missing` cannot be pulled, left the session
+running on its A container with no error and no intent, and logged "container recreation for the
+upgrade failed ... pull container image ...". Starting B then moved it within seconds:
+
+    16:08:18 state=running    image=localhost/mjolnir/agent-dev:issue-1139-a
+    16:08:22 state=suspending image=localhost/mjolnir/agent-dev:issue-1139-b
+    16:08:26 state=running    image=localhost/mjolnir/agent-dev:issue-1139-b
+
+`a_failed_automatic_recreation_gives_back_its_intent_and_records_no_failure` fails without the
+release-on-abandon fix and passes with it.
 
 ## Context and Orientation
 
@@ -647,7 +699,7 @@ Milestones 3 to 5 add, in `mj-controller/src/controller/worker_binary/image_work
 
 in `mj-core/src/state/target_runtime.rs`, `ContainerSettings::default_image: Option<String>`,
 `ContainerSettings::applied(session, image)` and `ContainerSettings::default_image_moved(session)`;
-in `mj-core/src/config.rs`, `DEFAULT_CONTAINER_IMAGE_IS_RELEASE: bool`; in
+in `mj-core/src/config.rs`, `RELEASE_IMAGE_CARRIES_WORKER: bool`; in
 `mj-core/src/worker_build.rs`, `is_worker_build(&str) -> bool`; in the worker CLI, the hidden
 `mj-worker worker build-id`; `LatchExclusivity::HoldThroughIdleClose`;
 `WorkerUpgradeOutcome::RecreateContainer`, `ContainerRecreationReport` and

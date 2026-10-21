@@ -181,6 +181,14 @@ fn main() {
         "cargo:rustc-env=MJ_AGENT_DEV_IMAGE_RELEASE={}",
         u8::from(release)
     );
+    // The release's image carries a worker stamped with the Git-tree identity
+    // of its inputs. A build whose own identity fell back to the commit (a
+    // crates.io package, or a tree without Git) can never match it.
+    let carries_worker = release && worker_inputs_id != revision.to_ascii_lowercase();
+    println!(
+        "cargo:rustc-env=MJ_RELEASE_IMAGE_CARRIES_WORKER={}",
+        u8::from(carries_worker)
+    );
     if std::env::var_os("CARGO_FEATURE_TEST_HOOKS").is_some() {
         // Generate this fixture at build time: writing an executable during
         // parallel tests can leave inherited writable descriptors (ETXTBSY).

@@ -1731,8 +1731,9 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
         )?;
         as_root("chown 0:0 /opt/mjolnir/mj-worker && chmod 755 /opt/mjolnir/mj-worker")?;
         ensure!(
-            WorkerInstall::for_target(&locator, &ProcessExecutor)? == WorkerInstall::Image,
-            "an image carrying this build's worker is used as it is"
+            image_worker_build(&locator, &ProcessExecutor)?.as_deref()
+                == Some(mj_core::worker_build::WORKER_BUILD_ID),
+            "the image's worker reports this build"
         );
 
         // Checkpoint-only mode starts the worker without a harness.

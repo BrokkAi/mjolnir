@@ -23,10 +23,14 @@ pub(in crate::controller) enum WorkerInstall {
 }
 
 impl WorkerInstall {
-    /// Choose the worker for a target. A container uses its image's worker
-    /// when that is this controller's build; anything else (a custom image, an
-    /// older image, or a development build that changed the worker) gets the
-    /// host binary, which must carry this build too.
+    /// Choose the worker for a target.
+    ///
+    /// A release runs its container image's worker when that is this build.
+    /// Any other build prefers the worker it was built with: its identity
+    /// covers committed inputs only, so an image worker reporting the same
+    /// build can still lack a developer's uncommitted changes. It runs the
+    /// image's worker only when it has none of its own. A custom or older
+    /// image gets the host binary, which must carry this build too.
     pub(in crate::controller) fn for_target(
         locator: &targets::TargetLocator,
         executor: &impl CommandExecutor,
@@ -35,26 +39,30 @@ impl WorkerInstall {
             return worker_binary_for(locator, executor).map(Self::Host);
         }
         let image_build = image_worker_build(locator, executor)?;
-        if image_build.as_deref() == Some(WORKER_BUILD_ID) {
+        let image_is_current = image_build.as_deref() == Some(WORKER_BUILD_ID);
+        if image_is_current && mj_core::config::RELEASE_IMAGE_CARRIES_WORKER {
             return Ok(Self::Image);
         }
-        let carried = image_build.map_or_else(
-            || "no worker".to_owned(),
-            |build| format!("worker build {build}"),
-        );
-        tracing::info!(
-            image_worker = carried,
-            expected = WORKER_BUILD_ID,
-            "container image does not carry this controller's worker; installing the host worker"
-        );
-        worker_binary_for(locator, executor)
-            .map(Self::Host)
-            .with_context(|| {
-                format!(
+        match worker_binary_for(locator, executor) {
+            Ok(binary) => Ok(Self::Host(binary)),
+            Err(error) if image_is_current => {
+                tracing::info!(
+                    error = format!("{error:#}"),
+                    "this build has no host worker; running the container image's worker of the same build"
+                );
+                Ok(Self::Image)
+            }
+            Err(error) => {
+                let carried = image_build.map_or_else(
+                    || "no worker".to_owned(),
+                    |build| format!("worker build {build}"),
+                );
+                Err(error.context(format!(
                     "the container's image carries {carried}, not this Mjolnir's worker build \
                      {WORKER_BUILD_ID}, and no host worker can replace it"
-                )
-            })
+                )))
+            }
+        }
     }
 
     /// The host binary this install copies, if it copies one.
@@ -93,4 +101,88 @@ fn parse_image_worker_build(stdout: &[u8]) -> Result<Option<String>> {
         "the image's worker reported an unrecognized build {text:?}"
     );
     Ok(Some(text.to_owned()))
+}
+
+/// The label `containers/Containerfile.agent-dev` gives the worker it bakes in.
+/// The image build fails unless the worker reports exactly this build.
+pub(crate) const WORKER_BUILD_LABEL: &str = "org.brokk.mjolnir.worker-build";
+
+/// The worker build an image's `image inspect` JSON is labelled with, from
+/// Docker's or Podman's shape; `None` when it has none or cannot be read.
+/// Sessions decide by asking the worker itself; this is for planning before
+/// a container exists.
+pub(crate) fn image_worker_label(inspection: &[u8]) -> Option<String> {
+    let images = serde_json::from_slice::<Vec<serde_json::Value>>(inspection).ok()?;
+    let image = images.first()?;
+    ["/Config/Labels", "/Labels"]
+        .into_iter()
+        .filter_map(|labels| image.pointer(labels))
+        .find_map(|labels| labels.get(WORKER_BUILD_LABEL))
+        .and_then(serde_json::Value::as_str)
+        .filter(|build| !build.is_empty())
+        .map(str::to_owned)
+}
+
+impl Controller {
+    /// Make sure the container an upgrade recreates for this session can
+    /// start before the old one is touched: the image it names is on its
+    /// host, pulled now if it was missing, and a worker of this build can be
+    /// installed in it. A failure here leaves the session as it was.
+    pub(crate) fn prepare_container_recreation(
+        &self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+    ) -> Result<()> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        let template = self
+            .config
+            .targets
+            .get(&session.target_template_id)
+            .with_context(|| format!("target {} is not configured", session.target_template_id))?;
+        let Some((host, container)) = template.image_host() else {
+            return Ok(());
+        };
+        let image = container.image.as_str();
+        // Pull only what is missing, unless the target forbids pulling.
+        let policy = match container.pull_policy {
+            mj_core::config::ImagePullPolicy::Never => mj_core::config::ImagePullPolicy::Never,
+            _ => mj_core::config::ImagePullPolicy::Missing,
+        };
+        if let Some(refresh) =
+            targets::image_refresh(host.clone(), image, container.platform.as_deref(), policy)
+        {
+            let lock = crate::image_pull_gate::image_pull_mutex(&refresh.host, &refresh.image);
+            let _pulling = crate::image_pull_gate::hold_image_pull(
+                &lock,
+                || executor.cancellation_requested(),
+                || {},
+            )?;
+            crate::pollers::refresh_host_image(&refresh, executor, &|_| {})
+                .with_context(|| format!("pull container image {image}"))?;
+        }
+        let inspection = execute_checked(
+            executor,
+            host.command(
+                vec![
+                    host.engine().to_owned(),
+                    "image".to_owned(),
+                    "inspect".to_owned(),
+                    image.to_owned(),
+                ],
+                format!("inspect container image {image}"),
+            ),
+        )
+        .with_context(|| format!("container image {image} is not on its host"))?;
+        let image_supplies_worker = mj_core::config::RELEASE_IMAGE_CARRIES_WORKER
+            && image_worker_label(&inspection.stdout).as_deref() == Some(WORKER_BUILD_ID);
+        if !image_supplies_worker {
+            preflight_host_worker_binary(template, executor)
+                .context("the new container's image does not carry this build's worker")?;
+        }
+        Ok(())
+    }
 }

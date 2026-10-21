@@ -410,7 +410,7 @@ pub(super) async fn refresh_images(
 
 /// What one host's refresh of one image did.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ImageRefreshOutcome {
+pub(crate) enum ImageRefreshOutcome {
     /// The host already had the image and this target only wants it present,
     /// so nothing was downloaded.
     Present,
@@ -430,7 +430,7 @@ pub(super) enum ImageRefreshOutcome {
 /// `report` is told when a download actually starts and when one leaves the
 /// host with a new image, so the user hears about the wait they are in rather
 /// than about every hourly check.
-pub(super) fn refresh_host_image(
+pub(crate) fn refresh_host_image(
     refresh: &ImageRefresh,
     executor: &impl CommandExecutor,
     report: &dyn Fn(ImageRefreshReport),
