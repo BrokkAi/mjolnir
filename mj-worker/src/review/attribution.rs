@@ -120,18 +120,17 @@ pub(crate) fn review_base(
     let Some(head) = head else {
         return Ok(plain(None, point.pending));
     };
-    // A fallback's whole-tree diff reviews the pending commits HEAD now
-    // reaches or the capture otherwise holds, and carries only the rest.
+    // A fallback's whole-tree diff reviews the pending work the capture
+    // holds, so it carries only the commits whose change the capture lacks,
+    // by the same rule an attributed review uses.
     let fallback = |reason: String| -> Result<ReviewBase> {
         let mut history = History::new(git, repository);
         let mut carried = Vec::new();
         for commit in history.read_existing(&point.pending)? {
-            if history.is_ancestor(&commit, head)? {
-                continue;
-            }
             let before = history.change_base(&commit)?;
             let after = history.tree(&commit)?;
-            if before != after && !history.holds(&after, &before, capture)? {
+            let reached = history.is_ancestor(&commit, head)?;
+            if before != after && !history.holds(&after, &before, capture, reached)? {
                 carried.push(commit);
             }
         }
@@ -236,12 +235,15 @@ pub(crate) fn review_base(
     }
     let mut base = history.reduced(&reduced, head)?;
 
-    let mut still_pending = Vec::new();
-    for commit in own
+    // An amend replaces the commit before it with the turn's own successor,
+    // which carries what is left of it.
+    let superseded = made
         .iter()
-        .rev()
-        .filter(|commit| !reachable.contains(*commit))
-    {
+        .filter_map(|made| made.amended.as_ref())
+        .filter(|commit| own_set.contains(*commit))
+        .collect::<HashSet<_>>();
+    let mut still_pending = Vec::new();
+    for commit in own.iter().rev() {
         // What the turn changed: beyond its parent, beyond the unresolved
         // merge of a merge's parents, and beyond a rewrite's counterpart.
         let mut before = history.change_base(commit)?;
@@ -252,8 +254,15 @@ pub(crate) fn review_base(
         if before == after {
             continue;
         }
-        base = history.merge3(&after, &base, &before, MergeConflicts::KeepOurs)?;
-        if !history.holds(&after, &before, capture)? {
+        let walked = reachable.contains(commit);
+        if !walked {
+            base = history.merge3(&after, &base, &before, MergeConflicts::KeepOurs)?;
+        }
+        if superseded.contains(commit) {
+            continue;
+        }
+        let reached = walked || history.is_ancestor(commit, head)?;
+        if !history.holds(&after, &before, capture, reached)? {
             still_pending.push(commit.clone());
         }
     }
@@ -593,10 +602,24 @@ impl<'a> History<'a> {
         }
     }
 
-    /// Whether `capture` holds the change from `before` to `after`: reverting
-    /// it, with any conflict kept, would change the capture.
-    fn holds(&mut self, after: &str, before: &str, capture: &str) -> Result<bool> {
-        Ok(self.merge3(after, capture, before, MergeConflicts::Mark)? != capture)
+    /// Whether `capture` holds the change from `before` to `after`, the test
+    /// for keeping one of the turn's commits pending.
+    ///
+    /// A hunk counts when the capture has it, which reverting it would undo.
+    /// For a commit HEAD reaches, a hunk also counts when it conflicts: later
+    /// history changed those lines again, so the review saw the commit's
+    /// change on the way. For one HEAD does not reach, a conflict means the
+    /// capture has other lines there and none of the commit's work, so it
+    /// does not count; counting it would drop work no review has seen. A
+    /// commit with any hunk held is not kept, so a partly present commit is
+    /// not reviewed again for the part that was.
+    fn holds(&mut self, after: &str, before: &str, capture: &str, reached: bool) -> Result<bool> {
+        let conflicts = if reached {
+            MergeConflicts::Mark
+        } else {
+            MergeConflicts::KeepOurs
+        };
+        Ok(self.merge3(after, capture, before, conflicts)? != capture)
     }
 
     fn is_ancestor(&self, commit: &str, head: &str) -> Result<bool> {
