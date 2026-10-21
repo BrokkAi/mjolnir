@@ -1276,7 +1276,7 @@ fn install_on_ssh_host(
         session,
         &root,
         &format!("{root}/profile"),
-        &fixture.worker_binary,
+        &WorkerInstall::Host(fixture.worker_binary.clone()),
         &fixture.launch_config,
         &fixture.ownership,
         &fixture.profile_stage,
@@ -1447,7 +1447,7 @@ fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
             &session,
             &root,
             &profile,
-            &fixture.worker_binary,
+            &WorkerInstall::Host(fixture.worker_binary.clone()),
             &fixture.launch_config,
             &fixture.ownership,
             &fixture.profile_stage,
@@ -1631,6 +1631,174 @@ fn stopped_docker_session_recovers_with_the_current_worker_build() {
         Ok(())
     })();
     // Stop the owning container before removing its files, even on failure.
+    let cleanup = execute_checked(
+        &ProcessExecutor,
+        CommandSpec::new("docker", ["rm", "-f", &container_id]),
+    );
+    result.unwrap();
+    cleanup.unwrap();
+}
+
+#[test]
+#[ignore = "requires Docker, the agent-dev image and a portable MJ_WORKER_BINARY of this build"]
+fn a_container_runs_its_images_worker_through_the_hel_link() {
+    let source =
+        PathBuf::from(std::env::var_os("MJ_WORKER_BINARY").expect("portable Linux worker"));
+    verify_worker_build(&source).unwrap();
+    let fixture = podman_install_fixture();
+    let session = mj_core::state::new_session_id().unwrap();
+    let container_id = targets::resource_name(&session).unwrap();
+    let locator = targets::TargetLocator::LocalDocker {
+        borrowed_from: None,
+        container_id: container_id.clone(),
+    };
+    execute_checked(
+        &ProcessExecutor,
+        CommandSpec::new(
+            "docker",
+            [
+                "run",
+                "--pull=never",
+                "-d",
+                "--name",
+                &container_id,
+                "ghcr.io/brokkai/mjolnir/agent-dev:latest",
+                "sleep",
+                "infinity",
+            ],
+        ),
+    )
+    .unwrap();
+    let as_root = |script: &str| {
+        execute_checked(
+            &ProcessExecutor,
+            CommandSpec::new(
+                "docker",
+                ["exec", "--user", "0", &container_id, "sh", "-c", script],
+            ),
+        )
+    };
+    let result = (|| -> Result<()> {
+        ensure!(
+            image_worker_build(&locator, &ProcessExecutor)?.is_none(),
+            "an image without a worker must say so"
+        );
+        ensure!(
+            WorkerInstall::for_target(&locator, &ProcessExecutor)?
+                .host_binary()
+                .is_some(),
+            "an image without a worker gets the host worker"
+        );
+        // A worker that is present but cannot run is a failure, never "absent".
+        as_root(
+            "mkdir -p /opt/mjolnir && printf 'not a worker' > /opt/mjolnir/mj-worker && chmod 644 /opt/mjolnir/mj-worker",
+        )?;
+        ensure!(
+            WorkerInstall::for_target(&locator, &ProcessExecutor).is_err(),
+            "an unusable image worker must not be mistaken for a missing one"
+        );
+        execute_checked(
+            &ProcessExecutor,
+            CommandSpec::new(
+                "docker",
+                [
+                    "cp".to_owned(),
+                    source.to_string_lossy().into_owned(),
+                    format!("{container_id}:{IMAGE_WORKER}"),
+                ],
+            ),
+        )?;
+        as_root("chown 0:0 /opt/mjolnir/mj-worker && chmod 755 /opt/mjolnir/mj-worker")?;
+        ensure!(
+            WorkerInstall::for_target(&locator, &ProcessExecutor)? == WorkerInstall::Image,
+            "an image carrying this build's worker is used as it is"
+        );
+
+        // Checkpoint-only mode starts the worker without a harness.
+        let root = targets::worker_root(&locator, &session)?;
+        let relay = tempfile::tempdir()?;
+        drop(mj_worker::relay::DurableRelay::open(
+            relay.path(),
+            &session,
+            "2.0.0",
+        )?);
+        as_root(&format!("mkdir -p {root}"))?;
+        execute_checked(
+            &ProcessExecutor,
+            CommandSpec::new(
+                "docker",
+                [
+                    "cp".to_owned(),
+                    relay.path().join(".").to_string_lossy().into_owned(),
+                    format!("{container_id}:{root}"),
+                ],
+            ),
+        )?;
+        as_root(&format!("chown -R hel:hel {root}"))?;
+        let launch: WorkerLaunchConfig = serde_json::from_value(serde_json::json!({
+            "session_id": session, "harness": "codex", "bridge_command": "/not-used",
+            "bridge_args": [], "environment": {}, "target_environment": {},
+            "cwd": "/tmp", "execution_policy": "configured_approvals", "run_mode": "checkpoint_only"
+        }))?;
+        launch.write(&fixture.launch_config)?;
+        install_worker_files(
+            &ProcessExecutor,
+            &locator,
+            &session,
+            &root,
+            &format!("{root}/profile"),
+            &WorkerInstall::Image,
+            &fixture.launch_config,
+            &fixture.ownership,
+            &fixture.profile_stage,
+            None,
+        )?;
+        execute_checked(
+            &ProcessExecutor,
+            CommandSpec::new(
+                "docker",
+                [
+                    "exec",
+                    &container_id,
+                    "sh",
+                    "-c",
+                    "test \"$(id -u)\" != 0 && test \"$(readlink \"$1/hel\")\" = /opt/mjolnir/mj-worker && test -x \"$1/hel\"",
+                    "sh",
+                    &root,
+                ],
+            ),
+        )
+        .context("the session's hel must be a link to the image's worker")?;
+        execute_checked(&ProcessExecutor, start_worker_command(&locator, &root))?;
+        let reconnect = targets::reconnect_plan(&locator, &session)?
+            .commands
+            .remove(0);
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(async {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            let connection = loop {
+                match crate::worker_client::RelayClient::connect(&reconnect, &session).await {
+                    Ok(connection) => break connection,
+                    Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+                }
+            };
+            ensure!(
+                connection.worker_build() == Some(mj_core::worker_build::WORKER_BUILD_ID),
+                "the image's worker must report this controller's build"
+            );
+            Ok::<_, anyhow::Error>(())
+        })?;
+        // The daemon identifies its worker by `hel worker run --root`; the
+        // link keeps that name on the process started through it.
+        let liveness = execute_checked(&ProcessExecutor, worker_liveness_command(&locator, &root))?;
+        ensure!(
+            String::from_utf8_lossy(&liveness.stdout).trim() == "alive",
+            "the worker started through the link must be recognized as alive, got {:?}",
+            String::from_utf8_lossy(&liveness.stdout)
+        );
+        Ok(())
+    })();
     let cleanup = execute_checked(
         &ProcessExecutor,
         CommandSpec::new("docker", ["rm", "-f", &container_id]),

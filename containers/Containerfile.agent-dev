@@ -23,6 +23,64 @@ ARG BIFROST_VERSION
 RUN cargo install brokk-bifrost@${BIFROST_VERSION} --locked --bin bifrost --root /opt/bifrost \
     && /opt/bifrost/bin/bifrost --version
 
+# The session worker, compiled from the same commit as the image, so a release's
+# `mj` and its image agree on the worker by construction. Git is not in the build
+# context, so the caller supplies the identities mj-core/build.rs would otherwise
+# read from it: scripts/build-agent-dev-image.sh and the publish workflow compute
+# them. MJ_WORKER_BUILD_ID is also the image's worker-build label, and the build
+# fails unless the compiled worker reports exactly that build.
+FROM ${RUST_IMAGE} AS worker
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends musl-tools \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+# Cargo resolves the whole workspace, so every member's sources come along;
+# .dockerignore admits exactly these paths.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY mj-core/ mj-core/
+COPY mj-review/ mj-review/
+COPY mj-checkpoint/ mj-checkpoint/
+COPY mj-transcript/ mj-transcript/
+COPY mj-worker/ mj-worker/
+COPY mj-client/ mj-client/
+COPY mj-controller/ mj-controller/
+COPY mj-chat/ mj-chat/
+COPY mj-tui/ mj-tui/
+COPY mj-cli/ mj-cli/
+COPY mj-desktop/ mj-desktop/
+COPY voice-worker/ voice-worker/
+ARG MJ_BUILD_REVISION
+ARG MJ_WORKER_INPUTS_ID
+ARG MJ_WORKER_BUILD_ID
+RUN set -eu \
+    && for value in "$MJ_BUILD_REVISION" "$MJ_WORKER_INPUTS_ID" "$MJ_WORKER_BUILD_ID"; do \
+        if [ -z "$value" ]; then \
+            echo 'MJ_BUILD_REVISION, MJ_WORKER_INPUTS_ID and MJ_WORKER_BUILD_ID are required; build with scripts/build-agent-dev-image.sh' >&2; \
+            exit 1; \
+        fi; \
+    done \
+    && ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && case "$ARCH" in \
+        amd64) MUSL=x86_64-unknown-linux-musl ;; \
+        arm64) MUSL=aarch64-unknown-linux-musl ;; \
+        *) echo "unsupported arch $ARCH" >&2; exit 1 ;; \
+    esac \
+    && rustup target add "$MUSL" \
+    && CC_x86_64_unknown_linux_musl=musl-gcc CC_aarch64_unknown_linux_musl=musl-gcc \
+        cargo build --release --locked --target "$MUSL" -p brokk-mj-worker --bin mj-worker \
+    && binary="target/$MUSL/release/mj-worker" \
+    && if readelf -lW "$binary" | grep -q 'Requesting program interpreter'; then \
+        echo 'the worker unexpectedly needs a dynamic loader' >&2; \
+        exit 1; \
+    fi \
+    && built="$("$binary" worker build-id)" \
+    && if [ "$built" != "$MJ_WORKER_BUILD_ID" ]; then \
+        echo "the worker reports build $built, but the image is labelled $MJ_WORKER_BUILD_ID" >&2; \
+        exit 1; \
+    fi \
+    && install -D -m 0755 "$binary" /out/mj-worker \
+    && rm -rf target
+
 FROM ${RUST_IMAGE}
 ARG MJ_RUST_TOOLCHAIN
 
@@ -237,12 +295,20 @@ ENV HOME=/home/hel \
     SHELL=/bin/bash
 WORKDIR /workspace
 
+# The worker is the last filesystem layer. A release that changes only Mjolnir
+# shares every layer above with the previous image, so a host upgrading `mj`
+# downloads just this one. Sessions link their `hel` to it.
+COPY --from=worker /out/mj-worker /opt/mjolnir/mj-worker
+
 # Metadata comes last so that editing it never invalidates the cached layers
 # above; a label-only change then republishes an image whose filesystem layers
-# every host already has.
+# every host already has. Declared here, after every RUN, so the per-commit
+# worker build cannot invalidate a cached RUN layer.
+ARG MJ_WORKER_BUILD_ID
 LABEL org.opencontainers.image.title="Mjolnir agent development environment" \
       org.opencontainers.image.source="https://github.com/BrokkAi/mjolnir" \
-      org.opencontainers.image.description="Mjolnir agent development environment with Node, Rust, cargo-nextest, OpenJDK, and the pinned ACP bridges"
+      org.opencontainers.image.description="Mjolnir agent development environment with Node, Rust, cargo-nextest, OpenJDK, and the pinned ACP bridges" \
+      org.brokk.mjolnir.worker-build="${MJ_WORKER_BUILD_ID}"
 
 # Hel overrides the command with the same keepalive, but retaining it here also
 # makes the image convenient to inspect directly.

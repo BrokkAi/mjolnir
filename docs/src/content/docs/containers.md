@@ -111,14 +111,19 @@ release names the image built for its own version, while a development build
 names `:latest`. Podman, Docker, and Apple's container runtime pull it
 automatically when first needed.
 
+The image also carries the session worker, built from the same commit at
+`/opt/mjolnir/mj-worker` and labelled `org.brokk.mjolnir.worker-build`. When a
+container's image carries the worker build of the `mj` that starts the session,
+the session runs that worker directly; nothing is copied into the container.
+Any other image, including a custom one, gets the worker installed from beside
+`mj` as before, and Mjolnir checks that it is the matching build either way.
+
 Building it yourself remains a supported alternative, for example to
-customize the image or to work offline:
+customize the image or to work offline. Build from a Git checkout with the
+script, which computes the worker build identity the image needs:
 
 ```console
-podman build --pull=always \
-  --file containers/Containerfile.agent-dev \
-  --tag localhost/mjolnir/agent-dev:latest \
-  .
+scripts/build-agent-dev-image.sh podman localhost/mjolnir/agent-dev:latest --pull=always
 ```
 
 ## Choose a runtime in the UI

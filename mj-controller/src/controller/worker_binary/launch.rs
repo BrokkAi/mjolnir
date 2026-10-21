@@ -175,7 +175,7 @@ impl Controller {
                 )?;
             }
         }
-        let worker_binary = worker_binary_for(backend, executor)?;
+        let worker = WorkerInstall::for_target(backend, executor)?;
 
         install_worker_files(
             executor,
@@ -183,7 +183,7 @@ impl Controller {
             session_id,
             worker_root,
             &target_profile_home,
-            &worker_binary,
+            &worker,
             &launch_path,
             &ownership_path,
             &profile_stage,

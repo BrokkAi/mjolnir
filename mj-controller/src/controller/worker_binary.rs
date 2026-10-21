@@ -67,6 +67,8 @@ mod harness;
 pub(super) use harness::*;
 mod catalog;
 pub(super) use catalog::*;
+mod image_worker;
+pub(super) use image_worker::*;
 mod install;
 pub(super) use install::*;
 mod upgrade;

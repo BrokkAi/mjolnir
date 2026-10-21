@@ -39,13 +39,22 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
 - [x] (2026-10-08 17:00Z) Integrate with master and land the work: merged `origin/master`
       (release 2.37.0 and per-architecture macOS packaging) into the two commits, re-ran the checks,
       and pushed to `master`.
-- [ ] Milestone 3: the image bakes the worker in at `/opt/mjolnir/mj-worker` with a build label,
-      built from the same commit as the image.
-- [ ] Milestone 4: upgrading `mj` recreates stopped container sessions from the new image
-      (checkpoint, provision, restore); running sessions are untouched until they stop.
-- [ ] Milestone 5: remove in-place worker copy-in and patching for the default container path;
-      bare, SSH-bare, EC2 and custom-image targets keep it. `mj doctor` reports the resolved image
-      and worker build.
+- [x] (2026-10-21 12:40Z) Resumed from a fresh session. Re-mapped every path that installs, replaces or
+      starts a container worker, the Restart/Resume recreation machinery, and `mj doctor`, and
+      revised Milestones 3-5 below to match what the code actually does (see Surprises).
+- [x] (2026-10-21 13:20Z) Milestone 3: the image bakes the worker in at `/opt/mjolnir/mj-worker`,
+      built from the same commit and labelled with its build; a new container links its `hel` to
+      that worker when it is this `mj`'s build and otherwise installs the host worker as before.
+      Validated by the workflow alignment tests, a Podman build of the worker stage, the Docker
+      integration test, and a real session created, suspended and resumed in an isolated instance on
+      a derived image (see Outcomes).
+- [ ] Milestone 4: a container records the default image it was created from; Restart recreates a
+      container whose default image moved, and a quiet session whose worker is stale because its
+      default image moved is recreated automatically (checkpoint, new container, restore) instead of
+      having a worker copied in. Running work is never interrupted.
+- [ ] Milestone 5: no in-place worker replacement for a container whose default image moved;
+      preflight lets a release's own image supply the worker without a host copy; `mj doctor`
+      reports which image and worker a container target would use and why; documentation.
 
 ## Surprises & Discoveries
 
@@ -79,6 +88,45 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
   `package-aarch64-apple-darwin`. The merge's only conflict was the `release` job's `needs` list;
   the resolution keeps upstream's per-architecture macOS packaging and adds
   `publish-agent-dev-image` to it.
+
+- Observation: a stopped container session has no container. Stopping checkpoints the session and
+  destroys its container (`destroy_after_verified_checkpoint_with` in
+  `mj-controller/src/controller/lifecycle.rs` sets `target = None`; Podman only defers the removal
+  to `cleanup_stopped_target`), and Resume always provisions a new container from the template's
+  current image. So "recreate stopped sessions from the new image" already happens on every resume;
+  the work in Milestone 4 is about sessions that are still running.
+- Observation: `<worker_root>/hel` is the worker's name everywhere. The start command, the relay
+  reconnect (`hel worker proxy`), checkpoint transfer, staged Claude and Kimi MCP commands, and the
+  daemon's process identity (`hel_match="hel worker run --root $hel_root"` in
+  `mj-controller/src/targets/worker_daemon.rs`) all use it, and the worker re-execs itself keeping
+  `argv[0]`. An image worker therefore stays behind a `hel` symbolic link to
+  `/opt/mjolnir/mj-worker` rather than being started by its own path.
+- Observation: the digest-gated recovery refresh hashes `<root>/hel` with `sha256sum`, which follows
+  the link; the image's worker and a host binary of the same build never have the same bytes, so
+  that refresh would copy a host worker over the link. Milestone 5 must keep it away from a
+  container whose worker is the image's.
+- Observation: Restart already has a checkpoint-bound container recreation phase
+  (`SessionRestartPhase::RecreatingContainer`, `restart_recreate_container` in
+  `mj-controller/src/daemon/restart.rs`), driven by `ContainerSettings::recreation_required`, which
+  compares the settings applied when the container was created (`target_runtime.container_settings`)
+  with the requested ones. The image is not part of that comparison yet.
+- Observation: a checkpoint barrier can either interrupt running work (close) or defer while the
+  session works (`BarrierBusyPolicy` in `mj-controller/src/controller/checkpoint/barrier.rs`). An
+  automatic recreation must use the deferring policy so it can never cancel accepted work.
+- Observation: Apple's `container` CLI has no `--format` and no stopped-target recovery plan, so
+  reading the image label from a container's configuration is engine-specific. Asking the image's
+  worker itself (`exec ... /opt/mjolnir/mj-worker worker build-id`) works the same way on every
+  engine and over SSH through `targets::locator_command`.
+
+- Observation: an agent working inside a Mjolnir session inherits `MJ_CONFIG_DIR` and `MJ_DATA_DIR`
+  from its worker, and those override `--instance`, so `mj --instance NAME ...` silently talks to the
+  default instance. Unset both (and `MJ_SESSION_ID`) for every isolated-instance command:
+
+      env -u MJ_CONFIG_DIR -u MJ_DATA_DIR -u MJ_SESSION_ID ./target/debug/mj --instance issue-1139-image daemon status
+
+- Observation: a container session needs its repository to have a network remote; a local-only
+  fixture is refused with "needs valid default network Git remotes". A clone of a small public
+  repository works as the fixture.
 
 ## Decision Log
 
@@ -114,6 +162,36 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
   keeps an installed 14 file loadable. The cost is that an older binary refuses a version-15 file,
   which the version gate already reports as "Update Mjolnir". Date/Author: 2026-10-08, Codex.
 
+- Decision: decide a container's worker after the container exists, by asking the image's worker
+  for its build (`worker build-id`), not from the image label. The image label
+  `org.brokk.mjolnir.worker-build` is still written, and the image build fails unless the compiled
+  worker reports exactly that label, so the two cannot disagree in a published image. Rationale:
+  the binary is the one owner of its own build; the probe is the same on Podman, Docker, Apple
+  `container` and SSH engines; and it distinguishes "no worker" (`absent`) from "a worker that
+  cannot run" (a failed command) instead of reading an empty label as either. Date/Author:
+  2026-10-21, Claude.
+- Decision: link `<root>/hel` to `/opt/mjolnir/mj-worker` with `ln -sfn` instead of starting the
+  image path directly or copying the file inside the container. Rationale: every caller and the
+  process-identity probe keep working unchanged, nothing is duplicated, and the link always names
+  the container's own immutable image. Date/Author: 2026-10-21, Claude.
+- Decision: when the container's image does not carry this `mj`'s worker build, install the host
+  worker exactly as before, still guarded by the #1138 build stamp. Rationale: this is the designed
+  path for custom images and for development builds whose worker differs from master's `:latest`,
+  not a fallback that hides a failure: the invariant that a session's worker is this `mj`'s build
+  holds either way, and when no host worker exists the error names both the image's build and the
+  missing host worker. The release guarantee (the image carries the release's worker) is enforced
+  where it is made, by the image build itself. Date/Author: 2026-10-21, Claude.
+- Decision: the developer loop is the existing host copy-in (`scripts/run.sh` already builds the
+  musl worker beside `mj`), not a locally derived image. Rationale: it needs no image rebuild per
+  edit, and the stamp check already guarantees a development session never runs a stale worker.
+  `scripts/build-agent-dev-image.sh` exists to build the full image from a checkout, with the build
+  identities the worker stage needs. Date/Author: 2026-10-21, Claude.
+- Decision: compile the worker in a builder stage that copies every workspace member, rather than
+  copying a worker the workflow built separately. Rationale: the issue asks for a self-contained
+  image built from the same commit, and Cargo needs every member's sources to resolve the
+  workspace. `.dockerignore` admits exactly the members, and a test keeps both lists equal to
+  `Cargo.toml`. Date/Author: 2026-10-21, Claude.
+
 ## Outcomes & Retrospective
 
 Milestones 1 and 2 are complete. A tagged release now builds and publishes
@@ -141,6 +219,37 @@ master image to prove the registry is reachable is still meaningful.
 The lesson worth keeping: `skip_serializing_if` and the in-place editor do not compose. Any future
 field whose default is meant to be *absent* from an existing file needs a document-level step in
 the save that migrates it, not just a serialization predicate.
+
+Milestone 3 is complete. `containers/Containerfile.agent-dev` has a `worker` stage that compiles
+`mj-worker` for the image's musl target from the build context (every workspace member, admitted by
+`.dockerignore`), refuses to finish unless the compiled worker reports exactly the
+`MJ_WORKER_BUILD_ID` it was given, and copies it to `/opt/mjolnir/mj-worker` as the last filesystem
+layer, labelled `org.brokk.mjolnir.worker-build`. The publish workflow computes the identities with
+`mj-core/worker_build_inputs.py` and rebuilds `:latest` when any worker input changes;
+`scripts/build-agent-dev-image.sh` does the same for a local build. In the controller,
+`WorkerInstall::for_target` (`mj-controller/src/controller/worker_binary/image_worker.rs`) asks a
+container's image worker for its build with the new hidden `worker build-id` command and either
+links `<root>/hel` to it or installs the host worker exactly as before.
+
+Evidence. The worker stage built under Podman and printed the identity this checkout's `mj` uses:
+
+    scripts/build-agent-dev-image.sh podman localhost/mjolnir/agent-dev-worker-stage:issue-1139 --target worker
+    ...
+    Finished `release` profile [optimized] target(s) in 1m 21s
+    2.51.0+2254268f81bbdb9e171fb6ec90e567a59a3337c0
+
+The ignored Docker integration test `a_container_runs_its_images_worker_through_the_hel_link`
+(run with `MJ_WORKER_BINARY` set to that worker and `-- --ignored`) passed: no image worker selects
+the host worker, an unusable one is an error, a matching one is linked, the worker started through
+the link reports this build, and the daemon's liveness probe still recognizes it. A real session in
+the isolated instance `issue-1139-image`, whose Docker target names a derived image
+(`FROM agent-dev:latest` plus that worker and label), ran with
+
+    /var/lib/hel/workers/9311ccf6.../hel -> /opt/mjolnir/mj-worker
+    187 /var/lib/hel/workers/9311ccf6.../hel worker run --root /var/lib/hel/workers/9311ccf6... --config ...
+
+and after `mj suspend` (the container was removed) and `mj resume` it ran in a new container with
+the same link.
 
 ## Context and Orientation
 
@@ -239,8 +348,7 @@ built worker) so a checkout never silently falls back to a stale worker.
 
 ## Concrete Steps
 
-Run all commands from the repository root, `/home/ryansvihla/.codex/worktrees/e7f0/mjolnir`,
-unless a command says otherwise. `cargo` commands normally build for the host; a portable container
+Run all commands from the repository root unless a command says otherwise. `cargo` commands normally build for the host; a portable container
 worker needs an explicit `--target <arch>-unknown-linux-musl`.
 
 Before Milestone 1, read the two workflows end to end so the reusable-workflow edit preserves the
@@ -257,6 +365,26 @@ After Milestone 2, run the focused config and worker-build tests, then the full 
 
     cargo test -p brokk-mj-core config
     cargo clippy --all-targets -- -D warnings
+
+For Milestone 3, build the image's worker stage and a derived test image, then run the Docker
+integration test against that worker:
+
+    scripts/build-agent-dev-image.sh podman localhost/mjolnir/agent-dev-worker-stage:issue-1139 --target worker
+    mkdir -p target/issue-1139
+    podman create --name extract localhost/mjolnir/agent-dev-worker-stage:issue-1139 true
+    podman cp extract:/out/mj-worker target/issue-1139/mj-worker && podman rm extract
+    printf 'FROM ghcr.io/brokkai/mjolnir/agent-dev:latest\nCOPY mj-worker /opt/mjolnir/mj-worker\n' > target/issue-1139/Containerfile
+    docker build -f target/issue-1139/Containerfile -t localhost/mjolnir/agent-dev:issue-1139 target/issue-1139
+    MJ_WORKER_BINARY=$PWD/target/issue-1139/mj-worker cargo test -p brokk-mj-controller a_container_runs_its_images_worker_through_the_hel_link -- --ignored
+
+For a real session, write `~/.config/mjolnir/instances/issue-1139-image/config.toml` with a Codex
+profile, a bundle whose repository has a network remote, and a `docker` target whose `image` is
+`localhost/mjolnir/agent-dev:issue-1139` with `pull_policy = "never"`, then (with the variables above
+unset) create a workspace and a session and check the link:
+
+    mj --instance issue-1139-image workspaces create image-test
+    mj --instance issue-1139-image --workspace image-test new --profile codex --target docker --bundle fixture
+    docker exec <container> readlink /var/lib/hel/workers/<session>/hel   # /opt/mjolnir/mj-worker
 
 Every `cargo test` invocation must run outside the restricted sandbox with elevated permissions:
 the suite uses loopback TCP and Unix sockets and can fail with `EPERM` or hang otherwise. Use an

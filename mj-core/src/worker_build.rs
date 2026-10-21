@@ -19,6 +19,17 @@ pub const WORKER_BUILD_STAMP: &str =
     concat!("\0MJ-WORKER-BUILD:", env!("MJ_WORKER_BUILD_ID"), "\0");
 const PREFIX: &[u8] = b"\0MJ-WORKER-BUILD:";
 
+/// Whether `build` has the shape of a worker compatibility identity: a
+/// package version, `+`, and a 40-digit hexadecimal digest.
+#[must_use]
+pub fn is_worker_build(build: &str) -> bool {
+    build.rsplit_once('+').is_some_and(|(version, revision)| {
+        !version.is_empty()
+            && revision.len() == 40
+            && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
 pub fn worker_build_from_bytes(bytes: &[u8]) -> Result<&str> {
     let mut found = None;
     for offset in memchr::memmem::find_iter(bytes, PREFIX) {
@@ -29,13 +40,7 @@ pub fn worker_build_from_bytes(bytes: &[u8]) -> Result<&str> {
         let Ok(build) = std::str::from_utf8(&tail[..end]) else {
             continue;
         };
-        let Some((version, revision)) = build.rsplit_once('+') else {
-            continue;
-        };
-        if version.is_empty()
-            || revision.len() != 40
-            || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
+        if !is_worker_build(build) {
             continue;
         }
         ensure!(
