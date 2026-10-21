@@ -61,7 +61,9 @@ impl RuntimeState {
                         session_id,
                         cancelled,
                         None,
-                        acknowledge_container_recreation,
+                        RestartRequest::Requested {
+                            acknowledge_container_recreation,
+                        },
                     )
                     .await
             },
@@ -133,10 +135,20 @@ impl RuntimeState {
                     create_control: None,
                     phase: LifecyclePhase::Executing,
                     move_operation_id: None,
+                    deferrable_admission: None,
                 },
                 move |state, session_id, cancelled| async move {
+                    // A recovered intent keeps the rules it was started with,
+                    // including an automatic one's refusal to interrupt work.
                     state
-                        .restart_admitted(session_id, cancelled, Some(intent), false)
+                        .restart_admitted(
+                            session_id,
+                            cancelled,
+                            Some(intent),
+                            RestartRequest::Requested {
+                                acknowledge_container_recreation: false,
+                            },
+                        )
                         .await
                 },
             )?;
@@ -170,16 +182,11 @@ impl RuntimeState {
         session_id: String,
         cancelled: Arc<AtomicBool>,
         recovered: Option<crate::database::SessionRestartIntent>,
-        acknowledge_container_recreation: bool,
+        request: RestartRequest,
     ) -> Result<DaemonLifecycleResult> {
         self.request_close(&session_id);
         let result = self
-            .restart_admitted_inner(
-                &session_id,
-                cancelled,
-                recovered,
-                acknowledge_container_recreation,
-            )
+            .restart_admitted_inner(&session_id, cancelled, recovered, request)
             .await;
         self.clear_close_request(&session_id);
         result
@@ -190,7 +197,7 @@ impl RuntimeState {
         session_id: &str,
         cancelled: Arc<AtomicBool>,
         recovered: Option<crate::database::SessionRestartIntent>,
-        acknowledge_container_recreation: bool,
+        request: RestartRequest,
     ) -> Result<DaemonLifecycleResult> {
         let _recovery_reservation = tokio::task::spawn_blocking({
             let observer = self.recovery_observer.clone();
@@ -215,13 +222,22 @@ impl RuntimeState {
                 blocking({
                     let session_id = session_id.to_owned();
                     let cancelled = cancelled.clone();
-                    move || {
-                        crate::database::begin_session_restart(
+                    move || match request {
+                        RestartRequest::Requested {
+                            acknowledge_container_recreation,
+                        } => crate::database::begin_session_restart(
                             &session_id,
                             &operation_id,
                             cancelled,
                             acknowledge_container_recreation,
-                        )
+                        ),
+                        RestartRequest::Automatic => {
+                            crate::database::begin_automatic_session_restart(
+                                &session_id,
+                                &operation_id,
+                                cancelled,
+                            )
+                        }
                     }
                 })
                 .await?
@@ -299,6 +315,19 @@ impl RuntimeState {
 
         if !restart_checkpoint_matches(&record, &intent) {
             let target = restart_target_availability(&controller, session_id, &executor)?;
+            if fallback_is_safe(target) && intent.automatic {
+                // Falling back resumes the last recovery copy. Only a person
+                // may trade newer work for that; the recovery coordinator owns
+                // a target that went missing.
+                self.release_restart_intent(session_id, &intent.operation_id)
+                    .await?;
+                tracing::info!(
+                    %session_id,
+                    ?target,
+                    "automatic container recreation stood down: the target is unavailable"
+                );
+                return Ok(DaemonLifecycleResult::Done);
+            }
             if fallback_is_safe(target) {
                 ensure!(
                     !intent.checkpoint_started,
@@ -334,15 +363,33 @@ impl RuntimeState {
             })
             .await?;
             tracing::info!(%session_id, "Restart selected in-place checkpoint and restore");
-            controller
+            let suspended = controller
                 .suspend_session_for_restart(
                     session_id,
                     &executor,
                     &self.session_manager,
-                    Some(self.stop_subagents_before_close(session_id)),
+                    Some(if intent.automatic {
+                        self.keep_subagents_before_close(session_id)
+                    } else {
+                        self.stop_subagents_before_close(session_id)
+                    }),
+                    intent.automatic,
                 )
-                .await
-                .context("checkpoint and seal session for Restart")?;
+                .await;
+            if let Err(error) = suspended {
+                if intent.automatic && crate::controller::checkpoint_was_deferred(&error) {
+                    // The session went back to work. Nothing was sealed, so the
+                    // intent goes too; the upgrade coordinator tries again later.
+                    self.release_restart_intent(session_id, &intent.operation_id)
+                        .await?;
+                    tracing::info!(
+                        %session_id,
+                        "automatic container recreation stood down: the session is working"
+                    );
+                    return Ok(DaemonLifecycleResult::Done);
+                }
+                return Err(error.context("checkpoint and seal session for Restart"));
+            }
             controller = tokio::task::spawn_blocking(Controller::load)
                 .await
                 .context("reload controller after Restart checkpoint")??;
@@ -662,6 +709,111 @@ impl RuntimeState {
             .await?;
         let _ = materialized;
         Ok(())
+    }
+}
+
+/// Who asked for a Restart. It decides only how a new intent is recorded;
+/// a recovered intent carries its own answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RestartRequest {
+    /// A person asked, and saw the recreation warning when one applied.
+    Requested {
+        acknowledge_container_recreation: bool,
+    },
+    /// An upgrade recreates the container from the image this Mjolnir names.
+    Automatic,
+}
+
+/// How an automatic container recreation ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ContainerRecreationOutcome {
+    /// The session runs in a new container from this Mjolnir's image.
+    Recreated,
+    /// Nothing changed: the session was working, another lifecycle owned it,
+    /// a handoff was draining, or its target was unavailable.
+    StoodDown,
+}
+
+impl RuntimeState {
+    /// Recreate a session's container from the image this Mjolnir names,
+    /// because an upgrade moved its default image. Nobody asked for this, so
+    /// it is admitted only while no handoff drains, waits for nothing that
+    /// is already running, and never interrupts work (see [`RestartRequest`]).
+    pub(crate) async fn recreate_container_for_upgrade(
+        self: &Arc<Self>,
+        session_id: String,
+    ) -> Result<ContainerRecreationOutcome> {
+        let workspace_id = blocking({
+            let session_id = session_id.clone();
+            move || {
+                Controller::load()?
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .map(|session| session.workspace_id.clone())
+                    .with_context(|| format!("unknown session {session_id}"))
+            }
+        })
+        .await?;
+        let Ok(_workspace_admission) = self.workspace_resume_gate(&workspace_id).try_read_owned()
+        else {
+            return Ok(ContainerRecreationOutcome::StoodDown);
+        };
+        if self.owner().lifecycle.contains_key(&session_id) {
+            return Ok(ContainerRecreationOutcome::StoodDown);
+        }
+        let admitted = self.admit_lifecycle(
+            session_id.clone(),
+            LifecycleKind::Restart,
+            super::lifecycle::LifecycleStart {
+                resume_workspace_id: None,
+                request_key: None,
+                create_control: None,
+                phase: LifecyclePhase::Executing,
+                move_operation_id: None,
+                deferrable_admission: Some("upgrade container recreation"),
+            },
+            move |state, session_id, cancelled| async move {
+                state
+                    .restart_admitted(session_id, cancelled, None, RestartRequest::Automatic)
+                    .await
+            },
+        );
+        let operation = match admitted {
+            Ok(operation) => operation,
+            // Refused admission, while a handoff drains or another lifecycle
+            // took the session first, changes nothing.
+            Err(error) => {
+                tracing::debug!(
+                    %session_id,
+                    error = format!("{error:#}"),
+                    "automatic container recreation was not admitted"
+                );
+                return Ok(ContainerRecreationOutcome::StoodDown);
+            }
+        };
+        let completed = operation.clone();
+        let outcome = Self::wait_lifecycle_result(operation).await;
+        self.remove_completed_lifecycle(&completed);
+        outcome?;
+        // The record owns the answer: a recreated container was created from
+        // this Mjolnir's default image, and one that stood down was not.
+        let moved = blocking({
+            let session_id = session_id.clone();
+            move || {
+                Ok(Controller::load()?
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .is_some_and(mj_core::state::ContainerSettings::default_image_moved))
+            }
+        })
+        .await?;
+        Ok(if moved {
+            ContainerRecreationOutcome::StoodDown
+        } else {
+            ContainerRecreationOutcome::Recreated
+        })
     }
 }
 

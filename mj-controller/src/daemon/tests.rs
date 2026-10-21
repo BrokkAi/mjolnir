@@ -123,6 +123,7 @@ fn restart_recovery_requires_the_checkpoint_bound_to_its_intent() {
         checkpoint_sha256: None,
         checkpoint_started: true,
         container_recreation_acknowledged: true,
+        automatic: false,
     };
 
     assert!(!restart::restart_checkpoint_matches(&record, &intent));
@@ -6493,6 +6494,7 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
                     create_control: None,
                     phase: LifecyclePhase::Executing,
                     move_operation_id: Some(id.into()),
+                    deferrable_admission: None,
                 },
                 move |_, _, _| async move {
                     released.notified().await;

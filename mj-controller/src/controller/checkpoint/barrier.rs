@@ -78,7 +78,9 @@ pub(super) enum BarrierBusyPolicy {
 impl BarrierBusyPolicy {
     pub(super) fn of(exclusivity: LatchExclusivity) -> Self {
         match exclusivity {
-            LatchExclusivity::ReleaseAfterLatch => Self::DeferWhileRunning,
+            LatchExclusivity::ReleaseAfterLatch | LatchExclusivity::HoldThroughIdleClose => {
+                Self::DeferWhileRunning
+            }
             LatchExclusivity::HoldThroughClose => Self::InterruptWhileRunning,
         }
     }
@@ -301,6 +303,15 @@ pub struct CheckpointDeferred(String);
 impl CheckpointDeferred {
     pub fn harness_busy() -> Self {
         Self("the agent is working; try again when it is idle".to_owned())
+    }
+
+    /// An automatic close keeps sub-agents, and the container it would
+    /// recreate still holds one.
+    pub fn sub_agents_in_container() -> Self {
+        Self(
+            "a sub-agent still has its worker in this container; try again once it has stopped"
+                .to_owned(),
+        )
     }
 
     pub(super) fn background_work() -> Self {

@@ -131,6 +131,18 @@ pub(in crate::controller) enum LatchExclusivity {
     /// Close seals the relay at the exact latched cursor, so nothing else may
     /// reach the relay between the barrier and its Close command.
     HoldThroughClose,
+    /// A close nobody asked for, such as recreating a container after an
+    /// upgrade. It holds the relay through Close like [`Self::HoldThroughClose`],
+    /// but only on a session with nothing to lose: it defers instead of
+    /// interrupting work, and it never restarts the worker.
+    HoldThroughIdleClose,
+}
+
+impl LatchExclusivity {
+    /// Whether this checkpoint keeps its connection until the relay is sealed.
+    pub(in crate::controller) fn holds_through_close(self) -> bool {
+        matches!(self, Self::HoldThroughClose | Self::HoldThroughIdleClose)
+    }
 }
 
 /// Whether a latched checkpoint must export a fresh archive.

@@ -6,6 +6,10 @@ pub(super) struct LifecycleStart {
     pub(super) create_control: Option<CreateSessionControl>,
     pub(super) phase: LifecyclePhase,
     pub(super) move_operation_id: Option<String>,
+    /// Admit this operation only while no handoff drains, under this label.
+    /// Work nobody asked for, which the next daemon starts again, uses it;
+    /// anything a person asked for holds the handoff instead.
+    pub(super) deferrable_admission: Option<&'static str>,
 }
 
 impl RuntimeState {
@@ -80,6 +84,7 @@ impl RuntimeState {
                 create_control,
                 phase: LifecyclePhase::Executing,
                 move_operation_id: None,
+                deferrable_admission: None,
             },
             work,
         )
@@ -102,6 +107,7 @@ impl RuntimeState {
             create_control,
             mut phase,
             move_operation_id,
+            deferrable_admission,
         } = start;
         let mut work = Some(work);
         let mut superseded_restart_intent = None;
@@ -155,7 +161,9 @@ impl RuntimeState {
             } else {
                 // A destroy is waited for by a stop or handoff, up to a bound;
                 // other lifecycles hold the handoff until they finish.
-                let admitted = if kind == LifecycleKind::StartupCleanup {
+                let admitted = if let Some(label) = deferrable_admission {
+                    crate::upgrade::activity_unless_draining(label)?
+                } else if kind == LifecycleKind::StartupCleanup {
                     crate::upgrade::activity_unless_draining("failed startup cleanup")?
                 } else if kind == LifecycleKind::ForceDestroy {
                     crate::upgrade::destroy_activity(&session_id)?

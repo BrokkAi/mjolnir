@@ -18,7 +18,7 @@ impl Controller {
             manager,
             exclusivity,
             export_policy,
-            exclusivity == LatchExclusivity::HoldThroughClose,
+            exclusivity.holds_through_close(),
             requested_operation_id,
             held_relay,
         )
@@ -259,8 +259,14 @@ impl Controller {
                     prepared: false,
                     messages: &RESTART_FOR_CHECKPOINT,
                 },
-                exclusivity == LatchExclusivity::HoldThroughClose
-                    || session.harness_kind != HarnessKind::Kimi,
+                // An automatic close is not worth restarting a worker for.
+                match exclusivity {
+                    LatchExclusivity::HoldThroughClose => true,
+                    LatchExclusivity::HoldThroughIdleClose => false,
+                    LatchExclusivity::ReleaseAfterLatch => {
+                        session.harness_kind != HarnessKind::Kimi
+                    }
+                },
                 held_relay,
             )
             .await?;
@@ -303,6 +309,17 @@ impl Controller {
                             RelayCommand::CancelTurn,
                         )
                         .await?;
+                }
+            }
+            if exclusivity == LatchExclusivity::HoldThroughIdleClose {
+                // Ask the predicate the upgrade observer asked, again, before
+                // opening a barrier: the session can start working after the
+                // observation, and an automatic close must not wait behind
+                // that work or interrupt it.
+                let snapshot = relay.connection_mut().sync().await?;
+                if !snapshot.operational.safe_to_replace(session.harness_kind) {
+                    relay.release();
+                    return Err(CheckpointDeferred::harness_busy().into());
                 }
             }
             if exclusivity == LatchExclusivity::ReleaseAfterLatch {
@@ -357,7 +374,9 @@ impl Controller {
             match result {
                 Ok(barrier) => break (barrier, barrier_command_id),
                 Err(error)
-                    if !restarted_worker && checkpoint_barrier_needs_worker_restart(&error) =>
+                    if !restarted_worker
+                        && exclusivity != LatchExclusivity::HoldThroughIdleClose
+                        && checkpoint_barrier_needs_worker_restart(&error) =>
                 {
                     if exclusivity == LatchExclusivity::ReleaseAfterLatch
                         && matches!(session.harness_kind, HarnessKind::Kimi | HarnessKind::Codex)
@@ -417,6 +436,17 @@ impl Controller {
                 Err(error) => return Err(error),
             }
         };
+        if exclusivity == LatchExclusivity::HoldThroughIdleClose {
+            // The barrier freezes new turns, but background commands and
+            // agent terminals run on. Tearing the target down would end them,
+            // so an automatic close lets go instead.
+            let mut settled = barrier.operational.clone();
+            settled.checkpoint_barrier = None;
+            if !settled.safe_to_replace(session.harness_kind) {
+                relay.cancel_abandoned_barrier().await?;
+                return Err(CheckpointDeferred::harness_busy().into());
+            }
+        }
         let barrier_ready_at = Instant::now();
         // Project memory is checkpoint state, not relay connection state.
         // Reconcile it once while the checkpoint barrier keeps the harness

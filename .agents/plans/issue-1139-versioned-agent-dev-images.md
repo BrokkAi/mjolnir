@@ -53,11 +53,14 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
       the default to this build's, so Restart offers recreation once an upgrade moved it, and
       `default_image_moved` names that case. Breaking migration 87 (older writers would drop the
       field). Restart confirmation wording updated in the TUI, the web viewer and both goldens.
-- [ ] Milestone 4, second part: a quiet session whose worker is stale because its default image
-      moved is recreated automatically through Restart's container recreation, with a checkpoint
-      that defers instead of interrupting work and never restarts the worker, and a durable
-      "automatic" marker so a recovered intent keeps those rules; the worker-upgrade coordinator
-      owns the retry policy for it.
+- [x] (2026-10-21 15:05Z) Milestone 4, second part: a quiet session whose worker is stale because
+      its default image moved is recreated automatically through Restart's container recreation.
+      Its checkpoint uses the new `LatchExclusivity::HoldThroughIdleClose`, which defers instead of
+      interrupting work and never restarts the worker; a durable `automatic` column on Restart
+      intents (breaking migration 88) keeps those rules for a recovered intent; the worker-upgrade
+      coordinator returns `WorkerUpgradeOutcome::RecreateContainer` instead of copying a worker in
+      and owns the retry policy through `ContainerRecreationReport`. Validated by two new tests and
+      an isolated-instance upgrade from a fake release A to a fake release B (see Outcomes).
 - [ ] Milestone 5: no in-place worker replacement for a container whose default image moved;
       preflight lets a release's own image supply the worker without a host copy; `mj doctor`
       reports which image and worker a container target would use and why; documentation.
@@ -210,6 +213,47 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
   rewrites that JSON without the new field, after which the container would never be recognized as
   due for recreation. Date/Author: 2026-10-21, Claude.
 
+- Decision: recreate a running session's container automatically, once it is quiet, through the
+  existing Restart recreation phase rather than a new path. Rationale: the issue asks for "the next
+  time they stop or go idle", and Restart already owns a checkpoint-bound, durable,
+  handoff-recoverable recreation (`SessionRestartPhase::RecreatingContainer`). Stopped sessions need
+  nothing: they have no container, and Resume provisions from the new image. Date/Author:
+  2026-10-21, Claude.
+- Decision: express "never interrupt work" as a third latch mode,
+  `LatchExclusivity::HoldThroughIdleClose`, instead of a separate busy-policy argument. Rationale:
+  every place that already branches on the latch mode had to decide the automatic case anyway
+  (interrupt or defer at the barrier, restart an unresponsive worker or not, cancel a capacity
+  retry or not); one enum keeps those decisions in one vocabulary. It asks
+  `RelayOperationalState::safe_to_replace`, the predicate the upgrade observer used, both before
+  opening the barrier and again once it is ready, because background commands run on under a
+  barrier. Date/Author: 2026-10-21, Claude.
+- Decision: store `automatic` on the Restart intent (migration 88, breaking) rather than keeping it
+  in memory. Rationale: a handoff or crash mid-recreation is recovered from the intent by the next
+  daemon; without the marker it would be recovered as a Restart a person asked for and could
+  interrupt a turn the worker started meanwhile. Date/Author: 2026-10-21, Claude.
+- Decision: the coordinator keeps the retry policy; the daemon runs the recreation and reports back
+  through `WorkerUpgradeObserver::report_recreation`. Rationale: the recreation must run outside the
+  coordinator's attempt (Restart reserves the same recovery gate the attempt holds), but one owner
+  must decide when the next attempt is due. A stand-down waits like a deferral, a failure takes the
+  widening backoff, and `recreation_pending` blocks attempts until the report arrives. Date/Author:
+  2026-10-21, Claude.
+- Decision: decide "recreated or stood down" from the durable record
+  (`ContainerSettings::default_image_moved` after the lifecycle finished), not from a new lifecycle
+  result variant. Rationale: the record is the owner of the fact the coordinator acts on, and the
+  answer is then the same whichever path (including a joined Restart) ended the operation.
+  Date/Author: 2026-10-21, Claude.
+- Decision: an automatic recreation keeps sub-agents. It stands down while any child of the session
+  still has a target, checked in the before-close hook under the checkpoint barrier. Rationale: a
+  person's Restart stops children, but children's workers (parked ones included) live in the
+  parent's container, and an automatic operation must not end work nobody chose to end. Under the
+  barrier the parent cannot start another child, so the check cannot race. Date/Author: 2026-10-21,
+  Claude.
+- Decision: admit an automatic recreation with `activity_unless_draining("upgrade container
+  recreation")` (the new `LifecycleStart::deferrable_admission`). Rationale: AGENTS.md requires
+  deferrable work to be refused while a handoff drains. Once admitted it holds admission until it
+  finishes, as a person's Restart does, because after the old container is retired the operation
+  must complete; see Outcomes for this limitation. Date/Author: 2026-10-21, Claude.
+
 ## Outcomes & Retrospective
 
 Milestones 1 and 2 are complete. A tagged release now builds and publishes
@@ -268,6 +312,31 @@ the isolated instance `issue-1139-image`, whose Docker target names a derived im
 
 and after `mj suspend` (the container was removed) and `mj resume` it ran in a new container with
 the same link.
+
+Milestone 4 is complete. Evidence from the isolated instance `issue-1139-upgrade`, using two fake
+releases built from this tree: release A (`MJ_AGENT_DEV_IMAGE=localhost/mjolnir/agent-dev:issue-1139-a`,
+`MJ_WORKER_INPUTS_ID=aaaa...`) and release B (image `...-b`, inputs `bbbb...`), each image derived
+from `agent-dev:latest` plus its own worker and label. A session created under A ran from image A
+with `hel -> /opt/mjolnir/mj-worker` and recorded `default_image: localhost/mjolnir/agent-dev:issue-1139-a`.
+After `mj daemon restart` from build B:
+
+    15:00:38 state=running    image=localhost/mjolnir/agent-dev:issue-1139-a
+    15:00:44 state=suspending image=localhost/mjolnir/agent-dev:issue-1139-a
+    15:00:57 state=suspending image=
+    15:01:03 state=running    image=localhost/mjolnir/agent-dev:issue-1139-b
+
+The new container's `hel` links to image B's worker, which reports `2.51.0+bbbb...`; the record
+names image B; no Restart intent and no error remain; and the daemon log shows
+"Restart is recreating the container" followed by "recreated the session container from this
+Mjolnir's image", with no worker upload. The busy case is covered by
+`an_automatic_restart_stands_down_instead_of_cancelling_a_running_turn`, which drives a real relay
+actor against a stand-in worker holding a running turn, and the retry policy by
+`a_recreation_holds_further_attempts_until_the_daemon_reports_it`.
+
+Limitation: once admitted, an automatic recreation holds daemon handoff admission until it
+finishes, like a person's Restart, and exporting a large workspace can take minutes. It is only
+started after a handoff and is refused while one drains, so this matters only for two upgrades in
+quick succession.
 
 ## Context and Orientation
 

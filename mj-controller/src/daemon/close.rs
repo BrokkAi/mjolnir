@@ -197,6 +197,40 @@ impl RuntimeState {
 
     /// [`Self::stop_subagents_for_suspend`] as the step a close runs once the
     /// parent's checkpoint is verified.
+    /// An automatic close keeps every sub-agent. Their workers run in this
+    /// session's container, so it stands down while any child still has a
+    /// target. It runs under the checkpoint barrier, when the parent cannot
+    /// start another child.
+    pub(super) fn keep_subagents_before_close(
+        self: &Arc<Self>,
+        parent_session_id: &str,
+    ) -> BeforeClose {
+        let state = Arc::clone(self);
+        let parent_session_id = parent_session_id.to_owned();
+        Box::pin(async move {
+            let occupied = {
+                let owner = state.owner();
+                let sessions = &owner.controller().state;
+                sessions
+                    .subagents
+                    .values()
+                    .filter(|child| child.parent_session_id == parent_session_id)
+                    .any(|child| {
+                        sessions
+                            .sessions
+                            .get(&child.child_session_id)
+                            .is_some_and(|session| session.target.is_some())
+                    })
+            };
+            if occupied {
+                return Err(
+                    crate::controller::CheckpointDeferred::sub_agents_in_container().into(),
+                );
+            }
+            Ok(())
+        })
+    }
+
     pub(super) fn stop_subagents_before_close(
         self: &Arc<Self>,
         parent_session_id: &str,

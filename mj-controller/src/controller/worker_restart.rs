@@ -121,6 +121,10 @@ pub enum WorkerUpgradeOutcome {
     /// The session was working when the upgrade reached it. A worker restart
     /// would have killed that work, so nothing was touched.
     Deferred,
+    /// The worker came with an older Mjolnir's default image. Its container is
+    /// recreated from the image this Mjolnir names instead of having a worker
+    /// copied in; the daemon owns that recreation, so nothing was touched here.
+    RecreateContainer,
 }
 
 impl WorkerUpgradeOutcome {
@@ -130,7 +134,7 @@ impl WorkerUpgradeOutcome {
     pub fn build(&self) -> Option<&str> {
         match self {
             Self::Upgraded { build } | Self::AlreadyCurrent { build } => Some(build),
-            Self::Deferred => None,
+            Self::Deferred | Self::RecreateContainer => None,
         }
     }
 }
@@ -166,12 +170,22 @@ impl Controller {
             .into_iter()
             .next()
             .context("reconnect plan is empty")?;
-        let binary = worker_binary_for(&backend, executor)
-            .context("resolve the worker binary this controller would install")?;
         let installed = mj_core::worker_build::WORKER_BUILD_ID.to_owned();
         if worker_runs_installed_build(reported_build, &installed) {
             return Ok(WorkerUpgradeOutcome::AlreadyCurrent { build: installed });
         }
+        if self
+            .state
+            .sessions
+            .get(session_id)
+            .is_some_and(mj_core::state::ContainerSettings::default_image_moved)
+        {
+            // Nothing is patched into a container an upgrade left behind: its
+            // image, tools and worker are all an older release's.
+            return Ok(WorkerUpgradeOutcome::RecreateContainer);
+        }
+        let binary = worker_binary_for(&backend, executor)
+            .context("resolve the worker binary this controller would install")?;
 
         // Preparation can download a managed harness. Keep the old worker and
         // its controls available for all of it; reserve only for the swap.

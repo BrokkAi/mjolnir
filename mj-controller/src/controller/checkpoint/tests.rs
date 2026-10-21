@@ -3375,6 +3375,20 @@ async fn close_cut_controller(
     crate::session_manager::SessionManagerChannels,
     ManagedSessionHandle,
 ) {
+    close_cut_controller_with(state, false).await
+}
+
+/// [`close_cut_controller`], with the stand-in worker holding a running turn
+/// when `running`.
+#[cfg(unix)]
+async fn close_cut_controller_with(
+    state: SessionState,
+    running: bool,
+) -> (
+    Controller,
+    crate::session_manager::SessionManagerChannels,
+    ManagedSessionHandle,
+) {
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_secs(120));
         eprintln!("the suspend never finished");
@@ -3460,7 +3474,7 @@ async fn close_cut_controller(
             &relay_root,
             None,
             ReleaseSupport::Supported,
-            false,
+            running,
         )])
         .unwrap();
     let handle = channels
@@ -3517,6 +3531,61 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
     }
     assert_eq!(record.state, SessionState::Stopped);
     assert_eq!(record.last_error, None);
+}
+
+/// The container recreation an upgrade starts on its own may never cancel
+/// accepted work. Over a running turn its checkpoint stands down before any
+/// barrier is admitted: the turn keeps running (the stand-in worker would
+/// clear it on `CancelTurn`), the session stays live, and nothing is
+/// recorded as a failure.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_automatic_restart_stands_down_instead_of_cancelling_a_running_turn() {
+    if !in_close_cut_child(
+        "an_automatic_restart_stands_down_instead_of_cancelling_a_running_turn",
+        LATE_HARNESS_NOTIFICATION,
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (mut controller, channels, handle) =
+        close_cut_controller_with(SessionState::Running, true).await;
+    wait_until_the_actor_serves_again(&handle).await;
+    let error = controller
+        .suspend_session_for_restart(
+            LATCH_RELAY_SESSION,
+            &SucceedingExecutor,
+            &channels.control,
+            None,
+            true,
+        )
+        .await
+        .expect_err("an automatic restart must not close over a running turn");
+    assert!(
+        crate::controller::checkpoint_was_deferred(&error),
+        "the stand-down is a deferral, not a failure: {error:#}"
+    );
+    handle.sync_now().await.unwrap();
+    let snapshot = handle.view().snapshot.expect("live relay view");
+    assert_eq!(
+        snapshot
+            .operational
+            .active_prompt
+            .as_ref()
+            .map(|prompt| prompt.command_id.as_str()),
+        Some("seed-running-prompt"),
+        "the running turn was interrupted"
+    );
+    assert!(snapshot.operational.checkpoint_barrier.is_none());
+    let stored = crate::database::load_session_record(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    for record in [&controller.state.sessions[LATCH_RELAY_SESSION], &stored] {
+        assert_eq!(record.state, SessionState::Running);
+        assert_eq!(record.last_error, None);
+        assert_eq!(record.last_checkpoint_error, None);
+    }
+    channels.shutdown.shutdown().await.unwrap();
 }
 
 /// A failed suspend can leave an `Error` record and no relay worker while its
@@ -3598,7 +3667,13 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
         ..Default::default()
     };
     controller
-        .suspend_session_for_restart(LATCH_RELAY_SESSION, &executor, &channels.control, None)
+        .suspend_session_for_restart(
+            LATCH_RELAY_SESSION,
+            &executor,
+            &channels.control,
+            None,
+            false,
+        )
         .await
         .unwrap();
     restore_actor.await.unwrap();
