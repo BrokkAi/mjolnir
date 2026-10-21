@@ -99,7 +99,8 @@ pub(in crate::controller) fn bridge_launch(
             vec![
                 "-c".into(),
                 format!(
-                    "if command -v opencode >/dev/null 2>&1; then exec opencode acp; elif [ -x \"$HOME/.opencode/bin/opencode\" ]; then exec \"$HOME/.opencode/bin/opencode\" acp; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://opencode.ai/install | bash -s -- --version {OPENCODE_VERSION} --no-modify-path >&2 && exec \"$HOME/.opencode/bin/opencode\" acp; else echo 'Mjolnir needs compatible OpenCode or curl for its official installer; add the tool to PATH' >&2; exit 127; fi"
+                    "if command -v opencode >/dev/null 2>&1; then opencode=opencode; elif [ -x \"$HOME/.opencode/bin/opencode\" ]; then opencode=\"$HOME/.opencode/bin/opencode\"; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://opencode.ai/v2/install | bash -s -- --version {OPENCODE_VERSION} --no-modify-path >&2 || exit; opencode=\"$HOME/.opencode/bin/opencode\"; else echo 'Mjolnir needs compatible OpenCode or curl for its official installer; add the tool to PATH' >&2; exit 127; fi; {}",
+                    mj_core::harness_runtime::opencode_acp_script()
                 ),
             ],
         ),
@@ -192,7 +193,9 @@ const HARNESS_CLI_MISSING_STATUS: i32 = 3;
 
 pub(super) const MJ_CONTAINER_ENVIRONMENT: &str = "## Mjolnir disposable environment\n\nThis session runs in a disposable Mjolnir container. When the session closes, Mjolnir checkpoints everything in project workspace directories under `/workspace`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then removes the container.\n\nEverything outside `/workspace`, including installed packages, `$HOME`, and `/tmp`, is ephemeral and will be lost. Keep durable results in the workspace or push them to a remote.\n\nNew workspaces start on their own session branch from the default network fetch remote’s default branch. Local unpublished commits and uncommitted files are not copied. Use normal git push to publish the current branch to the configured network push destination. Closing saves a checkpoint; it does not publish commits or update the original local checkout. Resumed sessions restore their saved work.\n";
 
-pub(in crate::controller) fn stage_profile(
+/// The profile's own files only. Outside this module, stage through
+/// [`stage_profile_with_catalog`].
+pub(super) fn stage_profile(
     profile: &mj_core::config::HarnessProfile,
     destination: &Path,
 ) -> Result<()> {
@@ -226,15 +229,9 @@ pub(in crate::controller) fn stage_profile(
             "plugins",
         ],
         mj_core::config::HarnessKind::Grok => &["auth.json", "config.toml", "agent_id", "plugins"],
-        mj_core::config::HarnessKind::OpenCode => {
-            // OpenCode keeps its login in the data directory beside the
-            // configuration directory both share as a root.
-            &[
-                "opencode.json",
-                "opencode.jsonc",
-                ".data/opencode/auth.json",
-            ]
-        }
+        // OpenCode's logins live in its database, not its configuration
+        // directory; they are exported below.
+        mj_core::config::HarnessKind::OpenCode => &["opencode.json", "opencode.jsonc"],
     };
     let allowlist: Vec<&str> = harness_files
         .iter()
@@ -272,12 +269,21 @@ pub(in crate::controller) fn stage_profile(
             )
         })?;
     }
+    if harness == mj_core::config::HarnessKind::OpenCode
+        && let Some(logins) = crate::opencode_logins::profile_logins(profile)?
+    {
+        mj_core::config::atomic_write(&destination.join(harness.credential_file_name()), &logins)
+            .context("stage OpenCode logins")?;
+    }
     // `muse serve` never fetches its model list: it reads the list the
     // person's own `muse` last saved in its data directory, and without one
     // offers only its built-in model. A staged home starts with empty data, so
     // it gets that saved list.
     if harness == mj_core::config::HarnessKind::Muse {
-        let catalog = muse_data_dir(source).join("model-catalog");
+        let catalog = harness
+            .nested_data_dir(source)
+            .expect("Muse has an XDG home")
+            .join("model-catalog");
         if catalog.exists() {
             copy_profile_entry(&catalog, &destination.join(".data/muse/model-catalog"))?;
         }
@@ -285,30 +291,18 @@ pub(in crate::controller) fn stage_profile(
     Ok(())
 }
 
-/// Where Muse keeps its data for the configured home `home`. The person's own
-/// home (`$XDG_CONFIG_HOME/muse` or `~/.config/muse`) pairs with Muse's own
-/// data directory, `$XDG_DATA_HOME/muse` or `~/.local/share/muse`; any other
-/// home is one Mjolnir runs Muse against with its data under `<home>/.data`.
-fn muse_data_dir(home: &Path) -> PathBuf {
-    let kind = mj_core::config::HarnessKind::Muse;
-    let absolute = |name: &str| {
-        std::env::var_os(name)
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-    };
-    let user_home = mj_core::path_input::user_home();
-    let own_home = absolute("XDG_CONFIG_HOME")
-        .map(|config| kind.home_from_environment(config))
-        .or_else(|| {
-            user_home
-                .as_ref()
-                .map(|user| user.join(kind.default_home_leaf()))
-        });
-    if own_home.as_deref() != Some(home) {
-        return home.join(".data").join(kind.id());
-    }
-    absolute("XDG_DATA_HOME")
-        .or_else(|| user_home.map(|user| user.join(".local/share")))
-        .unwrap_or_else(|| home.join(".data"))
-        .join(kind.id())
+/// Stage `profile` into `destination` for one harness run, together with the
+/// model catalog of its Codex provider. Every staged copy outside this module
+/// goes through here, so a session, a reviewer and a capability probe all
+/// offer the same models: a reviewer staged without the catalog offered
+/// OpenAI's built-in model names on a DeepSeek profile (#1320).
+pub(in crate::controller) fn stage_profile_with_catalog(
+    profile_id: &str,
+    profile: &mj_core::config::HarnessProfile,
+    destination: &Path,
+    fetch: CatalogFetch<'_>,
+    cache: &dyn CatalogCache,
+) -> Result<()> {
+    stage_profile(profile, destination)?;
+    stage_codex_catalog(profile_id, profile, destination, fetch, cache)
 }

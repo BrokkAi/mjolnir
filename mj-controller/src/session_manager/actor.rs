@@ -1240,12 +1240,14 @@ impl std::fmt::Display for NotSent {
 
 impl std::error::Error for NotSent {}
 
+/// Mailbox admission declined before sending. The text is the reason the
+/// outbox logs while the event waits.
 #[derive(Debug)]
-struct MailboxAdmissionDeferred;
+struct MailboxAdmissionDeferred(&'static str);
 
 impl std::fmt::Display for MailboxAdmissionDeferred {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("mailbox delivery is deferred or already terminal")
+        f.write_str(self.0)
     }
 }
 
@@ -1308,7 +1310,10 @@ pub(super) async fn submit_actor_command(
                 crate::database::MailboxDeliveryState::Accepted(ordinal) => return Ok(ordinal),
                 crate::database::MailboxDeliveryState::Discarded
                 | crate::database::MailboxDeliveryState::Failed(_) => {
-                    return Err(MailboxAdmissionDeferred.into());
+                    return Err(MailboxAdmissionDeferred(
+                        "the event is already discarded or failed",
+                    )
+                    .into());
                 }
                 crate::database::MailboxDeliveryState::Pending => {}
             }
@@ -1319,7 +1324,9 @@ pub(super) async fn submit_actor_command(
                 .clear_context_started_at_ms
                 .is_some()
             {
-                return Err(MailboxAdmissionDeferred.into());
+                return Err(
+                    MailboxAdmissionDeferred("the worker reports a /clear in progress").into(),
+                );
             }
         }
         if connection.is_none()

@@ -20,6 +20,7 @@ fn request(kind: ElicitationFieldKind, required: bool) -> ElicitationRequest {
             custom_answer_option: None,
             kind,
         }],
+        tool_permission: None,
     }
 }
 
@@ -86,6 +87,7 @@ fn paired_request(question_count: usize, multi_select: bool) -> ElicitationReque
         title: None,
         description: None,
         fields,
+        tool_permission: None,
     }
 }
 
@@ -481,6 +483,7 @@ fn append_elicitation_golden_state(
 }
 
 // Hard-won: #1265: async Codex questions must expose both suggested and custom answers.
+// Hard-won: #1312: Claude's Other dropped the picks beside it and a required Codex question's own field.
 #[test]
 fn golden_elicitation_dialog() {
     let mut output = String::new();
@@ -509,6 +512,281 @@ fn golden_elicitation_dialog() {
         &buffer,
         &[],
     );
+    billing.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    billing.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    billing.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    billing.paste("BedrockCI");
+    let answer = billing
+        .handle_key(KeyCode::Enter, KeyModifiers::NONE)
+        .expect("the last answer submits the form");
+    append_elicitation_golden_state(
+        &mut output,
+        "Codex answers as submitted and as the harness receives them",
+        &rendered_in_pane(&billing, 100, 20),
+        &[
+            format!("submitted: {answer:?}"),
+            format!(
+                "harness: {:?}",
+                billing.request.harness_response(answer.clone())
+            ),
+        ],
+    );
+
+    // Recorded ACP form from claude-agent-acp 0.90.0 for an Air client
+    // (`askUserQuestionsToCreateRequest`): a single-select and a
+    // multi-select question, each with its "Other" companion.
+    let mut claude = ElicitationDialog::new(
+        ElicitationRequest::from_acp_params(
+            "claude-questions",
+            serde_json::from_str(include_str!("testdata/claude-ask-user-question.json")).unwrap(),
+        )
+        .unwrap(),
+    );
+    let buffer = rendered_in_pane(&claude, 100, 20);
+    append_elicitation_golden_state(
+        &mut output,
+        "Claude optional question starts with nothing picked",
+        &buffer,
+        &[],
+    );
+    // Pick first, then write: arrows to the text box under the choices pass
+    // Memcached without picking it, and the pick stays Redis.
+    claude.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+    claude.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    claude.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    claude.paste("Keep TTLs short");
+    let buffer = rendered_in_pane(&claude, 100, 20);
+    append_elicitation_golden_state(
+        &mut output,
+        "Claude pick kept while writing Other",
+        &buffer,
+        &[],
+    );
+    claude.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    claude.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+    claude.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    claude.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+    claude.handle_key(KeyCode::End, KeyModifiers::NONE);
+    claude.paste("freebsd");
+    let buffer = rendered_in_pane(&claude, 100, 20);
+    append_elicitation_golden_state(
+        &mut output,
+        "Claude multi-select picks with Other text",
+        &buffer,
+        &[],
+    );
+    let answer = claude
+        .handle_key(KeyCode::Enter, KeyModifiers::NONE)
+        .expect("the last answer submits the form");
+    append_elicitation_golden_state(
+        &mut output,
+        "Claude answers as submitted and as the harness receives them",
+        &rendered_in_pane(&claude, 100, 20),
+        &[
+            format!("submitted: {answer:?}"),
+            format!(
+                "harness: {:?}",
+                claude.request.harness_response(answer.clone())
+            ),
+        ],
+    );
+    // With nothing picked, the text alone is the whole answer, also when the
+    // arrows pass every option on the way to it.
+    let mut own = ElicitationDialog::new(claude.request.clone());
+    own.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    own.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    for character in "Valkey".chars() {
+        own.handle_key(KeyCode::Char(character), KeyModifiers::NONE);
+    }
+    let buffer = rendered_in_pane(&own, 100, 20);
+    own.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    own.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    assert!(
+        own.confirming_unanswered,
+        "the targets question is unanswered"
+    );
+    own.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    let answer = own
+        .handle_key(KeyCode::Char(' '), KeyModifiers::NONE)
+        .expect("submitting with an unanswered question still answers");
+    append_elicitation_golden_state(
+        &mut output,
+        "Claude Other text reached with arrows picks nothing on the way",
+        &buffer,
+        &[format!("submitted: {answer:?}")],
+    );
+
+    // A click or Space toggles an option: it picks it, replacing any other
+    // pick, and takes back the option already picked. A mouse-only answer
+    // can therefore still end with nothing picked.
+    let page_answer = |dialog: &ElicitationDialog| format!("{:?}", dialog.question_content(0));
+    // Clicks on a fixed clock, each well past the double-click interval.
+    let start = std::time::Instant::now();
+    let later = |clicks: u32| start + crate::components::DOUBLE_CLICK_INTERVAL * 3 * clicks;
+    let mut toggles = ElicitationDialog::new(claude.request.clone());
+    let mut steps = Vec::new();
+    for (click, (label, step)) in [
+        ("click Redis", "Redis"),
+        ("click Memcached", "Memcached"),
+        ("click Memcached again, later", "Memcached"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        click_question_button_at(&mut toggles, step, later(click as u32));
+        steps.push(format!("{label}: {}", page_answer(&toggles)));
+    }
+    toggles.handle_key(KeyCode::Up, KeyModifiers::NONE);
+    toggles.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+    steps.push(format!("Space on Redis: {}", page_answer(&toggles)));
+    toggles.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+    steps.push(format!("Space on Redis again: {}", page_answer(&toggles)));
+    click_question_button_at(&mut toggles, "Other", later(3));
+    toggles.paste("Valkey");
+    steps.push(format!(
+        "click Other, write Valkey: {}",
+        page_answer(&toggles)
+    ));
+    append_elicitation_golden_state(
+        &mut output,
+        "Claude clicks and Space toggle the pick",
+        &rendered_in_pane(&toggles, 100, 20),
+        &steps,
+    );
+
+    // A double-click on an option is an activation, as on any other list:
+    // the option ends picked and the question is answered. A real
+    // double-click lands twice on one screen cell, and the first click moves
+    // the cursor, which reflows the rows below it, so the second click lands
+    // on whatever row now occupies that cell. Starting from the default
+    // cursor on Redis, that is Other on the recorded form and Dragonfly once
+    // a third option follows Memcached.
+    let mut with_dragonfly: serde_json::Value =
+        serde_json::from_str(include_str!("testdata/claude-ask-user-question.json")).unwrap();
+    with_dragonfly["requestedSchema"]["properties"]["question_0"]["oneOf"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "const": "Dragonfly",
+            "title": "Dragonfly",
+            "description": "Redis-compatible, multi-threaded"
+        }));
+    let mut steps = Vec::new();
+    let mut double = ElicitationDialog::new(claude.request.clone());
+    for (label, request) in [
+        ("recorded form", claude.request.clone()),
+        (
+            "with Dragonfly after Memcached",
+            ElicitationRequest::from_acp_params("claude-questions", with_dragonfly).unwrap(),
+        ),
+    ] {
+        double = ElicitationDialog::new(request);
+        let (column, row) = label_cell(&double, "Memcached");
+        let first = start + crate::components::DOUBLE_CLICK_INTERVAL * 3;
+        click_cell_at(&mut double, column, row, first);
+        let redrawn = rendered_in_pane(&double, 110, 22);
+        let under_cell = buffer_row(&redrawn, row, 0, redrawn.area.width)
+            .trim_matches(|character: char| character == '│' || character.is_whitespace())
+            .to_owned();
+        let response = click_cell_at(
+            &mut double,
+            column,
+            row,
+            first + crate::components::DOUBLE_CLICK_INTERVAL / 2,
+        );
+        steps.push(format!(
+            "{label}: second click lands on {under_cell:?}; {}, answered={}, now on question {}, response={response:?}",
+            page_answer(&double),
+            double.confirmed.contains(&0),
+            double.current_question + 1,
+        ));
+    }
+    append_elicitation_golden_state(
+        &mut output,
+        "Claude double-click picks the option and answers",
+        &rendered_in_pane(&double, 100, 20),
+        &steps,
+    );
+
+    // Enter answers with what is already there. It takes the option under
+    // the cursor only when the question would otherwise be empty.
+    let mut empty = ElicitationDialog::new(claude.request.clone());
+    empty.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    empty.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    let mut written = ElicitationDialog::new(claude.request.clone());
+    written.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    written.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    written.paste("Valkey");
+    written.handle_key(KeyCode::Up, KeyModifiers::NONE);
+    let buffer = rendered_in_pane(&written, 100, 20);
+    written.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    append_elicitation_golden_state(
+        &mut output,
+        "Claude Enter on an option answers with what is there",
+        &buffer,
+        &[
+            format!(
+                "Enter on Memcached, nothing picked, Other blank: {}",
+                page_answer(&empty)
+            ),
+            format!(
+                "Enter on Memcached, nothing picked, Other holds Valkey: {}",
+                page_answer(&written)
+            ),
+        ],
+    );
+
+    // Tool permissions share the three form actions; rejection is chosen
+    // from their permission options. Preserve the harness response semantics
+    // for one-time rejection and persistent network rules.
+    for (label, id, message, options, skip) in [
+        (
+            "Claude permission form uses the same three actions",
+            "tool-permission-1",
+            "Claude Code requests permission:\nRun cargo test",
+            serde_json::json!([
+                {"const": "allow-once", "title": "Yes"},
+                {"const": "allow-with-updates", "title": "Yes, and don't ask again for `cargo test` commands"},
+                {"const": "reject", "title": "No"}
+            ]),
+            true,
+        ),
+        (
+            "persistent permission form uses the same three actions",
+            "tool-permission-2",
+            "Codex requests permission:\nReach crates.io",
+            serde_json::json!([
+                {"const": "network_policy_amendment:0", "title": "Yes, and allow this host in the future"},
+                {"const": "network_policy_amendment:1", "title": "No, and block this host in the future"}
+            ]),
+            false,
+        ),
+    ] {
+        let mut request = ElicitationRequest::from_acp_params(
+            id,
+            serde_json::json!({
+                "mode": "form", "sessionId": "session-1",
+                "message": message,
+                "requestedSchema": {"type": "object", "required": ["choice"], "properties": {
+                    "choice": {"type": "string", "title": "Permission", "oneOf": options}
+                }}
+            }),
+        )
+        .unwrap();
+        request.tool_permission = Some(mj_core::elicitation::ToolPermissionForm { skip });
+        let dialog = ElicitationDialog::new(request);
+        append_elicitation_golden_state(
+            &mut output,
+            label,
+            &rendered_in_pane(&dialog, 100, 14),
+            &[format!(
+                "skip: {:?}",
+                dialog
+                    .request
+                    .harness_response(ElicitationResponse::Decline)
+            )],
+        );
+    }
 
     let mut smallest = ElicitationDialog::new(paired_request(1, true));
     smallest.handle_key(KeyCode::End, KeyModifiers::NONE);
@@ -793,6 +1071,7 @@ fn component_form() -> ElicitationRequest {
                 },
             },
         ],
+        tool_permission: None,
     }
 }
 
@@ -1037,25 +1316,54 @@ fn click_question_button(
     dialog: &mut ElicitationDialog,
     label: &str,
 ) -> Option<ElicitationResponse> {
+    click_question_button_at(dialog, label, std::time::Instant::now())
+}
+
+/// Clicks `label` at an explicit time, so two clicks are a double-click
+/// exactly when the test places them within the interval.
+fn click_question_button_at(
+    dialog: &mut ElicitationDialog,
+    label: &str,
+    now: std::time::Instant,
+) -> Option<ElicitationResponse> {
+    let (column, row) = label_cell(dialog, label);
+    click_cell_at(dialog, column, row, now)
+}
+
+/// The screen cell where `label` starts once the dialog is drawn.
+fn label_cell(dialog: &ElicitationDialog, label: &str) -> (u16, u16) {
     let buffer = rendered_in_pane(dialog, 110, 22);
-    let (column, row) = (0..buffer.area.height)
+    (0..buffer.area.height)
         .find_map(|row| {
             let line = buffer_row(&buffer, row, 0, buffer.area.width);
             line.find(label)
                 .map(|byte| (line[..byte].chars().count() as u16, row))
         })
-        .expect("button rendered");
+        .expect("label rendered")
+}
+
+/// Presses and releases the left button on one screen cell, as a real
+/// click does, whatever is drawn there.
+fn click_cell_at(
+    dialog: &mut ElicitationDialog,
+    column: u16,
+    row: u16,
+    now: std::time::Instant,
+) -> Option<ElicitationResponse> {
     let mut response = None;
     for kind in [
         MouseEventKind::Down(MouseButton::Left),
         MouseEventKind::Up(MouseButton::Left),
     ] {
-        response = dialog.handle_mouse(MouseEvent {
-            kind,
-            column,
-            row,
-            modifiers: KeyModifiers::NONE,
-        });
+        response = dialog.handle_mouse_at(
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            now,
+        );
     }
     response
 }

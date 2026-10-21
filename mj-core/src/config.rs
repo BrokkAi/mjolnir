@@ -600,7 +600,7 @@ pub struct Config {
     pub version: u32,
     /// Client-side activity animation; omitted configurations retain the classic scan.
     pub spinner: SpinnerStyle,
-    pub theme: UiTheme,
+    pub theme: ThemeChoice,
     pub phone: PhoneConfig,
     pub github: GithubConfig,
     pub review: ReviewConfig,
@@ -641,8 +641,8 @@ struct StoredConfig {
     version: u32,
     #[serde(default, skip_serializing_if = "SpinnerStyle::is_default")]
     spinner: SpinnerStyle,
-    #[serde(default, skip_serializing_if = "UiTheme::is_default")]
-    theme: UiTheme,
+    #[serde(default, skip_serializing_if = "ThemeChoice::is_default")]
+    theme: ThemeChoice,
     #[serde(default, skip_serializing_if = "PhoneConfig::is_default")]
     phone: PhoneConfig,
     #[serde(default, skip_serializing_if = "GithubConfig::is_default")]

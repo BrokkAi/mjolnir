@@ -455,8 +455,16 @@ impl SessionCanonical {
         github_token: Option<&str>,
     ) -> Result<Self> {
         let credential_path = harness_authentication_marker(target.harness, &target.profile_home);
-        let (credential, credential_bytes) =
-            read_credential_file(target.harness, &credential_path)?;
+        // A login database is read where the harness keeps it; the profile
+        // home holds no copy of it.
+        let (credential, credential_bytes) = if target.harness.keeps_logins_in_database() {
+            match crate::opencode_logins::home_logins(&target.profile_home)? {
+                Some(bytes) => (CredentialSnapshot::of(target.harness, &bytes), bytes),
+                None => (CredentialSnapshot::absent(), Vec::new()),
+            }
+        } else {
+            read_credential_file(target.harness, &credential_path)?
+        };
         Ok(Self {
             credential_path,
             credential,
@@ -624,6 +632,13 @@ pub(super) async fn reconcile_credentials(
     actions: &mut Vec<CredentialSyncAction>,
 ) -> Result<()> {
     let session = client.credential_state().await?;
+    if target.harness.keeps_logins_in_database() {
+        if let Some(bytes) = stored_logins_push(canonical, canonical_bytes, &session) {
+            client.install_credentials(bytes).await?;
+            actions.push(CredentialSyncAction::Pushed);
+        }
+        return Ok(());
+    }
     match reconcile(canonical, &session) {
         SyncAction::None => {
             if canonical.present
@@ -661,6 +676,32 @@ pub(super) async fn reconcile_credentials(
         }
     }
     Ok(())
+}
+
+/// The export of a profile with no logins.
+const NO_STORED_LOGINS: &[u8] = b"[]";
+
+/// What to push to a session whose staged logins are `session`, when the
+/// profile's login database exports `canonical` (`bytes`); `None` when the
+/// session already holds them. The database is the profile's only copy, so a
+/// session's copy is never pulled, and a session staged while the profile had
+/// no logins holds no export, which is the same as an empty one.
+pub(crate) fn stored_logins_push<'a>(
+    canonical: &CredentialSnapshot,
+    bytes: &'a [u8],
+    session: &CredentialSnapshot,
+) -> Option<&'a [u8]> {
+    let wanted: &'a [u8] = if canonical.present {
+        bytes
+    } else {
+        NO_STORED_LOGINS
+    };
+    let current = if session.present {
+        session.fingerprint == mj_core::credentials::credential_fingerprint(wanted)
+    } else {
+        !canonical.present
+    };
+    (!current).then_some(wanted)
 }
 
 pub(super) async fn reconcile_github_token(

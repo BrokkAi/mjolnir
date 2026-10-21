@@ -26,6 +26,7 @@ fn changed_delta() -> Vec<RepoDelta> {
             ..Default::default()
         }],
         merged_in: Vec::new(),
+        unattributed: None,
     }]
 }
 
@@ -39,6 +40,7 @@ fn empty_delta() -> Vec<RepoDelta> {
         changed_lines: 0,
         files: Vec::new(),
         merged_in: Vec::new(),
+        unattributed: None,
     }]
 }
 
@@ -138,6 +140,7 @@ fn a_workspace_with_no_baseline_starts_coverage_rather_than_reviewing_nothing() 
         changed_lines: 0,
         files: Vec::new(),
         merged_in: Vec::new(),
+        unattributed: None,
     }]);
     assert_eq!(
         driver.phase(),

@@ -313,7 +313,7 @@ closing a session after capture and continuing it later is scriptable:
 `mj suspend --session <id>`, then `mj resume --session <id>` when you want it
 back. The command answers as soon as the daemon has taken the session; `mj wait`
 blocks while the resume runs and reports the reason if it fails. Afterwards
-`mj set-config` and `mj prompt` work as they do for any live session. The same
+`mj set-config`, `mj prompt` and `mj message` work as they do for any live session. The same
 operation is `POST /api/v1/sessions/{id}/resume` in the
 [HTTP API](/api-reference/#resume-a-suspended-session).
 

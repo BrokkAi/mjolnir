@@ -5689,14 +5689,46 @@ function elicitationFieldValue(field, control) {
   if (field.kind === 'number') return Number(control.value);
   return control.value;
 }
+// The radio value of a single-select's free-text alternative. It picks no
+// option: the companion text is the answer. The unit separator keeps it apart
+// from any option value an agent sends.
+const FREE_TEXT_CHOICE = '\u001ffree-text';
+// `custom_answer_option` of a companion that goes beside any pick, as
+// `mj_core::elicitation::COMPANION_ALONGSIDE` defines it.
+const COMPANION_ALONGSIDE = '\u001falongside';
+// How a select's companion text field takes part in its answer, as
+// `ElicitationField::companion_role` decides it.
+function companionRole(field) {
+  if (field.custom_answer_option == null) return 'alternative';
+  return field.custom_answer_option === COMPANION_ALONGSIDE ? 'alongside' : 'detail';
+}
 // Build logical question pages and collect only the requested pages as ACP
-// content. A custom answer replaces its choice group unless the request pairs
-// it with one specific option, matching the terminal form's response shape.
+// content. Every field sends its own value; the daemon and worker decide how
+// the harness reads a pick and its companion together
+// (`ElicitationRequest::harness_response`). A free-text alternative replaces
+// the pick, text beside a pick is sent with it, and detail tied to one option
+// is sent with that option.
 function buildElicitationForm(form, request, register, onEdit) {
+  const fields = request.fields || [];
+  // A select's companion: the first text field whose `custom_answer_for`
+  // names it. This mirrors `ElicitationRequest::companion` in mj-core
+  // exactly, which the daemon, worker and terminal form use; keep the two
+  // rules identical.
+  const companions = new Map();
+  for (const field of fields) {
+    if (field.kind !== 'single_select' && field.kind !== 'multi_select') continue;
+    const companion = fields.find(
+      candidate => candidate.kind === 'text' && candidate.custom_answer_for === field.id,
+    );
+    if (companion) companions.set(field.id, companion);
+  }
   const entries = [],
     customByOwner = new Map();
-  for (const field of request.fields || []) {
+  for (const field of fields) {
     const isChoice = field.kind === 'single_select' || field.kind === 'multi_select';
+    const companion = companions.get(field.id);
+    const role = companion ? companionRole(companion) : undefined;
+    const freeTextRadio = field.kind === 'single_select' && role === 'alternative';
     // A fieldset contains its own option labels. Keeping its outer wrapper a
     // div avoids invalid nested labels and preserves one target per option.
     const wrapper = document.createElement(isChoice ? 'div' : 'label');
@@ -5706,9 +5738,13 @@ function buildElicitationForm(form, request, register, onEdit) {
     if (isChoice) {
       control = choiceControl({
         label: `${field.title}${field.required ? ' *' : ''}`,
-        options: (field.kind === 'single_select' && !field.required
-          ? [{ value: '', title: 'No answer' }, ...(field.options || [])]
-          : field.options || []).map(option => ({
+        options: [
+          ...(field.kind === 'single_select' && !field.required
+            ? [{ value: '', title: 'No answer' }]
+            : []),
+          ...(field.options || []),
+          ...(freeTextRadio ? [{ value: FREE_TEXT_CHOICE, title: companion.title }] : []),
+        ].map(option => ({
           value: option.value,
           title: elicitationOptionLabel(option),
           description: option.description,
@@ -5727,16 +5763,26 @@ function buildElicitationForm(form, request, register, onEdit) {
       });
       const validateTarget = control.querySelector('input');
       validateChoices = () => {
-        if (field.kind !== 'multi_select' || !validateTarget) return;
         const custom = customByOwner.get(field.id);
-        // An unpaired free-text answer replaces this choice field. Its value
-        // must be able to satisfy a required group without a phantom native
-        // selection, while a cleared value puts the constraints back.
-        if (custom && custom.control.value.trim() !== '' && custom.field.custom_answer_option == null) {
+        if (field.kind === 'single_select') {
+          // The free-text alternative of a required question needs its text.
+          if (custom && role === 'alternative') {
+            custom.control.required =
+              Boolean(field.required) &&
+              control.querySelector('input:checked')?.value === FREE_TEXT_CHOICE;
+          }
+          return;
+        }
+        if (field.kind !== 'multi_select' || !validateTarget) return;
+        const count = control.querySelectorAll('input:checked').length;
+        const text = custom && role !== 'detail' && custom.control.value.trim() !== '';
+        // A free-text alternative replaces the picks. Text beside the picks
+        // answers alone when nothing is picked; picks sent with it keep their
+        // own limits.
+        if (text && (role === 'alternative' || count === 0)) {
           validateTarget.setCustomValidity('');
           return;
         }
-        const count = control.querySelectorAll('input:checked').length;
         const minimum = field.required ? Math.max(1, field.min_items ?? 1) : field.min_items;
         const few = minimum != null && (field.required || count > 0) && count < minimum;
         const many = field.max_items != null && count > field.max_items;
@@ -5771,23 +5817,25 @@ function buildElicitationForm(form, request, register, onEdit) {
     entries.push({ field, control, wrapper, validateChoices });
   }
   for (const entry of entries) {
-    const owner = entry.field.custom_answer_for;
-    if (!owner || entry.field.kind !== 'text' || customByOwner.has(owner)) continue;
-    const target = entries.find(candidate => candidate.field.id === owner);
-    if (!target || !Array.isArray(target.field.options)) continue;
-    customByOwner.set(owner, entry);
+    if (companions.get(entry.field.custom_answer_for) === entry.field)
+      customByOwner.set(entry.field.custom_answer_for, entry);
   }
   // Custom text changes can make the owner group valid or invalid before the
   // user submits it. Keep browser validity and the visible choices in sync.
   for (const entry of entries) {
-    if (entry.field.kind === 'multi_select') entry.validateChoices();
+    entry.validateChoices();
     const owner = entry.field.custom_answer_for;
-    if (!owner || entry.field.kind !== 'text') continue;
+    if (customByOwner.get(owner) !== entry) continue;
     const target = entries.find(candidate => candidate.field.id === owner);
-    if (target?.field.kind === 'multi_select') {
-      entry.control.addEventListener('input', target.validateChoices);
-      entry.control.addEventListener('change', target.validateChoices);
-    }
+    // Writing a free-text alternative chooses it as the answer.
+    const freeTextInput = [...target.control.querySelectorAll('input')].find(
+      input => input.value === FREE_TEXT_CHOICE,
+    );
+    entry.control.addEventListener('input', () => {
+      if (freeTextInput && entry.control.value.trim() !== '') freeTextInput.checked = true;
+      target.validateChoices();
+    });
+    entry.control.addEventListener('change', target.validateChoices);
   }
   const questions = entries
     .filter(entry => customByOwner.get(entry.field.custom_answer_for) !== entry)
@@ -5801,6 +5849,15 @@ function buildElicitationForm(form, request, register, onEdit) {
     question.wrapper.addEventListener('input', () => onEdit(index));
     question.wrapper.addEventListener('change', () => onEdit(index));
   });
+  // Whether `entry`'s free-text alternative is the answer in place of its
+  // choices: its radio for a single-select, its text for a multi-select.
+  const alternativeAnswers = entry => {
+    const custom = customByOwner.get(entry.field.id);
+    if (!custom || companionRole(custom.field) !== 'alternative') return false;
+    if (entry.field.kind === 'single_select')
+      return entry.control.querySelector('input:checked')?.value === FREE_TEXT_CHOICE;
+    return custom.control.value !== '';
+  };
   // Validate only participating questions. Hidden, unanswered controls must
   // neither block the current page nor leak suggested defaults into content.
   const collect = indices => {
@@ -5809,13 +5866,13 @@ function buildElicitationForm(form, request, register, onEdit) {
       if (entry.field.kind === 'text') entry.control.value = entry.control.value.trim();
       entry.validateChoices();
     }
-    const active = new Map();
-    for (const [owner, entry] of customByOwner)
-      if (included.has(entry) && entry.control.value !== '') active.set(owner, entry);
     const restored = [];
     for (const entry of entries) {
-      const custom = active.get(entry.field.id);
-      const omit = !included.has(entry) || (custom && custom.field.custom_answer_option == null);
+      // A multi-select replaced by its free-text alternative must not block
+      // the page with its own limits.
+      const omit =
+        !included.has(entry) ||
+        (entry.field.kind === 'multi_select' && alternativeAnswers(entry));
       const controls = entry.control.matches('input')
         ? [entry.control] : [...entry.control.querySelectorAll('input')];
       for (const input of controls) {
@@ -5829,12 +5886,25 @@ function buildElicitationForm(form, request, register, onEdit) {
     const content = {};
     for (const entry of included) {
       const { field, control } = entry;
-      if (customByOwner.get(field.custom_answer_for) === entry) {
-        if (active.has(field.custom_answer_for)) content[field.id] = control.value;
+      const owner = questions.find(question => question.entries[1] === entry)?.entries[0];
+      if (owner) {
+        const role = companionRole(field);
+        // A free-text alternative counts only while it is the answer.
+        if (control.value !== '' && (role !== 'alternative' || alternativeAnswers(owner)))
+          content[field.id] = control.value;
         continue;
       }
-      const custom = active.get(field.id);
-      if (custom && custom.field.custom_answer_option == null) continue;
+      if (alternativeAnswers(entry)) continue;
+      const custom = customByOwner.get(field.id);
+      // Text beside nothing picked is the whole answer.
+      if (
+        field.kind === 'multi_select' &&
+        custom &&
+        companionRole(custom.field) === 'alongside' &&
+        custom.control.value !== '' &&
+        !control.querySelector('input:checked')
+      )
+        continue;
       const value = elicitationFieldValue(field, control);
       if (value !== undefined) content[field.id] = value;
     }
@@ -6066,9 +6136,7 @@ function renderElicitations(session) {
     cards.push(entry.card);
   }
   for (const key of [...elicitationCards.keys()]) if (!live.has(key)) elicitationCards.delete(key);
-  const mounted = [...elicitations.children];
-  if (mounted.length !== cards.length || cards.some((card, index) => mounted[index] !== card))
-    elicitations.replaceChildren(...cards);
+  reconcileChildren(elicitations, cards);
 }
 async function submitElicitation(sessionId, elicitationId, response) {
   const key = elicitationKey(sessionId, elicitationId);
@@ -7083,10 +7151,17 @@ function renderDiffStats(diffstats) {
   return list;
 }
 
+/// When the entry happened. A tool call that ran for a minute or more shows
+/// when it started and ended; a shorter one shows only when it started.
 function entryTimestamp(entry) {
   if (!entry.recorded_at_ms) return null;
-  const node = el('time', 'entry-time', new Date(entry.recorded_at_ms).toLocaleTimeString());
-  node.setAttribute('datetime', new Date(entry.recorded_at_ms).toISOString());
+  const started = new Date(entry.recorded_at_ms);
+  let text = started.toLocaleTimeString();
+  if (entry.tool_ended_at_ms && entry.tool_ended_at_ms - entry.recorded_at_ms >= 60_000) {
+    text += `–${new Date(entry.tool_ended_at_ms).toLocaleTimeString()}`;
+  }
+  const node = el('time', 'entry-time', text);
+  node.setAttribute('datetime', started.toISOString());
   return node;
 }
 

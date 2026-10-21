@@ -206,6 +206,14 @@ impl ExecutionEnforcement {
     }
 }
 
+/// An XDG base directory variable's value, when it names an absolute path.
+/// XDG requires a relative value to be ignored.
+fn absolute_environment_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
 /// The file inside a harness home that proves the harness is logged in.
 ///
 /// Setup, quota checks, credential sync, and the target-side worker all read
@@ -252,16 +260,58 @@ impl HarnessKind {
     /// live in the home ([`HarnessKind::keeps_login_in_home`]), the variable is
     /// left unset, so the command finds the login and the settings the person
     /// signed in with. Setting it there could only move the command off those
-    /// settings.
+    /// settings. The same holds for the person's own XDG home
+    /// ([`HarnessKind::is_own_nested_home`]): the harness already resolves it
+    /// with its data directory beside it, and the `<home>/.data` layout of a
+    /// staged home would move the login out of the person's own data.
     pub fn configure_profile_home_environment(
         self,
         home: &Path,
         host: HarnessHost,
         environment: &mut BTreeMap<String, String>,
     ) {
-        if self.keeps_login_in_home(host) {
+        if self.keeps_login_in_home(host) && !self.is_own_nested_home(home) {
             self.configure_home_environment(home, environment);
         }
+    }
+
+    /// Whether `home` is the person's own home for a harness with an XDG home
+    /// ([`HarnessKind::nested_home`]): `$XDG_CONFIG_HOME/<id>`, or
+    /// `~/.config/<id>` when that variable is unset or relative, as XDG
+    /// requires.
+    pub fn is_own_nested_home(self, home: &Path) -> bool {
+        if !self.nested_home() {
+            return false;
+        }
+        let own = absolute_environment_path("XDG_CONFIG_HOME")
+            .map(|config| self.home_from_environment(config))
+            .or_else(|| {
+                crate::path_input::user_home().map(|user| user.join(self.default_home_leaf()))
+            });
+        own.as_deref() == Some(home)
+    }
+
+    /// Where a harness with an XDG home ([`HarnessKind::nested_home`]) keeps
+    /// its data for the home `home`. The person's own home pairs with the
+    /// person's own data directory, `$XDG_DATA_HOME/<id>` or
+    /// `~/.local/share/<id>`; any other home is one Mjolnir runs the harness
+    /// against, with its data under `<home>/.data/<id>`
+    /// ([`HarnessKind::configure_home_environment`]). `None` for a harness
+    /// whose data lives in its home.
+    pub fn nested_data_dir(self, home: &Path) -> Option<PathBuf> {
+        if !self.nested_home() {
+            return None;
+        }
+        let staged = || home.join(".data").join(self.id());
+        if !self.is_own_nested_home(home) {
+            return Some(staged());
+        }
+        Some(
+            absolute_environment_path("XDG_DATA_HOME")
+                .or_else(|| crate::path_input::user_home().map(|user| user.join(".local/share")))
+                .map(|data| data.join(self.id()))
+                .unwrap_or_else(staged),
+        )
     }
 
     /// Whether this harness keeps its login inside its home on `host`, so that
@@ -329,6 +379,11 @@ impl HarnessKind {
 
     /// The harness-home-relative file that proves the harness is logged in.
     /// Join it onto a home with [`harness_authentication_marker`].
+    ///
+    /// OpenCode 2 keeps its logins in its database rather than a file
+    /// ([`AuthScheme::NativeLoginStore`]); this names the file a staged home
+    /// carries them in, the JSON array `opencode auth export` prints, which
+    /// every launch imports ([`crate::harness_runtime::opencode_acp_script`]).
     pub const fn credential_file_name(self) -> &'static str {
         match self {
             Self::Codex => "auth.json",
@@ -336,8 +391,16 @@ impl HarnessKind {
             Self::Kimi => "credentials/kimi-code.json",
             Self::Grok => "auth.json",
             Self::Muse => "auth.json",
-            Self::OpenCode => ".data/opencode/auth.json",
+            Self::OpenCode => ".data/opencode/mjolnir-credentials.json",
         }
+    }
+
+    /// Whether this harness keeps its logins in its own database rather than a
+    /// file Mjolnir can copy (OpenCode 2). Staging exports them into the
+    /// staged home, the credential sync pushes a changed export to live
+    /// sessions, and each launch imports it.
+    pub const fn keeps_logins_in_database(self) -> bool {
+        matches!(self, Self::OpenCode)
     }
 
     /// Whether sessions on this machine can share the profile's own login
@@ -908,6 +971,9 @@ impl HarnessProfile {
     /// `config.toml`; that file is copied into the staged home, so the profile
     /// is just as set up as an `env_key` one and needs no interactive login.
     pub fn auth_scheme(&self) -> AuthScheme {
+        if self.kind.keeps_logins_in_database() {
+            return AuthScheme::NativeLoginStore;
+        }
         if self.kind == HarnessKind::Claude
             && self
                 .environment
@@ -965,14 +1031,19 @@ impl HarnessProfile {
 
     /// The file inside this profile's home that proves it is authenticated.
     /// An API-key profile is proven by its Codex `config.toml`, whether the key
-    /// lives in the profile environment or inline in that file.
+    /// lives in the profile environment or inline in that file. A login kept
+    /// in the harness's database ([`AuthScheme::NativeLoginStore`]) has no
+    /// such file in the profile home; this names where a staged home carries
+    /// it.
     pub fn authentication_marker(&self) -> PathBuf {
         match self.auth_scheme() {
             AuthScheme::ApiKey { .. }
             | AuthScheme::InlineApiKey
             | AuthScheme::AwsCredentialChain
             | AuthScheme::NoAuthentication => self.home.join("config.toml"),
-            AuthScheme::NativeLogin => harness_authentication_marker(self.kind, &self.home),
+            AuthScheme::NativeLogin | AuthScheme::NativeLoginStore => {
+                harness_authentication_marker(self.kind, &self.home)
+            }
         }
     }
 
@@ -983,7 +1054,8 @@ impl HarnessProfile {
             AuthScheme::ApiKey { .. }
             | AuthScheme::InlineApiKey
             | AuthScheme::AwsCredentialChain
-            | AuthScheme::NoAuthentication => None,
+            | AuthScheme::NoAuthentication
+            | AuthScheme::NativeLoginStore => None,
             AuthScheme::NativeLogin => crate::credentials::credential_freshness(self.kind, bytes),
         }
     }
@@ -994,7 +1066,8 @@ impl HarnessProfile {
             AuthScheme::ApiKey { .. }
             | AuthScheme::InlineApiKey
             | AuthScheme::AwsCredentialChain
-            | AuthScheme::NoAuthentication => None,
+            | AuthScheme::NoAuthentication
+            | AuthScheme::NativeLoginStore => None,
             AuthScheme::NativeLogin => crate::credentials::credential_expiry(self.kind, bytes),
         }
     }
@@ -1186,6 +1259,13 @@ fn normalized_base_url(base_url: &str) -> String {
 pub enum AuthScheme {
     /// The harness's own login writes a credential file into the profile home.
     NativeLogin,
+    /// The harness's own login keeps its credentials in the harness's own
+    /// database, beside the session history in the same file
+    /// ([`HarnessKind::keeps_logins_in_database`]). Staging exports them into
+    /// each session home, where every launch imports them; the credential
+    /// sync pushes a changed export, and the session reloads to import it. A
+    /// session's copy is never pulled back.
+    NativeLoginStore,
     /// A long-lived API key supplied through this environment variable.
     ApiKey { env_key: String },
     /// A long-lived API key written into the profile's own harness
@@ -1205,6 +1285,12 @@ impl AuthScheme {
     /// Whether this profile uses the harness's own login file.
     pub const fn uses_native_login_file(&self) -> bool {
         matches!(self, Self::NativeLogin)
+    }
+
+    /// Whether the credential sync exchanges this profile's login with its
+    /// sessions: a login file both ways, a login database by push.
+    pub const fn syncs_login(&self) -> bool {
+        matches!(self, Self::NativeLogin | Self::NativeLoginStore)
     }
 }
 

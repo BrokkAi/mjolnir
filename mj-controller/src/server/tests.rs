@@ -816,10 +816,10 @@ fn sample_elicitation() -> ElicitationRequest {
                     "question_0_custom": {
                         "type": "string",
                         "title": "Other",
-                        "_meta": {"_askUserQuestionCustomAnswer": {
+                        "_meta": {"jetbrains": {"air": {"version": 1, "customAnswer": {
                             "questionId": "question_0",
                             "isCustomAnswer": true
-                        }}
+                        }}}}
                     }
                 }
             }
@@ -917,8 +917,8 @@ fn elicitation_answers_are_checked_against_the_request_the_agent_asked() {
     assert!(validate_action(&respond(accept(&[("question_0", "cron")])), &snapshot).is_err());
     assert!(validate_action(&respond(accept(&[("smuggled", "yes")])), &snapshot).is_err());
     assert!(validate_action(&respond(accept(&[])), &snapshot).is_err());
-    // A custom answer stands in for the select it belongs to, exactly as
-    // the chat form submits it.
+    // A free-text answer answers the select it belongs to, exactly as the
+    // chat form submits it; the harness then gets it in the select's field.
     assert!(
         validate_action(
             &respond(accept(&[("question_0_custom", "a monorepo pipeline")])),
@@ -2162,9 +2162,13 @@ fn no_web_module_builds_markup_from_a_string() {
 // Hard-won: a6567c51: snapshot polling erased typed elicitation answers before submission.
 #[test]
 fn embedded_viewer_keeps_elicitation_answers_across_snapshot_polls() {
-    let source = viewer_source(
-        "const elicitationCards = new Map()",
-        "async function submitElicitation",
+    let source = format!(
+        "{}\n{}",
+        viewer_source("function reconcileChildren(", "function epochMs("),
+        viewer_source(
+            "const elicitationCards = new Map()",
+            "async function submitElicitation",
+        ),
     );
     let dom = r#"
 let replaceCalls = 0;
@@ -2190,6 +2194,18 @@ append(...kids) {
 replaceChildren(...kids) {
   replaceCalls += 1;
   this.children = kids;
+},
+removeChild(child) {
+  replaceCalls += 1;
+  this.children.splice(this.children.indexOf(child), 1);
+  return child;
+},
+insertBefore(child, reference) {
+  if (this.children.includes(child)) this.removeChild(child);
+  replaceCalls += 1;
+  const index = reference == null ? this.children.length : this.children.indexOf(reference);
+  this.children.splice(index, 0, child);
+  return child;
 },
 addEventListener() {},
 setAttribute(name, value) { this[name] = value; },
@@ -3241,6 +3257,7 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
                 role: "user",
                 label: "You".into(),
                 recorded_at_ms: None,
+                tool_ended_at_ms: None,
                 lines: vec!["retained history ".repeat(10_000)],
                 mailbox_events: Vec::new(),
                 glyph: "\u{276f}",
@@ -3256,6 +3273,7 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
                 role: "agent",
                 label: "Agent".into(),
                 recorded_at_ms: None,
+                tool_ended_at_ms: None,
                 lines: vec!["live".into()],
                 mailbox_events: Vec::new(),
                 glyph: "\u{25cf}",
@@ -3337,6 +3355,7 @@ async fn conversation_endpoint_rejects_cached_transcript_during_transition() {
             role: "agent",
             label: "Agent".into(),
             recorded_at_ms: None,
+            tool_ended_at_ms: None,
             lines: vec!["stale".into()],
             mailbox_events: Vec::new(),
             glyph: "●",

@@ -2,9 +2,9 @@ target readiness request: Some(CheckTargetReadiness { generation: 1, target_ids:
 checked target ids: ["docker", "podman", "sandbox"]
 === Targets hides unavailable defaults (160x40) ===
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                         ☰ ││                                                                                                         │
+│ default                                         ≡ ││                                                                                                         │
 ╰───────────────────────────────────────────────────╯│                                                                                                         │
-╭ Sessions ────────────────────────────── ▁   ▪   □ ╮│                                                                                                         │
+╭ Sessions ────────────────────────────── ▁   ▄   □ ╮│                                                                                                         │
 │ Create   Open   Filter: ________________________  ││                                                                                                         │
 │No sessions yet                                    ││                                                                                                         │
 │Create new work or open a session.                 ││                                                                                                         │
@@ -33,19 +33,19 @@ checked target ids: ["docker", "podman", "sandbox"]
 │                                                   ││No live session in this workspace.                                                                       │
 │                                                   ││Press ctrl+b c to create a session or ctrl+b g to find one.                                              │
 │                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                                   │╭ Targets ▾ ─────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                                   │╭ Targets ▾ ─────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                   ││  Host / fleet  Targets                                   CPU          RAM                               │
 │                                                   ││  local         localhost, podman, sandbox (unavailable)  unavailable                                    │
 │                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                                   │╭ Profiles ▾ (not refreshed)─────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                                   │╭ Profiles ▾ (not refreshed)─────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                   ││           Harness  Weekly Resets  5H Resets                                                             │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
 === grouped host load without sample clock (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │No sessions yet                       ││                                                                              │
 │Create new work or open a session.    ││                                                                              │
@@ -71,11 +71,11 @@ checked target ids: ["docker", "podman", "sandbox"]
 │                                      ││No live session in this workspace.                                            │
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets                CPU  RAM                               │
 │                                      ││  local         podman, mac-container  37%  75%                               │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -84,9 +84,9 @@ checked target ids: ["docker", "podman", "sandbox"]
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === quota error with refresh age (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
 │No sessions yet                       ││                                                                              │
 │Create new work or open a session.    ││                      Create a session to start building.                     │
@@ -101,10 +101,10 @@ checked target ids: ["docker", "podman", "sandbox"]
 │                                      ││No live session in this workspace.                                            │
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        unavailable                                          │
@@ -113,9 +113,9 @@ checked target ids: ["docker", "podman", "sandbox"]
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === expired login quota (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
 │No sessions yet                       ││                                                                              │
 │Create new work or open a session.    ││                      Create a session to start building.                     │
@@ -130,10 +130,10 @@ checked target ids: ["docker", "podman", "sandbox"]
 │                                      ││No live session in this workspace.                                            │
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly        Resets  5H Resets                      │
 │                                      ││  claude-1  Claude Code  login expired                                        │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -142,9 +142,9 @@ checked target ids: ["docker", "podman", "sandbox"]
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === usage-priced API quota (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
 │No sessions yet                       ││                                                                              │
 │Create new work or open a session.    ││                      Create a session to start building.                     │
@@ -159,10 +159,10 @@ checked target ids: ["docker", "podman", "sandbox"]
 │                                      ││No live session in this workspace.                                            │
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▪ ╮
+│                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly       Resets  5H Resets                       │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        ▕   API    ▏                                         │
@@ -171,9 +171,9 @@ checked target ids: ["docker", "podman", "sandbox"]
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === weekly and five-hour quota columns (140x28) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                      ✦  M J O L N I R                                      │
 │No sessions yet                             ││                                                                                            │
 │Create new work or open a session.          ││                             Create a session to start building.                            │
@@ -188,10 +188,10 @@ checked target ids: ["docker", "podman", "sandbox"]
 │                                            ││No live session in this workspace.                                                          │
 │                                            ││Press ctrl+b c to create a session or ctrl+b g to find one.                                 │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │╭ Profiles ▾ (refreshed unknown)────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                            │╭ Profiles ▾ (refreshed unknown)────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly          Resets  5H              Resets                     │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        ▕███████▎  ▏73% 2d 0h   ▕███████   ▏70% 1h 5m                      │
@@ -200,9 +200,9 @@ checked target ids: ["docker", "podman", "sandbox"]
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === weekly and five-hour quota at 80 columns (80x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
-│ default                            ☰ ││                                      │
+│ default                            ≡ ││                                      │
 ╰──────────────────────────────────────╯│                                      │
-╭ Sessions ───────────────────── ▁   ▪ ╮│                                      │
+╭ Sessions ───────────────────── ▁   ▄ ╮│                                      │
 │ Create   Open   Filter: _____________││           ✦  M J O L N I R           │
 │No sessions yet                       ││                                      │
 │Create new work or open a session.    ││  Create a session to start building. │
@@ -217,10 +217,10 @@ checked target ids: ["docker", "podman", "sandbox"]
 │                                      ││No live session in this workspace.    │
 │                                      ││Press ctrl+b c to create a session or │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────╯
-╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU  RAM                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▪ ╮
+╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▄ ╮
 │            Harness      Weekly          Resets     5H              Resets    │
 │  claude-1  Claude Code  refreshing…                                          │
 │  codex-1   Codex        ▕███████▎  ▏73% 2d 0h [1]  ▕███████   ▏70% 1h 5m     │

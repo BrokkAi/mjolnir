@@ -503,9 +503,9 @@ def sidebar_relayout(tmux: TmuxController, evidence: Evidence) -> None:
         "dashboard rendered at 80 columns",
     )
     for glyph, sidebar_width, support_x, label in [
-        ("▪", 40, 0, "wide"),
+        ("▄", 40, 0, "wide"),
         ("▁", 20, 20, "narrow"),
-        ("▪", 40, 0, "wide-again"),
+        ("▄", 40, 0, "wide-again"),
     ]:
         screen = tmux.capture().splitlines()
         y = next(i for i, line in enumerate(screen) if "▁" in line)

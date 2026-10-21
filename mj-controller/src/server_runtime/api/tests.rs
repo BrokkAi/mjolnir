@@ -444,6 +444,47 @@ fn a_failed_child_reports_the_startup_cause_rather_than_the_symptom() {
     assert!(terminal);
     assert_eq!(output.as_deref(), record.last_error.as_deref());
 }
+
+/// Closing a child whose launch failed clears the launch failure from its
+/// record. Its failed first prompt then stood in for it: `list_agents` kept
+/// showing `error` after `close` returned, and the parent was told about a
+/// second failure. A closed child is stopped.
+// Hard-won: #1321: a closed child whose first prompt had failed stayed `error` and notified its parent again.
+#[test]
+fn a_closed_child_whose_first_prompt_failed_is_stopped() {
+    let mut record = crate::controller::test_support::checkpoint_test_session("child");
+    record.state = SessionState::Stopped;
+    record.last_error = None;
+    let status = StartStatus::Failed {
+        message: "session child is StartupCleanup before its hand-off".into(),
+    };
+
+    assert_eq!(
+        subagent_status(
+            Some(&record),
+            None,
+            Some(&status),
+            None,
+            false,
+            &ChildProgress::settled(ReportState::Fallback),
+        ),
+        ("stopped".into(), None, true)
+    );
+
+    // A failed resume also leaves the record stopped, but keeps its reason;
+    // that child still reports the failure.
+    record.last_error = Some("resume failed: the target is gone".into());
+    let (state, _, terminal) = subagent_status(
+        Some(&record),
+        None,
+        Some(&status),
+        None,
+        false,
+        &ChildProgress::settled(ReportState::Fallback),
+    );
+    assert_eq!(state, "error");
+    assert!(terminal);
+}
 use mj_client::session::{
     ManagedSessionView, PendingRelaySubmit, PendingRelaySync, SessionControlBackend,
     SessionHandleBackend,
@@ -2675,6 +2716,24 @@ async fn send_message_resolves_only_authorized_hex_session_prefixes() {
         "{}",
         self_prefix.message
     );
+
+    // A message from the user is the user's prompt, and the user may prompt
+    // any session, so the prefix a session may not use names the sub-agent.
+    assert_eq!(
+        refusals
+            .resolve_message_target("C0FFEE00".into())
+            .await
+            .unwrap(),
+        FOREIGN_CHILD
+    );
+    let ambiguous = refusals
+        .resolve_message_target("deadbeef".into())
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{ambiguous:#}").contains("ambiguous"),
+        "{ambiguous:#}"
+    );
 }
 
 #[tokio::test]
@@ -2726,7 +2785,7 @@ async fn send_message_refuses_stopped_self_foreign_child_unknown_target_and_chil
     }
     let claimed_child_sender = backend
         .deliver_message(
-            Some("child-1".into()),
+            "child-1".into(),
             "peer-1".into(),
             "hello".into(),
             "claimed-child-sender".into(),
@@ -4104,7 +4163,7 @@ async fn report_reconcile_recovers_unreported_finishes_and_ignores_parent_opt_ou
             .await
             .unwrap();
         if protocol < mj_core::relay::RELAY_LEGACY_MAILBOX_PROTOCOL {
-            assert_eq!(
+            assert!(matches!(
                 crate::mailbox_outbox::deliver_mailbox_event(
                     exports.clone(),
                     &remote.control,
@@ -4114,8 +4173,8 @@ async fn report_reconcile_recovers_unreported_finishes_and_ignores_parent_opt_ou
                 )
                 .await
                 .unwrap(),
-                crate::mailbox_outbox::MailboxEventDelivery::Pending
-            );
+                crate::mailbox_outbox::MailboxEventDelivery::Pending(_)
+            ));
             assert!(
                 tokio::time::timeout(Duration::from_millis(20), remote.requests.recv())
                     .await

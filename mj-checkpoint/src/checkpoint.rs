@@ -270,6 +270,12 @@ struct StagedRepository {
     staged_patch_path: PathBuf,
     unstaged_patch_path: PathBuf,
     untracked_tar_path: PathBuf,
+    /// The Git operation's two payloads, present exactly when
+    /// `metadata.git_operation` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conflicted_worktree_tar_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operation_state_tar_path: Option<PathBuf>,
 }
 
 /// A session delta is measured against every origin ref, so a repository that

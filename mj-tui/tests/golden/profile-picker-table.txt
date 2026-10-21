@@ -8,9 +8,9 @@
 │Create new work  │    claude-1  Claude Code  refreshing                                             │                 │
 │                 │    codex-1   Codex        refreshing                                             │                 │
 │                 │    codex-2   Codex        refreshing                                             │                 │
-│                 │ ⚠  kimi-1    Kimi Code    refreshing                                             │                 │
+│                 │ !  kimi-1    Kimi Code    refreshing                                             │                 │
 │                 │                                                                                  │                 │
-│                 │ ⚠  No guardian approval mode; do not run on a raw, unsandboxed target.           │                 │
+│                 │ !  No guardian approval mode; do not run on a raw, unsandboxed target.           │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
@@ -18,10 +18,10 @@
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▪ ╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▪ ╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │   Cancel     Next                                                                │                 │
@@ -50,10 +50,10 @@
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▪ ╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▪ ╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │    Resets       │
 │                 │   Cancel     Next                                                                │  % now          │
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
@@ -69,16 +69,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ───────────  │    claude-1  Claude Code  refreshing      (lossy: text-only transcript)          │                 │
 │› ■ ACP pretty   │    codex-1   Codex        refreshing                                             │                 │
 │  Stopped  podm  │    codex-2   Codex        refreshing                                             │                 │
-│  │ No messages  │ ⚠  kimi-1    Kimi Code    refreshing      (lossy: text-only transcript)          │                 │
+│  │ No messages  │ !  kimi-1    Kimi Code    refreshing      (lossy: text-only transcript)          │                 │
 │  │              │                                                                                  │  ───────────────╯
 │                 │ Same agent: the conversation continues natively.                                 │  ───────────────╮
-│                 │ ⚠  No guardian approval mode; do not run on a raw, unsandboxed target.           │                 │
+│                 │ !  No guardian approval mode; do not run on a raw, unsandboxed target.           │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▪ ╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──── ▁   ▪   □ ╮
+│                 │                                                                                  │  ──── ▁   ▄   □ ╮
 │                 │                                                                                  │                 ▐
 │                 │                                                                                  │                 ▐
 │                 │   Cancel     Next                                                                │                 ▐

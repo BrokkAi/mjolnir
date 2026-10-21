@@ -81,7 +81,7 @@ fn every_boolean_setting_is_drawn_as_a_checkbox() {
             .find(|line| line.contains(label))
             .unwrap_or_else(|| panic!("{section}: missing {label:?}: {lines:#?}"));
         assert!(
-            row.contains('☑') || row.contains('☐'),
+            row.contains('☒') || row.contains('☐'),
             "{section} › {label} is a checkbox: {row:?}"
         );
         assert!(
@@ -643,7 +643,7 @@ fn golden_settings_root() {
         panic!("expected Settings save, got {action:?}");
     };
     let saved: Config = serde_json::from_str(&updated).expect("saved config");
-    writeln!(output, "saved theme: {:?}", saved.theme).expect("write saved theme");
+    writeln!(output, "saved theme: {}", saved.theme.label()).expect("write saved theme");
     append_setup_state(
         &mut output,
         "active theme before save acknowledgement",
@@ -689,16 +689,24 @@ fn golden_settings_root() {
     )
     .expect("write reopened theme");
 
-    // The Windows Terminal and terminal-color themes save and apply through
-    // the same flow, starting from the reopened choice list.
+    // Auto, the accessible and Catppuccin palettes, and the Windows Terminal
+    // and terminal-color themes save and apply through the same flow,
+    // starting from the reopened choice list. No terminal answers here, so
+    // Auto draws Midnight and says why.
     for target in [
-        theme::UiTheme::Campbell,
-        theme::UiTheme::OneHalfDark,
-        theme::UiTheme::OneHalfLight,
-        theme::UiTheme::SolarizedDark,
-        theme::UiTheme::SolarizedLight,
-        theme::UiTheme::TerminalDark,
-        theme::UiTheme::TerminalLight,
+        theme::ThemeChoice::Auto,
+        theme::UiTheme::HighContrastLight.into(),
+        theme::UiTheme::ColorblindDark.into(),
+        theme::UiTheme::ColorblindLight.into(),
+        theme::UiTheme::CatppuccinMocha.into(),
+        theme::UiTheme::CatppuccinLatte.into(),
+        theme::UiTheme::Campbell.into(),
+        theme::UiTheme::OneHalfDark.into(),
+        theme::UiTheme::OneHalfLight.into(),
+        theme::UiTheme::SolarizedDark.into(),
+        theme::UiTheme::SolarizedLight.into(),
+        theme::UiTheme::TerminalDark.into(),
+        theme::UiTheme::TerminalLight.into(),
     ] {
         let wanted = serde_json::to_value(target).expect("theme serializes");
         let (current, position) = {
@@ -717,8 +725,13 @@ fn golden_settings_root() {
                     .expect("theme offered"),
             )
         };
-        for _ in current..position {
-            themed.handle_key(key(KeyCode::Down));
+        let step = if position < current {
+            KeyCode::Up
+        } else {
+            KeyCode::Down
+        };
+        for _ in 0..current.abs_diff(position) {
+            themed.handle_key(key(step));
         }
         themed.handle_key(key(KeyCode::Tab));
         let action = themed.handle_key(crossterm::event::KeyEvent::new(
@@ -734,13 +747,16 @@ fn golden_settings_root() {
             panic!("expected Settings save, got {action:?}");
         };
         let saved: Config = serde_json::from_str(&updated).expect("saved config");
-        writeln!(output, "saved theme: {:?}", saved.theme).expect("write saved theme");
+        writeln!(output, "saved theme: {}", saved.theme.label()).expect("write saved theme");
         themed.setup_saved(generation, Ok(saved));
         writeln!(
             output,
             "{} after save acknowledgement: {}",
             target.label(),
-            rendered_theme_colors(&mut themed, target)
+            rendered_theme_colors(
+                &mut themed,
+                theme::resolve(target, false, theme::terminal_background()).theme
+            )
         )
         .expect("write applied theme colors");
         themed.begin_setup();
@@ -1379,7 +1395,7 @@ fn disabling_a_profile_clears_references_and_reports_the_cleanup() {
         .draw(|frame| crate::render::render(frame, &mut dashboard))
         .unwrap();
     let enabled = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(enabled.contains('☑'), "{enabled}");
+    assert!(enabled.contains('☒'), "{enabled}");
 
     choose(&mut dashboard, "enabled");
     let Mode::Setup(dialog) = &dashboard.mode else {
@@ -2081,7 +2097,7 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
     let resolved = buffer_lines(terminal.backend().buffer()).join("\n");
     for expected in [
         "Enabled",
-        "☑",
+        "☒",
         "mbx: the filesystem under /mnt/fast/mbx-cache does not support reflinks",
         "/mnt/fast/mbx-cache",
         "537 GB, host mbx config",
@@ -2235,7 +2251,7 @@ fn the_build_cache_switch_is_a_checkbox_on_a_host_that_supports_it() {
         false,
     );
     let checked = drawn(&mut dashboard, 140, 30).join("\n");
-    assert!(checked.contains("☑"), "an unset switch is on:\n{checked}");
+    assert!(checked.contains("☒"), "an unset switch is on:\n{checked}");
     // The page otherwise only predicts; this line is the one thing on it that
     // says the cache is being used.
     for expected in [
@@ -2761,15 +2777,25 @@ fn a_setting_row_truncates_its_label_before_its_value() {
 // Hard-won: 584574a5: Setup claimed monochrome mode while the renderer still applied its theme.
 #[test]
 fn setup_reports_monochrome_while_no_color_overrides_the_theme() {
+    let midnight = theme::ThemeChoice::Fixed(theme::UiTheme::Midnight);
     assert_eq!(
-        schema::theme_report("Midnight", true),
+        schema::theme_report(midnight, true, None),
         "Monochrome (NO_COLOR; configured: Midnight)"
     );
-    assert_eq!(schema::theme_report("Midnight", false), "Midnight");
+    assert_eq!(schema::theme_report(midnight, false, None), "Midnight");
     // The override is the one the renderer applies.
     assert_eq!(
-        theme::theme_for(theme::UiTheme::Midnight, true),
+        theme::resolve(midnight, true, None).theme,
         theme::UiTheme::Mono
+    );
+    // Auto names the palette it drew and what the terminal said.
+    assert_eq!(
+        schema::theme_report(theme::ThemeChoice::Auto, false, Some((253, 246, 227))),
+        "Auto: Light (terminal background #fdf6e3)"
+    );
+    assert_eq!(
+        schema::theme_report(theme::ThemeChoice::Auto, true, Some((253, 246, 227))),
+        "Monochrome (NO_COLOR; configured: Auto)"
     );
 }
 

@@ -977,7 +977,7 @@ mod tests {
 
         let mut monochrome = dashboard_with_session(running_session());
         let mut config = monochrome.config.clone();
-        config.theme = mj_core::config::UiTheme::Mono;
+        config.theme = mj_core::config::UiTheme::Mono.into();
         monochrome.set_config(config);
         monochrome.focus_sessions();
         append_state(

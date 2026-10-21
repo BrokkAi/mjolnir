@@ -47,6 +47,7 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
     }
     .write_spec(&supervisor)?;
     let launch = LaunchSpec {
+        imported_logins: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         clear_context_request: None,
@@ -292,6 +293,7 @@ for line in sys.stdin:
     print(json.dumps({'jsonrpc':'2.0','id':ident,'result':result}), flush=True)
 "#).unwrap();
         let launch = LaunchSpec {
+            imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,

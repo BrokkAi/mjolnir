@@ -127,8 +127,11 @@ effort = "medium"
             if not found:
                 return None
             sockets[session] = found[0]
-        request = {"request_id": uuid.uuid4().hex, "protocol_version": 41,
-                   "request": {"method": "status"}}
+        # The worker serves only its own protocol, which hello names.
+        hello = {"request_id": uuid.uuid4().hex, "protocol_version": 1,
+                 "request": {"method": "hello", "params": {
+                     "controller_version": "parent-report-e2e",
+                     "supported": {"min": 1, "max": 4294967295}}}}
         try:
             with socket.socket(socket.AF_UNIX) as connection:
                 connection.settimeout(5)
@@ -141,8 +144,15 @@ effort = "medium"
                     connection.connect(sockets[session].name)
                 finally:
                     os.chdir(previous)
-                connection.sendall(json.dumps(request).encode() + b"\n")
-                reply = json.loads(connection.makefile("rb").readline())
+                with connection.makefile("rb") as reader:
+                    connection.sendall(json.dumps(hello).encode() + b"\n")
+                    greeting = json.loads(reader.readline())
+                    assert greeting["result"] == "ok", greeting
+                    request = {"request_id": uuid.uuid4().hex,
+                               "protocol_version": greeting["protocol_version"],
+                               "request": {"method": "status"}}
+                    connection.sendall(json.dumps(request).encode() + b"\n")
+                    reply = json.loads(reader.readline())
         except (FileNotFoundError, ConnectionRefusedError):
             return None
         assert reply["result"] == "ok", reply
@@ -269,7 +279,7 @@ to {project / 'report-b'}, and give your final answer.
         observe("idle state survives daemon restart", eventually("idle after restart", lambda: waiting(parent)))
         child_b_state = status(child_b["child_session_id"])
         assert child_b_state and child_b_state.get("active_prompt"), child_b_state
-        cli("prompt", "--session", parent, "User steering: write STEERING_ACK_1302 to "
+        cli("message", "--session", parent, "User steering: write STEERING_ACK_1302 to "
             + str(project / "steering-ack") + ". Do this small marker write yourself, spawn no more children, leave B running, then end your turn with a brief waiting status.")
         eventually("steering acknowledged", lambda: (project / "steering-ack").exists())
         second = eventually("parent idle after steering", lambda: waiting(parent))

@@ -14,8 +14,9 @@ use std::path::Path;
 use anyhow::{Context, Result, bail, ensure};
 
 use super::worker_binary::{
-    apply_staged_execution_setting, bridge_launch, container_upload_ownership_args,
-    link_shared_login, shared_profile_login, stage_profile,
+    SharedCatalogCache, apply_staged_execution_setting, bridge_launch,
+    container_upload_ownership_args, fetch_catalog_over_https, link_shared_login,
+    shared_profile_login, stage_profile_with_catalog,
 };
 use super::{Controller, execute_checked};
 use crate::targets::{self, CommandExecutor, CommandSpec, ProcessExecutor};
@@ -105,7 +106,14 @@ impl Controller {
         let staging = tempfile::tempdir().context("create reviewer staging directory")?;
         let local = staging.path().join("profile");
         profile.ensure_ready(profile_id)?;
-        stage_profile(profile, &local).with_context(|| format!("stage profile {profile_id:?}"))?;
+        stage_profile_with_catalog(
+            profile_id,
+            profile,
+            &local,
+            &fetch_catalog_over_https,
+            &SharedCatalogCache,
+        )
+        .with_context(|| format!("stage profile {profile_id:?}"))?;
         apply_staged_execution_setting(profile.kind, execution_policy, &local)
             .with_context(|| format!("stage profile {profile_id:?}"))?;
         // Harnesses that ignore MCP servers offered over ACP read their own

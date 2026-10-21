@@ -2,6 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 use crate::theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
@@ -13,14 +14,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Widget, Wrap};
 
 use crate::components::{
-    ButtonRow, Checkbox, ChoiceList, ControlKind, FieldEdit, Form, Interaction, TextField,
+    ButtonRow, Checkbox, ChoiceList, ControlKind, DOUBLE_CLICK_INTERVAL, FieldEdit, Form,
+    Interaction, TextField,
 };
 use crate::selection::{
     ContentPos, FrameSurfaces, SelectionRange, SurfaceFrame, SurfaceId, extract_rows,
 };
 use crate::text_input::TextInput;
 use mj_core::elicitation::{
-    ElicitationField, ElicitationFieldKind, ElicitationRequest, ElicitationResponse,
+    CompanionRole, ElicitationField, ElicitationFieldKind, ElicitationRequest, ElicitationResponse,
     ElicitationValue, validate_field_value,
 };
 
@@ -64,6 +66,9 @@ struct DisplayField {
     field: usize,
     custom: Option<usize>,
     custom_option: Option<usize>,
+    /// The companion goes beside any pick (claude-agent-acp's "Other")
+    /// instead of replacing it ([`CompanionRole::Alongside`]).
+    alongside: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +147,22 @@ pub(super) struct ElicitationDialog {
     /// Wrapped rows to skip in the form body when a long option list is
     /// taller than the space left above the answer controls.
     focus_scroll: Cell<u16>,
+    /// The last click on an option of a page that picks on purpose. The
+    /// dialog decides double-clicks there by screen cell, because the first
+    /// click moves the cursor and reflows the rows below it: the second
+    /// click lands on the same cell but often on a different row.
+    last_option_click: Cell<Option<OptionClick>>,
+}
+
+/// A click on an option: the screen cell it landed on, the option drawn
+/// there at the time, and when.
+#[derive(Debug, Clone, Copy)]
+struct OptionClick {
+    field: usize,
+    option: usize,
+    column: u16,
+    row: u16,
+    at: Instant,
 }
 
 impl ElicitationDialog {
@@ -160,13 +181,28 @@ impl ElicitationDialog {
             let Some(custom) = display.custom else {
                 continue;
             };
+            // An optional question whose text goes beside a pick starts with
+            // nothing picked, so the text alone can be the whole answer.
+            let owner = &request.fields[display.field];
+            if display.alongside
+                && !owner.required
+                && matches!(
+                    owner.kind,
+                    ElicitationFieldKind::SingleSelect { default: None, .. }
+                )
+            {
+                values[display.field] = FieldValue::Single(None);
+            }
             if active_custom_fields.contains(&custom)
-                && let Some(option_count) = select_option_count(&request.fields[display.field])
+                && !display.alongside
+                && let Some(option_count) = select_option_count(owner)
             {
                 let cursor = display.custom_option.unwrap_or(option_count);
                 option_cursors[display.field] = cursor;
+                // A free-text alternative picks no option; detail tied to an
+                // option picks that option.
                 if let FieldValue::Single(selected) = &mut values[display.field] {
-                    *selected = Some(cursor);
+                    *selected = display.custom_option;
                 }
             }
         }
@@ -189,6 +225,7 @@ impl ElicitationDialog {
             message_anchor_width: Cell::new(0),
             rendered_area: Cell::new(None),
             focus_scroll: Cell::new(0),
+            last_option_click: Cell::new(None),
         };
         dialog.reset_controls();
         dialog
@@ -269,6 +306,7 @@ impl ElicitationDialog {
     }
 
     pub(super) fn paste(&mut self, text: &str) {
+        self.last_option_click.set(None);
         let text = crate::text_input::single_line_paste(&sanitize_terminal_text(text));
         if text.is_empty() {
             return;
@@ -301,6 +339,8 @@ impl ElicitationDialog {
         if key.kind == crossterm::event::KeyEventKind::Release {
             return None;
         }
+        // A key between two clicks makes them two separate clicks.
+        self.last_option_click.set(None);
         if key.kind == crossterm::event::KeyEventKind::Press {
             if self.confirming_unanswered && code == KeyCode::Esc {
                 self.go_back();
@@ -319,6 +359,7 @@ impl ElicitationDialog {
                         Some(ElicitationControl::Field(_))
                     )
                 {
+                    self.pick_cursor_when_empty();
                     return self.answer_and_next();
                 }
             }
@@ -381,7 +422,10 @@ impl ElicitationDialog {
             Interaction::Activate(ElicitationControl::Cancel) | Interaction::Cancel => {
                 Some(ElicitationResponse::Cancel)
             }
-            Interaction::Activate(ElicitationControl::Field(_)) => self.answer_and_next(),
+            Interaction::Activate(ElicitationControl::Field(_)) => {
+                self.pick_cursor_when_empty();
+                self.answer_and_next()
+            }
             Interaction::Toggle(ElicitationControl::Field(index)) => {
                 self.focus_control(index);
                 self.toggle_current();
@@ -412,13 +456,71 @@ impl ElicitationDialog {
     }
 
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<ElicitationResponse> {
+        self.handle_mouse_at(mouse, Instant::now())
+    }
+
+    /// Handles a mouse event at an explicit monotonic time, so the
+    /// double-click interval is deterministic in tests.
+    pub(super) fn handle_mouse_at(
+        &mut self,
+        mouse: MouseEvent,
+        now: Instant,
+    ) -> Option<ElicitationResponse> {
         let event = crossterm::event::Event::Mouse(mouse);
-        let result = self.form.borrow_mut().handle(&event);
+        let result = self.form.borrow_mut().handle_at(&event, now);
+        let click = matches!(
+            mouse.kind,
+            MouseEventKind::Up(crossterm::event::MouseButton::Left)
+        );
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+        ) {
+            self.last_option_click.set(None);
+        }
+        // The dialog alone decides double-clicks on pages that pick on
+        // purpose: a second click on the cell of the last option click,
+        // within the interval, is a double-click on the option drawn there
+        // then, whatever the first click has since reflowed onto that cell.
+        if click
+            && let Some(first) = self.last_option_click.take()
+            && (first.column, first.row) == (mouse.column, mouse.row)
+            && now.saturating_duration_since(first.at) <= DOUBLE_CLICK_INTERVAL
+        {
+            return self.double_click_option(first.field, first.option);
+        }
         if let Some(interaction) = result.action {
-            let toggle = matches!(
-                mouse.kind,
-                MouseEventKind::Up(crossterm::event::MouseButton::Left)
-            ) && matches!(interaction, Interaction::Select(ElicitationControl::Field(index), _) if matches!(self.values[self.display_fields[index].field], FieldValue::Multi(_)));
+            let clicked_row = match interaction {
+                Interaction::Select(ElicitationControl::Field(index), row) if click => {
+                    Some((index, row))
+                }
+                Interaction::Activate(ElicitationControl::Field(index)) if click => self
+                    .form
+                    .borrow()
+                    .selected(ElicitationControl::Field(index))
+                    .map(|row| (index, row)),
+                _ => None,
+            };
+            if let Some((index, row)) = clicked_row
+                && self
+                    .display_fields
+                    .get(index)
+                    .is_some_and(|display| self.picks_on_purpose(*display))
+            {
+                return self.click_option_on_purpose(index, row, mouse, now);
+            }
+            let clicked = match interaction {
+                Interaction::Select(ElicitationControl::Field(index), _) if click => {
+                    self.display_fields.get(index).copied()
+                }
+                _ => None,
+            };
+            // A click on a multi-select option toggles it, as Space does.
+            let toggle = clicked
+                .is_some_and(|display| matches!(self.values[display.field], FieldValue::Multi(_)));
             let response = self.apply_interaction(interaction);
             if toggle {
                 if let Some((custom, true)) = self.editable_field() {
@@ -460,11 +562,13 @@ impl ElicitationDialog {
 
     pub(super) fn cancel_component_pointer(&self) {
         self.form.borrow_mut().cancel_pointer();
+        self.last_option_click.set(None);
     }
 
     pub(super) fn reset_component_geometry(&self) {
         self.form.borrow_mut().reset_geometry();
         self.rendered_area.set(None);
+        self.last_option_click.set(None);
     }
 
     fn focus_index(&self) -> usize {
@@ -525,6 +629,7 @@ impl ElicitationDialog {
     }
 
     fn reset_page(&mut self) {
+        self.last_option_click.set(None);
         self.message_scroll.set(0);
         self.message_anchor.set(None);
         self.message_anchor_width.set(0);
@@ -602,6 +707,13 @@ impl ElicitationDialog {
             return;
         }
         self.option_cursors[display.field] = selected;
+        // Beside its own text field, a pick is a deliberate act (Space, a
+        // click, or Enter with nothing picked): moving the cursor, on the
+        // way to the text row or back, never picks an option the user did
+        // not choose.
+        if display.alongside {
+            return;
+        }
         if let FieldValue::Single(value) = &mut self.values[display.field] {
             let next = (selected < option_count).then_some(selected);
             if *value != next {
@@ -693,6 +805,86 @@ impl ElicitationDialog {
         }
     }
 
+    /// A single click on row `row` of a page that picks on purpose, the
+    /// list's own activation included. On an option it toggles the option as
+    /// Space does and records the click, so a second click on the same cell
+    /// is a double-click on this option. On the text row it starts writing.
+    fn click_option_on_purpose(
+        &mut self,
+        index: usize,
+        row: usize,
+        mouse: MouseEvent,
+        now: Instant,
+    ) -> Option<ElicitationResponse> {
+        self.focus_control(index);
+        self.select_option(row);
+        let display = self.display_fields[index];
+        let option_count = select_option_count(&self.request.fields[display.field]).unwrap_or(0);
+        if row >= option_count {
+            if let Some((custom, true)) = self.editable_field() {
+                self.active_custom_fields.insert(custom);
+            }
+            return None;
+        }
+        self.toggle_current();
+        self.last_option_click.set(Some(OptionClick {
+            field: index,
+            option: row,
+            column: mouse.column,
+            row: mouse.row,
+            at: now,
+        }));
+        None
+    }
+
+    /// A double-click on `option` of display field `index`: it ends picked
+    /// and the question is answered, as a double-click does on any other
+    /// list.
+    fn double_click_option(&mut self, index: usize, option: usize) -> Option<ElicitationResponse> {
+        self.focus_control(index);
+        let display = self.display_fields[index];
+        self.option_cursors[display.field] = option;
+        if let FieldValue::Single(selected) = &mut self.values[display.field]
+            && *selected != Some(option)
+        {
+            *selected = Some(option);
+            self.confirmed.remove(&self.current_question);
+        }
+        self.answer_and_next()
+    }
+
+    /// Whether `display` is a single-select beside its own text field, where
+    /// a pick is deliberate: ↑/↓ move only the cursor, Space or a click
+    /// toggles the option under it, and Enter answers with what is there.
+    fn picks_on_purpose(&self, display: DisplayField) -> bool {
+        display.alongside && matches!(self.values[display.field], FieldValue::Single(_))
+    }
+
+    /// Enter on a page that picks on purpose answers with the pick and the
+    /// text already there. Only when that answer would be empty, with
+    /// nothing picked and the text blank, does it take the option under the
+    /// cursor, as Enter does on any other list.
+    fn pick_cursor_when_empty(&mut self) {
+        let Some(display) = self.display_fields.get(self.focus_index()).copied() else {
+            return;
+        };
+        if !self.picks_on_purpose(display) {
+            return;
+        }
+        let cursor = self.option_cursors[display.field];
+        let option_count = select_option_count(&self.request.fields[display.field]).unwrap_or(0);
+        let text_blank = display.custom.is_none_or(|custom| {
+            matches!(&self.values[custom], FieldValue::Text(value) if value.value().trim().is_empty())
+        });
+        if cursor < option_count
+            && text_blank
+            && let FieldValue::Single(selected @ None) = &mut self.values[display.field]
+        {
+            *selected = Some(cursor);
+            self.confirmed.remove(&self.current_question);
+        }
+    }
+
     fn toggle_current(&mut self) {
         if self.editable_field().is_some() {
             self.edit_text(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
@@ -704,6 +896,12 @@ impl ElicitationDialog {
         self.confirmed.remove(&self.current_question);
         let value = &mut self.values[display.field];
         match value {
+            // Beside its own text field a pick can be taken back, so the
+            // text alone can be the whole answer.
+            FieldValue::Single(selected) if display.alongside => {
+                let cursor = self.option_cursors[display.field];
+                *selected = (*selected != Some(cursor)).then_some(cursor);
+            }
             FieldValue::Single(selected) => {
                 *selected = Some(self.option_cursors[display.field]);
                 if let Some(custom) = display.custom {
@@ -715,7 +913,9 @@ impl ElicitationDialog {
                 if !selected.remove(&index) {
                     selected.insert(index);
                 }
-                if let Some(custom) = display.custom {
+                if let Some(custom) = display.custom
+                    && !display.alongside
+                {
                     self.active_custom_fields.remove(&custom);
                 }
             }
@@ -747,7 +947,19 @@ impl ElicitationDialog {
         let active_custom = display
             .custom
             .filter(|custom| self.active_custom_fields.contains(custom));
+        let picked = match &self.values[display.field] {
+            FieldValue::Single(selected) => selected.is_some(),
+            FieldValue::Multi(selected) => !selected.is_empty(),
+            _ => true,
+        };
         let indices = match (active_custom, display.custom_option) {
+            // Text beside a pick is sent with whatever is picked; with
+            // nothing picked it is the whole answer.
+            _ if display.alongside => display
+                .custom
+                .into_iter()
+                .chain(picked.then_some(display.field))
+                .collect(),
             (Some(custom), Some(_)) => vec![display.field, custom],
             (Some(custom), None) => vec![custom],
             (None, _) => vec![display.field],
@@ -913,46 +1125,30 @@ fn display_fields(
     request: &ElicitationRequest,
     values: &[FieldValue],
 ) -> (Vec<DisplayField>, BTreeSet<usize>) {
-    let fields_by_id = request
-        .fields
-        .iter()
-        .enumerate()
-        .map(|(index, field)| (field.id.as_str(), index))
-        .collect::<BTreeMap<_, _>>();
     let mut custom_by_owner = BTreeMap::new();
     let mut attached_custom = BTreeSet::new();
-    for (custom, field) in request.fields.iter().enumerate() {
-        let Some(owner) = field
-            .custom_answer_for
-            .as_deref()
-            .and_then(|owner| fields_by_id.get(owner))
-            .copied()
-        else {
-            continue;
-        };
-        if !matches!(field.kind, ElicitationFieldKind::Text { .. })
-            || select_option_count(&request.fields[owner]).is_none()
-            || custom_by_owner.contains_key(&owner)
-        {
-            continue;
+    for (owner, field) in request.fields.iter().enumerate() {
+        if let Some((custom, role)) = request.companion(field) {
+            custom_by_owner.insert(owner, (custom, role));
+            attached_custom.insert(custom);
         }
-        custom_by_owner.insert(owner, custom);
-        attached_custom.insert(custom);
     }
     let display_fields = request
         .fields
         .iter()
         .enumerate()
         .filter(|(index, _)| !attached_custom.contains(index))
-        .map(|(field, _)| DisplayField {
-            field,
-            custom: custom_by_owner.get(&field).copied(),
-            custom_option: custom_by_owner.get(&field).and_then(|custom| {
-                request.fields[*custom]
-                    .custom_answer_option
-                    .as_deref()
-                    .and_then(|value| select_option_index(&request.fields[field], value))
-            }),
+        .map(|(field, _)| {
+            let companion = custom_by_owner.get(&field).copied();
+            DisplayField {
+                field,
+                custom: companion.map(|(custom, _)| custom),
+                custom_option: companion
+                    .filter(|(_, role)| *role == CompanionRole::Detail)
+                    .and_then(|(custom, _)| request.fields[custom].custom_answer_option.as_deref())
+                    .and_then(|value| select_option_index(&request.fields[field], value)),
+                alongside: companion.is_some_and(|(_, role)| role == CompanionRole::Alongside),
+            }
         })
         .collect::<Vec<_>>();
     let active_custom_fields = attached_custom
@@ -1439,13 +1635,24 @@ fn render_elicitation_body(
             ElicitationControl::Field(dialog.current_question)
         });
     }
+    // Where a pick is deliberate, the arrows only move and Space picks.
+    let picks_on_purpose = !dialog.confirming_unanswered
+        && dialog
+            .display_fields
+            .get(dialog.current_question)
+            .is_some_and(|display| dialog.picks_on_purpose(*display));
+    let space_help = if picks_on_purpose {
+        "Space pick"
+    } else {
+        "Space toggle"
+    };
     let scroll_help = if maximum_scroll > 0 {
         let start = message_scroll.saturating_add(1);
         let end = message_scroll
             .saturating_add(chunks[0].height)
             .min(total_lines);
         Some(format!(
-            "Text {start}–{end}/{total_lines} · PgUp/PgDn or wheel scroll · Space toggle · Enter answer · Alt+←/→ questions"
+            "Text {start}–{end}/{total_lines} · PgUp/PgDn or wheel scroll · {space_help} · Enter answer · Alt+←/→ questions"
         ))
     } else {
         None
@@ -1456,6 +1663,8 @@ fn render_elicitation_body(
         scroll_help
     } else if dialog.confirming_unanswered {
         "Enter confirm · Esc go back".to_owned()
+    } else if picks_on_purpose {
+        "Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions".to_owned()
     } else {
         "Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions".to_owned()
     };
@@ -1588,9 +1797,11 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
             ));
         }
         (ElicitationFieldKind::SingleSelect { options, .. }, FieldValue::Single(selected)) => {
-            let custom_active = display
-                .custom
-                .is_some_and(|custom| dialog.active_custom_fields.contains(&custom));
+            // Only a free-text alternative takes the pick's place.
+            let custom_active = !display.alongside
+                && display
+                    .custom
+                    .is_some_and(|custom| dialog.active_custom_fields.contains(&custom));
             for (index, option) in options.iter().enumerate() {
                 let cursor = dialog.option_cursors[display.field] == index;
                 let custom_replaces_selection = display.custom_option.is_none();
@@ -1648,9 +1859,10 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
             );
         }
         (ElicitationFieldKind::MultiSelect { options, .. }, FieldValue::Multi(selected)) => {
-            let custom_active = display
-                .custom
-                .is_some_and(|custom| dialog.active_custom_fields.contains(&custom));
+            let custom_active = !display.alongside
+                && display
+                    .custom
+                    .is_some_and(|custom| dialog.active_custom_fields.contains(&custom));
             for (index, option) in options.iter().enumerate() {
                 if dialog.option_cursors[display.field] == index {
                     focused_row = Some(lines.len());
@@ -1771,7 +1983,10 @@ fn render_custom_answer(
     let custom = &dialog.request.fields[custom_index];
     let focused = dialog.option_cursors[display.field] == option_count;
     let active = dialog.active_custom_fields.contains(&custom_index);
-    let marker = if active {
+    // Text beside the pick is a field of its own, not one of the choices.
+    let marker = if display.alongside {
+        "✎"
+    } else if active {
         selected_marker
     } else {
         unselected_marker
@@ -1784,10 +1999,26 @@ fn render_custom_answer(
         Style::default()
     };
     lines.push(Line::styled(format!("{marker} {}", custom.title), style));
-    if !focused {
+    if focused {
+        render_custom_text(lines, text_cursor, dialog, custom_index);
         return;
     }
-    render_custom_text(lines, text_cursor, dialog, custom_index);
+    // Text beside the pick is sent with it, so it stays in view while the
+    // cursor is on the choices.
+    if display.alongside
+        && let FieldValue::Text(value) = &dialog.values[custom_index]
+        && !value.value().trim().is_empty()
+    {
+        let shown = if custom.secret {
+            "•".repeat(value.chars().count())
+        } else {
+            value.to_string()
+        };
+        lines.push(Line::styled(
+            format!("    {shown}"),
+            Style::default().fg(theme::palette().muted),
+        ));
+    }
 }
 
 fn render_custom_text(

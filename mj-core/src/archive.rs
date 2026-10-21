@@ -109,12 +109,47 @@ pub struct RepositoryMetadata {
     /// Newest to oldest, including stash entries unreachable from refs/stash.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stash_stack: Vec<SavedStashEntry>,
+    /// The Git operation an independent clone was in the middle of: a merge,
+    /// cherry-pick, revert, rebase or bisect, or unmerged index entries that
+    /// any command left. Absent when there is none, so every other archive is
+    /// written exactly as before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_operation: Option<SavedGitOperation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedStashEntry {
     pub commit: String,
     pub message: String,
+}
+
+/// The index side of an unfinished Git operation, and the objects it needs.
+/// The operation's working-tree files and its state files in the Git
+/// directory are the repository's two operation payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedGitOperation {
+    /// The index's unmerged entries, in index order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmerged: Vec<SavedUnmergedEntry>,
+    /// Unmerged paths that had no file in the working tree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_worktree_paths: Vec<PathBuf>,
+    /// Every object the unmerged entries and the state files name. The
+    /// committed bundle carries each one the restored clone could lack, and a
+    /// restore checks that all of them exist before it writes the operation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<String>,
+}
+
+/// One stage of an unmerged path, as `git ls-files --unmerged` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedUnmergedEntry {
+    pub path: PathBuf,
+    /// 1 for the common ancestor, 2 for ours, 3 for theirs.
+    pub stage: u8,
+    /// The octal mode as Git writes it, such as `100644`.
+    pub mode: String,
+    pub object: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +160,14 @@ pub struct RepositoryManifest {
     pub staged_patch_path: String,
     pub unstaged_patch_path: String,
     pub untracked_tar_path: String,
+    /// The working-tree files of the unmerged paths. Present exactly when
+    /// `metadata.git_operation` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflicted_worktree_tar_path: Option<String>,
+    /// The operation's state files from the Git directory. Present exactly
+    /// when `metadata.git_operation` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_state_tar_path: Option<String>,
 }
 
 /// Controller-owned, materialized state captured at a checkpoint barrier.
@@ -331,11 +374,32 @@ pub struct CanonicalQueuedPrompt {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PayloadRole {
     CanonicalSession,
-    NativeArtifact { relative_path: PathBuf },
-    GitBundle { repository_id: String },
-    GitStagedPatch { repository_id: String },
-    GitUnstagedPatch { repository_id: String },
-    GitUntrackedTar { repository_id: String },
+    NativeArtifact {
+        relative_path: PathBuf,
+    },
+    GitBundle {
+        repository_id: String,
+    },
+    GitStagedPatch {
+        repository_id: String,
+    },
+    GitUnstagedPatch {
+        repository_id: String,
+    },
+    GitUntrackedTar {
+        repository_id: String,
+    },
+    /// The working-tree files of a repository's unmerged paths, conflict
+    /// markers included. A build that predates it rejects the manifest as a
+    /// whole, so it cannot restore the clone without its operation.
+    GitConflictedWorktreeTar {
+        repository_id: String,
+    },
+    /// The state files of a repository's unfinished Git operation, named as
+    /// `git rev-parse --git-path` names them.
+    GitOperationStateTar {
+        repository_id: String,
+    },
 }
 
 /// One byte range of a sharded payload, stored as its own ZIP entry.

@@ -19,6 +19,7 @@ mod pollers;
 mod session_presentation;
 mod simple;
 mod splash;
+mod terminal_background;
 
 #[cfg(test)]
 mod test_support;
@@ -129,13 +130,14 @@ enum Command {
     Login(LoginArgs),
     /// Create a session through the API and print its id.
     New(api_commands::NewArgs),
-    /// Send a prompt to a session, optionally waiting for the turn.
+    /// Send a prompt as the user and wait for its turn to end.
     Prompt(api_commands::PromptArgs),
     /// Cancel queued prompts while preserving the session and its current turn.
     ClearQueue(api_commands::ClearQueueArgs),
     /// Queue an external event in a session's durable mailbox.
     Event(api_commands::EventArgs),
-    /// Send a message to a top-level session or one of your sub-agents.
+    /// Send a message and return: from your shell, a prompt; inside a
+    /// session, a message to another session or one of your sub-agents.
     Message(api_commands::MessageArgs),
     /// Block until a turn ends and print how it ended.
     Wait(api_commands::WaitArgs),
@@ -1821,8 +1823,21 @@ async fn login(args: LoginArgs) -> Result<()> {
     }
     let (program, arguments) = mj_core::credentials::login_command(profile)
         .with_context(|| format!("profile {profile_id:?}"))?;
-    let marker = profile.authentication_marker();
-    let (before, _) = mj_core::credentials::read_credential_file(profile.kind, &marker)?;
+    // OpenCode keeps its logins in its database, so its fingerprint is the
+    // logins read from there, and a live session reloads to take them up.
+    let stored = profile.auth_scheme() == mj_core::config::AuthScheme::NativeLoginStore;
+    let fingerprint = || -> Result<Option<String>> {
+        if stored {
+            return Ok(mj_controller::opencode_logins::profile_logins(profile)?
+                .map(|logins| mj_core::credentials::credential_fingerprint(&logins)));
+        }
+        let (snapshot, _) = mj_core::credentials::read_credential_file(
+            profile.kind,
+            &profile.authentication_marker(),
+        )?;
+        Ok(snapshot.present.then_some(snapshot.fingerprint))
+    };
+    let before = fingerprint()?;
 
     println!(
         "Running `{program} {}` against {}.",
@@ -1848,11 +1863,17 @@ async fn login(args: LoginArgs) -> Result<()> {
             )
         })?;
 
-    let (after, _) = mj_core::credentials::read_credential_file(profile.kind, &marker)?;
-    if after.present && after.fingerprint != before.fingerprint {
-        println!(
-            "Credentials updated for profile {profile_id}. Live sessions pick them up within about a minute while the Mjolnir daemon is running."
-        );
+    let after = fingerprint()?;
+    if after.is_some() && after != before {
+        if stored {
+            println!(
+                "Credentials updated for profile {profile_id}. Live sessions reload with them within about a minute, once idle, while the Mjolnir daemon is running."
+            );
+        } else {
+            println!(
+                "Credentials updated for profile {profile_id}. Live sessions pick them up within about a minute while the Mjolnir daemon is running."
+            );
+        }
     } else {
         println!("Credentials for profile {profile_id} are unchanged.");
     }
@@ -2183,6 +2204,11 @@ pub(crate) struct TerminalGuard {
 impl TerminalGuard {
     pub(crate) fn enter() -> Result<Self> {
         enable_raw_mode().context("enable terminal raw mode")?;
+        // Auto reads this answer whenever it resolves, including after a
+        // switch to Auto in Settings, when crossterm owns the input and the
+        // terminal can no longer be asked. So the first entry asks, before
+        // crossterm reads anything, whatever theme is configured.
+        mj_chat::theme::terminal_background_or_probe(terminal_background::query);
         let mut stdout = io::stdout();
         // Legacy terminal input encodes Ctrl+I as the same byte as Tab. Ask
         // capable terminals to report them distinctly so both bindings work.

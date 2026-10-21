@@ -12,8 +12,11 @@ pub struct RepositoryCapture {
     pub root: PathBuf,
     pub baseline_tree: String,
     pub capture_tree: String,
-    /// Commits the turn merged in, whose changes the baseline already holds.
+    /// Commits of other history the turn merged, pulled or switched to, whose
+    /// changes the baseline already holds.
     pub merged_in: Vec<String>,
+    /// Why the diff may hold changes the turn did not write.
+    pub unattributed: Option<String>,
 }
 
 /// Everything about a review pass needed to construct its prompt.
@@ -91,12 +94,22 @@ pub fn review_prompt(job: &ReviewJob) -> String {
                 String::new()
             } else {
                 format!(
-                    "\nThe base already includes the changes this turn merged in from {}, so the diff shows only the turn's own work. Where a merged change conflicted with already-reviewed code, the base holds the conflict markers and the diff shows how the turn resolved them.",
+                    "\nThe base already includes the changes of other history this turn merged, pulled or switched to ({}), so the diff shows only the turn's own commits, merge resolutions and edits. Where the turn resolved a merge conflict, the base holds the conflict markers and the diff shows the resolution.",
                     repository.merged_in.join(", ")
                 )
             };
+            let unattributed = repository
+                .unattributed
+                .as_ref()
+                .map(|reason| {
+                    format!(
+                        "\nThe review could not tell this turn's commits from other history here ({reason}), so the diff may include changes the turn pulled, merged or switched to without writing them. Before reporting a finding, confirm with `git -C {} log` that this turn made the change.",
+                        shell_quote(&root)
+                    )
+                })
+                .unwrap_or_default();
             format!(
-                "Repository root: {root}\nRun this exact command: `git -C {} diff --no-ext-diff {} {}`{merged}",
+                "Repository root: {root}\nRun this exact command: `git -C {} diff --no-ext-diff {} {}`{merged}{unattributed}",
                 shell_quote(&root),
                 repository.baseline_tree,
                 repository.capture_tree
@@ -164,6 +177,7 @@ mod tests {
                 baseline_tree: "baseline123".into(),
                 capture_tree: "capture456".into(),
                 merged_in: Vec::new(),
+                unattributed: None,
             }],
             changed_files: "Repository: /workspace/app -- 1 file changed\n  +1 -1 src/lib.rs"
                 .into(),
@@ -184,14 +198,22 @@ mod tests {
         assert!(prompt.contains("Fix the retry behavior"));
         assert!(!prompt.contains("diff --git"));
         assert!(!prompt.contains("<workspace_diff"));
-        assert!(!prompt.contains("merged in from"));
+        assert!(!prompt.contains("merged, pulled or switched to"));
 
         let mut merged = job();
         merged.repositories[0].merged_in = vec!["upstream1".into(), "upstream2".into()];
         let prompt = review_prompt(&merged);
         assert!(prompt.contains(
-            "diff --no-ext-diff baseline123 capture456`\nThe base already includes the changes this turn merged in from upstream1, upstream2"
+            "diff --no-ext-diff baseline123 capture456`\nThe base already includes the changes of other history this turn merged, pulled or switched to (upstream1, upstream2)"
         ));
+
+        let mut unattributed = job();
+        unattributed.repositories[0].unattributed = Some("the reflog is gone".into());
+        let prompt = review_prompt(&unattributed);
+        assert!(prompt.contains(
+            "capture456`\nThe review could not tell this turn's commits from other history here (the reflog is gone)"
+        ));
+        assert!(prompt.contains("confirm with `git -C /workspace/app log`"));
     }
 
     #[test]

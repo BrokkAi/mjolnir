@@ -689,6 +689,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .expect("completed command ledger was just checked")
                 .outcome = Some(outcome.clone());
             if let RelayCommandOutcome::Prompt { stop_reason, .. } = outcome {
+                // Always `KeepCurrent`; see `TurnCompletion` for why the field
+                // is still written.
                 snapshot.turn_completion = Some(crate::activity::verdict::TurnCompletion {
                     command_id: command_id.clone(),
                     completed_ordinal: event.ordinal,

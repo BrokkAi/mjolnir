@@ -2130,6 +2130,7 @@ fn staging_a_muse_profile_hands_its_saved_model_list_to_the_session_data_directo
     );
 }
 
+// Hard-won: #1320: a reviewer staged its profile without the provider's model catalog and offered OpenAI's model names
 #[test]
 fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from() {
     let home = tempfile::tempdir().unwrap();
@@ -2139,8 +2140,8 @@ fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from(
     let cache = IsolatedCatalogCache(cache.path().join("cache.sqlite3"));
     let asked = std::cell::RefCell::new(Vec::new());
 
-    stage_profile(&profile, staged.path()).unwrap();
-    stage_codex_catalog(
+    // The one staging call every session, reviewer and probe makes.
+    stage_profile_with_catalog(
         "glm",
         &profile,
         staged.path(),
@@ -4545,11 +4546,13 @@ fn fixture_home_entries(kind: HarnessKind) -> &'static [(&'static str, bool)] {
             ("cache/models.json", false),
             ("logs/muse.log", false),
         ],
+        // OpenCode 2's login is a row of its database, which also holds every
+        // session; staging exports the row and leaves the database behind.
         HarnessKind::OpenCode => &[
             ("opencode.json", true),
             ("AGENTS.md", true),
-            (".data/opencode/auth.json", true),
             ("skills/review/SKILL.md", true),
+            (".data/opencode/auth.json", false),
             (".data/opencode/opencode.db", false),
             (".data/opencode/opencode.db-wal", false),
             (".data/opencode/log/opencode.log", false),
@@ -4596,6 +4599,12 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, br#"{"fixture":true}"#).unwrap();
         }
+        if kind == HarnessKind::OpenCode {
+            write_opencode_database(
+                &home.path().join(".data/opencode/opencode.db"),
+                "sk-fixture",
+            );
+        }
         let profile = mj_core::config::HarnessProfile {
             enabled: true,
             kind,
@@ -4609,17 +4618,63 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
 
         stage_profile(&profile, staged.path()).unwrap();
 
-        let expected = fixture_home_entries(kind)
+        let mut expected = fixture_home_entries(kind)
             .iter()
             .filter(|(_, staged)| *staged)
             .map(|(path, _)| (*path).to_owned())
             .collect::<std::collections::BTreeSet<_>>();
+        if kind == HarnessKind::OpenCode {
+            expected.insert(kind.credential_file_name().to_owned());
+            let logins: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(staged.path().join(kind.credential_file_name())).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                logins,
+                serde_json::json!([{
+                    "id": "cred_fixture",
+                    "integrationID": "deepseek",
+                    "label": "DeepSeek",
+                    "active": true,
+                    "value": {"type": "key", "key": "sk-fixture"},
+                }])
+            );
+        }
         assert_eq!(files_under(staged.path()), expected, "{kind:?}");
         assert!(
             mj_core::config::harness_authentication_marker(kind, staged.path()).is_file(),
             "{kind:?} is signed in from its staged home"
         );
     }
+}
+
+/// An OpenCode 2 database holding one session and one API-key login with
+/// `key`, in the `credential` table layout OpenCode 2.1 creates, replacing any
+/// file at `path`.
+fn write_opencode_database(path: &Path, key: &str) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("remove {}: {error}", path.display()),
+    }
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let database = rusqlite::Connection::open(path).unwrap();
+    database
+        .execute_batch(
+            "PRAGMA journal_mode = WAL;
+             CREATE TABLE credential (id text PRIMARY KEY, integration_id text, label text NOT NULL,
+                 value text NOT NULL, connector_id text, method_id text, active integer,
+                 time_created integer NOT NULL, time_updated integer NOT NULL);
+             CREATE TABLE session_v2 (id text PRIMARY KEY, title text);
+             INSERT INTO session_v2 VALUES ('ses_fixture', 'native history');",
+        )
+        .unwrap();
+    database
+        .execute(
+            "INSERT INTO credential VALUES ('cred_fixture', 'deepseek', 'DeepSeek', ?1, NULL, NULL, 1, 1, 1)",
+            [format!(r#"{{"type":"key","key":"{key}"}}"#)],
+        )
+        .unwrap();
 }
 
 /// A login as each harness writes it. A higher `generation` is a fresher copy
@@ -4654,16 +4709,20 @@ fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
             }
         }),
         HarnessKind::Muse => serde_json::json!({ "token": format!("token-{generation}") }),
-        // OpenCode stores one grant per provider under the provider id, with
-        // the OAuth expiry in epoch milliseconds.
-        HarnessKind::OpenCode => serde_json::json!({
-            "anthropic": {
+        // A staged OpenCode home carries its logins as `auth export` prints
+        // them.
+        HarnessKind::OpenCode => serde_json::json!([{
+            "id": "cred_anthropic",
+            "integrationID": "anthropic",
+            "label": "OAuth",
+            "active": true,
+            "value": {
                 "type": "oauth",
                 "refresh": format!("refresh-{generation}"),
                 "access": format!("access-{generation}"),
                 "expires": 1_790_000_000_000_i64 + generation * 1000,
-            }
-        }),
+            },
+        }]),
     };
     serde_json::to_vec(&login).unwrap()
 }
@@ -4682,7 +4741,7 @@ fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
 fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
     use mj_core::config::harness_authentication_marker;
     use mj_core::credentials::{
-        SyncAction, read_credential_file, reconcile, write_credential_file,
+        CredentialSnapshot, SyncAction, read_credential_file, reconcile, write_credential_file,
     };
 
     let directory = tempfile::tempdir().unwrap();
@@ -4702,8 +4761,13 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             codex_profile: None,
         };
         let canonical = profile.authentication_marker();
-        std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
-        std::fs::write(&canonical, login_bytes(kind, 1)).unwrap();
+        let database = home.join(".data/opencode/opencode.db");
+        if kind.keeps_logins_in_database() {
+            write_opencode_database(&database, "sk-generation-1");
+        } else {
+            std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+            std::fs::write(&canonical, login_bytes(kind, 1)).unwrap();
+        }
         let worker_root = directory.path().join("workers").join(&session_id);
         let locator = targets::TargetLocator::LocalBare {
             worker_root: worker_root.to_string_lossy().into_owned(),
@@ -4756,6 +4820,29 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
         // exchange is the same for it, except that Muse stores no refresh
         // time, so the sync never orders two different Muse copies.
         if kind == HarnessKind::Muse {
+            continue;
+        }
+        // OpenCode's logins live in its database: the sync pushes its export
+        // into the staged home, and never copies a session's back.
+        if kind.keeps_logins_in_database() {
+            stage_profile(&profile, &launch.harness_home).unwrap();
+            write_opencode_database(&database, "sk-generation-2");
+            let export = crate::opencode_logins::profile_logins(&profile)
+                .unwrap()
+                .unwrap();
+            let profile_copy = CredentialSnapshot::of(kind, &export);
+            let (session_copy, _) = read_credential_file(kind, &endpoint).unwrap();
+            let push =
+                crate::worker_client::stored_logins_push(&profile_copy, &export, &session_copy)
+                    .expect("the rotated login is pushed");
+            write_credential_file(kind, &endpoint, push).unwrap();
+            assert_eq!(std::fs::read(&endpoint).unwrap(), export);
+            let (session_copy, _) = read_credential_file(kind, &endpoint).unwrap();
+            assert_eq!(
+                crate::worker_client::stored_logins_push(&profile_copy, &export, &session_copy),
+                None
+            );
+            assert!(!canonical.exists(), "the profile home holds no copy");
             continue;
         }
         stage_profile(&profile, &launch.harness_home).unwrap();

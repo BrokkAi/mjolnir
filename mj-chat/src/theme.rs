@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::sync::OnceLock;
 
 pub use mj_core::config::SymbolSet;
-pub use mj_core::config::UiTheme;
+pub use mj_core::config::{ThemeChoice, UiTheme};
 
 /// Semantic colors always paired with the palette's painted surfaces.
 #[derive(Debug)]
@@ -149,6 +149,167 @@ const HIGH_CONTRAST: Palette = Palette {
     session_idle: rgb(140, 220, 255),
     activity_dim: rgb(64, 0, 32),
     pins: DARK_PINS,
+    reverse_video: false,
+};
+
+const HIGH_CONTRAST_LIGHT: Palette = Palette {
+    background: rgb(255, 255, 255),
+    surface_raised: rgb(232, 232, 232),
+    surface: rgb(255, 255, 255),
+    selection: rgb(222, 222, 222),
+    text: rgb(0, 0, 0),
+    muted: rgb(64, 64, 64),
+    border: rgb(32, 32, 32),
+    // Every role reaches 7:1 on every surface.
+    accent: rgb(0, 60, 168),
+    secondary: rgb(127, 0, 128),
+    success: rgb(0, 82, 0),
+    warning: rgb(111, 54, 0),
+    error: rgb(146, 0, 0),
+    session_error: rgb(146, 0, 0),
+    session_activity: rgb(111, 54, 0),
+    session_attention: rgb(111, 54, 0),
+    session_idle: rgb(0, 60, 168),
+    activity_dim: rgb(222, 179, 179),
+    pins: LIGHT_PINS,
+    reverse_video: false,
+};
+
+// The colorblind palettes keep Midnight's and Light's surfaces and carry
+// status on the blue-yellow axis, which protanopia and deuteranopia keep:
+// success is blue, warnings and activity yellow, and failures orange (dark)
+// or deep crimson (light), which also differs from the yellow in lightness.
+// The status and session colors were chosen by simulating protanopia,
+// deuteranopia, and tritanopia: every pair stays at least 9 OKLab units
+// (x100) apart under all three. Pins follow Okabe and Ito's palette.
+
+const COLORBLIND_DARK: Palette = Palette {
+    background: rgb(15, 18, 20),
+    surface_raised: rgb(32, 39, 43),
+    surface: rgb(22, 27, 30),
+    selection: rgb(38, 50, 62),
+    text: rgb(239, 237, 232),
+    muted: rgb(151, 163, 163),
+    border: rgb(62, 74, 78),
+    accent: rgb(86, 180, 233),
+    secondary: rgb(186, 213, 233),
+    success: rgb(86, 180, 233),
+    warning: rgb(240, 228, 66),
+    error: rgb(229, 127, 79),
+    session_error: rgb(229, 127, 79),
+    session_activity: rgb(240, 228, 66),
+    session_attention: rgb(207, 147, 175),
+    session_idle: rgb(86, 180, 233),
+    activity_dim: rgb(62, 42, 33),
+    pins: [
+        rgb(86, 180, 233),
+        rgb(230, 159, 0),
+        rgb(0, 158, 115),
+        rgb(240, 228, 66),
+        rgb(204, 121, 167),
+        rgb(44, 138, 204),
+        rgb(215, 96, 5),
+        rgb(200, 200, 200),
+    ],
+    reverse_video: false,
+};
+
+const COLORBLIND_LIGHT: Palette = Palette {
+    background: rgb(242, 241, 237),
+    surface_raised: rgb(233, 231, 226),
+    surface: rgb(251, 250, 247),
+    selection: rgb(224, 231, 241),
+    text: rgb(38, 51, 46),
+    muted: rgb(89, 101, 95),
+    border: rgb(179, 186, 180),
+    accent: rgb(0, 106, 170),
+    secondary: rgb(70, 16, 82),
+    success: rgb(0, 106, 170),
+    warning: rgb(132, 90, 15),
+    error: rgb(127, 4, 30),
+    session_error: rgb(127, 4, 30),
+    session_activity: rgb(132, 90, 15),
+    session_attention: rgb(94, 50, 104),
+    session_idle: rgb(0, 106, 170),
+    activity_dim: rgb(206, 168, 173),
+    pins: [
+        rgb(0, 113, 177),
+        rgb(159, 92, 0),
+        rgb(0, 124, 84),
+        rgb(161, 82, 127),
+        rgb(95, 80, 170),
+        rgb(187, 70, 0),
+        rgb(123, 109, 0),
+        rgb(60, 60, 60),
+    ],
+    reverse_video: false,
+};
+
+// Catppuccin paints its base color, so the dashboard meets the padding of a
+// terminal running the same flavor. Mocha's colors are its own; Latte's
+// accents sit near 3:1 on its base and are deepened in hue to 4.5:1.
+
+const CATPPUCCIN_MOCHA: Palette = Palette {
+    // Base, mantle, and overlay 2 at 20% over base.
+    background: rgb(30, 30, 46),
+    surface_raised: rgb(24, 24, 37),
+    surface: rgb(30, 30, 46),
+    selection: rgb(53, 55, 72),
+    text: rgb(205, 214, 244),
+    muted: rgb(166, 173, 200),
+    border: rgb(108, 112, 134),
+    accent: rgb(203, 166, 247),
+    secondary: rgb(137, 180, 250),
+    success: rgb(166, 227, 161),
+    warning: rgb(249, 226, 175),
+    error: rgb(243, 139, 168),
+    session_error: rgb(243, 139, 168),
+    session_activity: rgb(249, 226, 175),
+    session_attention: rgb(250, 179, 135),
+    session_idle: rgb(137, 180, 250),
+    activity_dim: rgb(77, 54, 73),
+    pins: [
+        rgb(137, 220, 235),
+        rgb(203, 166, 247),
+        rgb(166, 227, 161),
+        rgb(245, 194, 231),
+        rgb(137, 180, 250),
+        rgb(249, 226, 175),
+        rgb(148, 226, 213),
+        rgb(242, 205, 205),
+    ],
+    reverse_video: false,
+};
+
+const CATPPUCCIN_LATTE: Palette = Palette {
+    // Base, mantle, and overlay 2 at 15% over base.
+    background: rgb(239, 241, 245),
+    surface_raised: rgb(230, 233, 239),
+    surface: rgb(239, 241, 245),
+    selection: rgb(222, 224, 230),
+    text: rgb(76, 79, 105),
+    muted: rgb(92, 95, 119),
+    border: rgb(156, 160, 176),
+    accent: rgb(128, 45, 229),
+    secondary: rgb(11, 85, 227),
+    success: rgb(0, 115, 0),
+    warning: rgb(153, 77, 0),
+    error: rgb(198, 0, 48),
+    session_error: rgb(198, 0, 48),
+    session_activity: rgb(153, 77, 0),
+    session_attention: rgb(153, 77, 0),
+    session_idle: rgb(11, 85, 227),
+    activity_dim: rgb(226, 166, 184),
+    pins: [
+        rgb(0, 119, 141),
+        rgb(136, 57, 239),
+        rgb(22, 126, 0),
+        rgb(176, 64, 149),
+        rgb(25, 97, 240),
+        rgb(165, 89, 0),
+        rgb(0, 120, 127),
+        rgb(174, 78, 80),
+    ],
     reverse_video: false,
 };
 
@@ -389,15 +550,96 @@ pub fn no_color_requested() -> bool {
     *NO_COLOR.get_or_init(|| std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()))
 }
 
-/// The theme to draw with: the configured one, unless `NO_COLOR` asks for
-/// none, which wins over every configured choice.
-pub fn effective_theme(configured: UiTheme) -> UiTheme {
-    theme_for(configured, no_color_requested())
+/// A terminal's background as red, green, and blue.
+pub type Rgb = (u8, u8, u8);
+
+/// What the terminal answered when asked for its background: `None` when it
+/// did not answer. Unset until a terminal surface asks, which happens once.
+static TERMINAL_BACKGROUND: OnceLock<Option<Rgb>> = OnceLock::new();
+
+/// Asks for the terminal's background with `probe` the first time it is
+/// called in this process, and returns that answer every time. The probe must
+/// run before anything else reads the terminal's input.
+pub fn terminal_background_or_probe(probe: impl FnOnce() -> Option<Rgb>) -> Option<Rgb> {
+    *TERMINAL_BACKGROUND.get_or_init(probe)
 }
 
-/// [`effective_theme`] with the environment answer passed in, for tests.
-pub fn theme_for(configured: UiTheme, no_color: bool) -> UiTheme {
-    if no_color { UiTheme::Mono } else { configured }
+/// The background the terminal reported, if it was asked and answered.
+pub fn terminal_background() -> Option<Rgb> {
+    TERMINAL_BACKGROUND.get().copied().flatten()
+}
+
+/// Why a theme is on screen, which Settings reports beside the choice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemeReason {
+    /// The configured palette.
+    Configured,
+    /// `NO_COLOR` is set; the configured choice returns once it is unset.
+    NoColor,
+    /// Auto, from the background the terminal reported.
+    TerminalBackground(Rgb),
+    /// Auto, with no background reported: Midnight, the default.
+    Unreported,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Resolution {
+    pub theme: UiTheme,
+    pub reason: ThemeReason,
+}
+
+/// The theme to draw with: the configured one, unless `NO_COLOR` asks for
+/// none, which wins over every configured choice.
+pub fn effective_theme(configured: ThemeChoice) -> UiTheme {
+    resolve(configured, no_color_requested(), terminal_background()).theme
+}
+
+/// The one decision from a choice to a palette, with the process facts
+/// passed in. Auto draws whichever of Midnight and Light has text that
+/// contrasts more with the terminal's background.
+pub fn resolve(configured: ThemeChoice, no_color: bool, background: Option<Rgb>) -> Resolution {
+    let (theme, reason) = match (no_color, configured, background) {
+        (true, _, _) => (UiTheme::Mono, ThemeReason::NoColor),
+        (false, ThemeChoice::Fixed(theme), _) => (theme, ThemeReason::Configured),
+        (false, ThemeChoice::Auto, None) => (UiTheme::default(), ThemeReason::Unreported),
+        (false, ThemeChoice::Auto, Some((red, green, blue))) => {
+            let background = rgb(red, green, blue);
+            let theme = if contrast(MIDNIGHT.text, background) >= contrast(LIGHT.text, background) {
+                UiTheme::Midnight
+            } else {
+                UiTheme::Light
+            };
+            (theme, ThemeReason::TerminalBackground((red, green, blue)))
+        }
+    };
+    Resolution { theme, reason }
+}
+
+/// WCAG relative luminance of an RGB color.
+fn luminance(color: Color) -> f64 {
+    let Color::Rgb(r, g, b) = color else {
+        panic!("contrast is measured between explicit RGB colors");
+    };
+    [r, g, b]
+        .into_iter()
+        .zip([0.2126, 0.7152, 0.0722])
+        .map(|(channel, weight)| {
+            let value = f64::from(channel) / 255.0;
+            weight
+                * if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+        })
+        .sum()
+}
+
+/// WCAG contrast ratio between two RGB colors, from 1 to 21.
+fn contrast(foreground: Color, background: Color) -> f64 {
+    let a = luminance(foreground);
+    let b = luminance(background);
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
 pub fn palette_for(theme: UiTheme) -> &'static Palette {
@@ -406,6 +648,11 @@ pub fn palette_for(theme: UiTheme) -> &'static Palette {
         UiTheme::Light => &LIGHT,
         UiTheme::Darcula => &DARCULA,
         UiTheme::HighContrast => &HIGH_CONTRAST,
+        UiTheme::HighContrastLight => &HIGH_CONTRAST_LIGHT,
+        UiTheme::ColorblindDark => &COLORBLIND_DARK,
+        UiTheme::ColorblindLight => &COLORBLIND_LIGHT,
+        UiTheme::CatppuccinMocha => &CATPPUCCIN_MOCHA,
+        UiTheme::CatppuccinLatte => &CATPPUCCIN_LATTE,
         UiTheme::Campbell => &CAMPBELL,
         UiTheme::OneHalfDark => &ONE_HALF_DARK,
         UiTheme::OneHalfLight => &ONE_HALF_LIGHT,
@@ -420,6 +667,10 @@ pub fn palette_for(theme: UiTheme) -> &'static Palette {
 /// The glyphs one symbol set draws with. Every site that draws a status
 /// mark, a control, a rule, or a separator reads these through [`glyphs`],
 /// so switching the set changes all of them together.
+///
+/// Every Unicode glyph must take the same columns in every common terminal;
+/// `every_unicode_glyph_takes_the_same_columns_in_every_terminal` lists the
+/// rules and why.
 #[derive(Debug)]
 pub struct Glyphs {
     pub pin: &'static str,
@@ -473,6 +724,9 @@ pub struct Glyphs {
     pub role_gutter: &'static str,
     /// The microphone chip on the composer's top border.
     pub microphone: &'static str,
+    /// A checkbox's mark when checked and when not.
+    pub checkbox_checked: &'static str,
+    pub checkbox_unchecked: &'static str,
     /// The marks a transcript header draws for each kind of message. A system
     /// message uses `rule` and a tool row uses the tool-status glyphs, so only
     /// the kinds without a mark of their own are listed here.
@@ -506,12 +760,12 @@ pub const UNICODE_GLYPHS: Glyphs = Glyphs {
     selected: "› ",
     ellipsis: "…",
     row_menu: " ⋯ ",
-    workspace_menu: " ☰ ",
+    workspace_menu: " ≡ ",
     close: " × ",
     size_minimized: "▁",
-    size_standard: "▪",
+    size_standard: "▄",
     size_maximized: "□",
-    warning: "⚠",
+    warning: "!",
     spark: "✦",
     rule: "─",
     none: "—",
@@ -532,9 +786,9 @@ pub const UNICODE_GLYPHS: Glyphs = Glyphs {
     bar_right: "▏",
     arrows_vertical: "↑↓",
     role_gutter: "│ ",
-    // The text variation selector is intentional: a terminal should keep this
-    // as a compact text button rather than an emoji of a different width.
-    microphone: "🎙︎",
+    microphone: "mic",
+    checkbox_checked: "☒",
+    checkbox_unchecked: "☐",
     role_user: "❯",
     role_message: "←",
     role_agent: "●",
@@ -591,6 +845,8 @@ pub const ASCII_GLYPHS: Glyphs = Glyphs {
     arrows_vertical: "^v",
     role_gutter: "| ",
     microphone: "mic",
+    checkbox_checked: "[x]",
+    checkbox_unchecked: "[ ]",
     role_user: ">",
     role_message: "<",
     role_agent: "*",
@@ -1122,31 +1378,6 @@ mod tests {
         assert_eq!(current(), original);
     }
 
-    fn luminance(color: Color) -> f64 {
-        let Color::Rgb(r, g, b) = color else {
-            panic!("palettes must define explicit RGB colors");
-        };
-        [r, g, b]
-            .into_iter()
-            .zip([0.2126, 0.7152, 0.0722])
-            .map(|(channel, weight)| {
-                let value = f64::from(channel) / 255.0;
-                weight
-                    * if value <= 0.04045 {
-                        value / 12.92
-                    } else {
-                        ((value + 0.055) / 1.055).powf(2.4)
-                    }
-            })
-            .sum()
-    }
-
-    fn contrast(foreground: Color, background: Color) -> f64 {
-        let a = luminance(foreground);
-        let b = luminance(background);
-        (a.max(b) + 0.05) / (a.min(b) + 0.05)
-    }
-
     fn rendered_theme_rows(
         label: &str,
         width: u16,
@@ -1168,11 +1399,12 @@ mod tests {
     fn golden_theme_rendering() {
         let mut output = String::new();
 
-        let mono = theme_for(UiTheme::Light, true);
+        let light = ThemeChoice::Fixed(UiTheme::Light);
+        let mono = resolve(light, true, None).theme;
         let mono_styles = with_theme(mono, || {
             format!(
                 "NO_COLOR theme: {mono:?}; color-enabled light remains: {:?}; base: {:?}; selection: {:?}; active control: {:?}",
-                theme_for(UiTheme::Light, false),
+                resolve(light, false, None).theme,
                 base(),
                 selection(true),
                 active_control()
@@ -1193,6 +1425,32 @@ mod tests {
             mono_rows,
             &mono_styles,
         ));
+
+        // Auto against backgrounds terminals actually report: xterm's white,
+        // Solarized's two bases, Catppuccin Mocha's base, a mid gray, and a
+        // terminal that does not answer. NO_COLOR still wins.
+        output.push_str("=== Auto resolution ===\n");
+        for background in [
+            Some((255, 255, 255)),
+            Some((253, 246, 227)),
+            Some((0, 43, 54)),
+            Some((30, 30, 46)),
+            Some((128, 128, 128)),
+            None,
+        ] {
+            writeln!(
+                output,
+                "{background:?}: {:?}",
+                resolve(ThemeChoice::Auto, false, background)
+            )
+            .expect("write Auto resolution");
+        }
+        writeln!(
+            output,
+            "NO_COLOR over a light background: {:?}",
+            resolve(ThemeChoice::Auto, true, Some((255, 255, 255)))
+        )
+        .expect("write Auto resolution");
 
         // A terminal palette's contrast belongs to the user's scheme, so its
         // record is the styles that carry selection and focus.
@@ -1265,10 +1523,15 @@ mod tests {
                         format!("{foreground_name} on {background_name}: Aa"),
                         Style::default().fg(foreground).bg(background),
                     )));
+                    let ratio = contrast(foreground, background);
+                    // A regenerated golden would accept an unreadable pair.
+                    assert!(
+                        ratio >= 4.5,
+                        "{theme:?} {foreground_name} on {background_name} is {ratio:.2}:1, under 4.5:1"
+                    );
                     writeln!(
                         details,
-                        "{foreground_name}/{background_name}: fg={foreground:?} bg={background:?} contrast={:.2}",
-                        contrast(foreground, background)
+                        "{foreground_name}/{background_name}: fg={foreground:?} bg={background:?} contrast={ratio:.2}",
                     )
                     .expect("write palette contrast");
                 }
@@ -1323,6 +1586,85 @@ mod tests {
             assert_eq!(line.spans[1].content, "Shift-Enter");
         });
         assert_eq!(footer_separator(), " · ");
+    }
+
+    /// ratatui writes a run of changed cells without moving the cursor, so a
+    /// glyph that a terminal draws wider than `unicode-width` measures it
+    /// moves every later cell of the run, and at the right edge the overflow
+    /// wraps onto the next row, where it stays. Every glyph the dashboard
+    /// draws must therefore take the same columns in every common terminal:
+    ///
+    /// - No zero-width code point (variation selector, joiner, combining
+    ///   mark). Windows Terminal before 1.22, and its "Windows Console" text
+    ///   measurement mode since, give every code point a column of its own.
+    /// - No emoji without default emoji presentation. Terminals disagree on
+    ///   whether to draw those as one-column text or two-column emoji.
+    /// - No code point whose East Asian Width changed in Unicode 16, which a
+    ///   terminal with an older table draws one column narrower.
+    ///
+    /// East Asian Ambiguous characters stay allowed: Windows Terminal, ConPTY
+    /// and `unicode-width` all draw them one column wide unless a terminal is
+    /// set to draw them wide, and the box-drawing characters of every border
+    /// are Ambiguous too.
+    // Hard-won: #1243: a glyph measured 1 column by ratatui and 2 by Windows Terminal shifted composer rows over the Sessions pane
+    #[test]
+    fn every_unicode_glyph_takes_the_same_columns_in_every_terminal() {
+        use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+        // Destructuring without `..` makes a glyph added to the table fail
+        // to compile here until it is checked too.
+        macro_rules! entries {
+            ($table:expr; $($field:ident),* $(,)?) => {{
+                let Glyphs { $($field),* } = $table;
+                [$((stringify!($field), *$field)),*]
+            }};
+        }
+        let entries = entries!(&UNICODE_GLYPHS;
+            pin, pinned, working, waiting, unread, idle, unknown, unreachable,
+            failed, starting, resuming, moving, checkpointing, stopping,
+            stopped, destroying, selected, ellipsis, row_menu, workspace_menu,
+            close, size_minimized, size_standard, size_maximized, warning,
+            spark, rule, none, footer_separator, footer_group_separator,
+            bullet, check, running, pending, dropdown, dropup, navigate,
+            scroll_track, scroll_thumb, scroll_mark, bar_full, bar_left,
+            bar_right, arrows_vertical, role_gutter, microphone, role_user,
+            checkbox_checked, checkbox_unchecked, role_message, role_agent,
+            role_thought, role_plan, role_plan_proposal, tool_output,
+        );
+        // Changed from Neutral to Wide in Unicode 16.0: the trigrams,
+        // monograms and digrams, the Yijing hexagrams, and the Tai Xuan Jing
+        // symbols.
+        let width_changed = [
+            0x2630..=0x2637,
+            0x268A..=0x268F,
+            0x4DC0..=0x4DFF,
+            0x1D300..=0x1D356,
+        ];
+        let mut offending = Vec::new();
+        for (name, glyph) in entries {
+            for mark in glyph.chars() {
+                let problem = match mark.width() {
+                    None | Some(0) => Some("is a zero-width code point"),
+                    Some(1) if format!("{mark}\u{FE0F}").width() == 2 => {
+                        Some("is an emoji without default emoji presentation")
+                    }
+                    _ if width_changed
+                        .iter()
+                        .any(|range| range.contains(&u32::from(mark))) =>
+                    {
+                        Some("changed East Asian Width in Unicode 16")
+                    }
+                    _ => None,
+                };
+                if let Some(problem) = problem {
+                    offending.push(format!(
+                        "{name} {glyph:?}: U+{:04X} {problem}",
+                        u32::from(mark)
+                    ));
+                }
+            }
+        }
+        assert!(offending.is_empty(), "{}", offending.join("\n"));
     }
 }
 

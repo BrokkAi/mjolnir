@@ -257,16 +257,9 @@ impl HarnessKind {
                         .map(|expiry| expiry.timestamp_millis())
                 })
                 .max(),
-            // OpenCode records each provider login's OAuth expiry in epoch
-            // milliseconds; 0 marks a login with no recorded expiry.
-            Self::OpenCode => json
-                .as_object()?
-                .values()
-                .filter_map(|grant| grant.get("expires")?.as_i64())
-                .filter(|expires| *expires > 0)
-                .max(),
-            // Muse stores no timestamp Hel can order two copies by.
-            Self::Muse => None,
+            // Muse stores no timestamp Hel can order two copies by, and
+            // OpenCode's logins live in its database, which no copy orders.
+            Self::Muse | Self::OpenCode => None,
         }
     }
 
@@ -617,7 +610,7 @@ pub fn login_command(profile: &HarnessProfile) -> Result<(String, Vec<String>)> 
         AuthScheme::NoAuthentication => {
             bail!("this profile's built-in provider does not require an interactive login")
         }
-        AuthScheme::NativeLogin => {}
+        AuthScheme::NativeLogin | AuthScheme::NativeLoginStore => {}
     }
     Ok(native_login_command(profile))
 }

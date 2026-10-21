@@ -28,7 +28,7 @@ previously archived by a provider. Provider archive metadata is read-only.
 
 The Workspace pane has one tab row framed by two borders above Sessions. Click a
 tab to switch immediately, or focus Workspaces and use the arrow keys to select
-a workspace without opening a manager. The pinned `☰` button at the right of the
+a workspace without opening a manager. The pinned `≡` button at the right of the
 tab row opens workspace management for creating, renaming, recovering, or
 deleting workspaces. The Workspaces command remains available in the command
 palette. The selected workspace also determines where **Create** attaches the
@@ -42,11 +42,21 @@ replaces the footer. Each session row has a **⋯** button for its actions.
 Displayed dashboard shortcut hints are clickable, including global shortcuts
 in the composer's footer. Help supports wheel scrolling and a **Close** button.
 
-Open Settings (`prefix+s`) to choose Midnight (the default), Light, Darcula,
-High Contrast, Campbell, One Half Dark, One Half Light, Solarized Dark,
-Solarized Light, Terminal Dark, Terminal Light, or Monochrome. Saving applies
-the palette to the dashboard, conversation, and dialogs and preserves it for
-future launches. Campbell, One Half, and Solarized match the Windows Terminal
+Open Settings (`prefix+s`) to choose Auto, Midnight (the default), Light,
+Darcula, High Contrast, High Contrast Light, Colorblind Dark, Colorblind Light,
+Catppuccin Mocha, Catppuccin Latte, Campbell, One Half Dark, One Half Light,
+Solarized Dark, Solarized Light, Terminal Dark, Terminal Light, or Monochrome.
+Saving applies the palette to the dashboard, conversation, and dialogs and
+preserves it for future launches. Auto asks the terminal for its background
+color when mj starts and draws Midnight on a dark background and Light on a
+light one; Settings names the palette it picked and the color the terminal
+reported. A terminal that does not answer, and Windows outside WSL, get
+Midnight, and Auto does not follow a terminal that changes scheme while mj is
+running. Colorblind Dark and Colorblind Light show success in blue, warnings
+and activity in yellow, and failures in orange or deep crimson, so failures
+stay distinct with red-green or blue-yellow color blindness. High Contrast
+Light is black on white. Catppuccin Mocha and Latte paint the flavor's own base
+color. Campbell, One Half, and Solarized match the Windows Terminal
 schemes of the same name, background included, so the dashboard blends into the
 window under WSL. Terminal Dark and Terminal Light paint no backgrounds and use
 the terminal's own 16 colors, with a neutral gray for secondary text, so they
@@ -175,7 +185,7 @@ At standard size it uses one third of the terminal width, bounded to 40–80
 columns; maximized uses half, bounded to 40–100 columns. Both stay within half
 the terminal on narrow screens. The Workspaces pane keeps one bordered tab row
 above the Sessions list at every sidebar size. Sessions, Targets, and Profiles each
-have minimized (`▁`), standard (`▪`), and maximized (`□`) title-bar controls.
+have minimized (`▁`), standard (`▄`), and maximized (`□`) title-bar controls.
 Click a control, or focus a support pane and press `prefix+shift+z` to cycle through
 its sizes. Max is hidden when it adds no space over Standard. The sidebar
 needs at least 80 columns, so standard and maximized are both 40 columns at
@@ -411,7 +421,7 @@ through **Open**, which lists them for resuming.
 ## Prompt editor
 
 The Prompt pane is a multiline editor with completion, history, and transcript
-controls. A `>` marks the editable input. The microphone button occupies the
+controls. A `>` marks the editable input. The microphone button, `mic`, occupies the
 upper-left corner of the composer, followed by **Model** and **Effort**. The
 selected session's busy spinner appears at the upper right while work is active.
 It disappears when the session is idle, stopped, or waiting without active work.

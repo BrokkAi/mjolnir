@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 85;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 87;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1586,6 +1586,19 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (86, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
              PRAGMA user_version = 86;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: stored elicitation requests can say they are tool permission
+    // forms (`tool_permission`), and older readers refuse the unknown field.
+    if version < 87 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 87 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (87, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 87;
              COMMIT;",
         )?;
     }

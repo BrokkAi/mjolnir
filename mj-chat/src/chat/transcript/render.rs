@@ -521,6 +521,9 @@ fn render_entry_tracking(
         ChatRole::User | ChatRole::Agent | ChatRole::Message | ChatRole::System => {
             format_event_time(entry.recorded_at_ms)
         }
+        ChatRole::Tool if tool == ToolView::Expanded => {
+            format_event_range(entry.recorded_at_ms, entry.tool_ended_at_ms)
+        }
         _ => None,
     };
     let mut header = vec![
@@ -819,6 +822,19 @@ pub fn format_event_time(recorded_at_ms: Option<i64>) -> Option<String> {
             .format("%H:%M")
             .to_string()
     })
+}
+
+/// Format when a tool call ran as local 24-hour times. A call that took less
+/// than a minute, or has not ended, shows only when it started.
+pub fn format_event_range(started_at_ms: Option<i64>, ended_at_ms: Option<i64>) -> Option<String> {
+    let started = format_event_time(started_at_ms)?;
+    match ended_at_ms {
+        Some(ended_at_ms) if ended_at_ms - started_at_ms? >= 60_000 => Some(format!(
+            "{started}–{}",
+            format_event_time(Some(ended_at_ms))?
+        )),
+        _ => Some(started),
+    }
 }
 
 pub(super) fn entry_logical_lines(

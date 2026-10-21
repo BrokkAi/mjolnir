@@ -570,7 +570,10 @@ fn retired_stopped_session_filters_load_and_are_dropped_on_save() {
 fn nested_home_mapping_keeps_config_credentials_and_session_data_together() {
     for (kind, credential) in [
         (HarnessKind::Muse, "auth.json"),
-        (HarnessKind::OpenCode, ".data/opencode/auth.json"),
+        (
+            HarnessKind::OpenCode,
+            ".data/opencode/mjolnir-credentials.json",
+        ),
     ] {
         let home = crate::target_path::join(Path::new("/private/session"), Path::new(kind.id()));
         let mut environment = BTreeMap::from([("XDG_DATA_HOME".into(), "/unrelated".into())]);
@@ -1352,7 +1355,7 @@ fn every_previous_config_version_upgrades_with_compatible_defaults() {
         fs::write(&path, format!("version = {version}\n")).unwrap();
         let config = Config::load_from(&path).unwrap();
         assert_eq!(config.version, CONFIG_VERSION);
-        assert_eq!(config.theme, UiTheme::Midnight);
+        assert_eq!(config.theme, UiTheme::Midnight.into());
         assert!(!config.advanced.detailed_activity_clocks);
     }
 }
@@ -1364,11 +1367,11 @@ fn theme_preferences_upgrade_and_round_trip_without_replacing_other_settings() {
     let old = "version = 4\nshow_stopped_sessions = false\n";
     fs::write(&path, old).unwrap();
     let config = Config::load_from(&path).unwrap();
-    assert_eq!(config.theme, UiTheme::Midnight);
+    assert_eq!(config.theme, UiTheme::Midnight.into());
     assert_eq!(config.version, CONFIG_VERSION);
     assert_eq!(fs::read_to_string(&path).unwrap(), old);
 
-    for theme in UiTheme::ALL {
+    for theme in ThemeChoice::all() {
         Config::update_to(&path, |config| {
             config.theme = theme;
             Ok(())
@@ -1391,8 +1394,7 @@ fn legacy_dracula_theme_loads_and_saves_as_darcula() {
     .unwrap();
 
     let config = Config::load_from(&path).unwrap();
-    assert_eq!(config.theme, UiTheme::Darcula);
-    assert_eq!(UiTheme::ALL.len(), 12);
+    assert_eq!(config.theme, UiTheme::Darcula.into());
     config.save_to(&path).unwrap();
     let saved = fs::read_to_string(&path).unwrap();
     assert!(saved.contains("theme = \"darcula\""), "{saved}");
