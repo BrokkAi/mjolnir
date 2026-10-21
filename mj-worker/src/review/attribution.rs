@@ -101,8 +101,6 @@ pub(crate) fn review_base(
     capture: &str,
 ) -> Result<ReviewBase> {
     let point = read_review_point(git, repository, baseline)?;
-    // A fallback still carries the pending commits: the whole-tree diff
-    // shows only those the capture holds.
     let plain = |unattributed: Option<String>, pending: Vec<String>| {
         if let Some(reason) = &unattributed {
             tracing::warn!(
@@ -122,59 +120,66 @@ pub(crate) fn review_base(
     let Some(head) = head else {
         return Ok(plain(None, point.pending));
     };
+    // A fallback's whole-tree diff reviews the pending commits HEAD now
+    // reaches or the capture otherwise holds, and carries only the rest.
+    let fallback = |reason: String| -> Result<ReviewBase> {
+        let mut history = History::new(git, repository);
+        let mut carried = Vec::new();
+        for commit in history.read_existing(&point.pending)? {
+            if history.is_ancestor(&commit, head)? {
+                continue;
+            }
+            let before = history.change_base(&commit)?;
+            let after = history.tree(&commit)?;
+            if before != after && !history.holds(&after, &before, capture)? {
+                carried.push(commit);
+            }
+        }
+        Ok(plain(Some(reason), carried))
+    };
     let Some(anchor) = point.reflog else {
-        return Ok(plain(
-            (point.head.as_deref() != Some(head)).then(|| {
-                "the baseline does not record its place in the HEAD reflog; it was taken by an \
-                 earlier release, or while HEAD had no reflog"
-                    .to_owned()
-            }),
-            point.pending.clone(),
-        ));
+        if point.head.as_deref() == Some(head) {
+            return Ok(plain(None, point.pending.clone()));
+        }
+        return fallback(
+            "the baseline does not record its place in the HEAD reflog; it was taken by an \
+             earlier release, or while HEAD had no reflog"
+                .to_owned(),
+        );
     };
     if let Some(since) = &point.head
         && !object_exists(git, repository, &format!("{since}^{{commit}}"))
     {
         // The commit outlives a rewrite in the reflog for at least 30 days, so
         // this takes deliberate history deletion.
-        return Ok(plain(
-            Some(format!(
-                "the baseline's commit {since} is no longer in the repository"
-            )),
-            point.pending.clone(),
+        return fallback(format!(
+            "the baseline's commit {since} is no longer in the repository"
         ));
     }
     let reflog = match reflog {
         Ok(reflog) => reflog,
         Err(error) => {
-            return Ok(plain(
-                Some(format!("the HEAD reflog could not be read: {error}")),
-                point.pending.clone(),
-            ));
+            return fallback(format!("the HEAD reflog could not be read: {error}"));
         }
     };
     let Some((before, since)) = entries_since(reflog, anchor, point.head.as_deref()) else {
-        return Ok(plain(
-            Some("the HEAD reflog no longer holds the entry the baseline was taken at".to_owned()),
-            point.pending.clone(),
-        ));
+        return fallback(
+            "the HEAD reflog no longer holds the entry the baseline was taken at".to_owned(),
+        );
     };
     if since
         .last()
         .map_or(point.head.as_deref(), |last| Some(last.commit.as_str()))
         != Some(head)
     {
-        return Ok(plain(
-            Some("HEAD moved without a reflog entry since the baseline".to_owned()),
-            point.pending.clone(),
-        ));
+        return fallback("HEAD moved without a reflog entry since the baseline".to_owned());
     }
     if since.is_empty() {
-        return Ok(plain(None, point.pending));
+        return Ok(plain(None, point.pending.clone()));
     }
     let made = match commits_made(before, since) {
         Ok(made) => made,
-        Err(reason) => return Ok(plain(Some(reason), point.pending.clone())),
+        Err(reason) => return fallback(reason),
     };
 
     let mut history = History::new(git, repository);
@@ -197,11 +202,8 @@ pub(crate) fn review_base(
         .collect::<Vec<_>>();
     let counterparts = counterparts(&mut history, &made, &own_set, &positions, head)?;
     let Some(order) = history.walk(head, point.head.as_deref())? else {
-        return Ok(plain(
-            Some(format!(
-                "HEAD's history since the baseline is longer than {HISTORY_LIMIT} commits"
-            )),
-            point.pending.clone(),
+        return fallback(format!(
+            "HEAD's history since the baseline is longer than {HISTORY_LIMIT} commits"
         ));
     };
     let reachable = order.iter().cloned().collect::<HashSet<_>>();
@@ -221,11 +223,11 @@ pub(crate) fn review_base(
             [parent] => history.reduced(&reduced, parent)?,
             _ => history.merge_parents(&parents, Some(&reduced))?,
         };
+        // A rewrite keeps its counterpart's change, which for a merge that
+        // `rebase --rebase-merges` recreated is the reviewed resolution.
         let tree = if !mine {
             history.replay(commit, &start)?
-        } else if let Some(counterpart) = counterparts.get(commit)
-            && parents.len() <= 1
-        {
+        } else if let Some(counterpart) = counterparts.get(commit) {
             history.replay(counterpart, &start)?
         } else {
             start
@@ -240,26 +242,18 @@ pub(crate) fn review_base(
         .rev()
         .filter(|commit| !reachable.contains(*commit))
     {
-        let parents = history.parents(commit)?;
-        let before = match (counterparts.get(commit), parents.as_slice()) {
-            (Some(counterpart), []) => {
-                let empty = history.empty_tree()?;
-                history.replay(counterpart, &empty)?
-            }
-            (Some(counterpart), [parent]) => {
-                let start = history.tree(parent)?;
-                history.replay(counterpart, &start)?
-            }
-            // A merge the turn made contributes only its resolution.
-            _ => history.change_base(commit)?,
-        };
+        // What the turn changed: beyond its parent, beyond the unresolved
+        // merge of a merge's parents, and beyond a rewrite's counterpart.
+        let mut before = history.change_base(commit)?;
+        if let Some(counterpart) = counterparts.get(commit) {
+            before = history.replay(counterpart, &before)?;
+        }
         let after = history.tree(commit)?;
         if before == after {
             continue;
         }
         base = history.merge3(&after, &base, &before, MergeConflicts::KeepOurs)?;
-        let captured = history.merge3(&after, capture, &before, MergeConflicts::Mark)?;
-        if captured == capture {
+        if !history.holds(&after, &before, capture)? {
             still_pending.push(commit.clone());
         }
     }
@@ -596,6 +590,28 @@ impl<'a> History<'a> {
             [] => self.empty_tree(),
             [parent] => self.tree(parent),
             _ => self.merge_parents(&parents, None),
+        }
+    }
+
+    /// Whether `capture` holds the change from `before` to `after`: reverting
+    /// it, with any conflict kept, would change the capture.
+    fn holds(&mut self, after: &str, before: &str, capture: &str) -> Result<bool> {
+        Ok(self.merge3(after, capture, before, MergeConflicts::Mark)? != capture)
+    }
+
+    fn is_ancestor(&self, commit: &str, head: &str) -> Result<bool> {
+        let output = run(
+            self.git,
+            self.repository,
+            &["merge-base", "--is-ancestor", commit, head],
+        )?;
+        match output.status {
+            0 => Ok(true),
+            1 => Ok(false),
+            status => anyhow::bail!(
+                "checking whether {head} contains {commit} failed with status {status}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
         }
     }
 

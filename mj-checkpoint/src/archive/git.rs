@@ -786,8 +786,10 @@ pub struct ReflogEntry {
 
 impl ReflogEntry {
     /// Whether this entry only moved HEAD to a commit that already existed,
-    /// as a checkout, reset, fast-forward, clone or the start and end of a
-    /// rebase do, rather than recording a commit made in this worktree.
+    /// as a checkout, reset, fast-forward, clone, or the start, end and
+    /// `reset` steps of a rebase do, rather than recording a commit made in
+    /// this worktree. `git rebase --rebase-merges` resets to its `onto` label
+    /// between the branches it replays.
     ///
     /// Git names the action at the start of every message (`commit:`,
     /// `checkout: moving from …`, `merge topic: Fast-forward`, `rebase (pick):
@@ -812,7 +814,7 @@ impl ReflogEntry {
             // `cherry-pick --ff` counts as a commit.
             || ((action.starts_with("merge ") || action == "pull" || action.starts_with("pull "))
                 && rest.eq_ignore_ascii_case("fast-forward"))
-            || ["(start)", "(finish)", "(abort)"]
+            || ["(start)", "(finish)", "(abort)", "(reset)"]
                 .iter()
                 .any(|step| action.ends_with(step))
     }

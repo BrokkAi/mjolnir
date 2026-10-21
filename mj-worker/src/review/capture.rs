@@ -877,10 +877,13 @@ mod capture_tests {
         }
     }
 
-    /// A review that covered commits the turn then rebases onto upstream and
-    /// amends shows only what the amend changed: neither the rebased commits
-    /// it already reviewed nor the upstream commit they now sit on.
+    /// A review that covered commits the turn then replays onto upstream with
+    /// `git rebase --rebase-merges`, among them a merge whose conflict it had
+    /// resolved, and then amends shows only what the amend changed: not the
+    /// replayed commits, not the resolution it already reviewed, and not the
+    /// upstream commit they now sit on.
     // Hard-won: 424f97670: amending or rebasing a reviewed commit put the whole commit back in the review.
+    // Hard-won: f93bececc: a rebase reset step forced a whole-tree review, and a replayed merge put its reviewed resolution back.
     #[test]
     fn a_rewrite_of_reviewed_commits_reviews_only_what_it_changed() {
         let temp = repository();
@@ -891,12 +894,34 @@ mod capture_tests {
             root,
             &["worktree", "add", "-q", "--detach", other.to_str().unwrap()],
         );
+        // Runs a Git command that stops on a conflict in tracked.rs and
+        // settles it with `resolution`.
+        let settle = |arguments: &[&str], resolution: &str| {
+            let output = std::process::Command::new("git")
+                .args(arguments)
+                .current_dir(root)
+                .env("GIT_EDITOR", "true")
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{arguments:?} conflicts");
+            std::fs::write(root.join("tracked.rs"), resolution).unwrap();
+            git(root, &["add", "tracked.rs"]);
+        };
         let roots = vec![root.to_path_buf()];
         let untracked_at_start = initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
-        git(root, &["checkout", "-qb", "feature"]);
+        git(root, &["checkout", "-qb", "side"]);
+        std::fs::write(root.join("tracked.rs"), "fn main() { side(); }\n").unwrap();
+        git(root, &["commit", "-qam", "side"]);
+        git(root, &["checkout", "-qb", "feature", "main"]);
         std::fs::write(root.join("feature.rs"), "fn one() {}\n").unwrap();
-        git(root, &["add", "feature.rs"]);
+        std::fs::write(root.join("tracked.rs"), "fn main() { feature(); }\n").unwrap();
+        git(root, &["add", "-A"]);
         git(root, &["commit", "-qm", "one"]);
+        settle(
+            &["merge", "-q", "--no-edit", "side"],
+            "fn main() { both(); }\n",
+        );
+        git(root, &["commit", "-q", "--no-edit"]);
         std::fs::write(root.join("feature.rs"), "fn one() {}\nfn two() {}\n").unwrap();
         git(root, &["commit", "-qam", "two"]);
         let first = capture_repository_deltas(
@@ -907,11 +932,9 @@ mod capture_tests {
             SESSION,
         )
         .unwrap();
-        assert!(
-            first[0].patch.contains("+fn two() {}"),
-            "{}",
-            first[0].patch
-        );
+        for wanted in ["+fn main() { both(); }", "+fn two() {}"] {
+            assert!(first[0].patch.contains(wanted), "{}", first[0].patch);
+        }
 
         let baselines = captured_trees(&first);
         advance_baselines(&SystemGit, &baselines).unwrap();
@@ -920,7 +943,21 @@ mod capture_tests {
         std::fs::write(other.join("upstream.rs"), "fn upstream() {}\n").unwrap();
         git(&other, &["add", "upstream.rs"]);
         git(&other, &["commit", "-qm", "upstream"]);
-        git(root, &["rebase", "-q", "main"]);
+        settle(
+            &["rebase", "-q", "--rebase-merges", "main"],
+            "fn main() { both(); }\n",
+        );
+        let continued = std::process::Command::new("git")
+            .args(["rebase", "--continue"])
+            .current_dir(root)
+            .env("GIT_EDITOR", "true")
+            .output()
+            .unwrap();
+        assert!(
+            continued.status.success(),
+            "{}",
+            String::from_utf8_lossy(&continued.stderr)
+        );
         std::fs::write(
             root.join("feature.rs"),
             "fn one() {}\nfn two() { fixed(); }\n",
@@ -930,32 +967,48 @@ mod capture_tests {
         let second =
             capture_repository_deltas(&SystemGit, &roots, &baselines, &next_start, SESSION)
                 .unwrap();
+        assert_eq!(second[0].unattributed, None);
         let patch = &second[0].patch;
         for wanted in ["-fn two() {}", "+fn two() { fixed(); }"] {
             assert!(patch.contains(wanted), "{wanted:?} is missing: {patch}");
         }
-        for unwanted in ["+fn one() {}", "upstream.rs"] {
+        for unwanted in ["+fn one() {}", "upstream.rs", "both", "<<<<<<<"] {
             assert!(!patch.contains(unwanted), "{unwanted:?} is in: {patch}");
         }
     }
 
     /// Work the turn commits on a branch it then leaves is not in that
-    /// review's capture. It is still the turn's when it returns later, here
-    /// by a merge, so a later review holds it rather than counting it as
-    /// merged-in history, even when a review in between could not attribute.
+    /// review's capture. It is still the turn's when it returns later, here by
+    /// a merge, so a later review holds it rather than counting it as merged-in
+    /// history, even when a review in between could not attribute. Work that
+    /// returns during such a review is covered by its whole-tree diff and is
+    /// not reviewed again.
     // Hard-won: 57fd7fe8e: merging the turn's own branch folded its commits into the base as merged-in history.
     // Hard-won: 424f97670: a review that could not attribute forgot the commits still pending.
+    // Hard-won: f93bececc: a review that could not attribute kept pending a commit its whole-tree diff had covered.
     #[test]
     fn work_left_on_another_branch_is_reviewed_when_it_returns() {
         let temp = repository();
         let root = temp.path();
         let roots = vec![root.to_path_buf()];
         let untracked_at_start = initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
-        git(root, &["checkout", "-qb", "side"]);
-        std::fs::write(root.join("side.rs"), "fn side() {}\n").unwrap();
-        git(root, &["add", "side.rs"]);
-        git(root, &["commit", "-qm", "side"]);
-        git(root, &["checkout", "-q", "main"]);
+        let leave = |branch: &str| {
+            git(root, &["checkout", "-qb", branch, "main"]);
+            let file = format!("{branch}.rs");
+            std::fs::write(root.join(&file), format!("fn {branch}() {{}}\n")).unwrap();
+            git(root, &["add", &file]);
+            git(root, &["commit", "-qm", branch]);
+            git(root, &["checkout", "-q", "main"]);
+        };
+        let review = |baselines: &BTreeMap<PathBuf, String>| {
+            let start = read_untracked_at_start(&SystemGit, &roots).unwrap();
+            let deltas =
+                capture_repository_deltas(&SystemGit, &roots, baselines, &start, SESSION).unwrap();
+            advance_baselines(&SystemGit, &captured_trees(&deltas)).unwrap();
+            deltas
+        };
+        leave("early");
+        leave("late");
         std::fs::write(root.join("tracked.rs"), "fn main() { edited(); }\n").unwrap();
 
         let first = capture_repository_deltas(
@@ -966,33 +1019,46 @@ mod capture_tests {
             SESSION,
         )
         .unwrap();
+        advance_baselines(&SystemGit, &captured_trees(&first)).unwrap();
         assert!(first[0].patch.contains("+fn main() { edited(); }"));
-        assert!(!first[0].patch.contains("side.rs"), "{}", first[0].patch);
+        for unwanted in ["early.rs", "late.rs"] {
+            assert!(!first[0].patch.contains(unwanted), "{}", first[0].patch);
+        }
 
-        let baselines = captured_trees(&first);
-        advance_baselines(&SystemGit, &baselines).unwrap();
-        let next_start = read_untracked_at_start(&SystemGit, &roots).unwrap();
         std::fs::remove_file(root.join(".git/logs/HEAD")).unwrap();
         git(root, &["commit", "-qam", "edited"]);
-        let second =
-            capture_repository_deltas(&SystemGit, &roots, &baselines, &next_start, SESSION)
-                .unwrap();
+        git(root, &["merge", "-q", "--no-ff", "--no-edit", "early"]);
+        let second = review(&captured_trees(&first));
         assert!(second[0].unattributed.is_some(), "{:?}", second[0]);
+        assert!(
+            second[0].patch.contains("+fn early() {}"),
+            "{}",
+            second[0].patch
+        );
 
-        let baselines = captured_trees(&second);
-        advance_baselines(&SystemGit, &baselines).unwrap();
-        let next_start = read_untracked_at_start(&SystemGit, &roots).unwrap();
-        git(root, &["merge", "-q", "--no-ff", "--no-edit", "side"]);
-        let third = capture_repository_deltas(&SystemGit, &roots, &baselines, &next_start, SESSION)
-            .unwrap();
+        std::fs::write(root.join("more.rs"), "fn more() {}\n").unwrap();
+        git(root, &["add", "more.rs"]);
+        git(root, &["commit", "-qm", "more"]);
+        let third = review(&captured_trees(&second));
         assert_eq!(third[0].unattributed, None);
         assert!(
-            third[0].patch.contains("+fn side() {}"),
+            third[0].patch.contains("+fn more() {}"),
             "{}",
             third[0].patch
         );
-        assert!(!third[0].patch.contains("tracked.rs"), "{}", third[0].patch);
-        assert!(third[0].merged_in.is_empty(), "{:?}", third[0].merged_in);
+        assert!(!third[0].patch.contains("early.rs"), "{}", third[0].patch);
+
+        git(root, &["merge", "-q", "--no-ff", "--no-edit", "late"]);
+        let fourth = review(&captured_trees(&third));
+        assert!(
+            fourth[0].patch.contains("+fn late() {}"),
+            "{}",
+            fourth[0].patch
+        );
+        for unwanted in ["tracked.rs", "early.rs", "more.rs"] {
+            assert!(!fourth[0].patch.contains(unwanted), "{}", fourth[0].patch);
+        }
+        assert!(fourth[0].merged_in.is_empty(), "{:?}", fourth[0].merged_in);
     }
 
     /// When the HEAD reflog no longer explains how HEAD moved, the review
