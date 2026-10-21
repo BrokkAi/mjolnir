@@ -281,6 +281,12 @@ fn harness_is_authenticated_with(
     if profile.auth_scheme() == mj_core::config::AuthScheme::AwsCredentialChain {
         return true;
     }
+    // OpenCode keeps its logins in its own database; doctor reports a
+    // database it cannot read.
+    if profile.auth_scheme() == mj_core::config::AuthScheme::NativeLoginStore {
+        return crate::opencode_logins::profile_logins(profile)
+            .is_ok_and(|logins| logins.is_some());
+    }
     if profile.authentication_marker().is_file()
         || (kind == HarnessKind::Kimi && home.join("credentials").is_file())
     {

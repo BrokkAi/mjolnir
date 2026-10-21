@@ -778,7 +778,7 @@ impl ProjectMemoryStore {
         for (path, content) in &snapshot.files {
             ensure_snapshot_budget(&mut total, content.len())?;
             let relative = validate_virtual_path(path)?;
-            reject_symlink_path(&self.root, &relative, true)?;
+            crate::confined_path::reject_symlinks(&self.root, &relative, true)?;
             ensure_snapshot_document(content)?;
             let destination = self.root.join(relative);
             match fs::read_to_string(&destination) {
@@ -809,7 +809,7 @@ impl ProjectMemoryStore {
         for (path, content) in &tree.files {
             ensure_snapshot_budget(&mut total, content.len())?;
             let relative = validate_virtual_path(path)?;
-            reject_symlink_path(&self.root, &relative, true)?;
+            crate::confined_path::reject_symlinks(&self.root, &relative, true)?;
             ensure_snapshot_document(content)?;
             anyhow::ensure!(
                 relative_paths.insert(relative.clone()),
@@ -828,7 +828,7 @@ impl ProjectMemoryStore {
             }
         }
 
-        reject_symlink_path(&self.root, Path::new(""), true)?;
+        crate::confined_path::reject_symlinks(&self.root, Path::new(""), true)?;
         if let Ok(metadata) = fs::symlink_metadata(&self.root) {
             anyhow::ensure!(metadata.is_dir(), "project memory root is not a directory");
         }
@@ -840,7 +840,7 @@ impl ProjectMemoryStore {
                 continue;
             }
             let relative = validate_virtual_path(path)?;
-            reject_symlink_path(&self.root, &relative, false)?;
+            crate::confined_path::reject_symlinks(&self.root, &relative, false)?;
             let file = self.root.join(relative);
             match fs::remove_file(&file) {
                 Ok(()) => changed = true,
@@ -863,7 +863,7 @@ impl ProjectMemoryStore {
             {
                 continue;
             }
-            reject_symlink_path(&self.root, &relative, true)?;
+            crate::confined_path::reject_symlinks(&self.root, &relative, true)?;
             let destination = self.root.join(relative);
             if let Some(parent) = destination.parent() {
                 fs::create_dir_all(parent)
@@ -1120,29 +1120,6 @@ fn validate_virtual_path(path: &str) -> Result<PathBuf> {
         bail!("memory document path cannot be empty");
     }
     Ok(relative)
-}
-
-fn reject_symlink_path(root: &Path, relative: &Path, missing_allowed: bool) -> Result<()> {
-    let mut current = root.to_path_buf();
-    if let Ok(metadata) = fs::symlink_metadata(root)
-        && metadata.file_type().is_symlink()
-    {
-        bail!("memory root cannot be a symlink");
-    }
-    for component in relative.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                bail!("memory path cannot traverse a symlink")
-            }
-            Ok(_) => {}
-            Err(error) if missing_allowed && error.kind() == std::io::ErrorKind::NotFound => {
-                break;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
 }
 
 struct MemoryFileEntry {

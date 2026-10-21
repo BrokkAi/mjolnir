@@ -787,6 +787,7 @@ impl ReviewerRole {
             &mut additional_directories,
         );
         let spec = LaunchSpec {
+            imported_logins: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),

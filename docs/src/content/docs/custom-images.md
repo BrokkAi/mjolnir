@@ -52,7 +52,9 @@ bridge and provider.
 
 Kimi Code, Grok Build, and OpenCode have no npm bridge:
 Mjolnir runs their official installer with `curl` piped to Bash instead, which
-needs both tools in the image.
+needs both tools in the image. An image-baked `opencode` must be OpenCode 2,
+because each session imports its logins with `opencode auth import` before it
+starts.
 
 Baking the bridges in, the way the reference image does, avoids that
 installation cost. Codex images should install the bridge version pinned by
