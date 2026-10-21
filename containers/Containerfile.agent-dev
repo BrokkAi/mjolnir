@@ -95,8 +95,8 @@ RUN uv --version && uvx --version && python3-config --embed --ldflags
 # demand.
 RUN npm install --global --no-audit --no-fund \
         @brokkai/codex-acp@1.13.7 \
-        @agentclientprotocol/claude-agent-acp@0.90.0 \
-        @anthropic-ai/claude-code@2.1.300 \
+        @agentclientprotocol/claude-agent-acp@0.94.0 \
+        @anthropic-ai/claude-code@2.1.306 \
         @brokkai/muse-acp@0.15.0 \
         @openai/codex@0.160.1 \
     && npm cache clean --force \

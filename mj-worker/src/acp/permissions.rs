@@ -21,6 +21,7 @@ impl PendingElicitation {
                 title: None,
                 description: None,
                 fields: Vec::new(),
+                tool_permission: None,
             },
             answer,
         }
@@ -194,10 +195,22 @@ pub(super) struct PermissionChoice {
 }
 
 /// The answers a person may give to a permission request shown as a form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PermissionAnswers {
+    pub(super) choices: Vec<PermissionChoice>,
+    /// The option Skip selects: the first offered one-time rejection, so the
+    /// agent is refused this tool call and its turn continues. Skip never
+    /// selects `reject_always`, which would persist a rule. Without a
+    /// one-time rejection the form offers no Skip.
+    pub(super) skip: Option<PermissionOptionId>,
+}
+
+/// The answers a person may give to a permission request shown as a form.
 ///
 /// This is the only place that decides them: the worker publishes exactly
-/// these choices and accepts only these answers, so every surface (terminal,
-/// web, `mj respond`, automation) sees and can select the same set.
+/// these choices and whether Skip is offered, and accepts only these
+/// answers, so every surface (terminal, web, `mj respond`, automation) sees
+/// and can select the same set.
 ///
 /// Claude's own plan approval (claude-agent-acp 0.84 `exit-plan-*` options,
 /// which reach this form when Claude wrote no plan file) must not change the
@@ -205,6 +218,25 @@ pub(super) struct PermissionChoice {
 /// becomes a plain "Yes"; an option that would raise a Guardian session to
 /// bypassPermissions is not offered at all. Lower modes stay available.
 pub(super) fn permission_choices(
+    request: &RequestPermissionRequest,
+    harness: HarnessKind,
+    policy: ExecutionPolicy,
+) -> PermissionAnswers {
+    let choices = offered_permission_choices(request, harness, policy);
+    let skip = request
+        .options
+        .iter()
+        .filter(|option| option.kind == PermissionOptionKind::RejectOnce)
+        .find(|option| {
+            choices
+                .iter()
+                .any(|choice| choice.option_id == option.option_id)
+        })
+        .map(|option| option.option_id.clone());
+    PermissionAnswers { choices, skip }
+}
+
+fn offered_permission_choices(
     request: &RequestPermissionRequest,
     harness: HarnessKind,
     policy: ExecutionPolicy,

@@ -18,7 +18,8 @@ pub(super) fn voice_button_glyph() -> &'static str {
 }
 
 /// The microphone button is a chip in the upper-left of the prompt's top
-/// border. Keep its geometry derived from the same Unicode width ratatui uses
+/// border. Like other border titles, it leaves one blank cell after the
+/// corner. Keep its geometry derived from the same Unicode width ratatui uses
 /// to lay out `Line`s.
 pub(super) fn voice_button_area(prompt_area: Rect) -> Option<Rect> {
     if prompt_area.width == 0 || prompt_area.height == 0 {
@@ -26,7 +27,7 @@ pub(super) fn voice_button_area(prompt_area: Rect) -> Option<Rect> {
     }
     let button_width = display_width(&format!(" {} ", voice_button_glyph()));
     let button_width = u16::try_from(button_width).ok()?;
-    let x = prompt_area.x.saturating_add(1);
+    let x = prompt_area.x.saturating_add(2);
     (x.saturating_add(button_width) < prompt_area.right())
         .then(|| Rect::new(x, prompt_area.y, button_width, 1))
 }

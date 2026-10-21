@@ -2442,7 +2442,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Runtime deltas carry transcript item changes, and a client fetches a
 // session's tail from the daemon at its cursor instead of reading SQLite.
 // Lifecycle stages can name the harness preparation step a worker reports.
-pub const PROTOCOL_VERSION: u32 = 56;
+// A pending form can say it is a tool permission and whether it offers Skip.
+pub const PROTOCOL_VERSION: u32 = 57;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

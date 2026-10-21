@@ -462,7 +462,8 @@ fn validate_branch_name(branch: &str) -> Result<()> {
     Ok(())
 }
 
-fn is_object_id(value: &str) -> bool {
+/// A full SHA-1 or SHA-256 Git object id other than the null id.
+pub fn is_object_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64)
         && value.bytes().all(|byte| byte.is_ascii_hexdigit())
         && value.bytes().any(|byte| byte != b'0')

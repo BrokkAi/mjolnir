@@ -203,6 +203,12 @@ pub(super) fn checkpoint_repository_bytes(repositories: &[RepositorySnapshot]) -
                 repository.untracked_tar.len(),
             ]
             .into_iter()
+            .chain(repository.operation_payloads.iter().flat_map(|payloads| {
+                [
+                    payloads.conflicted_worktree_tar.len(),
+                    payloads.state_tar.len(),
+                ]
+            }))
             .try_fold(total, |total, size| total.checked_add(size as u64))
         })
         .context("repository checkpoint size overflow")
@@ -245,12 +251,30 @@ pub(super) fn write_staged_repositories(
                 &repository.untracked_tar,
                 0o600,
             )?;
+            let (conflicted_worktree_tar_path, operation_state_tar_path) =
+                match &repository.operation_payloads {
+                    None => (None, None),
+                    Some(payloads) => {
+                        let worktree_path = root.join("conflicted-worktree.tar");
+                        let state_path = root.join("operation-state.tar");
+                        write_private_file(
+                            stage_root,
+                            &worktree_path,
+                            &payloads.conflicted_worktree_tar,
+                            0o600,
+                        )?;
+                        write_private_file(stage_root, &state_path, &payloads.state_tar, 0o600)?;
+                        (Some(worktree_path), Some(state_path))
+                    }
+                };
             Ok(StagedRepository {
                 metadata: repository.metadata,
                 committed_bundle_path,
                 staged_patch_path,
                 unstaged_patch_path,
                 untracked_tar_path,
+                conflicted_worktree_tar_path,
+                operation_state_tar_path,
             })
         })
         .collect()
@@ -458,6 +482,27 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
                         &repository.untracked_tar_path,
                         MAX_NATIVE_TOTAL,
                     )?,
+                    operation_payloads: match (
+                        &repository.conflicted_worktree_tar_path,
+                        &repository.operation_state_tar_path,
+                    ) {
+                        (None, None) => None,
+                        (Some(worktree_path), Some(state_path)) => {
+                            Some(crate::archive::GitOperationPayloads {
+                                conflicted_worktree_tar: read_staged_file(
+                                    &stage_path,
+                                    worktree_path,
+                                    MAX_NATIVE_TOTAL,
+                                )?,
+                                state_tar: read_staged_file(
+                                    &stage_path,
+                                    state_path,
+                                    MAX_NATIVE_TOTAL,
+                                )?,
+                            })
+                        }
+                        _ => bail!("staged repository has only one of its Git operation payloads"),
+                    },
                 })
             })
             .collect::<Result<Vec<_>>>()?;

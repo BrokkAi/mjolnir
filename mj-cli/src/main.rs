@@ -130,13 +130,14 @@ enum Command {
     Login(LoginArgs),
     /// Create a session through the API and print its id.
     New(api_commands::NewArgs),
-    /// Send a prompt to a session, optionally waiting for the turn.
+    /// Send a prompt as the user and wait for its turn to end.
     Prompt(api_commands::PromptArgs),
     /// Cancel queued prompts while preserving the session and its current turn.
     ClearQueue(api_commands::ClearQueueArgs),
     /// Queue an external event in a session's durable mailbox.
     Event(api_commands::EventArgs),
-    /// Send a message to a top-level session or one of your sub-agents.
+    /// Send a message and return: from your shell, a prompt; inside a
+    /// session, a message to another session or one of your sub-agents.
     Message(api_commands::MessageArgs),
     /// Block until a turn ends and print how it ended.
     Wait(api_commands::WaitArgs),

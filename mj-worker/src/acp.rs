@@ -76,7 +76,7 @@ use crate::terminal::{
 use mj_core::config::{ExecutionEnforcement, ExecutionPolicy, HarnessKind};
 use mj_core::elicitation::{
     ElicitationField, ElicitationFieldKind, ElicitationOption, ElicitationRequest,
-    ElicitationResponse, ElicitationValue,
+    ElicitationResponse, ElicitationValue, ToolPermissionForm,
 };
 use mj_core::relay::{AcpActivityClock, ClaimedSteeringPrompt};
 use mj_core::worker_launch::{ProjectMemoryLaunchConfig, ProjectMemoryMcpDelivery};

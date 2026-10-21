@@ -562,6 +562,7 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
                 metadata: mj_checkpoint::archive::RepositoryMetadata {
                     saved_refs: Default::default(),
                     stash_stack: Vec::new(),
+                    git_operation: None,
                     push_urls: Vec::new(),
                     remote_workspace: false,
                     id: repository.id.clone(),
@@ -633,6 +634,7 @@ fn repository_preflight_checks_declared_boundary_without_importing_delta_bundle(
         metadata: mj_checkpoint::archive::RepositoryMetadata {
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
+            git_operation: None,
             push_urls: Vec::new(),
             remote_workspace: false,
             id: "project".into(),

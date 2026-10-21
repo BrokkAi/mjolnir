@@ -20,6 +20,7 @@ fn request(kind: ElicitationFieldKind, required: bool) -> ElicitationRequest {
             custom_answer_option: None,
             kind,
         }],
+        tool_permission: None,
     }
 }
 
@@ -86,6 +87,7 @@ fn paired_request(question_count: usize, multi_select: bool) -> ElicitationReque
         title: None,
         description: None,
         fields,
+        tool_permission: None,
     }
 }
 
@@ -734,6 +736,59 @@ fn golden_elicitation_dialog() {
         ],
     );
 
+    // A tool permission form as the worker publishes it. Skip rejects the
+    // call alone, so it is offered only when the request has a one-time
+    // rejection: claude-agent-acp's Bash options have one, and a Codex
+    // network rule offers only `reject_always`, which Skip never selects.
+    for (label, id, message, options, skip) in [
+        (
+            "Claude permission form offers Skip",
+            "tool-permission-1",
+            "Claude Code requests permission:\nRun cargo test",
+            serde_json::json!([
+                {"const": "allow-once", "title": "Yes"},
+                {"const": "allow-with-updates", "title": "Yes, and don't ask again for `cargo test` commands"},
+                {"const": "reject", "title": "No"}
+            ]),
+            true,
+        ),
+        (
+            "permission form without a one-time rejection offers no Skip",
+            "tool-permission-2",
+            "Codex requests permission:\nReach crates.io",
+            serde_json::json!([
+                {"const": "network_policy_amendment:0", "title": "Yes, and allow this host in the future"},
+                {"const": "network_policy_amendment:1", "title": "No, and block this host in the future"}
+            ]),
+            false,
+        ),
+    ] {
+        let mut request = ElicitationRequest::from_acp_params(
+            id,
+            serde_json::json!({
+                "mode": "form", "sessionId": "session-1",
+                "message": message,
+                "requestedSchema": {"type": "object", "required": ["choice"], "properties": {
+                    "choice": {"type": "string", "title": "Permission", "oneOf": options}
+                }}
+            }),
+        )
+        .unwrap();
+        request.tool_permission = Some(mj_core::elicitation::ToolPermissionForm { skip });
+        let dialog = ElicitationDialog::new(request);
+        append_elicitation_golden_state(
+            &mut output,
+            label,
+            &rendered_in_pane(&dialog, 100, 14),
+            &[format!(
+                "skip: {:?}",
+                dialog
+                    .request
+                    .harness_response(ElicitationResponse::Decline)
+            )],
+        );
+    }
+
     let mut smallest = ElicitationDialog::new(paired_request(1, true));
     smallest.handle_key(KeyCode::End, KeyModifiers::NONE);
     smallest.paste("custom draft");
@@ -986,6 +1041,7 @@ fn component_form() -> ElicitationRequest {
                 },
             },
         ],
+        tool_permission: None,
     }
 }
 

@@ -94,6 +94,7 @@ pub(super) fn session_config_recovery_request(
                 .into(),
         ),
         fields,
+        tool_permission: None,
     })
 }
 

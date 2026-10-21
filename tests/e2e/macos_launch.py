@@ -50,9 +50,11 @@ class Lab:
                         SESSIONWIKI_DATA=str(self.root / "sessionwiki"),
                         MJOLNIR_NO_UPDATE_CHECK="1")
         # Each installed release must select its own matching sibling worker.
+        # The script sends as the user, even when run inside a session.
         for name in ("MJ_WORKER_BINARY", "MJ_WORKER_DIR", "MJ_WORKER_URL",
                      "MJ_WORKER_SHA256", "MJ_DEV_RESTART_STALE_DAEMON",
-                     "MJ_DAEMON_OWNER_PID", "MJ_DAEMON_EXIT_WHEN_IDLE"):
+                     "MJ_DAEMON_OWNER_PID", "MJ_DAEMON_EXIT_WHEN_IDLE",
+                     "MJ_SESSION_ID"):
             self.env.pop(name, None)
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
@@ -193,7 +195,7 @@ kind = "bare"
             "--json", "Reply with exactly MAC_LAUNCH_READY."))
         self.session = created["session_id"]
         self.wait_reply("MAC_LAUNCH_READY")
-        accepted = json.loads(self.run("prompt", "--session", self.session, "--json",
+        accepted = json.loads(self.run("message", "--session", self.session, "--json",
             "Run python3 -c 'import time; time.sleep(45); print(\"MAC_HANDOFF_SURVIVED\")' "
             "as a foreground shell command, wait for it to finish, then reply exactly MAC_HANDOFF_SURVIVED."))
         self.until(self.session_state,
@@ -228,7 +230,7 @@ kind = "bare"
         self.run("resume", "--session", self.session)
         self.until(self.session_state, lambda value: value["state"] == "running" and value["is_idle"],
                    "resumed worker readiness")
-        self.run("prompt", "--session", self.session, "Reply exactly MAC_RESUME_OK.")
+        self.run("message", "--session", self.session, "Reply exactly MAC_RESUME_OK.")
         self.wait_reply("MAC_RESUME_OK")
         self.check("checkpoint, suspend and resume with a space-containing data path", True)
         worker_root = self.data / "workers" / self.session
@@ -240,7 +242,7 @@ kind = "bare"
             "new harness wrote sessions in profile home"
         self.check(f"{self.harness} login from a staged home after upgrade and resume", True)
         self.viewer_logout()
-        self.run("prompt", "--session", self.session, "Reply exactly MAC_RESTART_OK.")
+        self.run("message", "--session", self.session, "Reply exactly MAC_RESTART_OK.")
         self.wait_reply("MAC_RESTART_OK")
         self.check("session answers after daemon restart", True)
         self.run("setup", "instructions", "--platform", "macos")

@@ -1928,6 +1928,7 @@ fn elicitation_event(ordinal: u64, previous_digest: &str, id: &str, message: &st
                 title: None,
                 description: None,
                 fields: Vec::new(),
+                tool_permission: None,
             },
         },
     };
@@ -2054,6 +2055,7 @@ async fn an_answer_to_a_reviewers_question_reaches_that_role() {
             title: None,
             description: None,
             fields: Vec::new(),
+            tool_permission: None,
         },
     }
     .session_request()

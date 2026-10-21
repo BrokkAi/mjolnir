@@ -1375,6 +1375,114 @@ async fn a_non_plan_permission_request_is_answered_by_the_user() {
     probe.close().await;
 }
 
+/// ACP keeps `cancelled` for a cancelled turn. Skip rejects the tool call
+/// alone: it selects the first one-time rejection, here codex-acp's "No,
+/// continue without running it", and the turn keeps running. A request with
+/// no one-time rejection offers no Skip. Cancel stops the turn, so the agent
+/// receives `session/cancel` before its request is answered `cancelled`.
+// Hard-won: #1313: Skip and Cancel on a permission form both told the agent its turn was cancelled.
+#[tokio::test]
+async fn skip_rejects_only_the_tool_call_and_cancel_cancels_the_turn() {
+    let mut probe =
+        PlanProbe::with_harness(ExecutionPolicy::ConfiguredApprovals, false, HarnessKind::Codex)
+            .await;
+    probe
+        .commands
+        .send(CommandRequest::Prompt {
+            request_id: "original-prompt".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new("Run the tests"))],
+        })
+        .await
+        .unwrap();
+    let prompt = probe.message().await;
+    assert_eq!(prompt["method"], "session/prompt");
+    // The options codex-acp 1.13.7 builds for a command approval that offers
+    // both of Codex's refusals, sorted allow first.
+    let codex_options = json!([
+        {"optionId": "approved", "name": "Yes, proceed", "kind": "allow_once"},
+        {"optionId": "approved-for-session", "name": "Yes, and don't ask again for this command in this session", "kind": "allow_always"},
+        {"optionId": "decline", "name": "No, continue without running it", "kind": "reject_once"},
+        {"optionId": "abort", "name": "No, and tell Codex what to do differently", "kind": "reject_once"}
+    ]);
+    let network_options = json!([
+        {"optionId": "network_policy_amendment:0", "name": "Yes, and allow this host in the future", "kind": "allow_always"},
+        {"optionId": "network_policy_amendment:1", "name": "No, and block this host in the future", "kind": "reject_always"}
+    ]);
+    let ask = async |probe: &mut PlanProbe, id: &str, options: &Value| {
+        probe
+            .send(json!({
+                "jsonrpc": "2.0", "id": id, "method": "session/request_permission",
+                "params": {
+                    "sessionId": "plan-session",
+                    "toolCall": {"toolCallId": id, "kind": "execute", "title": "cargo test"},
+                    "options": options
+                }
+            }))
+            .await;
+        loop {
+            if let RuntimeEvent::ElicitationRequested { request } = probe.event().await {
+                break request;
+            }
+        }
+    };
+
+    let form = ask(&mut probe, "skip-ask", &codex_options).await;
+    assert_eq!(form.tool_permission, Some(ToolPermissionForm { skip: true }));
+    probe
+        .answer_with(&form.id, ElicitationResponse::Decline)
+        .await
+        .unwrap();
+    let answer = probe.message().await;
+    assert_eq!(answer["id"], "skip-ask");
+    assert_eq!(
+        answer["result"]["outcome"],
+        json!({"outcome": "selected", "optionId": "decline"})
+    );
+    probe.no_finish().await;
+
+    let form = ask(&mut probe, "network-ask", &network_options).await;
+    assert_eq!(form.tool_permission, Some(ToolPermissionForm { skip: false }));
+    assert!(
+        probe
+            .answer_with(&form.id, ElicitationResponse::Decline)
+            .await
+            .is_err(),
+        "Skip must never select reject_always, which persists a rule"
+    );
+    probe.no_message().await;
+    probe
+        .answer_with(
+            &form.id,
+            ElicitationResponse::Accept {
+                content: BTreeMap::from([(
+                    "choice".into(),
+                    ElicitationValue::String("network_policy_amendment:1".into()),
+                )]),
+            },
+        )
+        .await
+        .unwrap();
+    let answer = probe.message().await;
+    assert_eq!(answer["id"], "network-ask");
+    assert_eq!(answer["result"]["outcome"]["outcome"], "selected");
+
+    let form = ask(&mut probe, "cancel-ask", &codex_options).await;
+    probe
+        .answer_with(&form.id, ElicitationResponse::Cancel)
+        .await
+        .unwrap();
+    let cancel = probe.message().await;
+    assert_eq!(cancel["method"], "session/cancel");
+    let answer = probe.message().await;
+    assert_eq!(answer["id"], "cancel-ask");
+    assert_eq!(answer["result"]["outcome"], json!({"outcome": "cancelled"}));
+    probe
+        .result(&prompt, json!({"stopReason": "cancelled"}))
+        .await;
+    assert_eq!(probe.finished().await, "Cancelled");
+    probe.close().await;
+}
+
 /// Claude's ExitPlanMode request exactly as claude-agent-acp 0.84.0 sends it
 /// to Mjolnir, an AIR client, when Claude wrote no plan file: the tool call has
 /// no kind and the input no plan, so it is not a plan review. The Guardian
@@ -1417,6 +1525,7 @@ fn bridge_exit_plan_request(policy: ExecutionPolicy, plan: bool) -> Value {
 fn offered(request: &Value, policy: ExecutionPolicy) -> Vec<(String, String)> {
     let request: RequestPermissionRequest = serde_json::from_value(request.clone()).unwrap();
     permission_choices(&request, HarnessKind::Claude, policy)
+        .choices
         .into_iter()
         .map(|choice| (choice.option_id.to_string(), choice.title))
         .collect()

@@ -17,7 +17,7 @@ when offered, effort for **Straightforward** tasks. **Subtle** is optional; if
 you set it, choose a smarter model or higher effort than Straightforward. Subtle
 cannot be set without Straightforward. These choices apply globally. With both
 set, parents choose a task type each time they delegate work. With only
-Straightforward, parents delegate only straightforward work and do work that
+Straightforward, parents delegate straightforward work and do work that
 needs judgment themselves.
 
 **Create** and **Move…** offer **Native** or **Mjolnir** delegation. Mjolnir

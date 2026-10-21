@@ -1502,6 +1502,7 @@ mod tests {
             title: None,
             description: None,
             fields: Vec::new(),
+            tool_permission: None,
         };
         assert!(chat.show_review_role_elicitation(Some("reviewer".to_owned()), form));
         assert!(chat.reviewer_elicitation_open());

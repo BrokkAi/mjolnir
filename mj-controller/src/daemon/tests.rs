@@ -89,14 +89,6 @@ fn restart_keeps_relay_ownership_through_checkpoint_and_can_recover_closing_stat
         LifecycleKind::Restart,
         Some(SessionState::Error)
     ));
-    assert!(lifecycle_cancellable(
-        LifecycleKind::Restart,
-        Some(SessionState::Closing)
-    ));
-    assert!(!lifecycle_cancellable(
-        LifecycleKind::Restart,
-        Some(SessionState::Destroying)
-    ));
     assert_eq!(
         RuntimeLifecycleKind::from(LifecycleKind::Restart),
         RuntimeLifecycleKind::Resume,
@@ -196,38 +188,254 @@ async fn restart_target_probe_only_allows_fallback_for_a_proven_missing_target()
 }
 
 // Hard-won: 7b694803: Alt-X cancelled target teardown after its verified-checkpoint gate.
-#[test]
-fn a_close_past_its_verified_checkpoint_cannot_be_cancelled() {
-    assert!(lifecycle_cancellable(
-        LifecycleKind::Suspend,
-        Some(SessionState::Running)
-    ));
-    assert!(lifecycle_cancellable(
-        LifecycleKind::Suspend,
-        Some(SessionState::Checkpointing)
-    ));
-    assert!(lifecycle_cancellable(
-        LifecycleKind::Suspend,
-        Some(SessionState::Closing)
-    ));
-    assert!(lifecycle_cancellable(LifecycleKind::Suspend, None));
-    assert!(!lifecycle_cancellable(
-        LifecycleKind::Suspend,
-        Some(SessionState::Destroying)
-    ));
+#[tokio::test]
+async fn a_close_past_its_verified_checkpoint_cannot_be_cancelled() {
+    // Whether a person may cancel an operation admitted on a record in this
+    // state, before the operation itself commits.
+    async fn cancellable_on(kind: LifecycleKind, durable: Option<SessionState>) -> bool {
+        let state = test_runtime_state();
+        if let Some(durable) = durable {
+            state.owner().edit_sessions(|sessions| {
+                let record = runtime_test_session("session-1", "workspace", durable);
+                sessions.insert(record.id.clone(), record);
+            });
+        }
+        let release = Arc::new(tokio::sync::Notify::new());
+        let result = state
+            .start_or_join_lifecycle("session-1".into(), kind, {
+                let release = release.clone();
+                move |_, _, _| async move {
+                    release.notified().await;
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            })
+            .unwrap();
+        let cancellable = state.active_lifecycles()[0].cancellable;
+        let refused = state.cancel_lifecycle_if_active("session-1").await.is_err();
+        assert_eq!(refused, !cancellable, "{kind:?} on {durable:?}");
+        release.notify_one();
+        let _ = RuntimeState::wait_lifecycle_result(result).await;
+        cancellable
+    }
+
+    for durable in [
+        None,
+        Some(SessionState::Running),
+        Some(SessionState::Checkpointing),
+        Some(SessionState::Closing),
+    ] {
+        assert!(cancellable_on(LifecycleKind::Suspend, durable).await);
+    }
+    // A close or Restart admitted on a record already removing its target
+    // (a recovery after a daemon restart) starts committed.
+    for kind in [LifecycleKind::Suspend, LifecycleKind::Restart] {
+        assert!(!cancellable_on(kind, Some(SessionState::Destroying)).await);
+    }
     // Only a graceful close has this gate; a forced teardown keeps none.
-    assert!(lifecycle_cancellable(
-        LifecycleKind::ForceStop,
-        Some(SessionState::Destroying)
+    for kind in [LifecycleKind::ForceStop, LifecycleKind::Create] {
+        assert!(cancellable_on(kind, Some(SessionState::Destroying)).await);
+    }
+    // A failed startup's cleanup finishes whichever operation runs it.
+    for kind in [LifecycleKind::Create, LifecycleKind::StartupCleanup] {
+        assert!(!cancellable_on(kind, Some(SessionState::StartupCleanup)).await);
+    }
+    // A sub-agent's stop, park and unpark belong to another operation.
+    for kind in [
+        LifecycleKind::StopSubagent,
+        LifecycleKind::Park,
+        LifecycleKind::Unpark,
+    ] {
+        assert!(!cancellable_on(kind, Some(SessionState::Running)).await);
+    }
+}
+
+/// Run a daemon close of the scripted relay session in its own process and
+/// store, holding the relay request that submits `held` (`begin_checkpoint`
+/// or `close`) until `at_hold` has run. Returns the close's outcome, what
+/// `at_hold` returned, and the session manager and the session's handle.
+#[cfg(unix)]
+async fn close_with_an_action_at_a_held_relay_command<T, F, Fut>(
+    at_hold: F,
+) -> (
+    Result<()>,
+    T,
+    crate::session_manager::SessionManagerChannels,
+    crate::session_manager::ManagedSessionHandle,
+)
+where
+    F: FnOnce(Arc<RuntimeState>) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    use crate::controller::checkpoint::tests::{LATCH_RELAY_HOLD_PATH, LATCH_RELAY_SESSION};
+    let (controller, channels, handle) =
+        crate::controller::checkpoint::tests::close_cut_controller(SessionState::Running).await;
+    // The daemon's close loads its own controller from the store.
+    controller.config.save().unwrap();
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        channels.control.clone(),
+        &recovery.observer(),
+    );
+    let state = Arc::new(RuntimeState::new_with_controller_loader(
+        channels.control.clone(),
+        Controller::load().unwrap(),
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+        Controller::load,
     ));
-    assert!(lifecycle_cancellable(
-        LifecycleKind::Create,
-        Some(SessionState::Destroying)
-    ));
-    assert!(lifecycle_cancellable(
-        LifecycleKind::Move,
-        Some(SessionState::Destroying)
-    ));
+    let hold = PathBuf::from(std::env::var_os(LATCH_RELAY_HOLD_PATH).unwrap());
+    let closing = tokio::spawn({
+        let state = state.clone();
+        async move { state.suspend_session(LATCH_RELAY_SESSION.into()).await }
+    });
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !hold.with_extension("reached").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the close never reached the held relay command");
+    let acted = at_hold(state.clone()).await;
+    std::fs::write(hold.with_extension("release"), b"go").unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(60), closing)
+        .await
+        .expect("the close did not finish")
+        .expect("close task");
+    (outcome, acted, channels, handle)
+}
+
+/// Run `test` alone with its own store, behind the scripted relay, holding the
+/// first request that submits `held`.
+#[cfg(unix)]
+fn in_held_close_child(test: &str, held: &str) -> bool {
+    use crate::controller::checkpoint::tests::{
+        LATCH_RELAY_HOLD_COMMAND, LATCH_RELAY_HOLD_PATH, LATCH_RELAY_JOURNALS_BEFORE_CLOSE,
+        LATE_HARNESS_NOTIFICATION,
+    };
+    const CHILD: &str = "MJ_TEST_HELD_CLOSE_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        return true;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    crate::controller::test_support::IsolatedTest::new(crate::controller::test_support::test_name(
+        module_path!(),
+        test,
+    ))
+    .env(CHILD, "1")
+    .env(LATCH_RELAY_JOURNALS_BEFORE_CLOSE, LATE_HARNESS_NOTIFICATION)
+    .env(LATCH_RELAY_HOLD_COMMAND, held)
+    .env(LATCH_RELAY_HOLD_PATH, directory.path().join("relay-hold"))
+    .isolated_store(directory.path())
+    .run();
+    false
+}
+
+/// The window #1218 hit: the close has installed its verified checkpoint and
+/// committed to stopping, and is sealing the relay, but the record does not
+/// say `Destroying` yet. A cancel that arrives there is refused, and the
+/// target teardown that follows runs to the end.
+// Hard-won: #1218: a cancel accepted after the suspend's checkpoint commit failed its teardown
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cancel_after_the_close_commits_is_refused_and_the_teardown_finishes() {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    if !in_held_close_child(
+        "a_cancel_after_the_close_commits_is_refused_and_the_teardown_finishes",
+        "close",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (outcome, cancel, channels, _handle) =
+        close_with_an_action_at_a_held_relay_command(|state| async move {
+            state
+                .cancel_lifecycle_with_intent(LATCH_RELAY_SESSION)
+                .await
+        })
+        .await;
+    channels.shutdown.shutdown().await.unwrap();
+    if let Err(error) = &outcome {
+        let stored = crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
+        panic!(
+            "the close failed after a late cancel: {error:#}; the session was left {:?} with {:?}",
+            stored.state, stored.last_error
+        );
+    }
+    let refusal = cancel.expect_err("a cancel after the commit is refused");
+    assert!(
+        format!("{refusal:#}").contains("has passed its verified checkpoint"),
+        "{refusal:#}"
+    );
+    let stored = crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
+    assert_eq!(
+        stored.state,
+        SessionState::Stopped,
+        "{:?}",
+        stored.last_error
+    );
+    assert_eq!(stored.target, None);
+    assert!(stored.checkpoint.is_some());
+}
+
+/// The other side of the #1218 commit: a cancel accepted while the close is
+/// still taking its checkpoint wins, so the close stops before its point of
+/// no return. No teardown runs, the relay is not sealed, and the session keeps
+/// running with its target and checkpoint.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cancel_before_the_close_commits_leaves_the_session_running() {
+    use crate::controller::checkpoint::tests::{
+        LATCH_RELAY_SESSION, wait_until_the_actor_serves_again,
+    };
+    if !in_held_close_child(
+        "a_cancel_before_the_close_commits_leaves_the_session_running",
+        "begin_checkpoint",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    // The local target's teardown removes the whole worker root.
+    let worker_root = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap())
+        .join("workers")
+        .join(LATCH_RELAY_SESSION);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    std::fs::write(worker_root.join("still-here"), b"no teardown ran").unwrap();
+    let (outcome, cancel, channels, handle) =
+        close_with_an_action_at_a_held_relay_command(|state| async move {
+            state
+                .cancel_lifecycle_with_intent(LATCH_RELAY_SESSION)
+                .await
+        })
+        .await;
+    cancel.expect("a cancel before the commit is accepted");
+    let error = outcome.expect_err("a cancelled close does not stop the session");
+    assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+    assert!(worker_root.join("still-here").exists());
+    let stored = crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
+    assert_eq!(
+        stored.state,
+        SessionState::Running,
+        "{:?}",
+        stored.last_error
+    );
+    assert!(stored.target.is_some());
+    assert!(stored.checkpoint.is_some());
+    wait_until_the_actor_serves_again(&handle).await;
+    let mut lease = handle.lease_connection().await.unwrap();
+    let snapshot = lease.connection_mut().sync().await.unwrap();
+    lease.release();
+    assert_eq!(snapshot.operational.checkpoint_barrier, None);
+    assert!(
+        !matches!(
+            snapshot.operational.execution,
+            mj_core::relay::RelayExecutionState::Closing
+                | mj_core::relay::RelayExecutionState::Closed
+        ),
+        "{:?}",
+        snapshot.operational.execution
+    );
+    channels.shutdown.shutdown().await.unwrap();
 }
 
 /// After a restart, every in-flight lifecycle state is either owned by
@@ -543,9 +751,8 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
             operation_id: "resume-operation".into(),
-            create_control: None,
+            control: LifecycleControl::default(),
             kind: LifecycleKind::Resume,
-            cancelled: Arc::new(AtomicBool::new(false)),
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
             resume_workspace_id: Some("workspace-a".into()),
@@ -571,9 +778,8 @@ async fn checkpoint_lifecycle_guard_is_per_session() {
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
             operation_id: "resume-operation".into(),
-            create_control: None,
+            control: LifecycleControl::default(),
             kind: LifecycleKind::Resume,
-            cancelled: Arc::new(AtomicBool::new(false)),
             started_at_epoch_seconds: epoch_seconds().saturating_sub(45),
             active_stages: BTreeMap::new(),
             resume_workspace_id: None,
@@ -1965,7 +2171,7 @@ async fn deferred_cleanup_is_visible_and_drains_before_shutdown_cancellation() {
 #[test]
 fn create_cancellation_and_commit_have_one_winner() {
     for _ in 0..32 {
-        let control = CreateSessionControl::default();
+        let control = LifecycleControl::default();
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let canceller = {
             let control = control.clone();
@@ -1986,6 +2192,59 @@ fn create_cancellation_and_commit_have_one_winner() {
     }
 }
 
+/// A child launch that an explicit daemon stop cancelled reported only
+/// "operation cancelled", which its parent could not tell from a fault on the
+/// target. The control records which cancel won, so a person's cancel that
+/// came first is never blamed on the shutdown that followed it.
+// Hard-won: #1321: a daemon stop cancelled a child launch and the failure did not say so.
+#[test]
+fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
+    let operation = |kind: LifecycleKind, control: LifecycleControl| {
+        let (_completed, result) = tokio::sync::watch::channel(None);
+        ActiveLifecycle {
+            restart_intent: None,
+            upgrade_work: Arc::new(Mutex::new(None)),
+            phase: LifecyclePhase::Executing,
+            operation_id: "operation".into(),
+            control,
+            kind,
+            started_at_epoch_seconds: 1,
+            active_stages: BTreeMap::new(),
+            resume_workspace_id: None,
+            resume_destination: None,
+            notice: None,
+            request_key: None,
+            _move_guard: None,
+            result,
+        }
+    };
+
+    let control = LifecycleControl::default();
+    assert!(operation(LifecycleKind::Create, control.clone()).interrupt_for_shutdown());
+    assert!(control.cancelled.load(Ordering::Acquire));
+    assert!(control.stopped_for_shutdown());
+
+    let control = LifecycleControl::default();
+    let mut cancelled = operation(LifecycleKind::Create, control.clone());
+    assert!(cancelled.request_cancel());
+    assert!(!cancelled.interrupt_for_shutdown());
+    assert!(control.cancelled.load(Ordering::Acquire));
+    assert!(!control.stopped_for_shutdown());
+
+    // A committed create is not stopped by shutdown, so its commands never
+    // fail as cancelled and nothing may blame the daemon.
+    let control = LifecycleControl::default();
+    assert!(control.grant_commit());
+    assert!(!operation(LifecycleKind::Create, control.clone()).interrupt_for_shutdown());
+    assert!(!control.stopped_for_shutdown());
+
+    // Any other committed operation is interrupted, and only shutdown does that.
+    let control = LifecycleControl::default();
+    assert!(control.grant_commit());
+    assert!(operation(LifecycleKind::Suspend, control.clone()).interrupt_for_shutdown());
+    assert!(control.stopped_for_shutdown());
+}
+
 #[tokio::test]
 async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
     let state = test_runtime_state();
@@ -1997,9 +2256,8 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
             operation_id: "closing-operation".into(),
-            create_control: None,
+            control: LifecycleControl::default(),
             kind: LifecycleKind::Suspend,
-            cancelled: Arc::new(AtomicBool::new(false)),
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
             resume_workspace_id: None,
@@ -2120,7 +2378,7 @@ async fn lifecycle_identity_survives_join_but_changes_for_next_operation() {
 async fn close_waits_for_cancelled_or_committed_provisioning_to_release_ownership() {
     for committed in [false, true] {
         let state = test_runtime_state();
-        let control = CreateSessionControl::default();
+        let control = LifecycleControl::default();
         let release = Arc::new(tokio::sync::Notify::new());
         state
             .start_or_join_lifecycle_controlled(
@@ -2169,7 +2427,7 @@ async fn close_waits_for_cancelled_or_committed_provisioning_to_release_ownershi
 #[tokio::test]
 async fn committed_creation_cannot_be_cancelled_by_another_surface() {
     let state = test_runtime_state();
-    let control = CreateSessionControl::default();
+    let control = LifecycleControl::default();
     let release = Arc::new(tokio::sync::Notify::new());
     let result = state
         .start_or_join_lifecycle_controlled(
@@ -2232,22 +2490,18 @@ async fn phone_cancel_uses_the_restart_lifecycle_cancellability_guard() {
             .await
             .is_err()
     );
-    state.finish_restart_container_teardown("restart-guard");
-    assert!(state.active_lifecycles()[0].cancellable);
-    state.owner().edit_sessions(|sessions| {
-        sessions.get_mut("restart-guard").unwrap().state = SessionState::Destroying
-    });
-    let result = state.cancel_lifecycle_if_active("restart-guard").await;
-    assert!(result.is_err());
     assert!(
         !state
             .owner()
             .lifecycle
             .get("restart-guard")
             .unwrap()
+            .control
             .cancelled
             .load(Ordering::Acquire)
     );
+    state.finish_restart_container_teardown("restart-guard");
+    assert!(state.active_lifecycles()[0].cancellable);
 
     release.notify_one();
     RuntimeState::wait_lifecycle_result(operation)
@@ -2309,6 +2563,7 @@ async fn a_waiting_close_preserves_the_intent_of_reserved_restart_teardown() {
     );
     assert!(
         !state.owner().lifecycle["session-1"]
+            .control
             .cancelled
             .load(Ordering::Acquire)
     );
@@ -2398,23 +2653,30 @@ async fn a_close_removing_the_target_stops_offering_cancellation() {
         sessions.insert(session.id.clone(), session.clone());
     });
     let release = Arc::new(tokio::sync::Notify::new());
+    let control = LifecycleControl::default();
     let result = state
-        .start_or_join_lifecycle("destroying".into(), LifecycleKind::Suspend, {
-            let release = release.clone();
-            move |_state, _session_id, _cancelled| async move {
-                release.notified().await;
-                Ok(DaemonLifecycleResult::Done)
-            }
-        })
+        .start_or_join_lifecycle_controlled(
+            "destroying".into(),
+            LifecycleKind::Suspend,
+            None,
+            None,
+            Some(control.clone()),
+            {
+                let release = release.clone();
+                move |_state, _session_id, _cancelled| async move {
+                    release.notified().await;
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            },
+        )
         .unwrap();
 
     // Before the checkpoint gate the stop is still cancellable.
     assert!(state.active_lifecycles()[0].cancellable);
 
-    session.state = SessionState::Destroying;
-    state.owner().edit_sessions(|sessions| {
-        sessions.insert(session.id.clone(), session);
-    });
+    // The close commits at its point of no return, before its record says
+    // `Destroying`; from then on the control refuses a cancel.
+    assert!(control.grant_commit());
 
     assert!(!state.active_lifecycles()[0].cancellable);
     let error = state
@@ -2422,7 +2684,9 @@ async fn a_close_removing_the_target_stops_offering_cancellation() {
         .await
         .unwrap_err();
     assert!(
-        error.to_string().contains("cannot be cancelled"),
+        error
+            .to_string()
+            .contains("has passed its verified checkpoint and is removing the target"),
         "unexpected error: {error:#}"
     );
     assert!(
@@ -2431,6 +2695,7 @@ async fn a_close_removing_the_target_stops_offering_cancellation() {
             .lifecycle
             .get("destroying")
             .expect("lifecycle entry")
+            .control
             .cancelled
             .load(Ordering::Acquire),
         "a refused cancel must not reach the running teardown"
@@ -2466,6 +2731,7 @@ async fn force_destruction_preempts_a_running_lifecycle_and_waits_for_it() {
             lifecycle
                 .get("session-1")
                 .expect("lifecycle entry")
+                .control
                 .cancelled
                 .load(Ordering::Acquire),
             "preemption must cancel the running operation"
@@ -2513,6 +2779,7 @@ async fn force_destruction_waits_for_a_teardown_already_running_instead_of_cance
             .lifecycle
             .get("session-1")
             .expect("lifecycle entry")
+            .control
             .cancelled
             .load(Ordering::Acquire)
     );
@@ -2542,6 +2809,41 @@ async fn force_destruction_cancels_a_teardown_that_outlives_the_wait() {
         .preempt_active_lifecycle("session-1")
         .await
         .expect("the wedged teardown is cancelled and stops");
+}
+
+/// A destroy that meets a close past its commit (#1218) treats it as the
+/// teardown it is: it waits, and when the close outlives the wait it reports
+/// that instead of cancelling a stop that can no longer be undone.
+#[tokio::test(start_paused = true)]
+async fn force_destruction_waits_for_a_committed_close_and_never_cancels_it() {
+    let state = test_runtime_state();
+    let control = LifecycleControl::default();
+    state
+        .start_or_join_lifecycle_controlled(
+            "session-1".into(),
+            LifecycleKind::Suspend,
+            None,
+            None,
+            Some(control.clone()),
+            |_state, _session_id, _cancelled| async move {
+                std::future::pending::<()>().await;
+                #[allow(unreachable_code)]
+                Ok(DaemonLifecycleResult::Done)
+            },
+        )
+        .unwrap();
+    assert!(control.grant_commit());
+    tokio::task::yield_now().await;
+
+    let error = state
+        .preempt_active_lifecycle("session-1")
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("can no longer be cancelled"),
+        "{error:#}"
+    );
+    assert!(!control.cancelled.load(Ordering::Acquire));
 }
 
 #[tokio::test(start_paused = true)]
@@ -3016,7 +3318,7 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
     assert!(result.is_err());
     assert!(crate::database::load_session_restarts().unwrap().is_empty());
 
-    let control = CreateSessionControl::default();
+    let control = LifecycleControl::default();
     let release = Arc::new(tokio::sync::Notify::new());
     let operation = state
         .start_or_join_lifecycle_controlled(
@@ -3124,7 +3426,7 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
     state.owner().edit_sessions(|sessions| {
         sessions.insert(session.id.clone(), session.clone());
     });
-    let control = CreateSessionControl::default();
+    let control = LifecycleControl::default();
     let release = Arc::new(tokio::sync::Notify::new());
     state
         .start_or_join_lifecycle_controlled(
@@ -4781,6 +5083,122 @@ async fn workspace_close_stops_independent_sessions_concurrently_and_retries_aft
     );
 }
 
+/// #1218's workspace close: the person cancels while one session's stop is
+/// past its commit and another's is not. The first finishes, the second
+/// stops, and neither is reported as a failure to retry; the answer is the
+/// cancellation, and the workspace and its drafts stay.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the_cancel() {
+    const TEST: &str =
+        "a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the_cancel";
+    const CHILD: &str = "MJ_TEST_CANCELLED_WORKSPACE_CLOSE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), TEST),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Cancelled close").unwrap();
+    for id in ["past-commit", "before-commit"] {
+        crate::database::save_session(&runtime_test_session(
+            id,
+            &workspace.id,
+            SessionState::Running,
+        ))
+        .unwrap();
+    }
+    crate::database::save_detached_draft(&workspace.id, None, "terminal", Some(7), "keep me")
+        .unwrap();
+    let state = test_runtime_state_loading_the_store();
+    // Each stop stands in for a close the workspace close joins: one already
+    // committed and still removing its target, one still checkpointing.
+    let committed = LifecycleControl::default();
+    let finish_teardown = Arc::new(tokio::sync::Notify::new());
+    state
+        .start_or_join_lifecycle_controlled(
+            "past-commit".into(),
+            LifecycleKind::Suspend,
+            None,
+            None,
+            Some(committed.clone()),
+            {
+                let finish_teardown = finish_teardown.clone();
+                move |_, _, _| async move {
+                    finish_teardown.notified().await;
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            },
+        )
+        .unwrap();
+    assert!(committed.grant_commit());
+    state
+        .start_or_join_lifecycle("before-commit".into(), LifecycleKind::Suspend, {
+            move |_, _, cancelled| async move {
+                while !cancelled.load(Ordering::Acquire) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                bail!("operation cancelled before the session began to stop")
+            }
+        })
+        .unwrap();
+    let closing = tokio::spawn({
+        let state = state.clone();
+        let id = workspace.id.clone();
+        async move { state.close_workspace(id).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.cancel_workspace_close(&workspace.id).is_err() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the workspace close never started");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state
+            .owner()
+            .lifecycle
+            .get("before-commit")
+            .is_some_and(|active| active.is_running())
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the stop before its commit was not cancelled");
+    assert!(
+        !committed.cancelled.load(Ordering::Acquire),
+        "the committed stop must not be cancelled"
+    );
+    finish_teardown.notify_one();
+    let error = tokio::time::timeout(Duration::from_secs(10), closing)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(
+        format!("{error:#}"),
+        "Workspace deletion cancelled; workspace and drafts retained. Completed suspensions were not undone."
+    );
+    assert!(
+        crate::database::list_workspaces()
+            .unwrap()
+            .iter()
+            .any(|retained| retained.id == workspace.id)
+    );
+    assert_eq!(
+        crate::database::list_detached_drafts(&workspace.id)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 #[tokio::test]
 async fn oversized_response_reports_its_size_and_keeps_connection_usable() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -6240,9 +6658,8 @@ async fn move_destination_ownership_is_typed_and_survives_cancellation() {
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
             operation_id: "current".into(),
-            create_control: None,
+            control: LifecycleControl::default(),
             kind: LifecycleKind::Move,
-            cancelled: Arc::new(AtomicBool::new(false)),
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
             resume_workspace_id: None,
@@ -6455,7 +6872,7 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
                 super::lifecycle::LifecycleStart {
                     resume_workspace_id: None,
                     request_key: Some(id.into()),
-                    create_control: None,
+                    control: None,
                     phase: LifecyclePhase::Executing,
                     move_operation_id: Some(id.into()),
                 },
@@ -6941,14 +7358,6 @@ async fn shutdown_joins_independent_startup_teardown_before_closing_the_store() 
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
-    assert!(!lifecycle_cancellable(
-        LifecycleKind::StartupCleanup,
-        Some(SessionState::StartupCleanup)
-    ));
-    assert!(!lifecycle_cancellable(
-        LifecycleKind::Create,
-        Some(SessionState::StartupCleanup)
-    ));
     let state = test_runtime_state();
     let result = state
         .start_or_join_lifecycle(

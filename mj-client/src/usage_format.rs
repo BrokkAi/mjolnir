@@ -114,6 +114,31 @@ impl SessionActivity {
         }
     }
 
+    /// The activity a bare state describes, with only the clocks the state
+    /// itself carries. For a caller that holds the worker's state and nothing
+    /// else, such as a wait's answer.
+    pub fn of_state(state: mj_core::activity::ActivityState) -> Self {
+        use mj_core::activity::ActivityState;
+        let last_known = state.last_known().clone();
+        Self {
+            harness_turn_started_at_ms: match last_known {
+                ActivityState::Turn { started_at_ms, .. } => started_at_ms,
+                _ => None,
+            },
+            foreground_tool_started_at_ms: match last_known {
+                ActivityState::Tool { started_at_ms, .. } => Some(started_at_ms),
+                _ => None,
+            },
+            execution: match last_known {
+                ActivityState::Closing => Some(mj_core::relay::RelayExecutionState::Closing),
+                ActivityState::Closed => Some(mj_core::relay::RelayExecutionState::Closed),
+                _ => None,
+            },
+            state: Some(state),
+            ..Self::default()
+        }
+    }
+
     /// Whether the session has no foreground or background work in flight.
     ///
     /// Timestamps are deliberately tested for presence rather than validity:

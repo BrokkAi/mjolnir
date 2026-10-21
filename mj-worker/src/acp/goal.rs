@@ -357,6 +357,7 @@ pub(super) async fn recover(
                 default: Some("resume".into()),
             },
         }],
+        tool_permission: None,
     };
     emit_runtime_event(
         events,

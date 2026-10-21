@@ -23,7 +23,7 @@ use crate::targets::{
 
 use super::*;
 
-// Hard-won: 68ea3d747: copying origin refs spawned one process per branch.
+// Hard-won: 68ea3d747: cached refs must keep alternate-only objects and copy in one batch.
 #[test]
 #[cfg_attr(
     windows,
@@ -47,10 +47,38 @@ fn managed_clone_copies_large_origin_ref_sets_in_one_command() {
         }
     }
 
-    let source = committed_repository();
-    let base = test_git(source.path(), &["rev-parse", "HEAD"]);
+    let object_source = committed_repository();
+    let base = test_git(object_source.path(), &["rev-parse", "HEAD"]);
+    let tree = test_git(object_source.path(), &["rev-parse", "HEAD^{tree}"]);
+    let cached_only = test_git(
+        object_source.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &base,
+            "-m",
+            "cached branch only",
+        ],
+    );
+    let source = tempfile::tempdir().unwrap();
+    test_git(
+        object_source.path(),
+        &[
+            "clone",
+            "--shared",
+            "--no-checkout",
+            object_source.path().to_str().unwrap(),
+            source.path().to_str().unwrap(),
+        ],
+    );
+    assert!(source.path().join(".git/objects/info/alternates").exists());
+    test_git(source.path(), &["remote", "remove", "origin"]);
     let refs: String = (0..1500)
-        .map(|i| format!("update refs/remotes/origin/branch-{i:04} {base}\n"))
+        .map(|i| {
+            let oid = if i == 0 { &cached_only } else { &base };
+            format!("update refs/remotes/origin/branch-{i:04} {oid}\n")
+        })
         .collect();
     assert!(refs.len() > 64 * 1024);
     let command = CommandSpec::new(
@@ -89,6 +117,17 @@ fn managed_clone_copies_large_origin_ref_sets_in_one_command() {
     };
     let executor = RecordingExecutor(RefCell::new(Vec::new()));
     create_managed_clone(&executor, &checkout).unwrap();
+    drop(object_source);
+    assert!(
+        !checkout
+            .worktree_root
+            .join(".git/objects/info/alternates")
+            .exists()
+    );
+    test_git(
+        &checkout.worktree_root,
+        &["cat-file", "-e", &format!("{cached_only}^{{commit}}")],
+    );
     let copied = test_git(
         &checkout.worktree_root,
         &[
@@ -756,6 +795,7 @@ fn recorded_repository(head_commit: &str, branch: Option<&str>) -> RepositoryMet
     RepositoryMetadata {
         saved_refs: Default::default(),
         stash_stack: Vec::new(),
+        git_operation: None,
         push_urls: Vec::new(),
         remote_workspace: false,
         id: "project".into(),

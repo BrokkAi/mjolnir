@@ -3,7 +3,9 @@ use super::*;
 pub(super) struct LifecycleStart {
     pub(super) resume_workspace_id: Option<String>,
     pub(super) request_key: Option<String>,
-    pub(super) create_control: Option<CreateSessionControl>,
+    /// The control the caller keeps to cancel or commit the operation; a new
+    /// one when the caller does not need it.
+    pub(super) control: Option<LifecycleControl>,
     pub(super) phase: LifecyclePhase,
     pub(super) move_operation_id: Option<String>,
 }
@@ -64,7 +66,7 @@ impl RuntimeState {
         kind: LifecycleKind,
         resume_workspace_id: Option<String>,
         request_key: Option<String>,
-        create_control: Option<CreateSessionControl>,
+        control: Option<LifecycleControl>,
         work: F,
     ) -> Result<LifecycleWatch>
     where
@@ -77,7 +79,7 @@ impl RuntimeState {
             LifecycleStart {
                 resume_workspace_id,
                 request_key,
-                create_control,
+                control,
                 phase: LifecyclePhase::Executing,
                 move_operation_id: None,
             },
@@ -99,7 +101,7 @@ impl RuntimeState {
         let LifecycleStart {
             resume_workspace_id,
             request_key,
-            create_control,
+            control,
             mut phase,
             move_operation_id,
         } = start;
@@ -128,6 +130,7 @@ impl RuntimeState {
                 phase = LifecyclePhase::MovingDestination;
             }
 
+            let durable = durable_session_state(lifecycle_owner.controller(), &session_id);
             let lifecycle = &mut lifecycle_owner.lifecycle;
             let completed_other_kind = lifecycle
                 .get(&session_id)
@@ -165,10 +168,13 @@ impl RuntimeState {
                     crate::upgrade::activity("session lifecycle")?
                 };
                 let upgrade_work = Arc::new(Mutex::new(Some(admitted)));
-                let cancelled = create_control
-                    .as_ref()
-                    .map(|control| control.cancelled.clone())
-                    .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+                let control = control.unwrap_or_default();
+                // Decided under the owner lock, before anyone else can see the
+                // control, so a cancel can never be accepted first.
+                if lifecycle_starts_committed(kind, durable) {
+                    control.grant_commit();
+                }
+                let cancelled = control.cancelled.clone();
                 let (result_tx, result_rx) = tokio::sync::watch::channel(None);
                 // The operation's own id is also what a failure reports as its
                 // reference, so a person holding "the suspension did not finish"
@@ -181,9 +187,8 @@ impl RuntimeState {
                         upgrade_work: upgrade_work.clone(),
                         phase,
                         operation_id: operation_reference.clone(),
-                        create_control,
+                        control,
                         kind,
-                        cancelled: cancelled.clone(),
                         started_at_epoch_seconds: epoch_seconds(),
                         active_stages: BTreeMap::new(),
                         resume_workspace_id,

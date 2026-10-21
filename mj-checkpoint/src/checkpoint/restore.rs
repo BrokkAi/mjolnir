@@ -285,6 +285,21 @@ pub(super) fn archived_repository_snapshot(
                 repository_id: id.clone(),
             })?
             .to_vec(),
+        operation_payloads: match repository.metadata.git_operation {
+            None => None,
+            Some(_) => Some(crate::archive::GitOperationPayloads {
+                conflicted_worktree_tar: archive
+                    .payload_by_role(&PayloadRole::GitConflictedWorktreeTar {
+                        repository_id: id.clone(),
+                    })?
+                    .to_vec(),
+                state_tar: archive
+                    .payload_by_role(&PayloadRole::GitOperationStateTar {
+                        repository_id: id.clone(),
+                    })?
+                    .to_vec(),
+            }),
+        },
     })
 }
 

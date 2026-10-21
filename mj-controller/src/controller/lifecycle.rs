@@ -63,11 +63,12 @@ pub(super) enum SourceTargetDisposition {
 }
 
 /// Work a close runs once the session is about to close: its checkpoint is
-/// verified and recorded, and its relay is not sealed yet. A daemon suspend
-/// stops the session's sub-agents here, so a close that fails at its
-/// checkpoint leaves them running. When this fails, the close does not
-/// proceed: the session returns to its previous state with its relay
-/// unsealed.
+/// verified and recorded, and its relay is not sealed yet. This is the
+/// close's point of no return. A daemon suspend commits its lifecycle here,
+/// so a cancel that arrives later is refused, and stops the session's
+/// sub-agents, so a close that fails at its checkpoint leaves them running.
+/// When this fails, the close does not proceed: the session returns to its
+/// previous state with its relay unsealed.
 pub type BeforeClose = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
 
 impl Controller {

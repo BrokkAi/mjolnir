@@ -343,6 +343,7 @@ fn a_reviewer_form_is_answered_back_to_the_reviewer() {
         title: None,
         description: None,
         fields: Vec::new(),
+        tool_permission: None,
     };
     assert!(chat.show_review_role_elicitation(None, form));
     assert!(chat.reviewer_elicitation_open());
@@ -369,6 +370,7 @@ fn the_primary_form_keeps_the_screen_over_a_reviewer_one() {
         title: None,
         description: None,
         fields: Vec::new(),
+        tool_permission: None,
     };
     // An answer the planning harness is blocked on matters more than one
     // its reviewer is.

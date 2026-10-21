@@ -84,7 +84,7 @@ impl StandaloneSession {
     /// Whether the actor should follow this worker at the fast cadence.
     ///
     /// True while the worker owns work whose events stream in, while it
-    /// classifies a turn that just ended (`mj prompt --wait` returns on that
+    /// classifies a turn that just ended (`mj prompt` returns on that
     /// verdict and automatic continuation acts on it, and it lands a moment
     /// after the turn goes quiet), or while a history search this
     /// connection runs still has a result to deliver on its next sync. A

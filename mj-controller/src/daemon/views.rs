@@ -11,14 +11,24 @@ impl RuntimeState {
             return Ok(None);
         };
         ensure!(
-            lifecycle_cancellable(active.kind, durable),
-            "stop of {session_id} has passed its verified checkpoint and is removing the target; \
-             it cannot be cancelled"
+            active.person_may_cancel_kind(durable),
+            "the {} of {session_id} cannot be cancelled on its own",
+            if durable == Some(SessionState::StartupCleanup) {
+                LifecycleKind::StartupCleanup.label()
+            } else {
+                active.kind.label()
+            }
         );
-        ensure!(
-            active.request_cancel(),
-            "lifecycle operation is no longer cancellable"
-        );
+        // The control decides: a close that committed first refuses this.
+        if !active.request_cancel() {
+            ensure!(
+                !(active.control.is_committed()
+                    && matches!(active.kind, LifecycleKind::Suspend | LifecycleKind::Restart)),
+                "stop of {session_id} has passed its verified checkpoint and is removing the target; \
+                 it cannot be cancelled"
+            );
+            bail!("lifecycle operation is no longer cancellable");
+        }
         if active.kind == LifecycleKind::Restart {
             active.phase = LifecyclePhase::CancellingRestart;
         }
@@ -79,8 +89,9 @@ impl RuntimeState {
         Ok(true)
     }
 
-    /// Let storage cleanup drain briefly, then cancel and join every lifecycle
-    /// owner before the daemon closes its session manager and database writer.
+    /// Let storage cleanup drain briefly, then cancel or interrupt and join
+    /// every lifecycle owner before the daemon closes its session manager and
+    /// database writer.
     /// One shared deadline bounds all cleanup tasks rather than granting eight
     /// seconds to each session serially.
     pub(super) async fn cancel_and_wait_lifecycles(&self) -> Result<()> {
@@ -92,7 +103,7 @@ impl RuntimeState {
                 .filter(|(_, active)| active.is_running())
                 .map(|(session_id, active)| {
                     if active.kind != LifecycleKind::Cleanup {
-                        active.request_cancel();
+                        active.interrupt_for_shutdown();
                     }
                     let stage = active
                         .active_stages
@@ -134,7 +145,7 @@ impl RuntimeState {
                 Ok(result) => result?,
                 Err(_) => {
                     tracing::warn!(%session_id, %stage, "deferred cleanup exceeded the daemon shutdown drain deadline");
-                    self.cancel_operation(session_id, operation_id);
+                    self.interrupt_operation(session_id, operation_id);
                 }
             }
         }
@@ -157,7 +168,7 @@ impl RuntimeState {
             } else {
                 join_deadline
             };
-            self.cancel_operation(&session_id, &operation_id);
+            self.interrupt_operation(&session_id, &operation_id);
             let joined = tokio::time::timeout_at(join_deadline, async {
                 while result.borrow_and_update().is_none() {
                     result.changed().await.with_context(|| {
@@ -199,11 +210,8 @@ impl RuntimeState {
             .filter(|(_, active)| active.is_visible())
             .map(|(session_id, active)| RuntimeLifecycleView {
                 operation_id: active.operation_id.clone(),
-                cancellable: active.is_cancellable()
-                    && lifecycle_cancellable(
-                        active.kind,
-                        durable_session_state(controller, session_id),
-                    ),
+                cancellable: active
+                    .cancellable_by_person(durable_session_state(controller, session_id)),
                 session_id: session_id.clone(),
                 kind: active.kind.into(),
                 started_at_epoch_seconds: active.started_at_epoch_seconds,
@@ -588,10 +596,10 @@ impl RuntimeState {
         }
     }
 
-    fn cancel_operation(&self, session_id: &str, operation_id: &str) {
+    fn interrupt_operation(&self, session_id: &str, operation_id: &str) {
         if let Some(active) = self.owner().lifecycle.get_mut(session_id)
             && active.operation_id == operation_id
-            && active.request_cancel()
+            && active.interrupt_for_shutdown()
         {
             self.publish_revision();
         }
