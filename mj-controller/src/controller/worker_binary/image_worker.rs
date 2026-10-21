@@ -176,12 +176,14 @@ impl Controller {
     /// Make sure the container an upgrade recreates for this session can
     /// start before the old one is touched: the image it names is on its
     /// host, pulled now if it was missing, and a worker of this build can be
-    /// installed in it. A failure here leaves the session as it was.
+    /// installed in it. Returns that image; the recreation refuses to retire
+    /// the container for any other. A failure here leaves the session as it
+    /// was.
     pub(crate) fn prepare_container_recreation(
         &self,
         session_id: &str,
         executor: &impl CommandExecutor,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let session = self
             .state
             .sessions
@@ -192,9 +194,9 @@ impl Controller {
             .targets
             .get(&session.target_template_id)
             .with_context(|| format!("target {} is not configured", session.target_template_id))?;
-        let Some((host, container)) = template.image_host() else {
-            return Ok(());
-        };
+        let (host, container) = template
+            .image_host()
+            .with_context(|| format!("target {} runs no image", session.target_template_id))?;
         let image = container.image.as_str();
         // Pull only what is missing, unless the target forbids pulling.
         let policy = match container.pull_policy {
@@ -232,6 +234,6 @@ impl Controller {
             preflight_host_worker_binary(template, executor)
                 .context("the new container's image does not carry this build's worker")?;
         }
-        Ok(())
+        Ok(image.to_owned())
     }
 }

@@ -82,6 +82,13 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
       Docker integration test no longer assumes `:latest` has no worker. Validated by upgrading
       a session created by the installed 2.51.0 release to a release-channel build of this branch.
 
+- [x] (2026-10-21 17:15Z) A third review raised four points; three are fixed and one was
+      declined. A move blocked by sub-agents stays due after an in-place upgrade
+      (`ContainerMoveBlocked`), a stand-down on an unrecorded container is no longer reported as
+      a move, and the move is decided on one fresh snapshot whose prepared image the daemon checks
+      before checkpointing. Comparing resolved image IDs for mutable tags was declined (see
+      Decision Log).
+
 ## Surprises & Discoveries
 
 - Observation: the repository owner is mixed case (`BrokkAi`) but GHCR requires lowercase, so the
@@ -353,6 +360,20 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
   of in the daemon. Rationale: the coordinator holds no handoff admission and is cancelled at
   handoff, which AGENTS.md requires of work that starts again under the next daemon.
   Date/Author: 2026-10-21, Claude.
+
+- Decision (third review): compare a legacy container's image *reference* with the one its target
+  names, not resolved image IDs. Rationale: recreation follows the image the target names, the
+  same rule as for recorded containers; a development `:latest` session is deliberately not
+  recreated when `:latest` refreshes, or the hourly refresh would recreate development
+  containers. Release targets name immutable `agent-dev:<version>` tags, and a pre-2.37 `:latest`
+  container differs from a release's versioned reference, so it is still recreated.
+  Date/Author: 2026-10-21, Claude.
+- Decision (third review): the coordinator decides a move on one `Controller::load()` snapshot
+  (the container's image, sub-agent occupancy, and preparation), returns the prepared image in
+  `RecreateContainer { image }`, and the automatic Restart stands down before its checkpoint if
+  the target names another image by then. A move blocked by sub-agents returns
+  `ContainerMoveBlocked`, which keeps it due in the policy (`container_move_pending`) after the
+  worker is current, so the cached build cannot end the attempts. Date/Author: 2026-10-21, Claude.
 
 ## Outcomes & Retrospective
 
@@ -748,7 +769,7 @@ in `mj-core/src/state/target_runtime.rs`, `ContainerSettings::default_image: Opt
 in `mj-core/src/config.rs`, `RELEASE_IMAGE_CARRIES_WORKER: bool`; in
 `mj-core/src/worker_build.rs`, `is_worker_build(&str) -> bool`; in the worker CLI, the hidden
 `mj-worker worker build-id`; `LatchExclusivity::HoldThroughIdleClose`;
-`WorkerUpgradeOutcome::RecreateContainer`, `ContainerRecreationReport` and
+`WorkerUpgradeOutcome::RecreateContainer { image }` and `::ContainerMoveBlocked`, `ContainerRecreationReport` and
 `WorkerUpgradeObserver::report_recreation`; `SessionRestartIntent::automatic` and
 `begin_automatic_session_restart`; `RuntimeState::recreate_container_for_upgrade`; and
 `LifecycleStart::deferrable_admission`.

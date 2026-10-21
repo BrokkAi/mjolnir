@@ -3133,6 +3133,62 @@ fn startup_prompt_test_store(name: &str) -> Option<crate::database::DatabaseWrit
     Some(crate::database::install_isolated_test_writer())
 }
 
+// Hard-won: #1139 review: an automatic recreation that stood down on a container with an unrecorded image was reported as a completed move.
+// The target check runs through `sh`, which only Unix hosts provide.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_automatic_recreation_that_stands_down_is_not_reported_as_a_move() {
+    const NAME: &str = "an_automatic_recreation_that_stands_down_is_not_reported_as_a_move";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let mut session = runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    // A container recorded before images were tracked, which no longer
+    // exists, so the recreation finds its target unavailable.
+    session.target_template_id = "docker".into();
+    session.target = Some(mj_core::state::TargetLocator::LocalDocker {
+        borrowed_from: None,
+        container_id: mj_core::targets::resource_name("session-1").unwrap(),
+    });
+    let template = mj_core::config::TargetTemplate::LocalDocker {
+        container: serde_json::from_value(serde_json::json!({})).unwrap(),
+    };
+    let mut runtime = mj_core::state::TargetRuntimeSettings::from(&template);
+    let mut applied = mj_core::state::ContainerSettings::requested(&session);
+    applied.default_image = None;
+    runtime.container_settings = Some(applied);
+    session.target_runtime = Some(runtime);
+    crate::database::save_session(&session).unwrap();
+    let state = test_runtime_state();
+
+    // The coordinator prepared another image than the target names now, and
+    // then the image it names: neither retires anything.
+    for prepared in [
+        "registry.example.test/not-the-target:1",
+        mj_core::config::DEFAULT_CONTAINER_IMAGE,
+    ] {
+        let outcome = state
+            .recreate_container_for_upgrade("session-1".into(), prepared.into())
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            restart::ContainerRecreationOutcome::StoodDown,
+            "{prepared}"
+        );
+        assert!(crate::database::load_session_restarts().unwrap().is_empty());
+        let record = crate::database::load_session_record("session-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, SessionState::Running);
+        assert_eq!(record.last_error, None);
+    }
+}
+
 // Hard-won: #1139 review: a failed automatic recreation kept its Restart intent, so its stuck lifecycle stood down every retry and blocked continuation.
 // A local bare target exists only where the controller runs workers itself.
 #[cfg(unix)]
@@ -3157,8 +3213,9 @@ async fn a_failed_automatic_recreation_gives_back_its_intent_and_records_no_fail
     crate::database::save_session(&session).unwrap();
     let state = test_runtime_state();
 
+    // A bare target names no image, so nothing is compared with this one.
     let error = state
-        .recreate_container_for_upgrade("session-1".into())
+        .recreate_container_for_upgrade("session-1".into(), "unused".into())
         .await
         .expect_err("the checkpoint cannot succeed");
     assert!(
