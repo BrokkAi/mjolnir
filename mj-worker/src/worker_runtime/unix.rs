@@ -1584,6 +1584,7 @@ async fn prepare_and_start_harness(
                 .home
                 .clone();
             let root = root.to_owned();
+            let session_id = config.session_id.clone();
             let configure_subagents = subagent_role.is_some();
             let registration_required =
                 subagent_role != Some(mj_core::subagent::SubagentMcpRole::MessageOnly);
@@ -1600,7 +1601,7 @@ async fn prepare_and_start_harness(
                         )?;
                     }
                     let mailbox_hook_available =
-                        super::subagents::configure_claude_mailbox_hook(&root, &home)?;
+                        super::subagents::configure_claude_mailbox_hook(&root, &session_id, &home)?;
                     Ok((true, mailbox_hook_available))
                 })
                 .await?;

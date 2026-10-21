@@ -94,16 +94,32 @@ pub(super) fn resolve_claude_mcp_paths(root: &Path, home: &Path, required: bool)
 
 /// Install the mailbox command hook in the session-private Claude settings and
 /// resolve staged remote paths on the worker target before Claude reads them.
-pub(super) fn configure_claude_mailbox_hook(root: &Path, home: &Path) -> Result<bool> {
-    let staged = root.join("profile");
-    let expected_home = staged.join(".claude");
-    // Check every component without following links, including existing hooks.
-    // Resolving both sides would accept a .claude link into the user's home.
-    let private = home == expected_home
-        && [root, staged.as_path(), expected_home.as_path()]
+///
+/// The Claude home is the staged profile directory itself: `<root>/profile`
+/// on this machine, `profiles/<session>` in a container or under a remote
+/// login (the controller's `removable_profile_root`).
+pub(super) fn configure_claude_mailbox_hook(
+    root: &Path,
+    session_id: &str,
+    home: &Path,
+) -> Result<bool> {
+    let staged_directories = if home == root.join("profile") {
+        vec![root, home]
+    } else if home.file_name() == Some(session_id.as_ref())
+        && home.parent().and_then(Path::file_name) == Some("profiles".as_ref())
+    {
+        vec![home]
+    } else {
+        Vec::new()
+    };
+    // An earlier local session's <root>/profile may link to the person's own
+    // home, so check each directory and the settings file without following
+    // links. Resolving both sides would accept that link.
+    let private = !staged_directories.is_empty()
+        && staged_directories
             .into_iter()
             .all(|path| std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()))
-        && match std::fs::symlink_metadata(expected_home.join("settings.json")) {
+        && match std::fs::symlink_metadata(home.join("settings.json")) {
             Ok(metadata) => metadata.is_file(),
             Err(error) => error.kind() == std::io::ErrorKind::NotFound,
         };
@@ -812,10 +828,11 @@ mod tests {
     use super::*;
     use mj_core::subagent::SubagentToolAction;
 
+    // Hard-won: 3c8973b87: the check expected <root>/profile/.claude, so it refused every real Claude home and steering was never offered.
     #[test]
     fn claude_mailbox_hook_resolves_the_worker_socket_and_preserves_profile_settings() {
         let worker_root = tempfile::tempdir().unwrap();
-        let staged_home = worker_root.path().join("profile/.claude");
+        let staged_home = worker_root.path().join("profile");
         std::fs::create_dir_all(&staged_home).unwrap();
         let remote_root = ".local/share/hel/workers/session";
         let path = staged_home.join("settings.json");
@@ -846,9 +863,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(configure_claude_mailbox_hook(worker_root.path(), &staged_home).unwrap());
+        assert!(
+            configure_claude_mailbox_hook(worker_root.path(), "session", &staged_home).unwrap()
+        );
         let first = std::fs::read(&path).unwrap();
-        assert!(configure_claude_mailbox_hook(worker_root.path(), &staged_home).unwrap());
+        assert!(
+            configure_claude_mailbox_hook(worker_root.path(), "session", &staged_home).unwrap()
+        );
         assert_eq!(std::fs::read(&path).unwrap(), first);
 
         let settings: serde_json::Value = serde_json::from_slice(&first).unwrap();
@@ -880,7 +901,9 @@ mod tests {
         assert_eq!(mailbox_hooks[0]["command"], expected_command);
 
         std::fs::write(&path, br#"{"model":"opus"}"#).unwrap();
-        assert!(configure_claude_mailbox_hook(worker_root.path(), &staged_home).unwrap());
+        assert!(
+            configure_claude_mailbox_hook(worker_root.path(), "session", &staged_home).unwrap()
+        );
         let repaired: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(repaired["model"], "opus");
@@ -891,19 +914,57 @@ mod tests {
                 .starts_with(CLAUDE_MAILBOX_HOOK_MARKER)
         );
 
-        let source_profile = tempfile::tempdir().unwrap();
-        let source_home = source_profile.path().join(".claude");
-        std::fs::create_dir(&source_home).unwrap();
-        let source_settings = source_home.join("settings.json");
+        // An earlier local session ran from the person's own home, and its
+        // staged path links there. Neither path may be edited.
+        let source_home = tempfile::tempdir().unwrap();
+        let source_settings = source_home.path().join("settings.json");
         std::fs::write(&source_settings, br#"{"user":"source"}"#).unwrap();
         let legacy_root = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(source_profile.path(), legacy_root.path().join("profile"))
-            .unwrap();
-        assert!(!configure_claude_mailbox_hook(legacy_root.path(), &source_home).unwrap());
+        let linked_home = legacy_root.path().join("profile");
+        std::os::unix::fs::symlink(source_home.path(), &linked_home).unwrap();
+        for home in [source_home.path(), linked_home.as_path()] {
+            assert!(!configure_claude_mailbox_hook(legacy_root.path(), "session", home).unwrap());
+        }
         assert_eq!(
             std::fs::read(source_settings).unwrap(),
             br#"{"user":"source"}"#
         );
+    }
+
+    // Hard-won: 3c8973b87: a remote profile outside the worker root kept its home-relative hook command.
+    #[test]
+    fn claude_mailbox_hook_repairs_a_remote_profile_outside_the_worker_root() {
+        let login = tempfile::tempdir().unwrap();
+        let root = login.path().join(".local/share/hel/workers/worker-7");
+        let home = login.path().join(".local/share/hel/profiles/session-7");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        // The controller wrote a home-relative command, which Claude would
+        // run from the checkout.
+        std::fs::write(
+            home.join("settings.json"),
+            br#"{"hooks":{"PostToolBatch":[{"hooks":[{"type":"command","command":"MJOLNIR_MAILBOX_HOOK=1 '.local/share/hel/workers/worker-7/hel' worker mailbox-hook"}]}]}}"#,
+        )
+        .unwrap();
+
+        assert!(configure_claude_mailbox_hook(&root, "session-7", &home).unwrap());
+        let settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join("settings.json")).unwrap()).unwrap();
+        let command = settings["hooks"]["PostToolBatch"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        let socket = root.join("control.sock");
+        assert!(command.ends_with(&format!(
+            "--socket {} --event PostToolBatch",
+            mj_core::targets::posix_quote(&socket.to_string_lossy())
+        )));
+
+        // Another session's profile, or one that is not under `profiles`, is
+        // not this session's.
+        assert!(!configure_claude_mailbox_hook(&root, "session-8", &home).unwrap());
+        let elsewhere = login.path().join("session-7");
+        std::fs::create_dir(&elsewhere).unwrap();
+        assert!(!configure_claude_mailbox_hook(&root, "session-7", &elsewhere).unwrap());
     }
 
     // Hard-won: #1302: a nested staging link allowed writes to the source profile.
@@ -911,21 +972,20 @@ mod tests {
     fn claude_mailbox_repair_rejects_nested_symlinks() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("profile")).unwrap();
-        let home = root.path().join("profile/.claude");
+        let home = root.path().join("profile");
         std::os::unix::fs::symlink(outside.path(), &home).unwrap();
         let path = outside.path().join("settings.json");
         // Check both missing hooks and a hook that the startup repair would refresh.
         for settings in [br#"{}"#.as_slice(), br#"{"hooks":{"PostToolBatch":[{"hooks":[{"type":"command","command":"MJOLNIR_MAILBOX_HOOK=1 old"}]}]}}"#.as_slice()] {
             std::fs::write(&path, settings).unwrap();
-            assert!(!configure_claude_mailbox_hook(root.path(), &home).unwrap());
+            assert!(!configure_claude_mailbox_hook(root.path(), "session", &home).unwrap());
             assert_eq!(std::fs::read(&path).unwrap(), settings);
         }
         std::fs::remove_file(&home).unwrap();
         std::fs::create_dir(&home).unwrap();
         std::os::unix::fs::symlink(&path, home.join("settings.json")).unwrap();
         let before = std::fs::read(&path).unwrap();
-        assert!(!configure_claude_mailbox_hook(root.path(), &home).unwrap());
+        assert!(!configure_claude_mailbox_hook(root.path(), "session", &home).unwrap());
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
@@ -976,7 +1036,7 @@ mod tests {
     #[test]
     fn mailbox_hooks_replace_old_handlers_and_preserve_user_handlers() {
         let claude_root = tempfile::tempdir().unwrap();
-        let claude_home = claude_root.path().join("profile/.claude");
+        let claude_home = claude_root.path().join("profile");
         std::fs::create_dir_all(&claude_home).unwrap();
         let claude_settings_path = claude_home.join("settings.json");
         std::fs::write(
@@ -990,7 +1050,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        configure_claude_mailbox_hook(claude_root.path(), &claude_home).unwrap();
+        configure_claude_mailbox_hook(claude_root.path(), "session", &claude_home).unwrap();
         let claude: serde_json::Value =
             serde_json::from_slice(&std::fs::read(claude_settings_path).unwrap()).unwrap();
         let claude_hooks = claude["hooks"]["PostToolBatch"][0]["hooks"]
