@@ -1822,8 +1822,21 @@ async fn login(args: LoginArgs) -> Result<()> {
     }
     let (program, arguments) = mj_core::credentials::login_command(profile)
         .with_context(|| format!("profile {profile_id:?}"))?;
-    let marker = profile.authentication_marker();
-    let (before, _) = mj_core::credentials::read_credential_file(profile.kind, &marker)?;
+    // OpenCode keeps its logins in its database, so its fingerprint is the
+    // logins read from there, and no live session takes them up.
+    let stored = profile.auth_scheme() == mj_core::config::AuthScheme::NativeLoginStore;
+    let fingerprint = || -> Result<Option<String>> {
+        if stored {
+            return Ok(mj_controller::opencode_logins::profile_logins(profile)?
+                .map(|logins| mj_core::credentials::credential_fingerprint(&logins)));
+        }
+        let (snapshot, _) = mj_core::credentials::read_credential_file(
+            profile.kind,
+            &profile.authentication_marker(),
+        )?;
+        Ok(snapshot.present.then_some(snapshot.fingerprint))
+    };
+    let before = fingerprint()?;
 
     println!(
         "Running `{program} {}` against {}.",
@@ -1849,11 +1862,17 @@ async fn login(args: LoginArgs) -> Result<()> {
             )
         })?;
 
-    let (after, _) = mj_core::credentials::read_credential_file(profile.kind, &marker)?;
-    if after.present && after.fingerprint != before.fingerprint {
-        println!(
-            "Credentials updated for profile {profile_id}. Live sessions pick them up within about a minute while the Mjolnir daemon is running."
-        );
+    let after = fingerprint()?;
+    if after.is_some() && after != before {
+        if stored {
+            println!(
+                "Credentials updated for profile {profile_id}. New and resumed sessions use them; running sessions keep the logins they started with."
+            );
+        } else {
+            println!(
+                "Credentials updated for profile {profile_id}. Live sessions pick them up within about a minute while the Mjolnir daemon is running."
+            );
+        }
     } else {
         println!("Credentials for profile {profile_id} are unchanged.");
     }

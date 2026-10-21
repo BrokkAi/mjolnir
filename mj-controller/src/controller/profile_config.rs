@@ -637,6 +637,59 @@ mod tests {
         assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), credentials);
     }
 
+    #[test]
+    #[ignore = "requires MJ_OPENCODE_TEST_BINARY naming an OpenCode 2 executable and MJ_WORKER_BINARY pointing to the current mj-worker build; discovers models without a provider turn"]
+    fn live_opencode_profile_discovery_offers_logins_from_its_database() {
+        let opencode = std::path::PathBuf::from(
+            std::env::var_os("MJ_OPENCODE_TEST_BINARY").expect("set an OpenCode 2 executable"),
+        );
+        let isolated = tempfile::tempdir().unwrap();
+        let home = isolated.path().join("config/opencode");
+        std::fs::create_dir_all(&home).unwrap();
+        // OpenCode itself writes the login, so the read meets its own schema.
+        let export = isolated.path().join("export.json");
+        std::fs::write(
+            &export,
+            r#"[{"id":"cred_mjolnir_live_test","integrationID":"deepseek","label":"DeepSeek","active":true,"value":{"type":"key","key":"sk-mjolnir-live-test"}}]"#,
+        )
+        .unwrap();
+        let status = std::process::Command::new(&opencode)
+            .args(["auth", "import", "--standalone"])
+            .arg(&export)
+            .env("XDG_CONFIG_HOME", isolated.path().join("config"))
+            .env("XDG_DATA_HOME", home.join(".data"))
+            .env("OPENCODE_DISABLE_AUTOUPDATE", "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "seed the OpenCode login: {status}");
+        let profile = HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::OpenCode,
+            home,
+            environment: Default::default(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+            codex_profile: None,
+            legacy_subagents: None,
+        };
+        let choices = probe_profile(
+            "opencode-database-login-test",
+            &profile,
+            Default::default(),
+            None,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert!(
+            choices
+                .models
+                .iter()
+                .any(|choice| choice.value.starts_with("deepseek/")),
+            "discovered models: {:?}",
+            choices.models
+        );
+    }
+
     #[tokio::test]
     async fn unsaved_profile_discovery_reads_the_owned_cache_without_saving_settings() {
         const CHILD: &str = "MJ_TEST_UNSAVED_PROFILE_DISCOVERY";

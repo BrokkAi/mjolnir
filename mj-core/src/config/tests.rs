@@ -570,7 +570,10 @@ fn retired_stopped_session_filters_load_and_are_dropped_on_save() {
 fn nested_home_mapping_keeps_config_credentials_and_session_data_together() {
     for (kind, credential) in [
         (HarnessKind::Muse, "auth.json"),
-        (HarnessKind::OpenCode, ".data/opencode/auth.json"),
+        (
+            HarnessKind::OpenCode,
+            ".data/opencode/mjolnir-credentials.json",
+        ),
     ] {
         let home = crate::target_path::join(Path::new("/private/session"), Path::new(kind.id()));
         let mut environment = BTreeMap::from([("XDG_DATA_HOME".into(), "/unrelated".into())]);
