@@ -243,6 +243,9 @@ impl Controller {
         let reuse_existing_branch =
             retained_managed_worktree_branch_available(executor, &worktree)?;
         if !reuse_existing_branch {
+            // The archived delta restored into this clone needs the session's
+            // base, which the network remote served after the host's last fetch.
+            refresh_source_origin(executor, &worktree.target, source)?;
             let (branch, remote_branch) = managed_clone_starting_branch(
                 executor,
                 &worktree.target,
@@ -343,6 +346,7 @@ impl Controller {
             &inspection.source_repository,
             &Path::new(".mj").join("clones").join(session_id),
         );
+        refresh_source_origin(executor, &target, &inspection.source_repository)?;
         // The worktree branch is created from the repository's HEAD, or from
         // the requested launch base, so record that commit as the session base
         // rather than rediscovering it later.
@@ -525,12 +529,15 @@ fn managed_clone_starting_branch(
                 "inspect origin remote",
             ))?;
             if origin.status == 0 {
-                let remote = managed_git_stdout(
-                    executor,
-                    target,
-                    repository,
-                    ["ls-remote", "--symref", "origin", "HEAD"],
-                    "resolve remote default branch",
+                let purpose = "resolve remote default branch";
+                let remote = command_stdout(
+                    executor.execute(&managed_network_git_command(
+                        target,
+                        repository,
+                        ["ls-remote", "--symref", "origin", "HEAD"],
+                        purpose,
+                    ))?,
+                    purpose,
                 )?;
                 let branch = remote
                     .lines()
@@ -576,6 +583,114 @@ fn managed_clone_starting_branch(
             String::from_utf8_lossy(&output.stderr).trim()
         ),
     }
+}
+
+/// Bring the source's cached `origin` branches up to date before a new clone
+/// takes its starting commit from them, as a person fetches before branching.
+/// The fetch lands in the source repository rather than the clone because
+/// clone recovery requires the session's base commit there.
+fn refresh_source_origin(
+    executor: &impl CommandExecutor,
+    target: &ManagedWorktreeTarget,
+    repository: &Path,
+) -> Result<()> {
+    let origin = executor.execute(&managed_git_command(
+        target,
+        repository,
+        ["config", "--get", "remote.origin.url"],
+        "inspect origin remote",
+    ))?;
+    match origin.status {
+        0 => {}
+        // Without origin the clone starts from the source's own branch.
+        1 => return Ok(()),
+        status => bail!(
+            "inspect origin remote failed with status {status}: {}",
+            String::from_utf8_lossy(&origin.stderr).trim()
+        ),
+    }
+    // Sessions provision concurrently, and two fetches into one repository
+    // race on its ref locks. One fetch at a time per repository.
+    let lock = source_fetch_lock(target, repository);
+    let _fetching = loop {
+        match lock.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                ensure!(
+                    !executor.cancellation_requested(),
+                    "operation cancelled while waiting to fetch origin"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    };
+    let purpose = "fetch origin";
+    command_stdout(
+        executor.execute(&managed_network_git_command(
+            target,
+            repository,
+            [
+                "fetch",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "--no-recurse-submodules",
+                "origin",
+            ],
+            purpose,
+        ))?,
+        purpose,
+    )
+    .with_context(|| {
+        format!(
+            "could not update origin in {} to find the latest starting commit",
+            repository.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn source_fetch_lock(
+    target: &ManagedWorktreeTarget,
+    repository: &Path,
+) -> std::sync::Arc<std::sync::Mutex<()>> {
+    use std::sync::{Arc, Mutex, OnceLock, Weak};
+    static LOCKS: OnceLock<Mutex<std::collections::BTreeMap<String, Weak<Mutex<()>>>>> =
+        OnceLock::new();
+    let key = match target {
+        ManagedWorktreeTarget::Local => format!("local|{}", repository.display()),
+        ManagedWorktreeTarget::Ssh { destination, .. } => {
+            format!("ssh|{destination}|{}", repository.display())
+        }
+    };
+    let mut locks = LOCKS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let slot = locks.entry(key).or_default();
+    if let Some(lock) = slot.upgrade() {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    *slot = Arc::downgrade(&lock);
+    lock
+}
+
+/// A Git command that contacts the remote, which must fail rather than wait
+/// for credentials no one is present to give. Over SSH the far side has no
+/// terminal, so Git cannot prompt there.
+fn managed_network_git_command(
+    target: &ManagedWorktreeTarget,
+    directory: &Path,
+    args: impl IntoIterator<Item = impl AsRef<str>>,
+    purpose: impl Into<String>,
+) -> CommandSpec {
+    let mut command = managed_git_command(target, directory, args, purpose);
+    if matches!(target, ManagedWorktreeTarget::Local) {
+        mj_core::local_git::unattended_git_environment(&mut command);
+    }
+    command
 }
 
 fn managed_target_ssh(target: &ManagedWorktreeTarget) -> Option<SshTarget> {

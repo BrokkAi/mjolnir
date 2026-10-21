@@ -481,6 +481,149 @@ fn a_launch_base_starts_the_worktree_at_that_commit() {
     );
 }
 
+// Hard-won: 90fc17a2b: a new clone started from the host's stale cached origin ref.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
+fn a_new_clone_starts_at_the_remote_tip_the_host_had_not_fetched() {
+    const CHILD: &str = "MJ_TEST_WORKTREE_FETCHES_ORIGIN_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "a_new_clone_starts_at_the_remote_tip_the_host_had_not_fetched",
+        ))
+        .env(CHILD, "1")
+        .env("MJ_DATA_DIR", directory.path())
+        .env("MJ_CONFIG_DIR", directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let repository = committed_repository();
+    let root = repository.path().canonicalize().unwrap();
+    let remote = tempfile::tempdir().unwrap();
+    test_git(
+        remote.path(),
+        &["init", "--bare", "--initial-branch=master"],
+    );
+    let remote_url = remote.path().to_str().unwrap();
+    test_git(&root, &["remote", "add", "origin", remote_url]);
+    test_git(&root, &["push", "--set-upstream", "origin", "master"]);
+    test_git(&root, &["remote", "set-head", "origin", "master"]);
+    let host_head = test_git(&root, &["rev-parse", "HEAD"]);
+    // A teammate pushes after the host's last fetch.
+    let teammate = tempfile::tempdir().unwrap();
+    test_git(teammate.path(), &["clone", remote_url, "."]);
+    test_git(teammate.path(), &["config", "user.name", "Teammate"]);
+    test_git(
+        teammate.path(),
+        &["config", "user.email", "teammate@example.invalid"],
+    );
+    std::fs::write(teammate.path().join("nested/file.txt"), "pushed\n").unwrap();
+    test_git(teammate.path(), &["commit", "-am", "pushed"]);
+    test_git(teammate.path(), &["push"]);
+    let pushed = test_git(teammate.path(), &["rev-parse", "HEAD"]);
+
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    config.save().unwrap();
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let record = raw_session_on("localhost", root.join("nested").to_str().unwrap());
+    crate::database::save_session(&record).unwrap();
+    controller.reload().unwrap();
+    assert!(
+        controller
+            .prepare_managed_raw_worktree(&record.id, &ProcessExecutor)
+            .unwrap()
+    );
+    let managed = controller.state.sessions[&record.id]
+        .managed_worktree
+        .clone()
+        .unwrap();
+    assert_eq!(managed.base_commit.as_deref(), Some(pushed.as_str()));
+    assert_eq!(
+        test_git(&managed.worktree_root, &["rev-parse", "HEAD"]),
+        pushed
+    );
+    // The base reached the source repository, where clone recovery looks for
+    // it, and the host's own branch and files did not move.
+    assert_eq!(
+        test_git(&root, &["rev-parse", "refs/remotes/origin/master"]),
+        pushed
+    );
+    assert_eq!(test_git(&root, &["rev-parse", "master"]), host_head);
+    assert_eq!(test_git(&root, &["status", "--porcelain"]), "");
+    controller
+        .cleanup_new_session_worktree_after_failure(&record.id, &ProcessExecutor)
+        .unwrap();
+
+    // A workspace session moving into a checkout gets its clone the same way.
+    std::fs::write(teammate.path().join("nested/file.txt"), "pushed again\n").unwrap();
+    test_git(teammate.path(), &["commit", "-am", "pushed again"]);
+    test_git(teammate.path(), &["push"]);
+    let pushed_again = test_git(teammate.path(), &["rev-parse", "HEAD"]);
+    controller
+        .config
+        .bundles
+        .insert("project".into(), local_bundle(&root));
+    let mut workspace = checkpoint_test_session("fedcba9876543210fedcba9876543210");
+    workspace.state = SessionState::Stopped;
+    workspace.bundle_id = "project".into();
+    let conversion = controller
+        .plan_workspace_to_raw(&workspace, "localhost", &ProcessExecutor)
+        .unwrap();
+    assert_eq!(
+        conversion.worktree.base_commit.as_deref(),
+        Some(pushed_again.as_str())
+    );
+}
+
+#[test]
+fn concurrent_session_starts_fetch_one_repository_one_at_a_time() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Default)]
+    struct OverlapRecorder {
+        fetching: AtomicUsize,
+        most: AtomicUsize,
+        fetches: AtomicUsize,
+    }
+    impl CommandExecutor for OverlapRecorder {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            if command.args.iter().any(|arg| arg == "fetch") {
+                let now = self.fetching.fetch_add(1, Ordering::SeqCst) + 1;
+                self.most.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                self.fetching.fetch_sub(1, Ordering::SeqCst);
+                self.fetches.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(CommandOutput {
+                status: 0,
+                stdout: b"https://example.test/repo.git\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+    let executor = OverlapRecorder::default();
+    let repository = Path::new("/home/dev/concurrent-fetch-project");
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                refresh_source_origin(&executor, &ManagedWorktreeTarget::Local, repository).unwrap()
+            });
+        }
+    });
+    assert_eq!(executor.fetches.load(Ordering::SeqCst), 4);
+    assert_eq!(executor.most.load(Ordering::SeqCst), 1);
+}
+
 #[test]
 fn a_launch_base_on_a_plain_directory_fails_instead_of_being_ignored() {
     let directory = tempfile::tempdir().unwrap();

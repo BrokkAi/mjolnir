@@ -624,6 +624,14 @@ fn git_command(path: &Path, args: impl IntoIterator<Item = impl Into<String>>) -
     let mut all = vec!["-C".to_owned(), path.to_string_lossy().into_owned()];
     all.extend(args.into_iter().map(Into::into));
     let mut command = CommandSpec::new("git", all);
+    unattended_git_environment(&mut command);
+    command
+}
+
+/// Environment for a local Git command that may reach a remote with no one
+/// present to answer: fail instead of prompting for credentials or host keys,
+/// and never fetch missing objects behind the caller's back.
+pub fn unattended_git_environment(command: &mut CommandSpec) {
     command
         .env
         .insert("GIT_TERMINAL_PROMPT".to_owned(), "0".to_owned());
@@ -637,7 +645,6 @@ fn git_command(path: &Path, args: impl IntoIterator<Item = impl Into<String>>) -
                 .to_owned(),
         );
     }
-    command
 }
 
 fn git_output(

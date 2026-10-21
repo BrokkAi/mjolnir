@@ -141,19 +141,7 @@ pub fn default_branch(
             r#"credential.https://github.com.helper=!f() { if [ "$1" = get ] && [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then printf '%s\n' username=x-access-token "password=${GH_TOKEN:-$GITHUB_TOKEN}"; else gh auth git-credential "$@"; fi; }; f"#.to_owned(),
         ]);
     }
-    command
-        .env
-        .insert("GIT_TERMINAL_PROMPT".to_owned(), "0".to_owned());
-    command
-        .env
-        .insert("GIT_NO_LAZY_FETCH".to_owned(), "1".to_owned());
-    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
-        command.env.insert(
-            "GIT_SSH_COMMAND".to_owned(),
-            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
-                .to_owned(),
-        );
-    }
+    crate::local_git::unattended_git_environment(&mut command);
 
     let output = match executor.execute(&command) {
         Ok(output) => output,
