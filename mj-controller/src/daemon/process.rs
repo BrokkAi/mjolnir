@@ -250,6 +250,14 @@ pub(super) async fn run_daemon_runtime(
             );
         })
     };
+    let activity_cleanup = {
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            if let Err(error) = super::activity_cleanup::run(cancellation).await {
+                tracing::warn!(error = %format!("{error:#}"), "API activity cleanup stopped; the next daemon will retry");
+            }
+        })
+    };
     let mut update_feed = continuation::spawn(state.clone(), manager_updates, cancellation.clone());
 
     let (delegation_services, mut delegation_task) = super::delegation::spawn(
@@ -704,6 +712,11 @@ pub(super) async fn run_daemon_runtime(
     // Idle exit and fallible loop exits do not arrive through the termination
     // coordinator. Stop every daemon-owned task before closing the sole writer.
     cancellation.cancel();
+    epilogue.record(
+        &mut outcome,
+        "join API activity cleanup",
+        activity_cleanup.await.map_err(anyhow::Error::from),
+    );
     epilogue.record(
         &mut outcome,
         "join machine build cache applications",

@@ -50,7 +50,12 @@ impl EventDecoder {
                 if !self.data.is_empty() {
                     let event: ApiEvent = serde_json::from_str(&self.data)?;
                     ensure!(
-                        self.id == Some(event.seq),
+                        self.id == Some(event.seq)
+                            || (self.id.is_none()
+                                && matches!(
+                                    event.event,
+                                    mj_controller::database::ApiEventData::ActivityChanged { .. }
+                                )),
                         "SSE ID does not match API event sequence"
                     );
                     ensure!(
@@ -101,12 +106,28 @@ mod tests {
             ": heartbeat\r\n\r\nid: 3\r\nevent: session_fault\r\ndata: {}\r\n\r\n",
             serde_json::to_string(&event).unwrap()
         );
+        let mut activity = event.clone();
+        activity.event = mj_controller::database::ApiEventData::ActivityChanged {
+            activity: mj_controller::database::ApiActivityState {
+                state: "running".into(),
+                details: None,
+                is_idle: false,
+                waiting_for_input: false,
+                capacity_retry: false,
+            },
+        };
+        // Adjacent transient updates share a durable resume cursor and have
+        // no SSE IDs. A later durable event still requires its own matching ID.
+        let frame = format!(
+            "{frame}event: activity_changed\ndata: {}\n\n{frame}",
+            serde_json::to_string(&activity).unwrap()
+        );
         let mut decoder = EventDecoder::default();
         let mut decoded = Vec::new();
         for chunk in frame.as_bytes().chunks(317) {
             decoded.extend(decoder.push(chunk).unwrap());
         }
-        assert_eq!(decoded, [event]);
+        assert_eq!(decoded, [event.clone(), activity, event]);
     }
 
     #[test]
@@ -116,6 +137,12 @@ mod tests {
             EventDecoder::default()
                 .push(format!("id: 1\nevent: session_fault\ndata: {body}\n\n").as_bytes())
                 .is_err()
+        );
+        assert!(
+            EventDecoder::default()
+                .push(format!("event: session_fault\ndata: {body}\n\n").as_bytes())
+                .is_err(),
+            "only transient activity may omit its SSE ID"
         );
         let error = EventDecoder::default()
             .push(b"event: stream_error\ndata: reconnect\n\n")

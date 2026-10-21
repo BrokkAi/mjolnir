@@ -423,6 +423,19 @@ pub(super) fn project_key(identity: &str) -> String {
     mj_core::hex::lower_hex(&digest[..8])
 }
 
+impl ViewerSession {
+    /// One interpretation for both current-state persistence and live API delivery.
+    pub(crate) fn api_activity(&self) -> mj_core::storage::ApiActivityState {
+        mj_core::storage::ApiActivityState {
+            state: self.state.clone(),
+            details: self.activity_details.clone(),
+            is_idle: self.is_idle,
+            waiting_for_input: !self.pending_elicitations.is_empty(),
+            capacity_retry: self.capacity_retry.is_some(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSession {

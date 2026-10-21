@@ -26,8 +26,8 @@ pub(super) async fn record_activity_stream(
             .changes(&current.0)
             .filter_map(|(id, row)| {
                 let row = row?;
-                let activity = activity_of(row);
-                (recorded.0.get(id).map(activity_of).as_ref() != Some(&activity))
+                let activity = row.api_activity();
+                (recorded.0.get(id).map(|row| row.api_activity()).as_ref() != Some(&activity))
                     .then(|| (id.clone(), activity))
             })
             .collect::<Vec<_>>();
@@ -74,16 +74,6 @@ pub(super) async fn record_activity_stream(
         if snapshots.changed().await.is_err() {
             return Ok(());
         }
-    }
-}
-
-fn activity_of(session: &crate::server::ViewerSession) -> ApiActivityState {
-    ApiActivityState {
-        state: session.state.clone(),
-        details: session.activity_details.clone(),
-        is_idle: session.is_idle,
-        waiting_for_input: !session.pending_elicitations.is_empty(),
-        capacity_retry: session.capacity_retry.is_some(),
     }
 }
 

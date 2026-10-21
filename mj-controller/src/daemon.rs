@@ -664,6 +664,7 @@ mod subagent_park;
 mod support;
 mod views;
 use support::*;
+mod activity_cleanup;
 pub(crate) mod delegation;
 mod diagnostics;
 mod process;
