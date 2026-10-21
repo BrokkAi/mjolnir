@@ -1318,6 +1318,30 @@ pub(super) async fn serve_session(
                                 elicitation_id,
                                 response,
                                 resolved,
+                            }) if prompt_running && answer_cancels_turn(pending_elicitations, &elicitation_id, &response) => {
+                                // Cancel on a tool permission stops the turn,
+                                // as an interrupt does. Cancelling it answers
+                                // the request `cancelled`. With no turn
+                                // running, the request alone is cancelled.
+                                implementation_rx.close(); approved_plan = None; implementation_deadline = None;
+                                let outcome = cancel_prompt_turn(connection, &session_id, terminals, pending_elicitations)
+                                    .map_err(|error| format!("cancel ACP prompt: {error}"));
+                                if outcome.is_ok() && cancel_deadline.is_none() {
+                                    cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
+                                }
+                                if resolved.send(outcome).is_err() {
+                                    tracing::debug!(
+                                        session_id = %session_id,
+                                        operation = "resolve_elicitation",
+                                        %elicitation_id,
+                                        "elicitation resolution receiver was already closed"
+                                    );
+                                }
+                            }
+                            Some(CommandRequest::ResolveElicitation {
+                                elicitation_id,
+                                response,
+                                resolved,
                             }) => {
                                 let goal_outcome = goal::resolve(connection, &session_id, spec, events, &mut goal_question, config_recovery.is_some(), (&elicitation_id, &response)).await?;
                                 let outcome = if let Some(outcome) = goal_outcome {

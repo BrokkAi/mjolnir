@@ -1158,6 +1158,7 @@ fn latch_relay_child_serves_stdio() {
                                     title: None,
                                     description: None,
                                     fields: Vec::new(),
+                                    tool_permission: None,
                                 },
                             },
                         )

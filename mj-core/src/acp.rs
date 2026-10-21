@@ -187,6 +187,7 @@ pub fn normalized_plan_review(id: String, value: &serde_json::Value) -> Elicitat
                 },
             },
         ],
+        tool_permission: None,
     }
 }
 

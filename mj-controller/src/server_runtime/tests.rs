@@ -2279,6 +2279,7 @@ fn a_reviewers_question_is_one_of_the_sessions_questions() {
         title: None,
         description: None,
         fields: Vec::new(),
+        tool_permission: None,
     };
     let reviews = BTreeMap::from([(
         "parent".to_owned(),

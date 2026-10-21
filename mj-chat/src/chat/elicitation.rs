@@ -590,7 +590,11 @@ impl ElicitationDialog {
         let control = match index.cmp(&field_count) {
             std::cmp::Ordering::Less => ElicitationControl::Field(index),
             std::cmp::Ordering::Equal => ElicitationControl::Submit,
-            std::cmp::Ordering::Greater if index == field_count + 1 => ElicitationControl::Skip,
+            std::cmp::Ordering::Greater
+                if index == field_count + 1 && self.request.offers_skip() =>
+            {
+                ElicitationControl::Skip
+            }
             _ => ElicitationControl::Cancel,
         };
         if index < field_count && index != self.current_question {
@@ -628,10 +632,10 @@ impl ElicitationDialog {
                 self.current_question + 1 < self.display_fields.len(),
             ));
         }
-        actions.extend([
-            (ElicitationControl::Skip, "Skip", true),
-            (ElicitationControl::Cancel, "Cancel", true),
-        ]);
+        if self.request.offers_skip() {
+            actions.push((ElicitationControl::Skip, "Skip", true));
+        }
+        actions.push((ElicitationControl::Cancel, "Cancel", true));
         actions
     }
 

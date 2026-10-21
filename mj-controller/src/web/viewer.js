@@ -5956,6 +5956,9 @@ function buildElicitationCard(session, request) {
   const next = button('→', () => navigate(current + 1));
   next.setAttribute('aria-label', 'Next');
   next.title = 'Next question';
+  // On a tool permission form, Decline rejects the call alone; the worker
+  // offers it only when the request has a one-time rejection to select.
+  const offersDecline = request.tool_permission?.skip !== false;
   const decline = button('Decline', () => submitElicitation(session.id, request.id, { action: 'decline' }));
   const cancel = button('Cancel', () => submitElicitation(session.id, request.id, { action: 'cancel' }), 'danger');
   const warning = el('div', 'elicitation-warning');
@@ -5974,7 +5977,8 @@ function buildElicitationCard(session, request) {
     questions.forEach((question, index) => { question.wrapper.hidden = confirming || index !== current; });
     warning.hidden = !confirming;
     previous.hidden = next.hidden = confirming || questions.length <= 1;
-    send.hidden = decline.hidden = cancel.hidden = confirming;
+    send.hidden = cancel.hidden = confirming;
+    decline.hidden = confirming || !offersDecline;
     back.hidden = proceed.hidden = !confirming;
     send.textContent = current + 1 < questions.length ? 'Answer and next' : 'Submit all';
     for (const control of gated) control.disabled = sent;

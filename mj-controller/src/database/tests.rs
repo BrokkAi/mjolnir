@@ -627,6 +627,7 @@ fn materialized_session(session_id: &str) -> MaterializedSession {
             title: Some("Question".into()),
             description: None,
             fields: Vec::new(),
+            tool_permission: None,
         }],
     }
 }

@@ -528,7 +528,8 @@ where
                 let id = format!("{TOOL_PERMISSION_ID_PREFIX}{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
                 // The worker alone decides which answers this form offers, and
                 // accepts only those (see `permission_choices`).
-                let choices = permission_choices(&request, permission_harness, permission_policy);
+                let PermissionAnswers { choices, skip } =
+                    permission_choices(&request, permission_harness, permission_policy);
                 let options: Vec<_> = choices.iter().map(|choice| serde_json::json!({
                     "const": choice.option_id.to_string(), "title": choice.title,
                 })).collect();
@@ -554,7 +555,7 @@ where
                 if permission_native_agents.lock().expect("native agent router poisoned").is_child(&request.session_id.to_string()) {
                     message = format!("Native agent {}: {message}", request.session_id);
                 }
-                let form = ElicitationRequest::from_acp_params(id.clone(), serde_json::json!({
+                let mut form = ElicitationRequest::from_acp_params(id.clone(), serde_json::json!({
                     "mode": "form", "sessionId": request.session_id.to_string(),
                     "message": format!(
                         "{} requests permission:\n{message}",
@@ -564,6 +565,7 @@ where
                         "choice":{"type":"string", "title":"Permission", "oneOf":options}
                     }}
                 })).map_err(|_| agent_client_protocol::Error::invalid_params())?;
+                form.tool_permission = Some(ToolPermissionForm { skip: skip.is_some() });
                 let (answer, answer_rx) = oneshot::channel();
                 permission_elicitations.lock().expect("pending elicitation lock poisoned")
                     .insert(id.clone(), PendingElicitation { question: form.clone(), answer });
@@ -577,17 +579,24 @@ where
                         pending.lock().expect("pending elicitation lock poisoned").remove(&id);
                         None
                     };
+                    // ACP keeps `cancelled` for a cancelled turn. Skip is a
+                    // rejection of this call alone, so it selects the
+                    // request's one-time rejection. Cancel reaches here only
+                    // after the prompt loop cancelled the turn, or when no
+                    // turn is running.
                     let selected = match &response {
-                        Some(ElicitationResponse::Accept { content }) if !cancellation.is_cancelled() => {
-                            match content.get("choice") {
-                                Some(ElicitationValue::String(value)) => choices.iter().find(|choice| choice.option_id.to_string() == *value),
-                                _ => None,
-                            }
-                        }
-                        _ => None,
+                        _ if cancellation.is_cancelled() => None,
+                        Some(ElicitationResponse::Accept { content }) => match content.get("choice") {
+                            Some(ElicitationValue::String(value)) => choices.iter()
+                                .find(|choice| choice.option_id.to_string() == *value)
+                                .map(|choice| choice.option_id.clone()),
+                            _ => None,
+                        },
+                        Some(ElicitationResponse::Decline) => skip,
+                        Some(ElicitationResponse::Cancel) | None => None,
                     };
-                    let outcome = selected.map_or(RequestPermissionOutcome::Cancelled, |choice|
-                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(choice.option_id.clone())));
+                    let outcome = selected.map_or(RequestPermissionOutcome::Cancelled, |option_id|
+                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)));
                     if let Err(error) = responder.respond(RequestPermissionResponse::new(outcome)) {
                         tracing::debug!(%error, "harness permission responder closed");
                     }
@@ -1136,6 +1145,39 @@ pub(super) fn permission_title_with_command(
     }
 }
 
+/// Cancels the session's prompt turn: stops its terminals, sends
+/// `session/cancel`, then answers every pending tool permission request
+/// `cancelled`. ACP requires that order of a client that cancels a turn, and
+/// reserves `cancelled` for it.
+pub(super) fn cancel_prompt_turn(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    terminals: &TerminalRegistry,
+    pending: &PendingElicitations,
+) -> std::result::Result<(), agent_client_protocol::Error> {
+    terminals.kill_live();
+    let sent = connection.send_notification(CancelNotification::new(session_id.clone()));
+    // Some agents (Kimi, I2-15) never withdraw the request themselves, which
+    // left the form open on an idle session.
+    withdraw_tool_permissions(pending);
+    sent
+}
+
+/// Whether an answer stops the running turn instead of answering its form:
+/// Cancel on a pending tool permission request.
+pub(super) fn answer_cancels_turn(
+    pending: &PendingElicitations,
+    elicitation_id: &str,
+    response: &ElicitationResponse,
+) -> bool {
+    *response == ElicitationResponse::Cancel
+        && elicitation_id.starts_with(TOOL_PERMISSION_ID_PREFIX)
+        && pending
+            .lock()
+            .expect("pending elicitation lock poisoned")
+            .contains_key(elicitation_id)
+}
+
 /// Drops the answer channel of every pending tool permission request. Each
 /// request's task then answers the agent with `cancelled` and reports the
 /// elicitation resolved, which closes its form.
@@ -1651,14 +1693,7 @@ pub(super) async fn apply_cancel(
     terminals: &TerminalRegistry,
     pending: &PendingElicitations,
 ) -> Result<()> {
-    terminals.kill_live();
-    let sent = connection.send_notification(CancelNotification::new(session_id.clone()));
-    // ACP: once the client cancels a turn it answers every pending
-    // `session/request_permission` of that turn with `cancelled`. Some agents
-    // (Kimi, I2-15) never withdraw the request themselves, which left the
-    // form open on an idle session.
-    withdraw_tool_permissions(pending);
-    match sent {
+    match cancel_prompt_turn(connection, session_id, terminals, pending) {
         Ok(()) => {
             emit_runtime_event(
                 events,

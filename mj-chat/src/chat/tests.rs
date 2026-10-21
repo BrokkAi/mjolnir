@@ -598,6 +598,7 @@ fn text_elicitation() -> ElicitationRequest {
                 format: None,
             },
         }],
+        tool_permission: None,
     }
 }
 
@@ -658,6 +659,7 @@ fn reviewer_form_reconciliation_drops_stale_forms_and_resurfaces_primary() {
         title: None,
         description: None,
         fields: Vec::new(),
+        tool_permission: None,
     };
     let mut chat = ChatState::new(&snapshot(), &[]);
     assert!(chat.show_review_role_elicitation(Some("reviewer-a".into()), request.clone()));
@@ -2916,6 +2918,7 @@ mod golden_cases {
             title: None,
             description: None,
             fields: Vec::new(),
+            tool_permission: None,
         };
         for (action_name, feedback) in [
             ("implement", None),

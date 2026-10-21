@@ -255,6 +255,40 @@ with Dragonfly after Memcached: second click lands on "○ Dragonfly"; Ok({"ques
 Enter on Memcached, nothing picked, Other blank: Ok({"question_0": String("Memcached")})
 Enter on Memcached, nothing picked, Other holds Valkey: Ok({"question_0_custom": String("Valkey")})
 
+=== Claude permission form offers Skip (100x14) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Permission (required)                                                                             │
+│                                                                                                  │
+│Claude Code requests permission:                                                                  │
+│Run cargo test                                                                                    │
+│● Yes                                                                                             │
+│○ Yes, and don't ask again for `cargo test` commands                                              │
+│○ No                                                                                              │
+│                                                                                                  │
+│                                                                                                  │
+│  Submit all     Skip     Cancel                                                                  │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+skip: Ok(Decline)
+
+=== permission form without a one-time rejection offers no Skip (100x14) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Permission (required)                                                                             │
+│                                                                                                  │
+│Codex requests permission:                                                                        │
+│Reach crates.io                                                                                   │
+│● Yes, and allow this host in the future                                                          │
+│○ No, and block this host in the future                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Submit all     Cancel                                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+skip: Err("this permission request offers no one-time rejection to skip with; choose one of its options, or cancel to stop the turn")
+
 === small question pane keeps the focused custom answer and actions (60x6) ===
 ╭ × Question 1/1 · 1 unanswered ───────────────────────────╮
 │Question 1                                                │
