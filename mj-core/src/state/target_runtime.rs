@@ -32,21 +32,39 @@ pub struct ContainerSettings {
     pub resource_allocation: Option<SessionResourceAllocation>,
     pub cpus: Option<String>,
     pub memory: Option<String>,
-    /// The image the container was created from, recorded only when it was
-    /// the default image of the Mjolnir that created it. A release's default
-    /// is its own version's image, so upgrading Mjolnir moves the default away
-    /// from this one and the container is due to be recreated from the new
-    /// image. A configured image moves only when the person edits it, and is
-    /// not recorded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_image: Option<String>,
+    /// Which image the container was created from, as far as upgrades care:
+    /// `Some(Some(image))` for the default image of the Mjolnir that created
+    /// it, `Some(None)` for a configured image, and `None` for a container
+    /// recorded before Mjolnir tracked this. A release's default is its own
+    /// version's image, so upgrading Mjolnir moves the default away from the
+    /// recorded one and the container is due to be recreated from the new
+    /// image. A configured image moves only when the person edits it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "recorded_default_image"
+    )]
+    pub default_image: Option<Option<String>>,
+}
+
+/// A present `default_image`, `null` included, is a recorded answer; only a
+/// missing one is unknown.
+fn recorded_default_image<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 impl ContainerSettings {
-    /// One policy for Restart and the daemon's confirmation projections.
+    /// One policy for Restart and the daemon's confirmation projections. A
+    /// container whose image was never recorded counts as changed: it was
+    /// created by an older Mjolnir, most likely from an older image.
     pub fn recreation_required(session: &SessionRecord) -> bool {
         Self::owns_container(session)
-            && Self::applied_to(session) != Some(&Self::requested(session))
+            && Self::applied_to(session).is_none_or(|applied| {
+                applied.default_image.is_none() || *applied != Self::requested(session)
+            })
     }
 
     /// Whether the session's container was created from a default image this
@@ -55,8 +73,16 @@ impl ContainerSettings {
     pub fn default_image_moved(session: &SessionRecord) -> bool {
         Self::owns_container(session)
             && Self::applied_to(session)
-                .and_then(|applied| applied.default_image.as_deref())
+                .and_then(|applied| applied.default_image.as_ref())
+                .and_then(Option::as_deref)
                 .is_some_and(|image| image != crate::config::DEFAULT_CONTAINER_IMAGE)
+    }
+
+    /// Whether the session owns a container whose image was never recorded,
+    /// so only the container itself can say what it runs.
+    pub fn image_unrecorded(session: &SessionRecord) -> bool {
+        Self::owns_container(session)
+            && Self::applied_to(session).is_none_or(|applied| applied.default_image.is_none())
     }
 
     pub fn requested(session: &SessionRecord) -> Self {
@@ -66,18 +92,23 @@ impl ContainerSettings {
             cpus: session.container_cpus.clone(),
             memory: session.container_memory.clone(),
             // A container on the default image follows the default to the one
-            // this Mjolnir names.
+            // this Mjolnir names; a configured image stays as it was.
             default_image: Self::applied_to(session)
                 .and_then(|applied| applied.default_image.as_ref())
-                .map(|_| crate::config::DEFAULT_CONTAINER_IMAGE.to_owned()),
+                .map(|image| {
+                    image
+                        .as_ref()
+                        .map(|_| crate::config::DEFAULT_CONTAINER_IMAGE.to_owned())
+                }),
         }
     }
 
     /// The snapshot to record for a container just created from `image`.
     pub fn applied(session: &SessionRecord, image: &str) -> Self {
         Self {
-            default_image: (image == crate::config::DEFAULT_CONTAINER_IMAGE)
-                .then(|| image.to_owned()),
+            default_image: Some(
+                (image == crate::config::DEFAULT_CONTAINER_IMAGE).then(|| image.to_owned()),
+            ),
             ..Self::requested(session)
         }
     }

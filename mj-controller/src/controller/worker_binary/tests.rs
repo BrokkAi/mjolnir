@@ -1700,6 +1700,9 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
         )
     };
     let result = (|| -> Result<()> {
+        // `:latest` carries a worker once master publishes one; start from an
+        // image without it.
+        as_root("rm -f /opt/mjolnir/mj-worker")?;
         ensure!(
             image_worker_build(&locator, &ProcessExecutor)?.is_none(),
             "an image without a worker must say so"

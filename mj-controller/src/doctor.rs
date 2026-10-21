@@ -1295,8 +1295,18 @@ fn image_worker_summary(inspection: &[u8]) -> String {
         return String::new();
     }
     match crate::controller::image_worker_label(inspection).as_deref() {
+        Some(build)
+            if build == mj_core::worker_build::WORKER_BUILD_ID
+                && mj_core::config::RELEASE_IMAGE_CARRIES_WORKER =>
+        {
+            format!(
+                " It carries this Mjolnir's worker (build {build}), which sessions run directly."
+            )
+        }
+        // A development build's identity covers committed inputs only, so it
+        // prefers the worker it was built with (see `WorkerInstall::for_target`).
         Some(build) if build == mj_core::worker_build::WORKER_BUILD_ID => format!(
-            " It carries this Mjolnir's worker (build {build}), which sessions run directly."
+            " It carries worker build {build}, which this development build runs only when it has no worker of its own."
         ),
         Some(build) => format!(
             " It carries worker build {build}, not this Mjolnir's {}, so sessions install the host worker.",
@@ -2808,11 +2818,17 @@ fn worker_binary_check(id: &str, container: &ContainerTemplate) -> DoctorCheck {
     } else {
         "a configured image"
     };
-    check.detail = format!(
-        "{image} is {provenance}: sessions run its worker when it is this Mjolnir's build ({}), and otherwise install the host worker. {}",
-        mj_core::worker_build::WORKER_BUILD_ID,
-        check.detail
-    );
+    let build = mj_core::worker_build::WORKER_BUILD_ID;
+    let choice = if mj_core::config::RELEASE_IMAGE_CARRIES_WORKER {
+        format!(
+            "sessions run its worker when it is this Mjolnir's build ({build}), and otherwise install the host worker"
+        )
+    } else {
+        format!(
+            "this build installs the host worker it was built with, and runs the image's worker only when it has none and the image's is build {build}"
+        )
+    };
+    check.detail = format!("{image} is {provenance}: {choice}. {}", check.detail);
     check
 }
 

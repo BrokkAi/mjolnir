@@ -76,6 +76,12 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
       Surprises and Decision Log), with a daemon regression for the abandoned recreation and an
       isolated-instance run of release-channel builds A, C (unpullable image) and B.
 
+- [x] (2026-10-21 16:55Z) A second review found four more issues; all are fixed. Containers
+      recorded before images were tracked are now recreated on the first upgrade, preparation
+      no longer holds handoff admission, doctor reports a development build's real choice, and the
+      Docker integration test no longer assumes `:latest` has no worker. Validated by upgrading
+      a session created by the installed 2.51.0 release to a release-channel build of this branch.
+
 ## Surprises & Discoveries
 
 - Observation: the repository owner is mixed case (`BrokkAi`) but GHCR requires lowercase, so the
@@ -168,6 +174,13 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
   permission forms. The merge renumbered this plan's migrations to 88 (`default_image`) and 89
   (the `automatic` intent column), with the floor at 89; neither had been applied outside
   isolated test stores, which were deleted.
+
+- Observation (second review): every container that exists when a user first upgrades to this
+  feature has `container_settings` without `default_image`, so `default_image_moved` was false for
+  exactly the containers the first upgrade should move; even Restart did not offer recreation.
+- Observation (second review): the daemon's `blocking` helper takes
+  `activity("database operation")`, so the image pull placed in it held a daemon handoff for as
+  long as the registry took.
 
 ## Decision Log
 
@@ -326,6 +339,21 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
   container whose default image moved. The occupancy predicate is `State::subagents_occupy_container`.
   Date/Author: 2026-10-21, Claude.
 
+- Decision (second review): make `ContainerSettings::default_image` three-valued,
+  `Option<Option<String>>`: missing (recorded before tracking), `null` (a configured image), or the
+  default image. A missing value makes Restart offer recreation, like other unknown settings, and
+  the coordinator asks the container itself (`container inspect --format {{.Config.Image}}`,
+  `Controller::container_image_changed`) whether it runs another image than its target names now;
+  Apple's CLI cannot say, so such a container is recreated once. Rationale: the first upgrade is
+  the one that matters most, and only the container knows what it was created from; records
+  already written by the earlier pushed code read the same way, so migration 88 is unchanged.
+  Date/Author: 2026-10-21, Claude.
+- Decision (second review): pull the new image and confirm its worker inside the worker-upgrade
+  coordinator's attempt (`upgrade_session_worker`), before it reports `RecreateContainer`, instead
+  of in the daemon. Rationale: the coordinator holds no handoff admission and is cancelled at
+  handoff, which AGENTS.md requires of work that starts again under the next daemon.
+  Date/Author: 2026-10-21, Claude.
+
 ## Outcomes & Retrospective
 
 Milestones 1 and 2 are complete. A tagged release now builds and publishes
@@ -451,6 +479,18 @@ upgrade failed ... pull container image ...". Starting B then moved it within se
 
 `a_failed_automatic_recreation_gives_back_its_intent_and_records_no_failure` fails without the
 release-on-abandon fix and passes with it.
+
+Second review, evidence: in the isolated instance `issue-1139-legacy`, the installed 2.51.0
+release created a container session (`agent-dev:2.51.0`, a copied worker, no `default_image` in its
+record, schema 86). After `mj daemon restart` from a release-channel build of this branch:
+
+    16:49:48 state=suspending image=ghcr.io/brokkai/mjolnir/agent-dev:2.51.0
+    16:49:52 state=suspending image=localhost/mjolnir/agent-dev:issue-1139-b
+    16:49:56 state=running    image=localhost/mjolnir/agent-dev:issue-1139-b
+
+with `hel -> /opt/mjolnir/mj-worker`, the store at schema 89, and the record naming the new image.
+The published `agent-dev:latest` from `ff0184bc3` carries worker `2.51.0+81f1c1a4...` on both
+architectures, which is exactly that commit's identity.
 
 ## Context and Orientation
 
@@ -702,7 +742,8 @@ Milestones 3 to 5 add, in `mj-controller/src/controller/worker_binary/image_work
     }
     pub(in crate::controller) fn image_worker_build(locator, executor) -> Result<Option<String>>;
 
-in `mj-core/src/state/target_runtime.rs`, `ContainerSettings::default_image: Option<String>`,
+in `mj-core/src/state/target_runtime.rs`, `ContainerSettings::default_image: Option<Option<String>>`,
+`ContainerSettings::image_unrecorded(session)`,
 `ContainerSettings::applied(session, image)` and `ContainerSettings::default_image_moved(session)`;
 in `mj-core/src/config.rs`, `RELEASE_IMAGE_CARRIES_WORKER: bool`; in
 `mj-core/src/worker_build.rs`, `is_worker_build(&str) -> bool`; in the worker CLI, the hidden

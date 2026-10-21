@@ -838,15 +838,13 @@ pub(crate) enum ContainerRecreationOutcome {
     StoodDown,
 }
 
-/// Upper bound on pulling the new image and checking its worker before an
-/// automatic recreation, which a slow registry should not hold forever.
-const RECREATION_PREPARATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-
 impl RuntimeState {
     /// Recreate a session's container from the image this Mjolnir names,
     /// because an upgrade moved its default image. Nobody asked for this, so
     /// it is admitted only while no handoff drains, waits for nothing that
     /// is already running, and never interrupts work (see [`RestartRequest`]).
+    /// The worker-upgrade coordinator has already pulled the new image and
+    /// confirmed its worker (`Controller::prepare_container_recreation`).
     pub(crate) async fn recreate_container_for_upgrade(
         self: &Arc<Self>,
         session_id: String,
@@ -880,19 +878,6 @@ impl RuntimeState {
                 return Ok(ContainerRecreationOutcome::StoodDown);
             }
         }
-        // Everything the new container needs is checked before the old one is
-        // touched: an upgrade on a host that cannot pull the new image, or has
-        // no worker for it, leaves every session running as it was.
-        blocking({
-            let session_id = session_id.clone();
-            move || {
-                let executor = CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)))
-                    .with_deadline(RECREATION_PREPARATION_TIMEOUT);
-                Controller::load()?.prepare_container_recreation(&session_id, &executor)
-            }
-        })
-        .await
-        .context("prepare the new container before touching the session")?;
         let abandoned = Arc::new(std::sync::Mutex::new(None::<String>));
         let failure = abandoned.clone();
         let admitted = self.admit_lifecycle(
