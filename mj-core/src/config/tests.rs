@@ -669,6 +669,13 @@ fn every_harness_is_pointed_at_its_staged_home() {
             home,
             "{kind:?}"
         );
+        if kind == HarnessKind::Mimo {
+            assert_eq!(environment["MIMOCODE_DISABLE_AUTOUPDATE"], "1");
+            assert_eq!(
+                Path::new(&environment["MIMOCODE_CONFIG_DIR"]),
+                home.join("config")
+            );
+        }
     }
 }
 
@@ -708,6 +715,7 @@ fn harness_mapping_and_permission_modes_are_fixed() {
     assert_eq!(HarnessKind::Claude.home_env(), "CLAUDE_CONFIG_DIR");
     assert_eq!(HarnessKind::Kimi.home_env(), "KIMI_CODE_HOME");
     assert_eq!(HarnessKind::Grok.home_env(), "GROK_HOME");
+    assert_eq!(HarnessKind::Mimo.home_env(), "MIMOCODE_HOME");
     let codex = HarnessKind::Codex
         .execution_enforcement(ExecutionPolicy::Unconstrained)
         .unwrap();
@@ -778,6 +786,15 @@ fn unconstrained_enforcement_splits_acp_modes_from_launch_controls() {
         muse.staged_setting().map(|setting| setting.value),
         Some(":ask-me")
     );
+    let mimo = HarnessKind::Mimo
+        .execution_enforcement(ExecutionPolicy::Unconstrained)
+        .unwrap();
+    assert_eq!(mimo.label(), "dangerously-skip-permissions");
+    assert_eq!(
+        mimo.launch_environment(),
+        Some(("MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS", "1"))
+    );
+    assert_eq!(mimo.staged_setting(), None);
 }
 
 #[test]
@@ -885,6 +902,7 @@ fn bridge_args_carry_the_acp_subcommand_per_harness() {
         assert!(HarnessKind::Codex.bridge_args(policy).is_empty());
         assert!(HarnessKind::Claude.bridge_args(policy).is_empty());
         assert_eq!(HarnessKind::Kimi.bridge_args(policy), ["acp"]);
+        assert_eq!(HarnessKind::Mimo.bridge_args(policy), ["acp"]);
         assert_eq!(
             HarnessKind::Grok.bridge_args(policy),
             if policy.is_unconstrained() {

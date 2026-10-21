@@ -483,6 +483,7 @@ pub(super) fn collect_native_tree(
         HarnessKind::Grok => inside && grok_session_artifact(relative, session_id),
         HarnessKind::Muse => inside && name == "session.jsonl",
         HarnessKind::OpenCode => is_opencode_native_artifact(relative),
+        HarnessKind::Mimo => is_mimo_native_artifact(relative),
     };
     if !selected || is_secret_like_path(relative) {
         return Ok(());
@@ -524,6 +525,37 @@ pub(super) fn is_opencode_native_artifact(relative_path: &Path) -> bool {
     data == ".data"
         && opencode == "opencode"
         && matches!(file.to_str(), Some("opencode.db" | "opencode.db-wal"))
+}
+
+/// MiMo Code keeps its isolated session database under `MIMOCODE_HOME/data`.
+/// Capture the WAL with the database so a checkpoint includes commits that
+/// have not yet been folded into the main SQLite file. The `-shm` file is
+/// rebuilt on open and is deliberately omitted.
+pub(super) fn is_mimo_native_artifact(relative_path: &Path) -> bool {
+    let mut components = relative_path.components();
+    matches!(
+        (
+            components.next(),
+            components.next(),
+            components.next()
+        ),
+        (
+            Some(Component::Normal(data)),
+            Some(Component::Normal(file)),
+            None
+        ) if data == "data"
+            && file
+                .to_str()
+                .is_some_and(is_mimo_database_file)
+    )
+}
+
+fn is_mimo_database_file(file: &str) -> bool {
+    let file = file.strip_suffix("-wal").unwrap_or(file);
+    file == "mimocode.db"
+        || (file.starts_with("mimocode-")
+            && file.len() > "mimocode-.db".len()
+            && file.ends_with(".db"))
 }
 
 pub(super) fn kimi_session_artifact(relative: &Path, session_id: &str) -> bool {

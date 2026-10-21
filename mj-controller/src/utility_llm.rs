@@ -608,7 +608,7 @@ fn utility_family(profile: &HarnessProfile) -> Option<UtilityFamily> {
         HarnessKind::Claude => None,
         // OpenCode is a multi-provider aggregator with no inference client of
         // its own; it never serves Mjolnir's utility work.
-        HarnessKind::OpenCode => None,
+        HarnessKind::OpenCode | HarnessKind::Mimo => None,
     }
 }
 
@@ -707,7 +707,7 @@ fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBac
         // Claude exposes no direct utility inference client independent of its
         // coding-agent session.
         HarnessKind::Claude => Ok(None),
-        HarnessKind::OpenCode => Ok(None),
+        HarnessKind::OpenCode | HarnessKind::Mimo => Ok(None),
     }
 }
 

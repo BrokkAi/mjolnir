@@ -496,7 +496,11 @@ pub fn error_reports_missing_native_session(
         HarnessKind::Claude => error.contains(&format!(
             "{CLAUDE_MISSING_SESSION_MESSAGE}{native_session_id}"
         )),
-        HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse | HarnessKind::OpenCode => false,
+        HarnessKind::Kimi
+        | HarnessKind::Grok
+        | HarnessKind::Muse
+        | HarnessKind::OpenCode
+        | HarnessKind::Mimo => false,
     }
 }
 

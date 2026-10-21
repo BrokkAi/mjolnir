@@ -85,8 +85,9 @@ pub struct WikiRow {
     #[serde(default)]
     pub profile: Option<String>,
     /// The harness kind the session ran (`codex`, `claude`, `kimi`, `grok`,
-    /// `muse`), from the index's `mj-harness:` tag. It stays meaningful after
-    /// the profile id has been removed from the configuration.
+    /// `muse`, `opencode`, or `mimo`), from the index's `mj-harness:` tag. It
+    /// stays meaningful after the profile id has been removed from the
+    /// configuration.
     #[serde(default)]
     pub harness: Option<String>,
 }

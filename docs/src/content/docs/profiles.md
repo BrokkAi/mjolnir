@@ -1,6 +1,6 @@
 ---
 title: Profiles and harnesses
-description: Configure Codex (including Amazon Bedrock and custom model providers), Claude Code, Kimi Code, Grok Build, Muse Code, and OpenCode accounts, credentials, skills, runtimes, and quota reporting.
+description: Configure Codex (including Amazon Bedrock and custom model providers), Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, and MiMo Code accounts, credentials, skills, runtimes, and quota reporting.
 ---
 
 A profile connects Mjolnir to one installed coding-agent harness and one account.
@@ -57,8 +57,9 @@ marks models or counters that cannot be priced from the recorded information.
 | Grok Build | `grok` | `GROK_HOME` | `~/.grok` | `auth.json` | yes |
 | Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
 | OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | `.data/opencode/auth.json` | yes |
+| MiMo Code | `mimo` | `MIMOCODE_HOME` | `~/.mimocode` | `data/auth.json` | yes |
 
-There are six harness kinds. Codex can use its built-in Amazon Bedrock
+There are seven harness kinds. Codex can use its built-in Amazon Bedrock
 providers; see [Codex on Amazon Bedrock](#codex-on-amazon-bedrock). It can also
 authenticate with an API key against a custom provider; see
 [Codex with a custom provider](#codex-with-a-custom-provider).
@@ -434,6 +435,13 @@ its login and session database under that copy's `.data/opencode/` tree,
 including on a bare runtime on this machine. Do not override
 `XDG_CONFIG_HOME` or `XDG_DATA_HOME` in the profile environment.
 
+For MiMo Code, configure `kind = "mimo"` and a home that is used as its
+`MIMOCODE_HOME`, for example `home = "/home/me/.mimocode"` or
+`/home/me/accounts/work/mimo`. Discovery uses `$MIMOCODE_HOME` when set.
+Mjolnir gives each session a private copy of that root with separate `config/`
+and `data/` trees, including on a bare runtime on this machine. Do not override
+`MIMOCODE_HOME` in the profile environment.
+
 Run:
 
 ```console
@@ -452,6 +460,7 @@ environment before starting the harness's interactive login:
 | Grok Build | `grok login` |
 | Muse Code | `muse login` |
 | OpenCode | `opencode auth login` |
+| MiMo Code | `mimo auth login` |
 
 The login command is always resolved from the controller's `PATH`. A profile
 selects credentials and environment, not another harness executable.
@@ -508,6 +517,7 @@ from the profile home:
 | Grok Build | `auth.json`, `config.toml`, `AGENTS.md`, `agent_id`, `skills/`, `plugins/` |
 | Muse Code | `auth.json`, `settings.json`, `trust.json`, `AGENTS.md`, `skills/`, `rules/` |
 | OpenCode | `opencode.json`, `opencode.jsonc`, `.data/opencode/auth.json`, `AGENTS.md`, `skills/` |
+| MiMo Code | `config/`, `data/auth.json` |
 
 Staging follows symbolic links: a linked file or directory is copied with the
 contents of its target, even when the target is outside the harness home. A link
@@ -535,6 +545,8 @@ Mjolnir then adds its own files to the staged home:
 - for Muse, the permission profile in its settings;
 - for OpenCode under an unconstrained policy, the `"permission": "allow"`
   setting in `opencode.json`;
+- for MiMo Code under an unconstrained policy,
+  `MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS=1` in the launch environment;
 - in a container or on an EC2 instance, a note in the instruction file
   (`AGENTS.md` or `CLAUDE.md`) that the environment is disposable.
 
@@ -713,7 +725,8 @@ Local-bare, raw SSH, and EC2 workers instead install the exact versions pinned b
 Mjolnir release into `$XDG_CACHE_HOME/mjolnir/harnesses`, or
 `$HOME/.cache/mjolnir/harnesses` when `XDG_CACHE_HOME` is unset. They launch
 only the resulting absolute path—never an arbitrary compatible executable from
-`PATH`. Codex and Claude require Node.js 22 or newer plus npm on the host.
+`PATH`. Codex, Claude, and MiMo Code require Node.js 22 or newer plus npm on
+the host.
 Kimi and Grok require curl and Bash for their official installers.
 Muse requires Node.js 22 or newer, npm, and curl; Mjolnir launches the pinned
 `muse-acp` adapter through npx and downloads the pinned native Muse binary,
@@ -723,6 +736,9 @@ OpenCode requires curl and tar; Mjolnir downloads the pinned OpenCode archive
 from its GitHub releases and verifies its SHA-256 checksum. Linux and macOS, on
 x86-64 and ARM64, are supported. The pinned installation disables OpenCode's
 self-update so a running session never replaces its own binary.
+MiMo Code installs from the pinned `@mimo-ai/cli` npm package. Its managed
+launch disables automatic updates so a running session never replaces its own
+binary.
 Mjolnir reports a missing prerequisite and leaves the existing worker alone;
 it does not invoke sudo or a system package manager.
 
@@ -751,6 +767,7 @@ while the pane has focus. **Refresh** runs the same refresh as
 | Grok Build | The harness's ACP billing extension. |
 | Muse Code | Native subscription usage windows and reset times, when reported. |
 | OpenCode | No published quota endpoint; the profile shows an unavailable reading. |
+| MiMo Code | No published quota endpoint; the profile shows an unavailable reading. |
 
 A Codex profile on a provider that publishes no quota endpoint shows `API`
 instead of a window, because it is usage-priced. An unavailable reading is
@@ -808,6 +825,10 @@ handoffs; see
   reads permission rules from `opencode.json`. Its sessions live in a SQLite
   database, so native import and SessionWiki search do not list them, and it
   never serves Mjolnir's delegation or utility inference.
+- MiMo Code also publishes no quota endpoint, accepts one workspace root, and
+  keeps native sessions in a SQLite database. Native import and SessionWiki
+  search do not list them yet, and it does not serve Mjolnir's delegation or
+  utility inference.
 - A custom bridge must speak the ACP version and features Mjolnir expects.
 - A profile home is account-scoped. Do not point two profiles at the same home
   and expect them to represent different accounts.

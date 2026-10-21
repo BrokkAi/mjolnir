@@ -164,6 +164,12 @@ fn every_harness_reports_expiry_only_where_hel_can_refresh_ahead_of_it() {
             Some(1_756_000_000_000),
             None,
         ),
+        (
+            HarnessKind::Mimo,
+            opencode_credentials(1_756_000_000_000),
+            Some(1_756_000_000_000),
+            None,
+        ),
         (HarnessKind::Muse, b"{}".to_vec(), None, None),
     ];
     for kind in HarnessKind::ALL {

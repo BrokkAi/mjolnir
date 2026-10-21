@@ -1759,7 +1759,9 @@ fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
 
 #[test]
 fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
-    use mj_core::harness_runtime::{CLAUDE_CLI_VERSION, MUSE_ACP_PACKAGE, MUSE_ACP_VERSION};
+    use mj_core::harness_runtime::{
+        CLAUDE_CLI_VERSION, MIMO_CLI_VERSION, MUSE_ACP_PACKAGE, MUSE_ACP_VERSION,
+    };
 
     const CONTAINERFILE: &str = include_str!("../../../../containers/Containerfile.agent-dev");
 
@@ -1793,6 +1795,12 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
              bridge_launch() npx fallbacks have to stay in lockstep, otherwise a container \
              session and an npx session run different adapter versions."
     );
+    let mimo = format!("@mimo-ai/cli@{MIMO_CLI_VERSION}");
+    assert!(
+        CONTAINERFILE.contains(&mimo),
+        "containers/Containerfile.agent-dev must install {mimo}"
+    );
+    assert!(CONTAINERFILE.contains("ENV MIMOCODE_DISABLE_AUTOUPDATE=1"));
 
     let package: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../mj-worker/assets/harnesses/claude/package.json"
@@ -1813,6 +1821,24 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
             version
         );
     }
+
+    let package: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../mj-worker/assets/harnesses/mimo/package.json"
+    ))
+    .unwrap();
+    let lock: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../mj-worker/assets/harnesses/mimo/package-lock.json"
+    ))
+    .unwrap();
+    assert_eq!(package["dependencies"]["@mimo-ai/cli"], MIMO_CLI_VERSION);
+    assert_eq!(
+        lock["packages"][""]["dependencies"]["@mimo-ai/cli"],
+        MIMO_CLI_VERSION
+    );
+    assert_eq!(
+        lock["packages"]["node_modules/@mimo-ai/cli"]["version"],
+        MIMO_CLI_VERSION
+    );
 }
 
 /// Runs a default bridge script with no harness installed, a fake `curl`
@@ -2801,12 +2827,15 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
                 "skills/.system/.codex-system-skills.marker",
                 "skills/.system/imagegen/SKILL.md",
             ],
-            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse | HarnessKind::OpenCode => {
-                &[]
-            }
+            HarnessKind::Kimi
+            | HarnessKind::Grok
+            | HarnessKind::Muse
+            | HarnessKind::OpenCode
+            | HarnessKind::Mimo => &[],
         };
         let home = tempfile::tempdir().unwrap();
-        for relative in std::iter::once(&"skills/review/SKILL.md").chain(owned) {
+        let skill = format!("{}/review/SKILL.md", kind.synced_skill_dirs()[0]);
+        for relative in std::iter::once(skill.as_str()).chain(owned.iter().copied()) {
             let path = home.path().join(relative);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, format!("{relative}\n")).unwrap();
@@ -2833,8 +2862,8 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
         .unwrap();
 
         assert_eq!(
-            std::fs::read_to_string(staged.path().join("skills/review/SKILL.md")).unwrap(),
-            "skills/review/SKILL.md\n",
+            std::fs::read_to_string(staged.path().join(&skill)).unwrap(),
+            format!("{skill}\n"),
             "{kind:?}"
         );
         for path in kind.harness_owned_skill_paths() {
@@ -4555,6 +4584,17 @@ fn fixture_home_entries(kind: HarnessKind) -> &'static [(&'static str, bool)] {
             (".data/opencode/log/opencode.log", false),
             (".data/opencode/repos/native", false),
         ],
+        HarnessKind::Mimo => &[
+            ("config/mimocode.json", true),
+            ("config/AGENTS.md", true),
+            ("config/skills/review/SKILL.md", true),
+            ("data/auth.json", true),
+            ("data/mimocode.db", false),
+            ("data/mimocode.db-wal", false),
+            ("data/log/mimocode.log", false),
+            ("state/model.json", false),
+            ("cache/models", false),
+        ],
     }
 }
 
@@ -4658,6 +4698,14 @@ fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
         // the OAuth expiry in epoch milliseconds.
         HarnessKind::OpenCode => serde_json::json!({
             "anthropic": {
+                "type": "oauth",
+                "refresh": format!("refresh-{generation}"),
+                "access": format!("access-{generation}"),
+                "expires": 1_790_000_000_000_i64 + generation * 1000,
+            }
+        }),
+        HarnessKind::Mimo => serde_json::json!({
+            "xiaomi": {
                 "type": "oauth",
                 "refresh": format!("refresh-{generation}"),
                 "access": format!("access-{generation}"),

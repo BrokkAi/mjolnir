@@ -1,5 +1,5 @@
 use super::*;
-use mj_core::harness_runtime::{GROK_VERSION, KIMI_VERSION, OPENCODE_VERSION};
+use mj_core::harness_runtime::{GROK_VERSION, KIMI_VERSION, MIMO_CLI_VERSION, OPENCODE_VERSION};
 
 /// The repository paths a worker opens. `session_id` and `container_workspace`
 /// identify the session whose workspace is used, which for a sub-agent child is
@@ -100,6 +100,15 @@ pub(in crate::controller) fn bridge_launch(
                 "-c".into(),
                 format!(
                     "if command -v opencode >/dev/null 2>&1; then exec opencode acp; elif [ -x \"$HOME/.opencode/bin/opencode\" ]; then exec \"$HOME/.opencode/bin/opencode\" acp; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://opencode.ai/install | bash -s -- --version {OPENCODE_VERSION} --no-modify-path >&2 && exec \"$HOME/.opencode/bin/opencode\" acp; else echo 'Mjolnir needs compatible OpenCode or curl for its official installer; add the tool to PATH' >&2; exit 127; fi"
+                ),
+            ],
+        ),
+        mj_core::config::HarnessKind::Mimo => (
+            "sh".into(),
+            vec![
+                "-c".into(),
+                format!(
+                    "if command -v mimo >/dev/null 2>&1; then exec mimo acp; fi; if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v npx >/dev/null 2>&1; then echo 'Mjolnir needs MiMo Code or Node.js, npm, and npx on PATH; install Node in the target environment' >&2; exit 127; fi; exec npx -y @mimo-ai/cli@{MIMO_CLI_VERSION} acp"
                 ),
             ],
         ),
@@ -234,6 +243,12 @@ pub(in crate::controller) fn stage_profile(
                 "opencode.jsonc",
                 ".data/opencode/auth.json",
             ]
+        }
+        mj_core::config::HarnessKind::Mimo => {
+            // MIMOCODE_HOME keeps the complete config tree beside session
+            // data. Copy configuration including skills, agents, and plugins,
+            // but only the login from the data directory.
+            &["config", "data/auth.json"]
         }
     };
     let allowlist: Vec<&str> = harness_files

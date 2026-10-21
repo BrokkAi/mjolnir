@@ -257,9 +257,9 @@ impl HarnessKind {
                         .map(|expiry| expiry.timestamp_millis())
                 })
                 .max(),
-            // OpenCode records each provider login's OAuth expiry in epoch
-            // milliseconds; 0 marks a login with no recorded expiry.
-            Self::OpenCode => json
+            // OpenCode and MiMo Code record each provider login's OAuth expiry
+            // in epoch milliseconds; 0 marks a login with no recorded expiry.
+            Self::OpenCode | Self::Mimo => json
                 .as_object()?
                 .values()
                 .filter_map(|grant| grant.get("expires")?.as_i64())
@@ -281,7 +281,7 @@ impl HarnessKind {
                 .and_then(|seconds| seconds.checked_mul(1000)),
             // None of these has a proactive-refresh path, so none reports an
             // expiry Hel would act on: each refreshes its own tokens on demand.
-            Self::Grok | Self::Muse | Self::OpenCode => None,
+            Self::Grok | Self::Muse | Self::OpenCode | Self::Mimo => None,
         }
     }
 
@@ -294,6 +294,7 @@ impl HarnessKind {
         let arguments = match self {
             Self::Claude => vec!["auth".to_owned(), "login".to_owned()],
             Self::OpenCode => vec!["auth".to_owned(), "login".to_owned()],
+            Self::Mimo => vec!["auth".to_owned(), "login".to_owned()],
             Self::Codex | Self::Kimi | Self::Grok | Self::Muse => vec!["login".to_owned()],
         };
         (self.cli_binary_name().to_owned(), arguments)
