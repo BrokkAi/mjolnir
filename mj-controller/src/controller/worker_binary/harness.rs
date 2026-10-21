@@ -192,7 +192,9 @@ const HARNESS_CLI_MISSING_STATUS: i32 = 3;
 
 pub(super) const MJ_CONTAINER_ENVIRONMENT: &str = "## Mjolnir disposable environment\n\nThis session runs in a disposable Mjolnir container. When the session closes, Mjolnir checkpoints everything in project workspace directories under `/workspace`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then removes the container.\n\nEverything outside `/workspace`, including installed packages, `$HOME`, and `/tmp`, is ephemeral and will be lost. Keep durable results in the workspace or push them to a remote.\n\nNew workspaces start on their own session branch from the default network fetch remote’s default branch. Local unpublished commits and uncommitted files are not copied. Use normal git push to publish the current branch to the configured network push destination. Closing saves a checkpoint; it does not publish commits or update the original local checkout. Resumed sessions restore their saved work.\n";
 
-pub(in crate::controller) fn stage_profile(
+/// The profile's own files only. Outside this module, stage through
+/// [`stage_profile_with_catalog`].
+pub(super) fn stage_profile(
     profile: &mj_core::config::HarnessProfile,
     destination: &Path,
 ) -> Result<()> {
@@ -283,6 +285,22 @@ pub(in crate::controller) fn stage_profile(
         }
     }
     Ok(())
+}
+
+/// Stage `profile` into `destination` for one harness run, together with the
+/// model catalog of its Codex provider. Every staged copy outside this module
+/// goes through here, so a session, a reviewer and a capability probe all
+/// offer the same models: a reviewer staged without the catalog offered
+/// OpenAI's built-in model names on a DeepSeek profile (#1320).
+pub(in crate::controller) fn stage_profile_with_catalog(
+    profile_id: &str,
+    profile: &mj_core::config::HarnessProfile,
+    destination: &Path,
+    fetch: CatalogFetch<'_>,
+    cache: &dyn CatalogCache,
+) -> Result<()> {
+    stage_profile(profile, destination)?;
+    stage_codex_catalog(profile_id, profile, destination, fetch, cache)
 }
 
 /// Where Muse keeps its data for the configured home `home`. The person's own

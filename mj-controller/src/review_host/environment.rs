@@ -131,12 +131,12 @@ impl ReviewEnvironment for ControllerEnvironment {
         Result<mj_core::review::settings::ResolvedReviewSettings, String>,
     > {
         Box::pin(async move {
-            let offered = self
+            let catalog = self
                 .catalog
                 .as_ref()
                 .and_then(|catalog| catalog.get())
-                .map(|catalog| catalog.snapshot());
-            crate::review_selection::resolve(handle, Some(config), cancelled, offered)
+                .cloned();
+            crate::review_selection::resolve(handle, Some(config), cancelled, catalog)
                 .await
                 .map_err(|e| format!("{e:#}"))
         })

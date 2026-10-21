@@ -678,6 +678,12 @@ impl ProfileCatalog {
             Arc::new(move |profile, _| model_probe(profile)),
         )
     }
+    /// A catalog whose per-model probe answers for the model it is asked
+    /// about, for callers that read one model's efforts.
+    #[cfg(test)]
+    pub(crate) fn with_probes(probe: Arc<Probe>, model_probe: Arc<ModelProbe>) -> Arc<Self> {
+        Self::build(CancellationToken::new(), probe, model_probe)
+    }
     #[cfg(test)]
     pub(crate) async fn sync_now(self: &Arc<Self>, config: &Config) {
         self.sync(config);
