@@ -4104,7 +4104,7 @@ async fn report_reconcile_recovers_unreported_finishes_and_ignores_parent_opt_ou
             .await
             .unwrap();
         if protocol < mj_core::relay::RELAY_LEGACY_MAILBOX_PROTOCOL {
-            assert_eq!(
+            assert!(matches!(
                 crate::mailbox_outbox::deliver_mailbox_event(
                     exports.clone(),
                     &remote.control,
@@ -4114,8 +4114,8 @@ async fn report_reconcile_recovers_unreported_finishes_and_ignores_parent_opt_ou
                 )
                 .await
                 .unwrap(),
-                crate::mailbox_outbox::MailboxEventDelivery::Pending
-            );
+                crate::mailbox_outbox::MailboxEventDelivery::Pending(_)
+            ));
             assert!(
                 tokio::time::timeout(Duration::from_millis(20), remote.requests.recv())
                     .await

@@ -1562,6 +1562,29 @@ impl RelaySnapshot {
         }
     }
 
+    /// Whether a `/clear` is still waiting or running. Terminal records stay
+    /// in the ledger until the daemon acknowledges their events, so they are
+    /// history, not work: a completed, rejected or interrupted clear must not
+    /// hold later work back.
+    pub fn clear_context_in_progress(&self) -> bool {
+        self.dispatches.values().any(|dispatch| {
+            matches!(dispatch.command, RelayCommand::ClearContext)
+                && matches!(
+                    dispatch.state,
+                    RelayDispatchState::Queued
+                        | RelayDispatchState::Pending
+                        | RelayDispatchState::InFlight
+                )
+        })
+    }
+
+    /// When the in-progress `/clear` began, which activity treats as a turn.
+    pub fn clear_context_started_at_ms(&self) -> Option<i64> {
+        self.clear_context_in_progress()
+            .then_some(self.activity_turn_started_at_ms)
+            .flatten()
+    }
+
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
             assessment: self.assessment.clone().map(Box::new),
@@ -1573,12 +1596,7 @@ impl RelaySnapshot {
             steering: self.steering.clone(),
             cancelling_prompt_id: self.cancelling_prompt_id.clone(),
             clear_context: false,
-            clear_context_started_at_ms: self
-                .dispatches
-                .values()
-                .any(|dispatch| matches!(dispatch.command, RelayCommand::ClearContext))
-                .then_some(self.activity_turn_started_at_ms)
-                .flatten(),
+            clear_context_started_at_ms: self.clear_context_started_at_ms(),
             native_agent_count: self
                 .native_agents
                 .values()
