@@ -4,6 +4,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 fn spec(command: PathBuf, environment: BTreeMap<String, String>, cwd: PathBuf) -> LaunchSpec {
     LaunchSpec {
+        imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,

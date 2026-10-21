@@ -395,6 +395,14 @@ impl HarnessKind {
         }
     }
 
+    /// Whether this harness keeps its logins in its own database rather than a
+    /// file Mjolnir can copy (OpenCode 2). Staging exports them into the
+    /// staged home, the credential sync pushes a changed export to live
+    /// sessions, and each launch imports it.
+    pub const fn keeps_logins_in_database(self) -> bool {
+        matches!(self, Self::OpenCode)
+    }
+
     /// Whether sessions on this machine can share the profile's own login
     /// file through a link instead of each holding a copy.
     ///
@@ -963,7 +971,7 @@ impl HarnessProfile {
     /// `config.toml`; that file is copied into the staged home, so the profile
     /// is just as set up as an `env_key` one and needs no interactive login.
     pub fn auth_scheme(&self) -> AuthScheme {
-        if self.kind == HarnessKind::OpenCode {
+        if self.kind.keeps_logins_in_database() {
             return AuthScheme::NativeLoginStore;
         }
         if self.kind == HarnessKind::Claude
@@ -1252,10 +1260,11 @@ pub enum AuthScheme {
     /// The harness's own login writes a credential file into the profile home.
     NativeLogin,
     /// The harness's own login keeps its credentials in the harness's own
-    /// database, beside the session history in the same file (OpenCode 2).
-    /// Staging copies them into each session home, where the launch imports
-    /// them; nothing syncs them afterwards, because the harness neither reads
-    /// a replaced copy nor writes one back.
+    /// database, beside the session history in the same file
+    /// ([`HarnessKind::keeps_logins_in_database`]). Staging exports them into
+    /// each session home, where every launch imports them; the credential
+    /// sync pushes a changed export, and the session reloads to import it. A
+    /// session's copy is never pulled back.
     NativeLoginStore,
     /// A long-lived API key supplied through this environment variable.
     ApiKey { env_key: String },
@@ -1276,6 +1285,12 @@ impl AuthScheme {
     /// Whether this profile uses the harness's own login file.
     pub const fn uses_native_login_file(&self) -> bool {
         matches!(self, Self::NativeLogin)
+    }
+
+    /// Whether the credential sync exchanges this profile's login with its
+    /// sessions: a login file both ways, a login database by push.
+    pub const fn syncs_login(&self) -> bool {
+        matches!(self, Self::NativeLogin | Self::NativeLoginStore)
     }
 }
 

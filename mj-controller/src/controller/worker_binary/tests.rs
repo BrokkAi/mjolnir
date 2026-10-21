@@ -4600,7 +4600,10 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             std::fs::write(&path, br#"{"fixture":true}"#).unwrap();
         }
         if kind == HarnessKind::OpenCode {
-            write_opencode_database(&home.path().join(".data/opencode/opencode.db"));
+            write_opencode_database(
+                &home.path().join(".data/opencode/opencode.db"),
+                "sk-fixture",
+            );
         }
         let profile = mj_core::config::HarnessProfile {
             enabled: true,
@@ -4645,10 +4648,16 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
     }
 }
 
-/// An OpenCode 2 database holding one session and one API-key login, in the
-/// `credential` table layout OpenCode 2.1 creates.
-fn write_opencode_database(path: &Path) {
-    std::fs::remove_file(path).unwrap();
+/// An OpenCode 2 database holding one session and one API-key login with
+/// `key`, in the `credential` table layout OpenCode 2.1 creates, replacing any
+/// file at `path`.
+fn write_opencode_database(path: &Path, key: &str) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("remove {}: {error}", path.display()),
+    }
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let database = rusqlite::Connection::open(path).unwrap();
     database
         .execute_batch(
@@ -4657,9 +4666,13 @@ fn write_opencode_database(path: &Path) {
                  value text NOT NULL, connector_id text, method_id text, active integer,
                  time_created integer NOT NULL, time_updated integer NOT NULL);
              CREATE TABLE session_v2 (id text PRIMARY KEY, title text);
-             INSERT INTO credential VALUES ('cred_fixture', 'deepseek', 'DeepSeek',
-                 '{\"type\":\"key\",\"key\":\"sk-fixture\"}', NULL, NULL, 1, 1, 1);
              INSERT INTO session_v2 VALUES ('ses_fixture', 'native history');",
+        )
+        .unwrap();
+    database
+        .execute(
+            "INSERT INTO credential VALUES ('cred_fixture', 'deepseek', 'DeepSeek', ?1, NULL, NULL, 1, 1, 1)",
+            [format!(r#"{{"type":"key","key":"{key}"}}"#)],
         )
         .unwrap();
 }
@@ -4728,7 +4741,7 @@ fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
 fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
     use mj_core::config::harness_authentication_marker;
     use mj_core::credentials::{
-        SyncAction, read_credential_file, reconcile, write_credential_file,
+        CredentialSnapshot, SyncAction, read_credential_file, reconcile, write_credential_file,
     };
 
     let directory = tempfile::tempdir().unwrap();
@@ -4748,8 +4761,13 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             codex_profile: None,
         };
         let canonical = profile.authentication_marker();
-        std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
-        std::fs::write(&canonical, login_bytes(kind, 1)).unwrap();
+        let database = home.join(".data/opencode/opencode.db");
+        if kind.keeps_logins_in_database() {
+            write_opencode_database(&database, "sk-generation-1");
+        } else {
+            std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+            std::fs::write(&canonical, login_bytes(kind, 1)).unwrap();
+        }
         let worker_root = directory.path().join("workers").join(&session_id);
         let locator = targets::TargetLocator::LocalBare {
             worker_root: worker_root.to_string_lossy().into_owned(),
@@ -4800,9 +4818,31 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
         );
         // Muse's staged root lies under the data directory; the rest of the
         // exchange is the same for it, except that Muse stores no refresh
-        // time, so the sync never orders two different Muse copies. OpenCode's
-        // logins live in its database, which the sync leaves alone.
-        if matches!(kind, HarnessKind::Muse | HarnessKind::OpenCode) {
+        // time, so the sync never orders two different Muse copies.
+        if kind == HarnessKind::Muse {
+            continue;
+        }
+        // OpenCode's logins live in its database: the sync pushes its export
+        // into the staged home, and never copies a session's back.
+        if kind.keeps_logins_in_database() {
+            stage_profile(&profile, &launch.harness_home).unwrap();
+            write_opencode_database(&database, "sk-generation-2");
+            let export = crate::opencode_logins::profile_logins(&profile)
+                .unwrap()
+                .unwrap();
+            let profile_copy = CredentialSnapshot::of(kind, &export);
+            let (session_copy, _) = read_credential_file(kind, &endpoint).unwrap();
+            let push =
+                crate::worker_client::stored_logins_push(&profile_copy, &export, &session_copy)
+                    .expect("the rotated login is pushed");
+            write_credential_file(kind, &endpoint, push).unwrap();
+            assert_eq!(std::fs::read(&endpoint).unwrap(), export);
+            let (session_copy, _) = read_credential_file(kind, &endpoint).unwrap();
+            assert_eq!(
+                crate::worker_client::stored_logins_push(&profile_copy, &export, &session_copy),
+                None
+            );
+            assert!(!canonical.exists(), "the profile home holds no copy");
             continue;
         }
         stage_profile(&profile, &launch.harness_home).unwrap();

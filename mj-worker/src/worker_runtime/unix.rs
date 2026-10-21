@@ -316,6 +316,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         &mut additional_directories,
     );
     let acp_spec = LaunchSpec {
+        imported_logins: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery,
