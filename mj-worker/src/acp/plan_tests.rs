@@ -1384,9 +1384,12 @@ async fn a_non_plan_permission_request_is_answered_by_the_user() {
 // Hard-won: #1313: Skip and Cancel on a permission form both told the agent its turn was cancelled.
 #[tokio::test]
 async fn skip_rejects_only_the_tool_call_and_cancel_cancels_the_turn() {
-    let mut probe =
-        PlanProbe::with_harness(ExecutionPolicy::ConfiguredApprovals, false, HarnessKind::Codex)
-            .await;
+    let mut probe = PlanProbe::with_harness(
+        ExecutionPolicy::ConfiguredApprovals,
+        false,
+        HarnessKind::Codex,
+    )
+    .await;
     probe
         .commands
         .send(CommandRequest::Prompt {
@@ -1428,7 +1431,10 @@ async fn skip_rejects_only_the_tool_call_and_cancel_cancels_the_turn() {
     };
 
     let form = ask(&mut probe, "skip-ask", &codex_options).await;
-    assert_eq!(form.tool_permission, Some(ToolPermissionForm { skip: true }));
+    assert_eq!(
+        form.tool_permission,
+        Some(ToolPermissionForm { skip: true })
+    );
     probe
         .answer_with(&form.id, ElicitationResponse::Decline)
         .await
@@ -1442,7 +1448,10 @@ async fn skip_rejects_only_the_tool_call_and_cancel_cancels_the_turn() {
     probe.no_finish().await;
 
     let form = ask(&mut probe, "network-ask", &network_options).await;
-    assert_eq!(form.tool_permission, Some(ToolPermissionForm { skip: false }));
+    assert_eq!(
+        form.tool_permission,
+        Some(ToolPermissionForm { skip: false })
+    );
     assert!(
         probe
             .answer_with(&form.id, ElicitationResponse::Decline)
