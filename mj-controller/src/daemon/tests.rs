@@ -3134,6 +3134,8 @@ fn startup_prompt_test_store(name: &str) -> Option<crate::database::DatabaseWrit
 }
 
 // Hard-won: #1139 review: a failed automatic recreation kept its Restart intent, so its stuck lifecycle stood down every retry and blocked continuation.
+// A local bare target exists only where the controller runs workers itself.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_failed_automatic_recreation_gives_back_its_intent_and_records_no_failure() {
     const NAME: &str = "a_failed_automatic_recreation_gives_back_its_intent_and_records_no_failure";
@@ -3198,7 +3200,10 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
         container: serde_json::from_value(serde_json::json!({})).unwrap(),
     };
     let mut runtime = mj_core::state::TargetRuntimeSettings::from(&template);
-    let applied = mj_core::state::ContainerSettings::requested(&session);
+    let applied = mj_core::state::ContainerSettings::applied(
+        &session,
+        mj_core::config::DEFAULT_CONTAINER_IMAGE,
+    );
     runtime.container_settings = Some(applied.clone());
     session.target_runtime = Some(runtime);
     crate::database::save_session(&session).unwrap();
@@ -3320,23 +3325,32 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
     crate::database::save_session(&session).unwrap();
     assert!(load().container_recreation_required("session-1").unwrap());
     session.target_runtime.as_mut().unwrap().container_settings =
-        Some(mj_core::state::ContainerSettings::requested(&session));
+        Some(mj_core::state::ContainerSettings::applied(
+            &session,
+            mj_core::config::DEFAULT_CONTAINER_IMAGE,
+        ));
     crate::database::save_session(&session).unwrap();
     assert!(!load().container_recreation_required("session-1").unwrap());
 
     // A container created from an older Mjolnir's default image follows the
     // default to this build's once an upgrade moved it; the stored record has
-    // to say so. A configured image is not the default and never moves.
-    for (image, moved) in [
-        ("ghcr.io/brokkai/mjolnir/agent-dev:0.1.0", true),
-        (mj_core::config::DEFAULT_CONTAINER_IMAGE, false),
-        ("registry.example.test/custom:1", false),
+    // to say so. A configured image is not the default and never moves. A
+    // container recorded before images were tracked is unknown: Restart
+    // offers to recreate it, and only the container can say whether it moved.
+    for (image, moved, unrecorded) in [
+        ("ghcr.io/brokkai/mjolnir/agent-dev:0.1.0", true, false),
+        (mj_core::config::DEFAULT_CONTAINER_IMAGE, false, false),
+        ("registry.example.test/custom:1", false, false),
+        ("written before images were tracked", false, true),
     ] {
         let mut applied = mj_core::state::ContainerSettings::applied(&session, image);
         if moved {
             // `applied` records only this build's default, as provisioning
             // does; an older build recorded its own.
-            applied.default_image = Some(image.to_owned());
+            applied.default_image = Some(Some(image.to_owned()));
+        }
+        if unrecorded {
+            applied.default_image = None;
         }
         session.target_runtime.as_mut().unwrap().container_settings = Some(applied);
         crate::database::save_session(&session).unwrap();
@@ -3348,15 +3362,23 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
             "{image}"
         );
         assert_eq!(
+            mj_core::state::ContainerSettings::image_unrecorded(record),
+            unrecorded,
+            "{image}"
+        );
+        assert_eq!(
             controller
                 .container_recreation_required("session-1")
                 .unwrap(),
-            moved,
+            moved || unrecorded,
             "{image}"
         );
     }
     session.target_runtime.as_mut().unwrap().container_settings =
-        Some(mj_core::state::ContainerSettings::requested(&session));
+        Some(mj_core::state::ContainerSettings::applied(
+            &session,
+            mj_core::config::DEFAULT_CONTAINER_IMAGE,
+        ));
     crate::database::save_session(&session).unwrap();
     // A replacement may own a newly dispatched turn before Running is published.
     // Its creation snapshot therefore forbids repeating source teardown.

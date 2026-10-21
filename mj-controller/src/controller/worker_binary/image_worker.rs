@@ -124,6 +124,55 @@ pub(crate) fn image_worker_label(inspection: &[u8]) -> Option<String> {
 }
 
 impl Controller {
+    /// Whether the container of a session whose image was never recorded
+    /// runs another image than the one its target names now. Apple's
+    /// `container` CLI cannot say which image a container runs, so such a
+    /// container counts as changed and is recreated once.
+    pub(in crate::controller) fn container_image_changed(
+        &self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+    ) -> Result<bool> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        let Some((host, container)) = self
+            .config
+            .targets
+            .get(&session.target_template_id)
+            .and_then(mj_core::config::TargetTemplate::image_host)
+        else {
+            return Ok(false);
+        };
+        let container_id = match session.target.as_ref() {
+            Some(
+                mj_core::state::TargetLocator::LocalPodman { container_id, .. }
+                | mj_core::state::TargetLocator::LocalDocker { container_id, .. }
+                | mj_core::state::TargetLocator::SshPodman { container_id, .. }
+                | mj_core::state::TargetLocator::SshDocker { container_id, .. },
+            ) => container_id,
+            Some(mj_core::state::TargetLocator::AppleContainer { .. }) => return Ok(true),
+            _ => return Ok(false),
+        };
+        let output = execute_checked(
+            executor,
+            host.command(
+                vec![
+                    host.engine().to_owned(),
+                    "container".to_owned(),
+                    "inspect".to_owned(),
+                    "--format".to_owned(),
+                    "{{.Config.Image}}".to_owned(),
+                    container_id.clone(),
+                ],
+                "read the image a session container was created from".to_owned(),
+            ),
+        )?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim() != container.image)
+    }
+
     /// Make sure the container an upgrade recreates for this session can
     /// start before the old one is touched: the image it names is on its
     /// host, pulled now if it was missing, and a worker of this build can be

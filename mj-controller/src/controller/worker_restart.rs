@@ -172,18 +172,29 @@ impl Controller {
             .context("reconnect plan is empty")?;
         let installed = mj_core::worker_build::WORKER_BUILD_ID.to_owned();
         let current = worker_runs_installed_build(reported_build, &installed);
-        // Asked first, so a container whose worker a recovery already
-        // replaced still moves: its image and tools are an older release's.
-        if self
+        let session = self
             .state
             .sessions
             .get(session_id)
-            .is_some_and(mj_core::state::ContainerSettings::default_image_moved)
-        {
+            .with_context(|| format!("unknown session {session_id}"))?;
+        // Asked first, so a container whose worker a recovery already
+        // replaced still moves: its image and tools are an older release's.
+        // A container recorded before images were tracked is asked directly.
+        let moved = mj_core::state::ContainerSettings::default_image_moved(session)
+            || (mj_core::state::ContainerSettings::image_unrecorded(session)
+                && self
+                    .container_image_changed(session_id, executor)
+                    .context("read which image the session's container runs")?);
+        if moved {
             if !Controller::load()?
                 .state
                 .subagents_occupy_container(session_id)
             {
+                // Pull the new image and confirm its worker here, where the
+                // work holds no daemon handoff and a handoff cancels it, so
+                // a host that cannot build the replacement touches nothing.
+                self.prepare_container_recreation(session_id, executor)
+                    .context("prepare the new container before touching the session")?;
                 return Ok(WorkerUpgradeOutcome::RecreateContainer);
             }
             // A sub-agent's worker in this container would end with it. Keep
