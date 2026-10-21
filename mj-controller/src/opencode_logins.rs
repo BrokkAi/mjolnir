@@ -53,14 +53,19 @@ struct Login {
 /// from the data directory and from the place Mjolnir kept them for an
 /// OpenCode 1 profile. `None` when there are none.
 pub fn profile_logins(profile: &HarnessProfile) -> Result<Option<Vec<u8>>> {
+    home_logins(&profile.home)
+}
+
+/// [`profile_logins`] for the profile whose home is `home`.
+pub fn home_logins(home: &Path) -> Result<Option<Vec<u8>>> {
     let data = HarnessKind::OpenCode
-        .nested_data_dir(&profile.home)
+        .nested_data_dir(home)
         .expect("OpenCode has an XDG home");
     let mut logins = stored_logins(&data)?;
     let mut legacy = vec![data.clone()];
     // Mjolnir pointed OpenCode 1 at `<home>/.data` even for the person's own
     // home, so a login made through `mj login` may be there instead.
-    let mjolnir = profile.home.join(".data").join(HarnessKind::OpenCode.id());
+    let mjolnir = home.join(".data").join(HarnessKind::OpenCode.id());
     if mjolnir != data {
         legacy.push(mjolnir);
     }

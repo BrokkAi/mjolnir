@@ -83,7 +83,7 @@ impl ProviderAuthCache {
                 let scheme = if profile.kind == HarnessKind::Codex {
                     self.files.get(&source(profile))?.1?
                 } else {
-                    !profile.auth_scheme().uses_native_login_file()
+                    !profile.auth_scheme().syncs_login()
                 };
                 Some((id.clone(), scheme))
             })
@@ -219,13 +219,13 @@ env_key = "FIXTURE_KEY"
         for (id, profile) in &config.profiles {
             assert_eq!(
                 cache.schemes[id],
-                !profile.auth_scheme().uses_native_login_file(),
+                !profile.auth_scheme().syncs_login(),
                 "{id}"
             );
         }
         assert!(
-            cache.schemes["opencode"],
-            "OpenCode's logins live in its database"
+            !cache.schemes["opencode"],
+            "OpenCode's logins are pushed from its database"
         );
     }
 
@@ -261,7 +261,7 @@ env_key = "FIXTURE_KEY"
         );
         assert_eq!(
             cache.schemes["codex"],
-            !profile.auth_scheme().uses_native_login_file(),
+            !profile.auth_scheme().syncs_login(),
             "the cached skip must agree with the profile's own auth scheme"
         );
     }

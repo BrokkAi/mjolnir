@@ -439,9 +439,11 @@ directory or under `<home>/.data/opencode` where Mjolnir kept it for OpenCode
 OpenCode 2's own upgrade carries it. Mjolnir gives each session a private configuration
 copy with those logins, which the session imports when it starts, and keeps the
 session's own database under that copy's `.data/opencode/` tree, including on
-a bare runtime on this machine. A login added or changed after a session
-started reaches it when it is resumed; running sessions keep the logins they
-started with. Checkpoints keep the session database without its logins. Do
+a bare runtime on this machine. A login you add, change or remove reaches
+running sessions within about a minute: each one reloads its OpenCode session
+once it is idle, never during a turn, and continues the same conversation.
+Logins come only from the profile; one made inside a session lasts until that
+session next reloads. Checkpoints keep the session database without its logins. Do
 not override `XDG_CONFIG_HOME` or `XDG_DATA_HOME` in the profile environment.
 
 Run:

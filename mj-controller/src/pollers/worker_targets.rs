@@ -77,7 +77,7 @@ pub fn credential_sync_targets(controller: &Controller) -> Vec<CredentialSyncTar
         .config
         .profiles
         .iter()
-        .map(|(id, profile)| (id.clone(), !profile.auth_scheme().uses_native_login_file()))
+        .map(|(id, profile)| (id.clone(), !profile.auth_scheme().syncs_login()))
         .collect();
     credential_sync_targets_with_auth(controller, &schemes)
 }

@@ -1824,7 +1824,7 @@ async fn login(args: LoginArgs) -> Result<()> {
     let (program, arguments) = mj_core::credentials::login_command(profile)
         .with_context(|| format!("profile {profile_id:?}"))?;
     // OpenCode keeps its logins in its database, so its fingerprint is the
-    // logins read from there, and no live session takes them up.
+    // logins read from there, and a live session reloads to take them up.
     let stored = profile.auth_scheme() == mj_core::config::AuthScheme::NativeLoginStore;
     let fingerprint = || -> Result<Option<String>> {
         if stored {
@@ -1867,7 +1867,7 @@ async fn login(args: LoginArgs) -> Result<()> {
     if after.is_some() && after != before {
         if stored {
             println!(
-                "Credentials updated for profile {profile_id}. New and resumed sessions use them; running sessions keep the logins they started with."
+                "Credentials updated for profile {profile_id}. Live sessions reload with them within about a minute, once idle, while the Mjolnir daemon is running."
             );
         } else {
             println!(
