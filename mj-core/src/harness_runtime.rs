@@ -106,6 +106,7 @@ pub const MUSE_ACP_PACKAGE: &str = "@brokkai/muse-acp";
 pub const MUSE_ACP_VERSION: &str = "0.15.0";
 pub const MUSE_VERSION: &str = "1.4.11-R6667.1";
 pub const OPENCODE_VERSION: &str = "2.1.2";
+pub const MIMO_CLI_VERSION: &str = "0.1.15";
 
 /// The shell commands that start OpenCode's ACP server with the executable
 /// named by `$opencode`, for the managed install and the container fallback
@@ -251,6 +252,11 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             install_id: "opencode-2.1.2",
             display_version: "OpenCode 2.1.2",
             entrypoint: "opencode",
+        },
+        HarnessKind::Mimo => HarnessPin {
+            install_id: "mimo-cli-0.1.15",
+            display_version: "MiMo Code 0.1.15",
+            entrypoint: "node_modules/.bin/mimo",
         },
     }
 }

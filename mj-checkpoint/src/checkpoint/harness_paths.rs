@@ -93,7 +93,8 @@ pub(super) fn harness_storage_cwd(harness: HarnessKind, launch_cwd: &Path) -> Pa
         | HarnessKind::Codex
         | HarnessKind::Kimi
         | HarnessKind::Muse
-        | HarnessKind::OpenCode => launch_cwd.components().collect(),
+        | HarnessKind::OpenCode
+        | HarnessKind::Mimo => launch_cwd.components().collect(),
     }
 }
 

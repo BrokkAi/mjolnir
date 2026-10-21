@@ -2894,6 +2894,7 @@ fn removable_profile_root_names_a_per_session_profile_directory_for_every_harnes
         (HarnessKind::Codex, "/home/dev/.codex"),
         (HarnessKind::Kimi, "/home/dev/.kimi-code"),
         (HarnessKind::Grok, "/home/dev/.grok"),
+        (HarnessKind::Mimo, "/home/dev/.mimocode"),
     ] {
         assert_eq!(
             removable_profile_root(&local, SESSION, &profile(kind, home)),
@@ -2926,6 +2927,7 @@ fn removable_profile_root_names_a_per_session_profile_directory_for_every_harnes
         HarnessKind::Codex,
         HarnessKind::Muse,
         HarnessKind::OpenCode,
+        HarnessKind::Mimo,
     ] {
         assert_eq!(
             removable_profile_root(&container, SESSION, &profile(kind, "/home/dev/.codex")),
@@ -2971,6 +2973,7 @@ fn a_session_never_runs_from_the_profile_home_itself() {
             (HarnessKind::Grok, "/home/dev/.grok"),
             (HarnessKind::Muse, "/home/dev/.config/muse"),
             (HarnessKind::OpenCode, "/home/dev/.config/opencode"),
+            (HarnessKind::Mimo, "/home/dev/.mimocode"),
         ] {
             let target = target_profile_home_for_test(locator, SESSION, &profile(kind, home));
             assert_ne!(target, home, "{kind:?} on {}", locator.kind_name());

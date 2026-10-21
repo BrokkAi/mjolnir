@@ -113,14 +113,15 @@ impl Drop for ResumePhaseTimer<'_> {
 }
 
 impl Controller {
-    /// Muse has one workspace root; native restore relocates its metadata.
+    /// Muse and MiMo Code have one workspace root; Muse native restore also
+    /// relocates its metadata.
     pub(super) fn validate_muse_resume_destination(
         &self,
         source: &SessionRecord,
         destination_harness: HarnessKind,
         _target_id: &str,
     ) -> Result<()> {
-        if destination_harness != HarnessKind::Muse {
+        if !matches!(destination_harness, HarnessKind::Muse | HarnessKind::Mimo) {
             return Ok(());
         }
         let checkout = self.state.checkout(&source.id)?;
@@ -129,7 +130,8 @@ impl Controller {
                 || source
                     .project_bundle(&self.config)
                     .is_none_or(|bundle| bundle.repositories.len() == 1),
-            "Muse Code ACP supports one workspace root; use a single-repository bundle"
+            "{} ACP supports one workspace root; use a single-repository bundle",
+            destination_harness.display_name()
         );
         Ok(())
     }
@@ -1598,8 +1600,12 @@ impl Controller {
         // incompatible target fails here instead of during provisioning.
         self.validate_muse_resume_destination(&previous, profile.kind, target_id)?;
         ensure!(
-            profile.kind != HarnessKind::Muse || previous.additional_mounts.is_empty(),
-            "Muse Code ACP supports one workspace root; attached directories are unsupported"
+            !matches!(
+                profile.kind,
+                HarnessKind::Muse | HarnessKind::Mimo
+            ) || previous.additional_mounts.is_empty(),
+            "{} ACP supports one workspace root; attached directories are unsupported",
+            profile.kind.display_name()
         );
         let checkout = self.state.checkout(session_id)?;
         let plan = resume_compatibility_with_checkout(

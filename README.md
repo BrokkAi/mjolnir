@@ -2,8 +2,9 @@
 
 **One control plane for all your coding agents.**
 
-Mjolnir (`mj`) runs Claude Code, Codex, Kimi Code, Grok Build, and Muse Code
-sessions side by side, on your laptop, in containers, over SSH, or on EC2, and
+Mjolnir (`mj`) runs Claude Code, Codex, Kimi Code, Grok Build, Muse Code,
+OpenCode, and MiMo Code sessions side by side, on your laptop, in containers,
+over SSH, or on EC2, and
 keeps them running after you close the terminal. You can move a session to
 another account, another harness, or a compatible target without starting over.
 Bare SSH sessions stay on their original host.

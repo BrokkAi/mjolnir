@@ -753,7 +753,11 @@ pub(super) fn worker_launch_config_with_checkout(
             .iter()
             .map(|resource| resource.destination.clone()),
     );
-    if profile.kind == mj_core::config::HarnessKind::Muse && !additional_directories.is_empty() {
+    if matches!(
+        profile.kind,
+        mj_core::config::HarnessKind::Muse | mj_core::config::HarnessKind::Mimo
+    ) && !additional_directories.is_empty()
+    {
         bail!(
             "{} ACP does not support multiple workspace roots; use a single-repository bundle",
             profile.kind.display_name()

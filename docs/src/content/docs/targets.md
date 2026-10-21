@@ -66,7 +66,8 @@ chosen harness's controls:
 The unconstrained translation is Codex `agent-full-access`, Claude Code
 `bypassPermissions` with its sandbox disabled, Kimi Code `auto`, Grok Build
 always-approve with its sandbox disabled, and OpenCode
-`"permission": "allow"` in `opencode.json`. Those all approve every action;
+`"permission": "allow"` in `opencode.json`. MiMo Code starts with
+`MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS=1`. Those all approve every action;
 Kimi's mode happens to be named `auto` but is not a risk-selective guardian.
 Muse instead stages `:ask-me`, selects `promptUnmatched` approvals, turns
 muse-acp's auto-review on, and disables only the sandbox
@@ -74,7 +75,7 @@ muse-acp's auto-review on, and disables only the sandbox
 can still be denied. Muse's guardian on raw targets is the same review with
 the sandbox kept on.
 
-Codex, Claude Code, Grok Build, OpenCode, and Muse Code can preserve guardian
+Codex, Claude Code, Grok Build, OpenCode, MiMo Code, and Muse Code can preserve guardian
 approvals on raw targets. Kimi Code cannot, so Mjolnir displays a prominent
 warning when it is selected without an isolation boundary. Read [Security boundaries](/security/)
 before choosing a raw or `yolo` target.
@@ -141,8 +142,8 @@ path, not the selected project or its linked-worktree location.
 
 The host does not need a preinstalled harness bridge. Its worker installs and
 reuses the exact harness version pinned by Mjolnir in the remote user's cache.
-It does require Node.js 22 and npm for Codex and Claude, or curl and Bash for
-Kimi and Grok, or curl and tar for Muse and OpenCode. Mjolnir never uses sudo to add these prerequisites and does not
+It does require Node.js 22 and npm for Codex, Claude, and MiMo Code, or curl
+and Bash for Kimi and Grok, or curl and tar for Muse and OpenCode. Mjolnir never uses sudo to add these prerequisites and does not
 fall back to another harness executable from the remote `PATH`.
 
 `permissions` accepts `guardian` or `yolo` and defaults to `guardian`. The

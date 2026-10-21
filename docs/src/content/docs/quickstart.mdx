@@ -19,7 +19,7 @@ mj
 Two words come up on every screen:
 
 - A **profile** is one coding-agent account: which agent (Claude Code, Codex,
-  Kimi Code, Grok Build, Muse Code, or OpenCode) and the home directory that holds its
+  Kimi Code, Grok Build, Muse Code, OpenCode, or MiMo Code) and the home directory that holds its
   sign-in.
 - A **target** is where the session runs: this machine directly (`localhost`),
   a local container, an SSH host, or an EC2 instance.
@@ -64,11 +64,11 @@ found, the welcome reports the missing profile. To fix this:
    @anthropic-ai/claude-code`, then run `claude`. Codex: `npm install -g
    @openai/codex`, then run `codex login`. Signing in creates the agent's home
    directory (`~/.claude`, `~/.codex`, `~/.kimi-code`, `~/.grok`,
-   `~/.config/muse`, or `~/.config/opencode`).
+   `~/.config/muse`, `~/.config/opencode`, or a MiMo Code `MIMOCODE_HOME`).
 2. Open Settings (`prefix+s`), choose **Agent Profiles**, and choose **Detect
    profiles**, or run `mj setup` again.
 
-Codex, Claude Code, and Muse Code sessions on this machine also need Node.js 22
+Codex, Claude Code, Muse Code, and MiMo Code sessions on this machine also need Node.js 22
 or newer and npm on `PATH`; Mjolnir launches its own pinned copy of each agent.
 
 The dashboard keeps its session list, Conversation and Prompt regions, target
@@ -213,7 +213,8 @@ By default Mjolnir sends recent prompt and reply text to TypeSafe's Jev classifi
 
 The Import tab of the session dialog (`prefix+g`) and `mj import` adopt a
 session you started directly in Claude Code, Codex, Kimi Code, Grok Build, or
-Muse Code. Import only reads your repository: it archives the tracked changes
+Muse Code. OpenCode and MiMo Code sessions use SQLite stores that are not
+importable yet. Import only reads your repository: it archives the tracked changes
 into Mjolnir's data directory and does not change the checkout. When the
 imported session has a single Git root, resuming it runs the agent in that live
 checkout, not in a new clone. See [sessions](/sessions/#import-a-native-harness-session).

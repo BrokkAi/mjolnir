@@ -220,6 +220,9 @@ pub fn locate_native_session(
         HarnessKind::OpenCode => bail!(
             "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot import them yet"
         ),
+        HarnessKind::Mimo => bail!(
+            "MiMo Code keeps its sessions in a SQLite database; Mjolnir cannot import them yet"
+        ),
     };
     Ok(LocatedNativeSession {
         native_session_id,
@@ -245,7 +248,7 @@ pub fn native_session_id_from_path(harness: HarnessKind, path: &Path) -> Option<
         HarnessKind::Muse => path.parent()?.file_name()?.to_str().map(str::to_owned),
         // OpenCode sessions live in SQLite rows, not files, so no transcript
         // path carries their id.
-        HarnessKind::OpenCode => None,
+        HarnessKind::OpenCode | HarnessKind::Mimo => None,
     }
 }
 
@@ -292,6 +295,9 @@ pub fn list_native_session_sources(
         HarnessKind::OpenCode => bail!(
             "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot enumerate them yet"
         ),
+        HarnessKind::Mimo => bail!(
+            "MiMo Code keeps its sessions in a SQLite database; Mjolnir cannot enumerate them yet"
+        ),
         other => bail!("{other:?} keeps one session per file; there is nothing to enumerate"),
     };
     Ok(sources)
@@ -323,6 +329,9 @@ pub fn read_native_transcript(
         HarnessKind::Grok => read_grok_transcript(source_path),
         HarnessKind::OpenCode => bail!(
             "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot import them yet"
+        ),
+        HarnessKind::Mimo => bail!(
+            "MiMo Code keeps its sessions in a SQLite database; Mjolnir cannot import them yet"
         ),
     }
 }
@@ -402,6 +411,9 @@ pub fn scan_native_sessions(
         }),
         HarnessKind::OpenCode => bail!(
             "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot enumerate them yet"
+        ),
+        HarnessKind::Mimo => bail!(
+            "MiMo Code keeps its sessions in a SQLite database; Mjolnir cannot enumerate them yet"
         ),
     }
 }

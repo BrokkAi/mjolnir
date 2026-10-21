@@ -157,10 +157,12 @@ RUN npm install --global --no-audit --no-fund \
         @anthropic-ai/claude-code@2.1.306 \
         @brokkai/muse-acp@0.15.0 \
         @openai/codex@0.160.1 \
+        @mimo-ai/cli@0.1.15 \
     && npm cache clean --force \
     && codex --version \
     && codex-acp --version \
     && claude --version \
+    && mimo --version \
     && [ "$(node -p "require('/usr/local/lib/node_modules/@brokkai/muse-acp/package.json').version")" = "0.15.0" ]
 
 # The bridge prefers CODEX_PATH over its bundled Codex binary. Select the
@@ -171,6 +173,9 @@ ENV CODEX_PATH=/usr/local/lib/node_modules/@openai/codex/bin/codex.js
 # The Claude bridge honors this override instead of its SDK's bundled CLI.
 # Match the separately pinned Code used by managed bare workers.
 ENV CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude
+
+# MiMo Code applies patch updates during normal startup unless this is set.
+ENV MIMOCODE_DISABLE_AUTOUPDATE=1
 
 # Buildx sets TARGETARCH per platform; the dpkg fallback keeps a plain
 # single-arch `podman build` working.

@@ -18,6 +18,7 @@ pub enum HarnessKind {
     Grok,
     Muse,
     OpenCode,
+    Mimo,
 }
 
 /// The operating system of the machine a harness's own CLI runs on, as far as
@@ -250,6 +251,13 @@ impl HarnessKind {
             self.home_env().into(),
             crate::target_path::text(config_root),
         );
+        if self == Self::Mimo {
+            environment.insert(
+                "MIMOCODE_CONFIG_DIR".into(),
+                crate::target_path::text(&crate::target_path::join(home, Path::new("config"))),
+            );
+            environment.insert("MIMOCODE_DISABLE_AUTOUPDATE".into(), "1".into());
+        }
     }
 
     /// Point this harness's own CLI at a profile's configured home, for the
@@ -343,13 +351,14 @@ impl HarnessKind {
         }
     }
 
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Codex,
         Self::Claude,
         Self::Kimi,
         Self::Grok,
         Self::Muse,
         Self::OpenCode,
+        Self::Mimo,
     ];
 
     /// Environment variable used to isolate this harness's configuration.
@@ -361,6 +370,7 @@ impl HarnessKind {
             Self::Grok => "GROK_HOME",
             Self::Muse => "XDG_CONFIG_HOME",
             Self::OpenCode => "XDG_CONFIG_HOME",
+            Self::Mimo => "MIMOCODE_HOME",
         }
     }
 
@@ -374,6 +384,7 @@ impl HarnessKind {
             Self::Grok => ".grok",
             Self::Muse => ".config/muse",
             Self::OpenCode => ".config/opencode",
+            Self::Mimo => ".mimocode",
         }
     }
 
@@ -392,6 +403,7 @@ impl HarnessKind {
             Self::Grok => "auth.json",
             Self::Muse => "auth.json",
             Self::OpenCode => ".data/opencode/mjolnir-credentials.json",
+            Self::Mimo => "data/auth.json",
         }
     }
 
@@ -425,6 +437,7 @@ impl HarnessKind {
             Self::Grok => "grok",
             Self::Muse => "muse",
             Self::OpenCode => "opencode",
+            Self::Mimo => "mimo",
         }
     }
 
@@ -432,7 +445,9 @@ impl HarnessKind {
     pub const fn agent_instructions_file(self) -> &'static str {
         match self {
             Self::Claude => "CLAUDE.md",
-            Self::Codex | Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode => "AGENTS.md",
+            Self::Codex | Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode | Self::Mimo => {
+                "AGENTS.md"
+            }
         }
     }
 
@@ -445,6 +460,7 @@ impl HarnessKind {
             Self::Codex | Self::Claude | Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode => {
                 &["skills"]
             }
+            Self::Mimo => &["config/skills"],
         }
     }
 
@@ -466,7 +482,7 @@ impl HarnessKind {
         match self {
             Self::Claude => &["skills/synced", "skills/.trash"],
             Self::Codex => &["skills/.system"],
-            Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode => &[],
+            Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode | Self::Mimo => &[],
         }
     }
 
@@ -479,6 +495,7 @@ impl HarnessKind {
             Self::Grok => "grok",
             Self::Muse => "muse",
             Self::OpenCode => "opencode",
+            Self::Mimo => "mimo",
         }
     }
 
@@ -491,6 +508,7 @@ impl HarnessKind {
             Self::Grok => "Grok Build",
             Self::Muse => "Muse Code",
             Self::OpenCode => "OpenCode",
+            Self::Mimo => "MiMo Code",
         }
     }
 
@@ -504,6 +522,9 @@ impl HarnessKind {
                 "Install it with `npm install -g @openai/codex` (Node.js 22 or newer)".to_owned()
             }
             Self::Claude => "Install it with `npm install -g @anthropic-ai/claude-code`".to_owned(),
+            Self::Mimo => {
+                "Install it with `npm install -g @mimo-ai/cli` (Node.js 22 or newer)".to_owned()
+            }
             other => format!("Install the {} CLI", other.display_name()),
         }
     }
@@ -669,6 +690,20 @@ impl HarnessKind {
                     object_version: None,
                 }),
             }),
+            // This is MiMo Code's own unconstrained startup mode. It injects
+            // an allow-all base rule and also bypasses the forced confirmation
+            // for irreversible shell deletes; explicit deny rules still win.
+            (Self::Mimo, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
+                label: "dangerously-skip-permissions",
+                acp_mode: None,
+                acp_mode_selector: None,
+                acp_setting: None,
+                launch_flag: None,
+                launch_environment: Some(("MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS", "1")),
+                launch_argument: None,
+                session_sandbox: None,
+                staged_setting: None,
+            }),
         }
     }
 
@@ -720,7 +755,7 @@ impl HarnessKind {
     pub const fn supports_guardian_approvals(self) -> bool {
         matches!(
             self,
-            Self::Codex | Self::Claude | Self::Grok | Self::OpenCode | Self::Muse
+            Self::Codex | Self::Claude | Self::Grok | Self::OpenCode | Self::Muse | Self::Mimo
         )
     }
 
@@ -751,7 +786,7 @@ impl HarnessKind {
         match self {
             Self::Claude => Some(".claude.json"),
             Self::Kimi => Some("mcp.json"),
-            Self::Codex | Self::Grok | Self::Muse | Self::OpenCode => None,
+            Self::Codex | Self::Grok | Self::Muse | Self::OpenCode | Self::Mimo => None,
         }
     }
 
@@ -770,6 +805,7 @@ impl HarnessKind {
             Self::Kimi | Self::Grok => &["sessions"],
             Self::Muse => &[".data/muse/sessions"],
             Self::OpenCode => &[".data/opencode"],
+            Self::Mimo => &["data"],
         }
     }
 
@@ -787,7 +823,7 @@ impl HarnessKind {
         match self {
             Self::Grok => Some("bin/agent"),
             Self::Claude => Some("node_modules/.bin/claude"),
-            Self::Codex | Self::Kimi | Self::Muse | Self::OpenCode => None,
+            Self::Codex | Self::Kimi | Self::Muse | Self::OpenCode | Self::Mimo => None,
         }
     }
 
@@ -799,6 +835,7 @@ impl HarnessKind {
             Self::Kimi => vec!["acp"],
             Self::Grok => ["agent"].into_iter().chain(flag).chain(["stdio"]).collect(),
             Self::OpenCode => vec!["acp"],
+            Self::Mimo => vec!["acp"],
         }
     }
 }
