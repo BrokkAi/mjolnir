@@ -517,14 +517,14 @@ test('golden_viewer_conversation', async ({ context }) => {
   await longPage.addStyleTag({ content: '#connection, #jump-to-latest { display: none !important; }' });
   const panel = longPage.locator('#elicitations');
   await captureConversationState(output, longPage, 'long phone elicitation form', longState, await conversationLayout(longPage));
-  await panel.getByRole('button', { name: 'Answer and next', exact: true }).click();
-  await panel.getByRole('button', { name: 'Answer and next', exact: true }).click();
+  await panel.getByRole('button', { name: 'Answer & Next', exact: true }).click();
+  await panel.getByRole('button', { name: 'Answer & Next', exact: true }).click();
   const finalChoice = panel.getByRole('radio', { name: /^Choice 3\.5/ });
   await finalChoice.check();
   await finalChoice.evaluate(input => input.blur());
-  await panel.getByRole('button', { name: 'Submit all', exact: true }).scrollIntoViewIfNeeded();
+  await panel.getByRole('button', { name: 'Answer & Next', exact: true }).scrollIntoViewIfNeeded();
   const longGeometry = await conversationLayout(longPage);
-  await panel.getByRole('button', { name: 'Submit all', exact: true }).click();
+  await panel.getByRole('button', { name: 'Answer & Next', exact: true }).click();
   await waitForActionCount(longState, 1);
   await expect(panel.locator('.elicitation')).toHaveCount(0);
   await captureConversationState(output, longPage, 'long phone elicitation answers submitted', longState, longGeometry);
@@ -614,10 +614,10 @@ test('optional choices start unanswered and can be cleared after selection', asy
   await expect(card.locator('input[type="radio"]:checked')).toHaveCount(0);
   await card.getByRole('radio', { name: /^Green/ }).check();
   await card.getByRole('radio', { name: 'No answer', exact: true }).check();
-  await card.getByRole('button', { name: 'Submit all', exact: true }).click();
-  await expect(card.getByRole('button', { name: 'Go back', exact: true })).toBeFocused();
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
+  await expect(card.getByRole('button', { name: 'Previous', exact: true })).toBeFocused();
   expect(state.actions).toHaveLength(0);
-  await card.getByRole('button', { name: 'Submit anyway', exact: true }).click();
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
   await waitForActionCount(state, 1);
   expect(state.actions[0].response).toEqual({ action: 'accept', content: {} });
 });
@@ -637,7 +637,7 @@ test('elicitation enum and custom answers submit exact content and survive snaps
   const green = card.locator('label.choice-option').filter({ hasText: /^Green/ });
   await green.click();
   await expect(green.locator('input')).toBeChecked();
-  await card.getByRole('button', { name: 'Submit all' }).click();
+  await card.getByRole('button', { name: 'Answer & Next' }).click();
   await waitForActionCount(state, 1);
   expect(state.actions[0]).toEqual({
     action: 'respond-elicitation',
@@ -655,12 +655,12 @@ test('elicitation enum and custom answers submit exact content and survive snaps
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 
   state.rejectNextAnswer = true;
-  await custom.getByRole('button', { name: 'Submit all' }).click();
+  await custom.getByRole('button', { name: 'Answer & Next' }).click();
   await waitForActionCount(state, 2);
   await expect(page.locator('#conversation-error')).toHaveText('answer temporarily rejected');
   await expect(custom.locator('input[type="text"]')).toHaveValue('Canary');
-  await expect(custom.getByRole('button', { name: 'Submit all' })).toBeEnabled();
-  await custom.getByRole('button', { name: 'Submit all' }).click();
+  await expect(custom.getByRole('button', { name: 'Answer & Next' })).toBeEnabled();
+  await custom.getByRole('button', { name: 'Answer & Next' }).click();
   await waitForActionCount(state, 3);
   expect(state.actions[2]).toEqual(state.actions[1]);
   expect(state.actions[1]).toEqual({
@@ -737,7 +737,7 @@ test('phone elicitation prompts stay above choices and the focused answer fits b
 
   // Moving focus from the text input to one of the card's buttons blurs first;
   // the card remains expanded through that button's click/focus interaction.
-  await card.getByRole('button', { name: 'Answer and next', exact: true }).focus();
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).focus();
   await expect(page.locator('body')).toHaveClass(/elicitation-focused/);
   await other.focus();
   await page.setViewportSize({ width: 390, height: 464 });
@@ -878,7 +878,7 @@ test('multi-select choices use full-row phone taps, survive refresh, and retry a
   await expect(options.nth(0).locator('input')).toBeChecked();
 
   // The minimum is enforced before any daemon action is sent.
-  await card.getByRole('button', { name: 'Submit all' }).click();
+  await card.getByRole('button', { name: 'Answer & Next' }).click();
   await expect.poll(() => state.actions.length).toBe(0);
   await options.nth(1).click();
   await expect(options.nth(1).locator('input')).toBeChecked();
@@ -889,14 +889,14 @@ test('multi-select choices use full-row phone taps, survive refresh, and retry a
   await expect(options.nth(1).locator('input')).toBeChecked();
 
   state.rejectNextAnswer = true;
-  await card.getByRole('button', { name: 'Submit all' }).click();
+  await card.getByRole('button', { name: 'Answer & Next' }).click();
   await waitForActionCount(state, 1);
   await expect(page.locator('#conversation-error')).toHaveText('answer temporarily rejected');
   await expect(options.nth(0).locator('input')).toBeChecked();
   await expect(options.nth(1).locator('input')).toBeChecked();
-  await expect(card.getByRole('button', { name: 'Submit all' })).toBeEnabled();
+  await expect(card.getByRole('button', { name: 'Answer & Next' })).toBeEnabled();
 
-  await card.getByRole('button', { name: 'Submit all' }).click();
+  await card.getByRole('button', { name: 'Answer & Next' }).click();
   await waitForActionCount(state, 2);
   expect(state.actions[1]).toEqual({
     action: 'respond-elicitation',
@@ -925,11 +925,11 @@ test('custom multi-select text answers alone or joins picks that keep their limi
   // Picks beside the text are sent with it, so they keep their own limits.
   for (let index = 0; index < 3; index += 1) await options.nth(index).click();
   await expect(ownerInput).toHaveJSProperty('validationMessage', 'Select at most 2 option(s).');
-  await card.getByRole('button', { name: 'Submit all' }).click();
+  await card.getByRole('button', { name: 'Answer & Next' }).click();
   await expect.poll(() => state.actions.length).toBe(0);
   for (let index = 0; index < 3; index += 1) await options.nth(index).click();
   await expect(ownerInput).toHaveJSProperty('validationMessage', '');
-  await card.getByRole('button', { name: 'Submit all' }).click();
+  await card.getByRole('button', { name: 'Answer & Next' }).click();
   await waitForActionCount(state, 1);
   expect(state.actions[0]).toEqual({
     action: 'respond-elicitation',
@@ -943,7 +943,7 @@ test('custom multi-select text answers alone or joins picks that keep their limi
   await joinedOptions.nth(0).click();
   await joinedOptions.nth(1).click();
   await joined.locator('input[type="text"]').fill('Mars');
-  await joined.getByRole('button', { name: 'Submit all' }).click();
+  await joined.getByRole('button', { name: 'Answer & Next' }).click();
   await waitForActionCount(state, 2);
   expect(state.actions[1].response).toEqual({
     action: 'accept',
@@ -961,6 +961,7 @@ function claudeQuestion(id, message) {
 }
 
 // Hard-won: #1312: writing Claude's Other text took back the option picked before it.
+// Hard-won: 5ca468627: resolving a sibling question detached the focused text input.
 test('Claude Other text goes beside the pick in either order, and alone with nothing picked', async ({ page }) => {
   const state = await mockViewerApi(page, [
     claudeQuestion('pick-then-write', 'Pick, then write a note.'),
@@ -968,7 +969,7 @@ test('Claude Other text goes beside the pick in either order, and alone with not
     claudeQuestion('write-only', 'Write your own answer.'),
   ]);
   const card = message => page.locator('#elicitations .elicitation').filter({ hasText: message });
-  const submit = async message => card(message).getByRole('button', { name: 'Submit all' }).click();
+  const submit = async message => card(message).getByRole('button', { name: 'Answer & Next' }).click();
 
   // The text box is a field of its own, not one of the choices.
   await expect(card('Pick, then write a note.').getByRole('radio', { name: 'Other', exact: true })).toHaveCount(0);
@@ -995,6 +996,12 @@ test('Claude Other text goes beside the pick in either order, and alone with not
   await card('Write your own answer.').getByRole('radio', { name: 'No answer', exact: true }).focus();
   await page.keyboard.press('Tab');
   await expect(card('Write your own answer.').locator('input[type="text"]')).toBeFocused();
+  state.snapshot.sessions[0].pending_elicitations.unshift(claudeQuestion('sibling', 'Another question.'));
+  await publishSnapshotDelta(page, state);
+  await expect(card('Write your own answer.').locator('input[type="text"]')).toBeFocused();
+  state.snapshot.sessions[0].pending_elicitations.shift();
+  await publishSnapshotDelta(page, state);
+  await expect(card('Write your own answer.').locator('input[type="text"]')).toBeFocused();
   await page.keyboard.type('Canary');
   await expect(card('Write your own answer.').locator('input[type="radio"]:checked')).toHaveCount(0);
   await submit('Write your own answer.');
@@ -1015,7 +1022,7 @@ test('a free-text alternative is the answer only while it is chosen', async ({ p
   await expect(freeText).toBeChecked();
   // Choosing an offered option instead leaves the text out of the answer.
   await card.getByRole('radio', { name: /^Green/ }).check();
-  await card.getByRole('button', { name: 'Submit all' }).click();
+  await card.getByRole('button', { name: 'Answer & Next' }).click();
   await waitForActionCount(state, 1);
   expect(state.actions[0].response).toEqual({ action: 'accept', content: { question_0: 'green' } });
 });
@@ -1153,34 +1160,38 @@ function guidedQuestions(id, count = 3) {
   return request;
 }
 
-test('guided navigation does not accept defaults and partial submission requires a separate action', async ({ page }) => {
+test('three guided actions preserve deliberate partial submission', async ({ page }) => {
   const state = await mockViewerApi(page, [guidedQuestions('guided-partial')]);
   const card = page.locator('#elicitations .elicitation');
   const progress = card.locator('.elicitation-progress');
   await expect(progress).toHaveText('Question 1/3 · 3 unanswered');
   await expect(card.getByRole('group')).toHaveCount(1);
-  await expect(card.getByRole('button', { name: 'Submit all', exact: true })).toHaveCount(0);
-  await card.getByRole('button', { name: 'Next', exact: true }).click();
-  await card.getByRole('button', { name: 'Next', exact: true }).click();
+  await expect(card.getByRole('button')).toHaveText(['Answer & Next', 'Previous', 'Cancel']);
+  await expect(card.getByRole('button', { name: 'Previous', exact: true })).toBeDisabled();
+  await card.getByRole('radio', { name: 'No answer', exact: true }).check();
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
+  await card.getByRole('radio', { name: 'No answer', exact: true }).check();
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
   await expect(progress).toHaveText('Question 3/3 · 3 unanswered');
-  await card.getByRole('button', { name: 'Submit all', exact: true }).click();
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
   await expect(card.getByRole('alert')).toContainText('2 unanswered questions');
   await expect(card.getByRole('alert')).toContainText('Decision 1');
   await expect(card.getByRole('alert')).toContainText('Decision 2');
+  await expect(card.getByRole('button')).toHaveText(['Answer & Next', 'Previous', 'Cancel']);
   expect(state.actions).toHaveLength(0);
-  await expect(card.getByRole('button', { name: 'Go back', exact: true })).toBeFocused();
+  await expect(card.getByRole('button', { name: 'Previous', exact: true })).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(progress).toHaveText('Question 1/3 · 2 unanswered');
   expect(state.actions).toHaveLength(0);
-  await card.getByRole('button', { name: 'Next', exact: true }).click();
-  await card.getByRole('button', { name: 'Next', exact: true }).click();
-  await card.getByRole('button', { name: 'Submit all', exact: true }).click();
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
   await page.keyboard.press('Escape');
   await expect(progress).toHaveText('Question 1/3 · 2 unanswered');
-  await card.getByRole('button', { name: 'Next', exact: true }).click();
-  await card.getByRole('button', { name: 'Next', exact: true }).click();
-  await card.getByRole('button', { name: 'Submit all', exact: true }).click();
-  await card.getByRole('button', { name: 'Submit anyway', exact: true }).click();
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
   await waitForActionCount(state, 1);
   expect(state.actions[0].response).toEqual({ action: 'accept', content: { answer_2: 'blue' } });
 });
@@ -1189,7 +1200,7 @@ test('confirmed answers survive backtracking and refresh but edits require confi
   const state = await mockViewerApi(page, [guidedQuestions('guided-edit', 2)]);
   const card = page.locator('#elicitations .elicitation');
   const progress = card.locator('.elicitation-progress');
-  await card.getByRole('button', { name: 'Answer and next', exact: true }).click();
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
   await expect(progress).toHaveText('Question 2/2 · 1 unanswered');
   await card.getByRole('button', { name: 'Previous', exact: true }).click();
   await expect(progress).toHaveText('Question 1/2 · 1 unanswered');
@@ -1198,32 +1209,34 @@ test('confirmed answers survive backtracking and refresh but edits require confi
   await publishSnapshotDelta(page, state);
   await expect(card.getByRole('radio', { name: /^Green/ })).toBeChecked();
   await expect(progress).toHaveText('Question 1/2 · 2 unanswered');
-  await card.getByRole('button', { name: 'Next', exact: true }).click();
-  await card.getByRole('button', { name: 'Submit all', exact: true }).click();
   expect(state.actions).toHaveLength(0);
-  await card.getByRole('button', { name: 'Go back', exact: true }).click();
-  await card.getByRole('button', { name: 'Answer and next', exact: true }).click();
-  await card.getByRole('button', { name: 'Submit all', exact: true }).click();
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
+  await expect(progress).toHaveText('Question 2/2 · 1 unanswered');
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
   await waitForActionCount(state, 1);
   expect(state.actions[0].response.content).toEqual({ answer_0: 'green', answer_1: 'blue' });
 });
 
-test('skipped required defaults return to that question instead of submitting', async ({ page }) => {
+test('required answers must pass browser validation before advancing', async ({ page }) => {
   const request = guidedQuestions('guided-required', 2);
-  request.fields[0].required = true;
+  request.fields[0] = { ...request.fields[0], kind: 'text', default: null, required: true };
   const state = await mockViewerApi(page, [request]);
   const card = page.locator('#elicitations .elicitation');
-  await card.getByRole('button', { name: 'Next', exact: true }).click();
-  await card.getByRole('button', { name: 'Submit all', exact: true }).click();
-  await expect(card.locator('.elicitation-progress')).toHaveText('Question 1/2 · 1 unanswered');
-  await expect(card).toContainText('Answer Decision 1 before submitting.');
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
+  await expect(card.locator('.elicitation-progress')).toHaveText('Question 1/2 · 2 unanswered');
   expect(state.actions).toHaveLength(0);
+  await card.getByRole('textbox').fill('Approved');
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
+  await expect(card.locator('.elicitation-progress')).toHaveText('Question 2/2 · 1 unanswered');
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
+  await waitForActionCount(state, 1);
+  expect(state.actions[0].response.content).toEqual({ answer_0: 'Approved', answer_1: 'blue' });
 });
 
 test('question replacement resets confirmation even when the request id is reused', async ({ page }) => {
   const state = await mockViewerApi(page, [guidedQuestions('reused-id', 2)]);
   const card = page.locator('#elicitations .elicitation');
-  await card.getByRole('button', { name: 'Answer and next', exact: true }).click();
+  await card.getByRole('button', { name: 'Answer & Next', exact: true }).click();
   state.snapshot.sessions[0].pending_elicitations[0].fields[0].title = 'Replacement decision';
   await publishSnapshotDelta(page, state);
   await expect(card.locator('.elicitation-progress')).toHaveText('Question 1/2 · 2 unanswered');
@@ -1238,7 +1251,7 @@ test('keyboard submission accepts false booleans and an empty form sends only on
   };
   const state = await mockViewerApi(page, [request, { id: 'empty-form', message: 'Continue?', fields: [] }]);
   const boolean = page.locator('#elicitations .elicitation').first();
-  await boolean.getByRole('button', { name: 'Submit all', exact: true }).focus();
+  await boolean.getByRole('button', { name: 'Answer & Next', exact: true }).focus();
   await page.keyboard.press('Enter');
   await waitForActionCount(state, 1);
   expect(state.actions[0].response.content).toEqual({ answer_0: false });

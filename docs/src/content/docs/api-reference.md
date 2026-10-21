@@ -505,8 +505,9 @@ field.
 The reply is `201` as soon as the controller has published an id.
 **`turn_id` is null on creation**: provisioning a target takes minutes, so the
 first prompt is submitted in the background once the harness is ready, after
-`model` and `effort` are applied. Wait on the session without a `turn_id` and
-the wait picks up that first turn by itself.
+`model` and `effort` are applied. A wait on the session without a `turn_id`
+does not answer before that first turn has ended, and then waits for the
+session to settle.
 
 ### Send a prompt
 
@@ -530,7 +531,8 @@ answers `409` and never becomes a turn. Any other session that cannot take a
 prompt right now answers `409`.
 
 For recovery operations, supply an optional `command_id` (also exposed as
-`mj prompt --command-id ID`). Retrying the identical command with the same ID
+`mj prompt --command-id ID` and `mj message --command-id ID`). Retrying the
+identical command with the same ID
 returns its original relay acceptance ordinal. Keep the body unchanged; use a
 new ID for a different command. Ordinary clients may omit it.
 
@@ -549,13 +551,24 @@ POST /api/v1/sessions/{session_id}/message
 ```
 
 `sender_session_id` is optional. The CLI sets it from `MJ_SESSION_ID` when
-present; otherwise the message is from the user. The daemon requires a claimed
-sender to be an existing top-level session. An authenticated local caller may
-claim another top-level session ID. The reply is `202` with `session_id`, `via`
-(`mailbox` or `turn`), and an optional `turn_id`. Message delivery refuses an
-unknown, destroyed, stopped, self, or other session's sub-agent target. A peer
-mailbox message wakes an idle recipient; workers below relay protocol 36
-receive a queued turn with the same sender label and reply instruction.
+present.
+
+Without `sender_session_id` the message is from the user, and the daemon
+submits it as the user's prompt, exactly as `POST /sessions/{id}/prompt` does:
+a session that is still starting holds it, a busy session takes it into the
+running turn or queues it, and the same refusals apply. `request_id` is the
+prompt's command ID, so retrying with the same `request_id` returns the same
+turn rather than sending a second prompt. `{session_id}` may be a full ID or a
+unique hexadecimal prefix of at least 8 characters. The reply is `202` with the
+full `session_id`, `via: "turn"`, and the `turn_id` that `wait` takes.
+
+With `sender_session_id`, the daemon requires the sender to be an existing
+top-level session. An authenticated local caller may claim another top-level
+session ID. The reply is `202` with `session_id`, `via` (`mailbox` or `turn`),
+and an optional `turn_id`. Message delivery refuses an unknown, destroyed,
+stopped, self, or other session's sub-agent target. A peer mailbox message
+wakes an idle recipient; workers below relay protocol 36 receive a queued turn
+with the same sender label and reply instruction.
 
 Typed `/clear` clears the native conversation in the same session and checkout.
 Its acceptance is not completion: observe the `command_ended` event and the
@@ -588,14 +601,39 @@ POST /api/v1/sessions/{session_id}/wait
 ```
 
 Both fields are optional. `timeout_secs` defaults to 600 and may not exceed
-3600. With no `turn_id` the wait ends when the session is idle with nothing
-queued, which is what a caller that lost its turn id — or that created the
-session and never had one — wants. Queued prompts are why the explicit id
-matters: without it, an earlier prompt's outcome could answer for a later one.
+3600. The two forms answer different questions.
+
+- **With `turn_id`, the wait answers when that turn has ended**, and says how.
+  The turn has ended once the worker has stopped working on that prompt: it
+  keeps waiting while the worker is about to resend the same request (a server
+  retry, which answers for the turn when it ends), while Jev is still reading
+  the reply, and while a sub-agent child still owes its report. It does not
+  wait for anything that starts new work: a turn the agent starts on its own,
+  background work, an expected continuation, Mjolnir's automatic continuation,
+  a later prompt, or a goal. To learn when your prompt's turn ended, pass its
+  `turn_id`, or use `mj prompt`.
+- **Without `turn_id`, the wait answers when the session settles**: the
+  worker's activity state is idle (the same state the dashboard shows as
+  idle), nothing is queued, the session can take a prompt, and a first prompt
+  handed over at creation has ended. That includes turns the agent starts on
+  its own, so this form can wait long after your prompt's turn ended. It then
+  reports how the latest turn ended; a session with no turn at all answers
+  `finished` at once.
+
+A session keeps only its latest turn outcome, so a wait on turn 57 that answers
+late can describe turn 61; `turn_id` says which turn the answer is about, and
+`requested_turn_id` repeats the one you asked for. Queued prompts are why the
+explicit id matters: without it, an earlier prompt's outcome could answer for a
+later one.
 
 `wait` reports how the named turn ended, and nothing else. An error the
 session recorded for some earlier, unrelated action does not fail the turn you
 asked about; the wait keeps waiting until that turn actually ends.
+
+When the session is not idle as the wait answers, `next` carries the worker's
+activity state, the same object as `activity_state` on a session, for example
+`"next": { "state": "background", "started_at_ms": 1788000000000 }` after a turn
+that left a build running. It is absent when the session is idle.
 
 ```json
 {
@@ -611,7 +649,7 @@ asked about; the wait keeps waiting until that turn actually ends.
 }
 ```
 
-For `mj wait --json` and `mj prompt --wait --json`, stdout contains the JSON
+For `mj wait --json` and `mj prompt --json`, stdout contains the JSON
 response even when the command exits unsuccessfully. `finished` and
 `input_required` exit **0**. `timeout`, `error`, `cancelled`, `quota_limit`, and
 `stopped` exit **1**, with a diagnostic on stderr. A timeout does not cancel the
@@ -635,7 +673,7 @@ response = json.loads(result.stdout)
 | `finished` | The turn completed normally. |
 | `error` | The turn failed or was rejected, the session could not be launched or started, or the harness gave a stop reason Mjolnir does not recognize. `stop_reason` and `message` say which. |
 | `cancelled` | The turn was cancelled or interrupted, which is what `interrupt-turn` produces. |
-| `quota_limit` | Reported usage quota is exhausted, or the model was at capacity and no retry is armed. |
+| `quota_limit` | Reported usage quota is exhausted, or Jev read the reply as a quota stop. When a quota recovery is recorded for the turn, `message` is its notice, whether or not a resume is scheduled: the resume is a new turn. |
 | `timeout` | The deadline passed with the turn still running. Wait again with the same `turn_id`. |
 | `stopped` | The session is suspended or failed, so no turn can finish on it. `message` carries the session's own recorded reason when it has one, such as a resume that failed. |
 
@@ -652,10 +690,11 @@ response = json.loads(result.stdout)
   limit returns `quota_limit` with stop reason `QuotaLimit`. The caller decides
   when to send another prompt. HTTP 403 or an authentication error alone is not
   enough to classify a quota limit. Reset text is not an invented retry deadline.
-- **A capacity retry keeps the wait waiting.** When the model reports capacity
-  limits, the worker arms its own retry and submits it; returning `quota_limit`
-  then would make your next prompt collide with that retry. If the deadline
-  passes first, the response carries
+- **A server retry keeps the wait waiting.** When the provider refuses a turn
+  and Jev judges the failure transient, the worker arms its own retry of that
+  turn and submits it; answering then would make your next prompt collide with
+  the retry. The wait answers when the retry ends, with the retry's outcome and
+  `turn_id`. If the deadline passes first, the response carries
   `"capacity_retry": { "attempt": 2, "retry_at_ms": 1788000000000 }`. Do not
   send a prompt while that field is present.
 - `relay` describes the daemon's live view of this session, when a live actor
@@ -939,9 +978,8 @@ Preconditions, all answering `409` with the reason:
 | `mj sessions` | `GET /sessions` |
 | `mj sessions --session <id>` | `GET /sessions/{id}` |
 | `mj new` | `POST /sessions` |
-| `mj prompt --session <id>` | `POST /sessions/{id}/prompt` |
-| `mj prompt --session <id> --wait` | `POST /sessions/{id}/prompt`, then `POST /sessions/{id}/wait` on the turn it returned |
-| `mj message --session <id> <text>` | `POST /sessions/{id}/message` |
+| `mj prompt --session <id> <text>` | `POST /sessions/{id}/prompt`, then `POST /sessions/{id}/wait` on the turn it returned |
+| `mj message --session <id> <text>` | `POST /sessions/{id}/message` (from your own shell, with no `sender_session_id`) |
 | `mj wait --session <id>` | `POST /sessions/{id}/wait` |
 | `mj transcript --session <id>` | `GET /sessions/{id}/transcript` |
 | `mj diff --session <id>` | `GET /sessions/{id}/diff` |
@@ -967,7 +1005,7 @@ mj workspaces create scripts
 mj new --workspace scripts --profile codex --target localhost --project-directory . \
   "add a README line"
 mj wait --session <id>
-mj prompt --session <id> --wait "now add a test"
+mj prompt --session <id> "now add a test"
 mj diff --session <id>
 mj export --session <id> --kind bundle --out work.bundle
 mj suspend --session <id> --acknowledge-unpublished-work
@@ -1181,7 +1219,7 @@ completed turns. These events do not prescribe retries or automatic pauses.
 usage remain on `turn`. Quota exhaustion is `failed` with reason `quota_limit`.
 Unknown harness endings are `failed` with reason `unrecognized_stop_reason`.
 Events, `mj wait`, and transcript rendering share this classification; `wait`
-retains its existing exit codes and continuation policy.
+keeps its own exit codes.
 
 `command_ended` includes `owner` (`worker` or `daemon`), `command_id`,
 `command_kind`, and `outcome` (`succeeded`, `cancelled`, `rejected`, or `failed`).
@@ -1317,6 +1355,6 @@ mj respond --session SESSION --elicitation REQUEST --response-file answer.json
 ```
 
 `mj put-file` accepts `-` as the source for binary stdin. `mj respond` accepts a
-positional JSON response or `-` for stdin. `mj prompt --wait` also accepts
+positional JSON response or `-` for stdin. `mj prompt` also accepts
 `--return-on-input`. The CLI exits successfully on `input_required`
 results so an orchestrator can answer and resume waiting.

@@ -51,13 +51,13 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
 - [x] (2026-10-21 14:10Z) Milestone 4, first part: a container's applied settings record the default
       image it was created from (`ContainerSettings::default_image`); `recreation_required` follows
       the default to this build's, so Restart offers recreation once an upgrade moved it, and
-      `default_image_moved` names that case. Breaking migration 87 (older writers would drop the
+      `default_image_moved` names that case. Breaking migration 88 (older writers would drop the
       field). Restart confirmation wording updated in the TUI, the web viewer and both goldens.
 - [x] (2026-10-21 15:05Z) Milestone 4, second part: a quiet session whose worker is stale because
       its default image moved is recreated automatically through Restart's container recreation.
       Its checkpoint uses the new `LatchExclusivity::HoldThroughIdleClose`, which defers instead of
       interrupting work and never restarts the worker; a durable `automatic` column on Restart
-      intents (breaking migration 88) keeps those rules for a recovered intent; the worker-upgrade
+      intents (breaking migration 89) keeps those rules for a recovered intent; the worker-upgrade
       coordinator returns `WorkerUpgradeOutcome::RecreateContainer` instead of copying a worker in
       and owns the retry policy through `ContainerRecreationReport`. Validated by two new tests and
       an isolated-instance upgrade from a fake release A to a fake release B (see Outcomes).
@@ -164,6 +164,11 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
   automatic recreation on a host that cannot pull the new image would have stopped idle sessions
   nobody asked to touch.
 
+- Observation: while this work was local, master took schema revision 87 for elicitation
+  permission forms. The merge renumbered this plan's migrations to 88 (`default_image`) and 89
+  (the `automatic` intent column), with the floor at 89; neither had been applied outside
+  isolated test stores, which were deleted.
+
 ## Decision Log
 
 - Decision: pin release builds to the immutable tag `agent-dev:<CARGO_PKG_VERSION>` rather than to
@@ -235,7 +240,7 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
   from the database admission check and the dashboard projections, which have the session record
   but not the configuration. A configured image changes only when the person edits it, which
   Restart does not track today and this issue does not ask for. Date/Author: 2026-10-21, Claude.
-- Decision: classify migration 87 as breaking and raise the compatibility floor to 87, exactly as
+- Decision: classify migration 88 as breaking and raise the compatibility floor to 88, exactly as
   migrations 79 and 83 did for earlier `target_runtime_json` fields. Rationale: an older daemon
   rewrites that JSON without the new field, after which the container would never be recognized as
   due for recreation. Date/Author: 2026-10-21, Claude.
@@ -254,7 +259,7 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
   `RelayOperationalState::safe_to_replace`, the predicate the upgrade observer used, both before
   opening the barrier and again once it is ready, because background commands run on under a
   barrier. Date/Author: 2026-10-21, Claude.
-- Decision: store `automatic` on the Restart intent (migration 88, breaking) rather than keeping it
+- Decision: store `automatic` on the Restart intent (migration 89, breaking) rather than keeping it
   in memory. Rationale: a handoff or crash mid-recreation is recovered from the intent by the next
   daemon; without the marker it would be recovered as a Restart a person asked for and could
   interrupt a turn the worker started meanwhile. Date/Author: 2026-10-21, Claude.
@@ -542,13 +547,13 @@ Milestone 4 — replace containers on upgrade. A stopped session already gets a 
 resume, so the work is for running sessions. `ContainerSettings` (in
 `mj-core/src/state/target_runtime.rs`) records `default_image` when provisioning created the
 container from this build's default image, `requested` follows the default to this build's, and
-`default_image_moved` names a container left on an older one; migration 87 is breaking.
+`default_image_moved` names a container left on an older one; migration 88 is breaking.
 `Controller::upgrade_session_worker` returns `WorkerUpgradeOutcome::RecreateContainer` for such a
 session before resolving any binary; the daemon (`spawn_container_recreation` in
 `mj-controller/src/daemon/support.rs`) calls `RuntimeState::recreate_container_for_upgrade`
 (`mj-controller/src/daemon/restart.rs`), which admits an automatic Restart only while no handoff
 drains and reports the outcome back to the coordinator. The automatic intent is recorded with
-`automatic = 1` (migration 88, breaking), its checkpoint uses `LatchExclusivity::HoldThroughIdleClose`
+`automatic = 1` (migration 89, breaking), its checkpoint uses `LatchExclusivity::HoldThroughIdleClose`
 (defer instead of interrupting, never restart the worker), its before-close hook keeps sub-agents
 (standing down while any child has a target), and a stand-down releases the intent and leaves the
 session running with no error.
@@ -720,4 +725,4 @@ replaced the original sketches of Milestones 3 to 5 with what was built and why:
 is linked behind `<root>/hel` because that name is the worker's identity; stopped sessions needed
 no work because they have no container; running sessions are recreated through Restart's existing
 recreation phase with a new non-interrupting latch mode and a durable `automatic` marker
-(migrations 87 and 88); and in-place installs share one `WorkerInstall` decision.
+(migrations 88 and 89); and in-place installs share one `WorkerInstall` decision.

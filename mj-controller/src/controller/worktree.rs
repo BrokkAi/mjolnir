@@ -2027,25 +2027,35 @@ fn copy_source_origin_refs(
         ],
         "read cached origin branches",
     )?;
-    let mut updates = String::new();
+    let mut has_branches = false;
     for line in refs.lines() {
-        let (name, oid) = line
+        let (name, _) = line
             .split_once(' ')
             .context("malformed source remote ref")?;
-        if name == "refs/remotes/origin/HEAD" {
-            continue;
-        }
-        updates.push_str(&format!("update {name} {oid}\n"));
+        has_branches |= name != "refs/remotes/origin/HEAD";
     }
-    if !updates.is_empty() {
-        let command = managed_git_command(
-            &checkout.target,
-            staging,
-            ["update-ref", "--stdin"],
-            "preserve cached origin branches",
-        );
-        let output = executor.execute_with_stdin(&command, &mut updates.as_bytes())?;
-        command_stdout(output, &command.purpose)?;
+    if has_branches {
+        // Dissociation copies objects reachable from the clone's own refs, not
+        // source-only remote refs whose objects live in an alternate store.
+        // Fetch their objects and refs together from the trusted local seed.
+        execute_checked(
+            executor,
+            managed_git_command(
+                &checkout.target,
+                staging,
+                [
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "--no-recurse-submodules",
+                    "--",
+                    &checkout.source_repository.to_string_lossy(),
+                    "+refs/remotes/origin/*:refs/remotes/origin/*",
+                    "^refs/remotes/origin/HEAD",
+                ],
+                "preserve cached origin branches",
+            ),
+        )?;
     }
     Ok(())
 }

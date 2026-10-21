@@ -1,10 +1,11 @@
 //! Worker-owned Git capture for turn review.
 
+use super::attribution::{reflog_anchor, review_base};
 use anyhow::{Context, Result};
 use mj_checkpoint::archive::{
     GitCommand, GitCommandRunner, GitOutput, ReviewPoint, capture_paths, diff_between_trees,
-    merge_trees, numstat_between_trees, pin_review_tree, read_review_point, record_review_point,
-    remove_departed_worktree_pins, review_baseline_ref,
+    numstat_between_trees, pin_review_tree, read_head_reflog, read_review_point,
+    record_review_point, remove_departed_worktree_pins, review_baseline_ref,
 };
 use mj_core::refusal::Refusal;
 use mj_core::relay::{FileLineChange, RepoDelta};
@@ -54,8 +55,10 @@ pub fn capture_repository_deltas(
                 .map(|(id, _)| id),
         };
         // One HEAD for the whole capture: the tree starts from it and the
-        // review point records it, so the two cannot disagree.
+        // review point records it, so the two cannot disagree. The reflog is
+        // read once, for attributing this capture and anchoring the next.
         let head = resolve_head(git, root)?;
+        let reflog = read_head_reflog(git, root).map_err(|error| format!("{error:#}"));
         // Capture tracked changes and untracked paths that are new or changed
         // since the session started. A completed review can put untracked files
         // in its baseline tree, so carry forward those that still exist too;
@@ -84,12 +87,48 @@ pub fn capture_repository_deltas(
         // that `git status` no longer calls dirty.
         let tree = capture_paths(git, root, head.as_deref(), &changed)
             .with_context(|| format!("capture the changed paths of {}", root.display()))?;
-        let current = record_review_point(git, root, &tree, head.as_deref(), session)
-            .with_context(|| format!("record the capture of {}", root.display()))?;
-        let (base, patch, files) = match &baseline {
-            Some(baseline) => {
-                let base = review_base(git, root, baseline, head.as_deref())
-                    .with_context(|| format!("separate merged-in history in {}", root.display()))?;
+        let base = match &baseline {
+            Some(baseline) => Some(
+                review_base(
+                    git,
+                    root,
+                    baseline,
+                    head.as_deref(),
+                    reflog.as_deref().map_err(String::as_str),
+                    &tree,
+                )
+                .with_context(|| format!("separate the turn's commits in {}", root.display()))?,
+            ),
+            None => None,
+        };
+        // With a baseline, the attribution reports an unreadable reflog.
+        if let (Err(error), None) = (&reflog, &base) {
+            tracing::warn!(
+                repository = %root.display(),
+                error = %error,
+                "could not read the HEAD reflog; the next review covers every change"
+            );
+        }
+        let current = record_review_point(
+            git,
+            root,
+            &ReviewPoint {
+                tree: tree.clone(),
+                head: head.clone(),
+                reflog: reflog
+                    .as_deref()
+                    .ok()
+                    .and_then(|reflog| reflog_anchor(reflog, head.as_deref())),
+                pending: base
+                    .as_ref()
+                    .map(|base| base.pending.clone())
+                    .unwrap_or_default(),
+                session: Some(session.to_owned()),
+            },
+        )
+        .with_context(|| format!("record the capture of {}", root.display()))?;
+        let (base, patch, files) = match base {
+            Some(base) => {
                 let patch = diff_between_trees(git, root, Some(&base.tree), &tree)
                     .with_context(|| format!("diff the captured trees of {}", root.display()))?;
                 let numstat = numstat_between_trees(git, root, &base.tree, &tree)
@@ -102,8 +141,10 @@ pub fn capture_repository_deltas(
             None => (None, String::new(), Vec::new()),
         };
         let summary = RawDiffSummary::from_patch(&patch);
-        let (baseline_tree, merged_in) =
-            base.map_or((None, Vec::new()), |base| (Some(base.tree), base.merged_in));
+        let (baseline_tree, merged_in, unattributed) = base
+            .map_or((None, Vec::new(), None), |base| {
+                (Some(base.tree), base.merged_in, base.unattributed)
+            });
         deltas.push(RepoDelta {
             root: root.clone(),
             baseline_tree,
@@ -113,152 +154,10 @@ pub fn capture_repository_deltas(
             changed_lines: summary.changed_line_count(),
             files,
             merged_in,
+            unattributed,
         });
     }
     Ok(deltas)
-}
-
-/// What a review diffs from.
-struct ReviewBase {
-    /// The baseline, with every line of history the turn merged in folded in.
-    tree: String,
-    /// The merged-in commits whose changes `tree` already holds.
-    merged_in: Vec<String>,
-}
-
-/// The tree a review compares the capture with, so the diff is the turn's own
-/// work and not what it merged in.
-///
-/// The turn's line is HEAD's first-parent line since the commit the baseline
-/// was taken at, which is how Git names a branch's own history. Each merge on
-/// that line brought in its other parents' changes; those are folded into the
-/// baseline with a three-way merge whose ancestor is the merge base of that
-/// merge's first parent and the merged parent. The ancestor is the merge's own
-/// and not the baseline commit: upstream may already hold a commit the turn
-/// pushed earlier, and measuring from the baseline would fold that commit in as
-/// upstream work and hide it. A merged change that conflicts with reviewed
-/// content leaves conflict markers in the base, so the diff shows both sides and
-/// the turn's resolution. What remains is the turn's own commits, its conflict
-/// resolutions, and its uncommitted edits.
-///
-/// Commits that join the first-parent line by fast-forward or by a rebase onto
-/// another line are still reviewed as the turn's: the commit graph cannot tell
-/// them from commits the turn pushed, and reviewing too much is the safe way
-/// to be wrong.
-fn review_base(
-    git: &dyn GitCommandRunner,
-    repository: &Path,
-    baseline: &str,
-    head: Option<&str>,
-) -> Result<ReviewBase> {
-    let unchanged = || ReviewBase {
-        tree: baseline.to_owned(),
-        merged_in: Vec::new(),
-    };
-    let Some(head) = head else {
-        return Ok(unchanged());
-    };
-    let point = read_review_point(git, repository, baseline)?;
-    let since = match point.head {
-        Some(since) if object_exists(git, repository, &format!("{since}^{{commit}}")) => since,
-        // The commit outlives a rewrite in the reflog for at least 30 days, so
-        // this takes deliberate history deletion. Failing instead would keep
-        // the baseline from ever advancing.
-        Some(since) => {
-            tracing::warn!(
-                repository = %repository.display(),
-                commit = %since,
-                "the review baseline's commit is gone; the review includes any history the turn merged in"
-            );
-            return Ok(unchanged());
-        }
-        // A bare tree from an earlier release, or an unborn branch.
-        None => return Ok(unchanged()),
-    };
-    if since == head {
-        return Ok(unchanged());
-    }
-    let merges = first_parent_merges(git, repository, head, &since)?;
-    if merges.is_empty() {
-        return Ok(unchanged());
-    }
-    let mut tree = point.tree;
-    let mut merged_in = Vec::new();
-    for merge in merges {
-        for parent in merge.merged {
-            let ancestor = merge_base(git, repository, &merge.first_parent, &parent)?;
-            tree = merge_trees(git, repository, ancestor.as_deref(), &tree, &parent)?;
-            merged_in.push(parent);
-        }
-    }
-    Ok(ReviewBase { tree, merged_in })
-}
-
-/// A merge commit on the turn's line: the parent it was made on, and the
-/// parents it merged in.
-struct FirstParentMerge {
-    first_parent: String,
-    merged: Vec<String>,
-}
-
-/// The merges on HEAD's first-parent line that `since` does not contain,
-/// oldest first.
-fn first_parent_merges(
-    git: &dyn GitCommandRunner,
-    repository: &Path,
-    head: &str,
-    since: &str,
-) -> Result<Vec<FirstParentMerge>> {
-    let exclude = format!("^{since}");
-    let output = run(
-        git,
-        repository,
-        &[
-            "rev-list",
-            "--first-parent",
-            "--merges",
-            "--parents",
-            "--reverse",
-            head,
-            &exclude,
-        ],
-    )?;
-    anyhow::ensure!(
-        output.status == 0,
-        "listing the merges since {since} failed with status {}: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut commits = line.split_whitespace().skip(1).map(str::to_owned);
-            Some(FirstParentMerge {
-                first_parent: commits.next()?,
-                merged: commits.collect(),
-            })
-        })
-        .collect())
-}
-
-/// The best common ancestor of two commits, or `None` for unrelated histories.
-fn merge_base(
-    git: &dyn GitCommandRunner,
-    repository: &Path,
-    left: &str,
-    right: &str,
-) -> Result<Option<String>> {
-    let output = run(git, repository, &["merge-base", left, right])?;
-    match output.status {
-        0 => Ok(Some(
-            String::from_utf8_lossy(&output.stdout).trim().to_owned(),
-        )),
-        1 => Ok(None),
-        status => anyhow::bail!(
-            "finding the merge base of {left} and {right} failed with status {status}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ),
-    }
 }
 
 /// The commit HEAD names, or `None` on an unborn branch.
@@ -282,7 +181,11 @@ fn resolve_head(git: &dyn GitCommandRunner, repository: &Path) -> Result<Option<
 }
 
 /// Runs one Git command in `repository` with no input.
-fn run(git: &dyn GitCommandRunner, repository: &Path, arguments: &[&str]) -> Result<GitOutput> {
+pub(super) fn run(
+    git: &dyn GitCommandRunner,
+    repository: &Path,
+    arguments: &[&str],
+) -> Result<GitOutput> {
     git.run(
         repository,
         &GitCommand {
@@ -410,10 +313,28 @@ pub fn initialize_review_baselines(
         // Untracked files are deliberately not in it; see `changed_untracked`
         // for how a review still tells a new file from a pre-existing one.
         let head = resolve_head(git, root)?;
+        let reflog = read_head_reflog(git, root).unwrap_or_else(|error| {
+            tracing::warn!(
+                repository = %root.display(),
+                error = format!("{error:#}"),
+                "could not read the HEAD reflog; the first review covers every change"
+            );
+            Vec::new()
+        });
         let tree = capture_paths(git, root, head.as_deref(), &state.dirty_tracked)
             .with_context(|| format!("capture the startup baseline of {}", root.display()))?;
-        let point = record_review_point(git, root, &tree, head.as_deref(), session)
-            .with_context(|| format!("record the startup baseline of {}", root.display()))?;
+        let point = record_review_point(
+            git,
+            root,
+            &ReviewPoint {
+                tree,
+                reflog: reflog_anchor(&reflog, head.as_deref()),
+                head,
+                pending: Vec::new(),
+                session: Some(session.to_owned()),
+            },
+        )
+        .with_context(|| format!("record the startup baseline of {}", root.display()))?;
         pin_review_tree(git, root, &reference, &point)
             .with_context(|| format!("pin the startup review baseline of {}", root.display()))?;
     }
@@ -468,7 +389,7 @@ fn tree_exists(git: &dyn GitCommandRunner, repository: &Path, baseline: &str) ->
     object_exists(git, repository, &format!("{baseline}^{{tree}}"))
 }
 
-fn object_exists(git: &dyn GitCommandRunner, repository: &Path, object: &str) -> bool {
+pub(super) fn object_exists(git: &dyn GitCommandRunner, repository: &Path, object: &str) -> bool {
     run(git, repository, &["cat-file", "-e", object]).is_ok_and(|output| output.status == 0)
 }
 
@@ -708,17 +629,21 @@ mod capture_tests {
 
     /// A turn that merges another line of history is reviewed for its own
     /// commits, its conflict resolutions and its edits, and not for what the
-    /// merges brought in. One merged line builds on a commit the turn made
-    /// earlier, which must stay in the review; the other conflicts with
-    /// content an earlier review already covered. The shared file is over
-    /// 64KB, so its conflicting versions cross pipe buffers through Git.
+    /// merges brought in. The merged lines are written in another worktree of
+    /// the repository, as another session would write them. One builds on a
+    /// commit the turn made earlier, which must stay in the review; the other
+    /// conflicts with content an earlier review already covered. The shared
+    /// file is over 64KB, so its conflicting versions cross pipe buffers
+    /// through Git.
     // Hard-won: #1285: a merge made during the turn put the merged-in commits in the turn's review.
     #[test]
     fn a_merge_during_the_turn_reviews_only_the_turns_work() {
         let temp = repository();
         let root = temp.path();
-        let shared = root.join("shared.txt");
-        let edit = |edits: &[(usize, &str)]| {
+        let outside = tempfile::tempdir().unwrap();
+        let other = outside.path().join("other");
+        let edit = |checkout: &Path, edits: &[(usize, &str)]| {
+            let shared = checkout.join("shared.txt");
             let text = std::fs::read_to_string(&shared).unwrap_or_default();
             let mut lines = text.lines().map(str::to_owned).collect::<Vec<_>>();
             lines.resize_with(8000, String::new);
@@ -732,9 +657,9 @@ mod capture_tests {
             }
             std::fs::write(&shared, lines.join("\n") + "\n").unwrap();
         };
-        let commit = |message: &str| {
-            git(root, &["add", "-A"]);
-            git(root, &["commit", "-qm", message]);
+        let commit = |checkout: &Path, message: &str| {
+            git(checkout, &["add", "-A"]);
+            git(checkout, &["commit", "-qm", message]);
         };
         // Merges `branch`, which conflicts in one place, and settles that
         // conflict with `resolution`.
@@ -745,6 +670,7 @@ mod capture_tests {
                 .output()
                 .unwrap();
             assert!(!merged.status.success(), "merging {branch} conflicts");
+            let shared = root.join("shared.txt");
             let text = std::fs::read_to_string(&shared).unwrap();
             let mut resolved = Vec::new();
             let mut in_conflict = false;
@@ -764,25 +690,32 @@ mod capture_tests {
         };
         let roots = vec![root.to_path_buf()];
 
-        edit(&[]);
-        commit("shared");
+        edit(root, &[]);
+        commit(root, "shared");
         git(root, &["branch", "old-upstream"]);
-        edit(&[(30, "line 30 reviewed")]);
-        commit("reviewed before the session");
+        edit(root, &[(30, "line 30 reviewed")]);
+        commit(root, "reviewed before the session");
+        let other_path = other.to_str().unwrap();
+        git(root, &["worktree", "add", "-q", "--detach", other_path]);
         let untracked_at_start = initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
 
-        edit(&[(10, "line 10 turn")]);
-        commit("turn, later pushed");
-        git(root, &["checkout", "-qb", "upstream"]);
-        std::fs::write(root.join("upstream.rs"), "fn upstream() {}\n").unwrap();
-        edit(&[(20, "line 20 upstream"), (6000, "line 6000 upstream")]);
-        commit("upstream, built on the turn's commit");
-        git(root, &["checkout", "-q", "old-upstream"]);
-        edit(&[(30, "line 30 upstream"), (7000, "line 7000 old upstream")]);
-        commit("upstream from before the session");
-        git(root, &["checkout", "-q", "main"]);
-        edit(&[(20, "line 20 turn")]);
-        commit("turn");
+        edit(root, &[(10, "line 10 turn")]);
+        commit(root, "turn, later pushed");
+        git(&other, &["checkout", "-q", "-b", "upstream", "main"]);
+        std::fs::write(other.join("upstream.rs"), "fn upstream() {}\n").unwrap();
+        edit(
+            &other,
+            &[(20, "line 20 upstream"), (6000, "line 6000 upstream")],
+        );
+        commit(&other, "upstream, built on the turn's commit");
+        git(&other, &["checkout", "-q", "old-upstream"]);
+        edit(
+            &other,
+            &[(30, "line 30 upstream"), (7000, "line 7000 old upstream")],
+        );
+        commit(&other, "upstream from before the session");
+        edit(root, &[(20, "line 20 turn")]);
+        commit(root, "turn");
         merge("upstream", "line 20 resolved");
         merge("old-upstream", "line 30 resolved");
         std::fs::write(root.join("tracked.rs"), "fn main() { edited(); }\n").unwrap();
@@ -838,6 +771,403 @@ mod capture_tests {
         let next = capture_repository_deltas(&SystemGit, &roots, &baselines, &next_start, SESSION)
             .unwrap();
         assert!(!has_changes(&next), "{}", next[0].patch);
+    }
+
+    /// Another clone pushes its own work to `main` and squash-merges the
+    /// turn's pushed branch. The turn fast-forwards `main`, starts a branch
+    /// from it, and commits there, squashing its own commits with a soft reset
+    /// and amending the result. The review holds the turn's work, including
+    /// the commit that reached HEAD only inside the other clone's squash, and
+    /// nothing the other clone wrote; the commits the turn rewrote leave no
+    /// conflict markers. A second review after the turn merges `main` again
+    /// holds only its new commit.
+    // Hard-won: 57fd7fe8e: a fast-forward or a branch from upstream put other people's commits in the turn's review.
+    #[test]
+    fn a_pulled_or_squashed_upstream_is_not_the_turns_work() {
+        let temp = repository();
+        let root = temp.path();
+        let outside = tempfile::tempdir().unwrap();
+        let remote = outside.path().join("remote.git");
+        let remote_path = remote.to_str().unwrap();
+        let teammate = outside.path().join("teammate");
+        git(
+            outside.path(),
+            &["init", "-q", "--bare", "-b", "main", remote_path],
+        );
+        git(root, &["remote", "add", "origin", remote_path]);
+        git(root, &["push", "-q", "origin", "main"]);
+        git(
+            outside.path(),
+            &["clone", "-q", remote_path, teammate.to_str().unwrap()],
+        );
+        git(&teammate, &["config", "user.name", "Teammate"]);
+        git(
+            &teammate,
+            &["config", "user.email", "teammate@example.test"],
+        );
+        let write = |checkout: &Path, name: &str, text: &str| {
+            std::fs::write(checkout.join(name), text).unwrap();
+            git(checkout, &["add", "-A"]);
+        };
+        let pull = |checkout: &Path, arguments: &[&str]| {
+            let mut command = vec!["-c", "pull.rebase=false", "pull", "-q"];
+            command.extend(arguments);
+            git(checkout, &command);
+        };
+        let roots = vec![root.to_path_buf()];
+        let untracked_at_start = initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
+
+        git(root, &["checkout", "-qb", "feature"]);
+        write(root, "feature.rs", "fn feature() {}\n");
+        git(root, &["commit", "-qm", "feature, squash-merged upstream"]);
+        git(root, &["push", "-q", "origin", "feature"]);
+        write(&teammate, "teammate.rs", "fn teammate() {}\n");
+        git(&teammate, &["commit", "-qm", "teammate"]);
+        git(&teammate, &["fetch", "-q", "origin"]);
+        git(&teammate, &["merge", "-q", "--squash", "origin/feature"]);
+        git(&teammate, &["commit", "-qm", "Squash feature (#1)"]);
+        git(&teammate, &["push", "-q", "origin", "main"]);
+        git(root, &["checkout", "-q", "main"]);
+        pull(root, &["--ff-only", "origin", "main"]);
+        git(root, &["checkout", "-qb", "next"]);
+        write(root, "tracked.rs", "fn main() { draft(); }\n");
+        git(root, &["commit", "-qm", "next"]);
+        write(root, "tracked.rs", "fn main() { fixed(); }\n");
+        git(root, &["commit", "-qm", "next, fixed"]);
+        git(root, &["reset", "-q", "--soft", "HEAD~2"]);
+        git(root, &["commit", "-qm", "next"]);
+        write(root, "tracked.rs", "fn main() { done(); }\n");
+        git(root, &["commit", "-q", "--amend", "--no-edit"]);
+
+        let first = capture_repository_deltas(
+            &SystemGit,
+            &roots,
+            &BTreeMap::new(),
+            &untracked_at_start,
+            SESSION,
+        )
+        .unwrap();
+        let patch = &first[0].patch;
+        for wanted in ["+fn feature() {}", "+fn main() { done(); }"] {
+            assert!(patch.contains(wanted), "{wanted:?} is missing: {patch}");
+        }
+        for unwanted in ["teammate.rs", "draft", "fixed", "<<<<<<<"] {
+            assert!(!patch.contains(unwanted), "{unwanted:?} is in: {patch}");
+        }
+        assert_eq!(first[0].merged_in, vec![git(root, &["rev-parse", "main"])]);
+        assert_eq!(first[0].unattributed, None);
+
+        let baselines = captured_trees(&first);
+        advance_baselines(&SystemGit, &baselines).unwrap();
+        let next_start = read_untracked_at_start(&SystemGit, &roots).unwrap();
+        write(&teammate, "later.rs", "fn later() {}\n");
+        git(&teammate, &["commit", "-qm", "teammate, later"]);
+        git(&teammate, &["push", "-q", "origin", "main"]);
+        pull(root, &["--no-edit", "origin", "main"]);
+        write(root, "more.rs", "fn more() {}\n");
+        git(root, &["commit", "-qm", "more"]);
+
+        let second =
+            capture_repository_deltas(&SystemGit, &roots, &baselines, &next_start, SESSION)
+                .unwrap();
+        let patch = &second[0].patch;
+        assert!(patch.contains("+fn more() {}"), "{patch}");
+        for unwanted in ["later.rs", "tracked.rs", "feature.rs"] {
+            assert!(!patch.contains(unwanted), "{unwanted:?} is in: {patch}");
+        }
+    }
+
+    /// A review that covered commits the turn then replays onto upstream with
+    /// `git rebase --rebase-merges`, among them a merge whose conflict it had
+    /// resolved, and then amends shows only what the amend changed: not the
+    /// replayed commits, not the resolution it already reviewed, and not the
+    /// upstream commit they now sit on.
+    // Hard-won: 424f97670: amending or rebasing a reviewed commit put the whole commit back in the review.
+    // Hard-won: f93bececc: a rebase reset step forced a whole-tree review, and a replayed merge put its reviewed resolution back.
+    #[test]
+    fn a_rewrite_of_reviewed_commits_reviews_only_what_it_changed() {
+        let temp = repository();
+        let root = temp.path();
+        let outside = tempfile::tempdir().unwrap();
+        let other = outside.path().join("other");
+        git(
+            root,
+            &["worktree", "add", "-q", "--detach", other.to_str().unwrap()],
+        );
+        // Runs a Git command that stops on a conflict in tracked.rs and
+        // settles it with `resolution`.
+        let settle = |arguments: &[&str], resolution: &str| {
+            let output = std::process::Command::new("git")
+                .args(arguments)
+                .current_dir(root)
+                .env("GIT_EDITOR", "true")
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{arguments:?} conflicts");
+            std::fs::write(root.join("tracked.rs"), resolution).unwrap();
+            git(root, &["add", "tracked.rs"]);
+        };
+        let roots = vec![root.to_path_buf()];
+        let untracked_at_start = initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
+        git(root, &["checkout", "-qb", "side"]);
+        std::fs::write(root.join("tracked.rs"), "fn main() { side(); }\n").unwrap();
+        git(root, &["commit", "-qam", "side"]);
+        git(root, &["checkout", "-qb", "feature", "main"]);
+        std::fs::write(root.join("feature.rs"), "fn one() {}\n").unwrap();
+        std::fs::write(root.join("tracked.rs"), "fn main() { feature(); }\n").unwrap();
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-qm", "one"]);
+        settle(
+            &["merge", "-q", "--no-edit", "side"],
+            "fn main() { both(); }\n",
+        );
+        git(root, &["commit", "-q", "--no-edit"]);
+        std::fs::write(root.join("feature.rs"), "fn one() {}\nfn two() {}\n").unwrap();
+        git(root, &["commit", "-qam", "two"]);
+        let first = capture_repository_deltas(
+            &SystemGit,
+            &roots,
+            &BTreeMap::new(),
+            &untracked_at_start,
+            SESSION,
+        )
+        .unwrap();
+        for wanted in ["+fn main() { both(); }", "+fn two() {}"] {
+            assert!(first[0].patch.contains(wanted), "{}", first[0].patch);
+        }
+
+        let baselines = captured_trees(&first);
+        advance_baselines(&SystemGit, &baselines).unwrap();
+        let next_start = read_untracked_at_start(&SystemGit, &roots).unwrap();
+        git(&other, &["checkout", "-q", "main"]);
+        std::fs::write(other.join("upstream.rs"), "fn upstream() {}\n").unwrap();
+        git(&other, &["add", "upstream.rs"]);
+        git(&other, &["commit", "-qm", "upstream"]);
+        settle(
+            &["rebase", "-q", "--rebase-merges", "main"],
+            "fn main() { both(); }\n",
+        );
+        let continued = std::process::Command::new("git")
+            .args(["rebase", "--continue"])
+            .current_dir(root)
+            .env("GIT_EDITOR", "true")
+            .output()
+            .unwrap();
+        assert!(
+            continued.status.success(),
+            "{}",
+            String::from_utf8_lossy(&continued.stderr)
+        );
+        std::fs::write(
+            root.join("feature.rs"),
+            "fn one() {}\nfn two() { fixed(); }\n",
+        )
+        .unwrap();
+        git(root, &["commit", "-qa", "--amend", "--no-edit"]);
+        let second =
+            capture_repository_deltas(&SystemGit, &roots, &baselines, &next_start, SESSION)
+                .unwrap();
+        assert_eq!(second[0].unattributed, None);
+        let patch = &second[0].patch;
+        for wanted in ["-fn two() {}", "+fn two() { fixed(); }"] {
+            assert!(patch.contains(wanted), "{wanted:?} is missing: {patch}");
+        }
+        for unwanted in ["+fn one() {}", "upstream.rs", "both", "<<<<<<<"] {
+            assert!(!patch.contains(unwanted), "{unwanted:?} is in: {patch}");
+        }
+    }
+
+    /// Work the turn commits on a branch it then leaves is not in that
+    /// review's capture. It is still the turn's when it returns later, here by
+    /// a merge, so a later review holds it rather than counting it as merged-in
+    /// history, even when a review in between could not attribute. Work that
+    /// returns during such a review is covered by its whole-tree diff and is
+    /// not reviewed again.
+    // Hard-won: 57fd7fe8e: merging the turn's own branch folded its commits into the base as merged-in history.
+    // Hard-won: 424f97670: a review that could not attribute forgot the commits still pending.
+    // Hard-won: f93bececc: a review that could not attribute kept pending a commit its whole-tree diff had covered.
+    #[test]
+    fn work_left_on_another_branch_is_reviewed_when_it_returns() {
+        let temp = repository();
+        let root = temp.path();
+        let roots = vec![root.to_path_buf()];
+        let untracked_at_start = initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
+        let leave = |branch: &str| {
+            git(root, &["checkout", "-qb", branch, "main"]);
+            let file = format!("{branch}.rs");
+            std::fs::write(root.join(&file), format!("fn {branch}() {{}}\n")).unwrap();
+            git(root, &["add", &file]);
+            git(root, &["commit", "-qm", branch]);
+            git(root, &["checkout", "-q", "main"]);
+        };
+        let review = |baselines: &BTreeMap<PathBuf, String>| {
+            let start = read_untracked_at_start(&SystemGit, &roots).unwrap();
+            let deltas =
+                capture_repository_deltas(&SystemGit, &roots, baselines, &start, SESSION).unwrap();
+            advance_baselines(&SystemGit, &captured_trees(&deltas)).unwrap();
+            deltas
+        };
+        leave("early");
+        leave("late");
+        std::fs::write(root.join("tracked.rs"), "fn main() { edited(); }\n").unwrap();
+
+        let first = capture_repository_deltas(
+            &SystemGit,
+            &roots,
+            &BTreeMap::new(),
+            &untracked_at_start,
+            SESSION,
+        )
+        .unwrap();
+        advance_baselines(&SystemGit, &captured_trees(&first)).unwrap();
+        assert!(first[0].patch.contains("+fn main() { edited(); }"));
+        for unwanted in ["early.rs", "late.rs"] {
+            assert!(!first[0].patch.contains(unwanted), "{}", first[0].patch);
+        }
+
+        std::fs::remove_file(root.join(".git/logs/HEAD")).unwrap();
+        git(root, &["commit", "-qam", "edited"]);
+        git(root, &["merge", "-q", "--no-ff", "--no-edit", "early"]);
+        let second = review(&captured_trees(&first));
+        assert!(second[0].unattributed.is_some(), "{:?}", second[0]);
+        assert!(
+            second[0].patch.contains("+fn early() {}"),
+            "{}",
+            second[0].patch
+        );
+
+        std::fs::write(root.join("more.rs"), "fn more() {}\n").unwrap();
+        git(root, &["add", "more.rs"]);
+        git(root, &["commit", "-qm", "more"]);
+        let third = review(&captured_trees(&second));
+        assert_eq!(third[0].unattributed, None);
+        assert!(
+            third[0].patch.contains("+fn more() {}"),
+            "{}",
+            third[0].patch
+        );
+        assert!(!third[0].patch.contains("early.rs"), "{}", third[0].patch);
+
+        git(root, &["merge", "-q", "--no-ff", "--no-edit", "late"]);
+        let fourth = review(&captured_trees(&third));
+        assert!(
+            fourth[0].patch.contains("+fn late() {}"),
+            "{}",
+            fourth[0].patch
+        );
+        for unwanted in ["tracked.rs", "early.rs", "more.rs"] {
+            assert!(!fourth[0].patch.contains(unwanted), "{}", fourth[0].patch);
+        }
+        assert!(fourth[0].merged_in.is_empty(), "{:?}", fourth[0].merged_in);
+    }
+
+    /// The turn's own work stays pending while the capture lacks it, even
+    /// when a later mainline change conflicts with it, or the turn merged it
+    /// and reverted the merge, whether a review could attribute that or not.
+    /// All of it comes back inside another worktree's commits and is reviewed
+    /// as the turn's.
+    // Hard-won: b4a2db6e6: a conflict with later lines, or a merge the turn reverted, dropped the work from pending.
+    #[test]
+    fn pending_work_the_capture_lacks_is_reviewed_when_it_returns() {
+        let temp = repository();
+        let root = temp.path();
+        let outside = tempfile::tempdir().unwrap();
+        let other = outside.path().join("other");
+        let roots = vec![root.to_path_buf()];
+        let review = |baselines: &BTreeMap<PathBuf, String>| {
+            let start = read_untracked_at_start(&SystemGit, &roots).unwrap();
+            let deltas =
+                capture_repository_deltas(&SystemGit, &roots, baselines, &start, SESSION).unwrap();
+            advance_baselines(&SystemGit, &captured_trees(&deltas)).unwrap();
+            deltas
+        };
+        initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
+        git(root, &["checkout", "-qb", "lost"]);
+        std::fs::write(root.join("tracked.rs"), "fn main() { lost(); }\n").unwrap();
+        git(root, &["commit", "-qam", "lost"]);
+        for branch in ["undone", "again"] {
+            git(root, &["checkout", "-qb", branch, "main"]);
+            let file = format!("{branch}.rs");
+            std::fs::write(root.join(&file), format!("fn {branch}() {{}}\n")).unwrap();
+            git(root, &["add", &file]);
+            git(root, &["commit", "-qm", branch]);
+            git(root, &["checkout", "-q", "main"]);
+        }
+        std::fs::write(root.join("tracked.rs"), "fn main() { kept(); }\n").unwrap();
+        git(root, &["commit", "-qam", "kept"]);
+        let first = review(&BTreeMap::new());
+        assert!(
+            first[0].patch.contains("+fn main() { kept(); }"),
+            "{}",
+            first[0].patch
+        );
+
+        std::fs::remove_file(root.join(".git/logs/HEAD")).unwrap();
+        git(root, &["merge", "-q", "--no-ff", "--no-edit", "undone"]);
+        git(root, &["revert", "-m", "1", "--no-edit", "HEAD"]);
+        let second = review(&captured_trees(&first));
+        assert!(second[0].unattributed.is_some(), "{:?}", second[0]);
+
+        git(root, &["merge", "-q", "--no-ff", "--no-edit", "again"]);
+        git(root, &["revert", "-m", "1", "--no-edit", "HEAD"]);
+        let third = review(&captured_trees(&second));
+        assert_eq!(third[0].unattributed, None);
+
+        git(
+            root,
+            &["worktree", "add", "-q", "--detach", other.to_str().unwrap()],
+        );
+        git(&other, &["cherry-pick", "undone", "again"]);
+        let squash = std::process::Command::new("git")
+            .args(["merge", "-q", "--squash", "lost"])
+            .current_dir(&other)
+            .output()
+            .unwrap();
+        assert!(!squash.status.success(), "the squash conflicts with kept()");
+        std::fs::write(other.join("tracked.rs"), "fn main() { lost(); }\n").unwrap();
+        git(&other, &["add", "tracked.rs"]);
+        git(&other, &["commit", "-qm", "Squash lost"]);
+        let returned = git(&other, &["rev-parse", "HEAD"]);
+        git(root, &["merge", "-q", "--ff-only", &returned]);
+        let fourth = review(&captured_trees(&third));
+        assert_eq!(fourth[0].unattributed, None);
+        for wanted in [
+            "+fn undone() {}",
+            "+fn again() {}",
+            "+fn main() { lost(); }",
+        ] {
+            assert!(
+                fourth[0].patch.contains(wanted),
+                "{wanted:?} is missing: {}",
+                fourth[0].patch
+            );
+        }
+    }
+
+    /// When the HEAD reflog no longer explains how HEAD moved, the review
+    /// covers every change since the baseline and names why, rather than
+    /// guessing which commits are the turn's.
+    #[test]
+    fn a_head_move_the_reflog_cannot_explain_is_reviewed_whole_and_says_why() {
+        let temp = repository();
+        let root = temp.path();
+        let roots = vec![root.to_path_buf()];
+        let untracked_at_start = initialize_review_baselines(&SystemGit, &roots, SESSION).unwrap();
+        std::fs::remove_file(root.join(".git/logs/HEAD")).unwrap();
+        std::fs::write(root.join("tracked.rs"), "fn main() { committed(); }\n").unwrap();
+        git(root, &["commit", "-qam", "after the reflog was lost"]);
+
+        let deltas = capture_repository_deltas(
+            &SystemGit,
+            &roots,
+            &BTreeMap::new(),
+            &untracked_at_start,
+            SESSION,
+        )
+        .unwrap();
+        assert!(deltas[0].patch.contains("+fn main() { committed(); }"));
+        let reason = deltas[0].unattributed.as_deref().unwrap_or_default();
+        assert!(reason.contains("reflog"), "{reason:?}");
     }
 
     /// Earlier workers recorded a baseline as a bare tree id, in the

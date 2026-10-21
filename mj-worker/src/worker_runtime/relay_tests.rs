@@ -7514,6 +7514,7 @@ async fn a_question_during_a_ready_barrier_is_journaled_at_once() {
                 title: None,
                 description: None,
                 fields: Vec::new(),
+                tool_permission: None,
             },
         })
         .await

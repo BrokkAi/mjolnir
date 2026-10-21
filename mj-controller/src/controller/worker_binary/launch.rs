@@ -110,7 +110,13 @@ impl Controller {
         // stage is always installed there.
         let profile_stage = staging.path().join("profile");
         let started = Instant::now();
-        let result = stage_profile(profile, &profile_stage);
+        let result = stage_profile_with_catalog(
+            &session.last_profile,
+            profile,
+            &profile_stage,
+            &fetch_catalog_over_https,
+            &SharedCatalogCache,
+        );
         tracing::debug!(
             session_id,
             elapsed_ms = started.elapsed().as_millis(),
@@ -125,13 +131,6 @@ impl Controller {
                 .as_ref()
                 .context("session target is missing")?
                 .skills_scope(),
-        )?;
-        stage_codex_catalog(
-            &session.last_profile,
-            profile,
-            &profile_stage,
-            &fetch_catalog_over_https,
-            &SharedCatalogCache,
         )?;
         append_hel_target_environment(profile.kind, &profile_stage, backend)?;
         append_container_storage_guidance(

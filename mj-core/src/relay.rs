@@ -80,7 +80,10 @@ pub const RELAY_SUBAGENT_WAIT_PROTOCOL: u32 = 39;
 pub const RELAY_TURN_CONTROLS_PROTOCOL: u32 = 40;
 /// 41 adds structured child reports and always installs mailbox drain hooks.
 pub const RELAY_SUBAGENT_FINISHED_PROTOCOL: u32 = 41;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_SUBAGENT_FINISHED_PROTOCOL;
+/// 42 says in a review capture why the worker could not tell the turn's
+/// commits from other history, which a protocol-41 controller cannot decode.
+pub const RELAY_REVIEW_ATTRIBUTION_PROTOCOL: u32 = 42;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_REVIEW_ATTRIBUTION_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

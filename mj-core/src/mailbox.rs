@@ -156,7 +156,13 @@ impl<'de> Deserialize<'de> for MailboxEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Sender {
-    Session { id: String, title: String },
+    Session {
+        id: String,
+        title: String,
+    },
+    /// No longer produced: a message from the user is now submitted as the
+    /// user's prompt. Kept because stored mailbox rows, relay journals and
+    /// transcripts written before that change still hold it.
     User,
 }
 

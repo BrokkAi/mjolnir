@@ -195,8 +195,6 @@ impl RuntimeState {
         Ok(())
     }
 
-    /// [`Self::stop_subagents_for_suspend`] as the step a close runs once the
-    /// parent's checkpoint is verified.
     /// An automatic close keeps every sub-agent. Their workers run in this
     /// session's container, so it stands down while any child still has a
     /// target. It runs under the checkpoint barrier, when the parent cannot
@@ -222,13 +220,39 @@ impl RuntimeState {
         })
     }
 
+    /// [`Self::stop_subagents_for_suspend`] as the step a close runs once the
+    /// parent's checkpoint is verified. With `commit`, the close first commits
+    /// through its lifecycle control (see [`Self::commit_close`]).
     pub(super) fn stop_subagents_before_close(
         self: &Arc<Self>,
         parent_session_id: &str,
+        commit: Option<LifecycleControl>,
     ) -> BeforeClose {
         let state = Arc::clone(self);
         let parent_session_id = parent_session_id.to_owned();
-        Box::pin(async move { state.stop_subagents_for_suspend(&parent_session_id).await })
+        Box::pin(async move {
+            if let Some(control) = commit {
+                Self::commit_close(&control)?;
+            }
+            state.stop_subagents_for_suspend(&parent_session_id).await
+        })
+    }
+
+    /// A close's point of no return: the step before it stops sub-agents,
+    /// seals the relay or tears down the target, none of which a cancel can
+    /// undo. The commit and a cancel race through the operation's control and
+    /// exactly one wins. When the cancel won, the close stops here and unwinds
+    /// the way a close that cannot proceed past its checkpoint does: the
+    /// session keeps running, with the checkpoint it just verified.
+    ///
+    /// A close admitted on a record already past this point started
+    /// committed; a commit never reverts, so that one goes on.
+    fn commit_close(control: &LifecycleControl) -> Result<()> {
+        ensure!(
+            control.grant_commit() || control.is_committed(),
+            "operation cancelled before the session began to stop"
+        );
+        Ok(())
     }
 
     /// Tell a parent that is still live which of its sub-agents a suspend or
@@ -396,13 +420,15 @@ impl RuntimeState {
         request_id: String,
     ) -> Result<()> {
         let key = serde_json::to_string(&(parent_session_id, request_id))?;
-        let result = self.start_or_join_lifecycle_with_key(
+        let control = LifecycleControl::default();
+        let result = self.start_or_join_lifecycle_controlled(
             session_id,
             LifecycleKind::Suspend,
             None,
             Some(key),
-            move |state, session_id, cancelled| async move {
-                state.suspend_admitted(session_id, cancelled, true).await
+            Some(control.clone()),
+            move |state, session_id, _cancelled| async move {
+                state.suspend_admitted(session_id, control, true).await
             },
         )?;
         let completed = result.clone();
@@ -418,25 +444,35 @@ impl RuntimeState {
         acknowledge_unpublished_work: bool,
     ) -> Result<()> {
         self.wait_before_close(&session_id).await?;
-        self.run_lifecycle(
+        let control = LifecycleControl::default();
+        let result = self.start_or_join_lifecycle_controlled(
             session_id,
             LifecycleKind::Suspend,
-            move |state, session_id, cancelled| async move {
+            None,
+            None,
+            Some(control.clone()),
+            move |state, session_id, _cancelled| async move {
                 state
-                    .suspend_admitted(session_id, cancelled, acknowledge_unpublished_work)
+                    .suspend_admitted(session_id, control, acknowledge_unpublished_work)
                     .await
             },
-        )
-        .await?;
+        )?;
+        let completed = result.clone();
+        let outcome = Self::wait_lifecycle_result(result).await;
+        self.remove_completed_lifecycle(&completed);
+        outcome?;
         Ok(())
     }
 
+    /// `control` is the operation's own: its executor reads the cancel flag
+    /// it holds, and the close commits through it.
     async fn suspend_admitted(
         self: &Arc<Self>,
         session_id: String,
-        cancelled: Arc<AtomicBool>,
+        control: LifecycleControl,
         acknowledge_unpublished_work: bool,
     ) -> Result<DaemonLifecycleResult> {
+        let cancelled = control.cancelled.clone();
         let _recovery_reservation = tokio::task::spawn_blocking({
             let observer = self.recovery_observer.clone();
             let session_id = session_id.clone();
@@ -458,22 +494,30 @@ impl RuntimeState {
             &mut controller,
             &executor,
             acknowledge_unpublished_work,
+            Some(&control),
         )
         .await
     }
 
+    /// `commit` is the control a daemon close commits through at its point of
+    /// no return. A Restart's fallback passes none: it holds its own teardown
+    /// phase for the whole stop instead.
     pub(super) async fn suspend_with_loaded_controller(
         self: &Arc<Self>,
         session_id: &str,
         controller: &mut Controller,
         executor: &(impl CommandExecutor + Sync),
         acknowledge_unpublished_work: bool,
+        commit: Option<&LifecycleControl>,
     ) -> Result<DaemonLifecycleResult> {
         let route = close_route(
             controller.state.sessions.get(session_id),
             controller.state.subagents.contains_key(session_id),
         );
         if matches!(route, CloseRoute::Done | CloseRoute::DeferredCleanup) {
+            if let Some(control) = commit {
+                Self::commit_close(control)?;
+            }
             self.stop_subagents_for_suspend(session_id).await?;
             return Ok(if route == CloseRoute::DeferredCleanup {
                 DaemonLifecycleResult::DeferredCleanup
@@ -491,7 +535,7 @@ impl RuntimeState {
                         executor,
                         &self.session_manager,
                         acknowledge_unpublished_work,
-                        Some(self.stop_subagents_before_close(session_id)),
+                        Some(self.stop_subagents_before_close(session_id, commit.cloned())),
                     )
                     .await?
             }
@@ -502,6 +546,9 @@ impl RuntimeState {
             // genuinely provisioning is not caught here.
             CloseRoute::SettleWithoutCheckpoint => {
                 // No checkpoint can fail after the sub-agents stop.
+                if let Some(control) = commit {
+                    Self::commit_close(control)?;
+                }
                 self.stop_subagents_for_suspend(session_id).await?;
                 controller.suspend_session_without_checkpoint(session_id, executor)?
             }
@@ -512,7 +559,7 @@ impl RuntimeState {
                         executor,
                         &self.session_manager,
                         acknowledge_unpublished_work,
-                        Some(self.stop_subagents_before_close(session_id)),
+                        Some(self.stop_subagents_before_close(session_id, commit.cloned())),
                     )
                     .await?
             }

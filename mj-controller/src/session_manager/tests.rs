@@ -2371,10 +2371,10 @@ async fn mailbox_delivery_serializes_clear_completion_and_rechecks_stale_batches
         .await
         .unwrap();
     let during = enqueue("actor-during-clear");
-    assert_eq!(
+    assert!(matches!(
         handle.deliver_mailbox_event(during.clone()).await.unwrap(),
-        MailboxEventDelivery::Pending
-    );
+        MailboxEventDelivery::Pending(_)
+    ));
     std::fs::write(root.path().join("complete-clear"), b"complete").unwrap();
     handle.sync_now().await.unwrap();
     for event in [before.clone(), during] {

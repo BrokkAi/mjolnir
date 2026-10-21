@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 88;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 89;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1590,10 +1590,8 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
-    // Breaking: a container's applied settings in target_runtime_json now
-    // record the default image it was created from, which decides whether an
-    // upgrade recreates it. Older writers discard that field, and the
-    // container would then never move to the upgraded image's worker.
+    // Breaking: stored elicitation requests can say they are tool permission
+    // forms (`tool_permission`), and older readers refuse the unknown field.
     if version < 87 {
         connection.execute_batch(
             "BEGIN IMMEDIATE;
@@ -1605,18 +1603,33 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
-    // Breaking: a Restart intent can now be automatic, the container
-    // recreation an upgrade starts on its own. Such a Restart defers rather
-    // than interrupting work; an older daemon would recover it as one a person
-    // asked for and interrupt a running turn to finish it.
+    // Breaking: a container's applied settings in target_runtime_json now
+    // record the default image it was created from, which decides whether an
+    // upgrade recreates it. Older writers discard that field, and the
+    // container would then never move to the upgraded image's worker.
     if version < 88 {
         connection.execute_batch(
             "BEGIN IMMEDIATE;
-             ALTER TABLE session_restart_intents ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0 CHECK(automatic IN (0, 1));
              UPDATE schema_compatibility SET minimum_compatible_version = 88 WHERE singleton = 1;
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (88, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
              PRAGMA user_version = 88;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: a Restart intent can now be automatic, the container
+    // recreation an upgrade starts on its own. Such a Restart defers rather
+    // than interrupting work; an older daemon would recover it as one a person
+    // asked for and interrupt a running turn to finish it.
+    if version < 89 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE session_restart_intents ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0 CHECK(automatic IN (0, 1));
+             UPDATE schema_compatibility SET minimum_compatible_version = 89 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (89, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 89;
              COMMIT;",
         )?;
     }
@@ -2652,7 +2665,7 @@ mod reader_tests {
             restore_github_v84_schema(&connection);
         }
         // Historical fixtures must remove columns introduced by later revisions.
-        if version < 88
+        if version < 89
             && legacy_schema::table_has_column(&connection, "session_restart_intents", "automatic")
                 .unwrap()
         {

@@ -263,9 +263,9 @@ pub enum ReviewerRequest {
 #[serde(deny_unknown_fields)]
 pub struct RepoDelta {
     pub root: std::path::PathBuf,
-    /// The tree-ish `patch` is diffed from: the baseline, with any history the
-    /// turn merged in already folded in (see `merged_in`). `None` when there
-    /// is no usable baseline and coverage starts at this capture.
+    /// The tree-ish `patch` is diffed from: the baseline, with every change
+    /// the turn did not write already in it (see `merged_in`). `None` when
+    /// there is no usable baseline and coverage starts at this capture.
     pub baseline_tree: Option<String>,
     /// The capture, which a completed review records as the next baseline: a
     /// Git tag naming the captured tree and the HEAD it was taken at, or a
@@ -285,11 +285,17 @@ pub struct RepoDelta {
     /// a worker that predates it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<FileLineChange>,
-    /// Commits the turn merged in from other lines of history. Their changes
-    /// are part of `baseline_tree`, so `patch` holds only the turn's own work
-    /// and how it resolved those merges. Empty from a worker that predates it.
+    /// Commits of other history the turn merged, pulled or switched to. Their
+    /// changes are part of `baseline_tree`, so `patch` holds only the turn's
+    /// own commits, how it resolved its merges, and its uncommitted edits.
+    /// Empty from a worker that predates it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merged_in: Vec<String>,
+    /// Why the worker could not tell the turn's commits from other history,
+    /// so `patch` may hold changes the turn pulled, merged or switched to.
+    /// `None` when it could, and from a worker that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unattributed: Option<String>,
 }
 
 /// One changed file's line counts in a review capture.

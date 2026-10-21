@@ -16,7 +16,7 @@ impl RuntimeState {
         self: &Arc<Self>,
         session_id: String,
         acknowledge_container_recreation: bool,
-        control: Option<CreateSessionControl>,
+        control: Option<LifecycleControl>,
     ) -> Result<()> {
         let joining_restart = self
             .owner()
@@ -132,7 +132,7 @@ impl RuntimeState {
                 super::lifecycle::LifecycleStart {
                     resume_workspace_id: None,
                     request_key: Some(key),
-                    create_control: None,
+                    control: None,
                     phase: LifecyclePhase::Executing,
                     move_operation_id: None,
                     deferrable_admission: None,
@@ -308,8 +308,14 @@ impl RuntimeState {
         if intent.phase == crate::database::SessionRestartPhase::Fallback {
             ensure_target_unavailable_for_fallback(&controller, session_id, &executor)?;
             tracing::info!(%session_id, "Restart selected suspend-and-resume fallback");
-            self.restart_fallback(session_id, &mut controller, &executor, &cancelled)
-                .await?;
+            self.restart_fallback(
+                session_id,
+                &intent.operation_id,
+                &mut controller,
+                &executor,
+                &cancelled,
+            )
+            .await?;
             self.release_restart_intent(session_id, &intent.operation_id)
                 .await?;
             return Ok(DaemonLifecycleResult::Done);
@@ -368,8 +374,14 @@ impl RuntimeState {
                     ?target,
                     "Restart selected suspend-and-resume because the target was unavailable before checkpointing"
                 );
-                self.restart_fallback(session_id, &mut controller, &executor, &cancelled)
-                    .await?;
+                self.restart_fallback(
+                    session_id,
+                    &intent.operation_id,
+                    &mut controller,
+                    &executor,
+                    &cancelled,
+                )
+                .await?;
                 self.release_restart_intent(session_id, &intent.operation_id)
                     .await?;
                 return Ok(DaemonLifecycleResult::Done);
@@ -400,10 +412,12 @@ impl RuntimeState {
                     session_id,
                     &executor,
                     &self.session_manager,
+                    // A Restart that sealed its checkpoint can still be
+                    // cancelled before the worker reset; it keeps the target.
                     Some(if intent.automatic {
                         self.keep_subagents_before_close(session_id)
                     } else {
-                        self.stop_subagents_before_close(session_id)
+                        self.stop_subagents_before_close(session_id, None)
                     }),
                     intent.automatic,
                 )
@@ -588,8 +602,12 @@ impl RuntimeState {
             .lifecycle
             .get_mut(session_id)
             .context("Restart lifecycle is missing")?;
+        // A Restart admitted on a record already `Destroying` starts
+        // committed; only an accepted cancel stops the teardown here.
         ensure!(
-            active.kind == LifecycleKind::Restart && active.is_cancellable(),
+            active.kind == LifecycleKind::Restart
+                && matches!(active.phase, LifecyclePhase::Executing)
+                && !active.control.cancel_accepted(),
             "Restart cancelled before container teardown"
         );
         ensure!(
@@ -715,6 +733,7 @@ impl RuntimeState {
     async fn restart_fallback(
         self: &Arc<Self>,
         session_id: &str,
+        restart_intent: &str,
         controller: &mut Controller,
         executor: &(impl CommandExecutor + Sync),
         cancelled: &AtomicBool,
@@ -724,19 +743,29 @@ impl RuntimeState {
             "Restart cancelled before fallback cleanup"
         );
         ensure_target_unavailable_for_fallback(controller, session_id, executor)?;
-        let outcome = self
-            .suspend_with_loaded_controller(session_id, controller, executor, true)
-            .await?;
-        match outcome {
-            DaemonLifecycleResult::Done => {}
-            DaemonLifecycleResult::DeferredCleanup => {
-                ensure_target_unavailable_for_fallback(controller, session_id, executor)?;
-                controller.cleanup_stopped_target(session_id, executor)?;
+        // The fallback's stop removes the target, so it reserves the teardown
+        // phase the way a container recreation does: a cancel is refused
+        // until the stop ends, and accepted again for the resume.
+        self.begin_restart_container_teardown(session_id, restart_intent)?;
+        let stopped = async {
+            match self
+                .suspend_with_loaded_controller(session_id, controller, executor, true, None)
+                .await?
+            {
+                DaemonLifecycleResult::Done => {}
+                DaemonLifecycleResult::DeferredCleanup => {
+                    ensure_target_unavailable_for_fallback(controller, session_id, executor)?;
+                    controller.cleanup_stopped_target(session_id, executor)?;
+                }
+                DaemonLifecycleResult::Move(_) | DaemonLifecycleResult::Park(_) => {
+                    unreachable!("Restart fallback suspension returned another lifecycle result")
+                }
             }
-            DaemonLifecycleResult::Move(_) | DaemonLifecycleResult::Park(_) => {
-                unreachable!("Restart fallback suspension returned another lifecycle result")
-            }
+            anyhow::Ok(())
         }
+        .await;
+        self.finish_restart_container_teardown(session_id);
+        stopped?;
         ensure!(
             !cancelled.load(Ordering::Acquire),
             "Restart cancelled before fallback resume"
@@ -873,7 +902,7 @@ impl RuntimeState {
                 // A person's Restart of the same session joins this one.
                 resume_workspace_id: Some(workspace_id),
                 request_key: None,
-                create_control: None,
+                control: None,
                 phase: LifecyclePhase::Executing,
                 move_operation_id: None,
                 deferrable_admission: Some("upgrade container recreation"),

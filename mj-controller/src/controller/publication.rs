@@ -555,16 +555,19 @@ fn checkpoint_has_file_changes(
     manifest: &ArchiveManifest,
     repository: &mj_core::archive::RepositoryManifest,
 ) -> bool {
-    manifest.payloads.iter().any(|payload| {
-        if payload.path == repository.untracked_tar_path {
-            // An empty tar contains two zero blocks.
-            payload.size > 1024
-        } else {
-            (payload.path == repository.staged_patch_path
-                || payload.path == repository.unstaged_patch_path)
-                && payload.size > 0
-        }
-    })
+    // An unfinished merge, rebase or other operation exists only in the
+    // archive, even when both patches are empty.
+    repository.metadata.git_operation.is_some()
+        || manifest.payloads.iter().any(|payload| {
+            if payload.path == repository.untracked_tar_path {
+                // An empty tar contains two zero blocks.
+                payload.size > 1024
+            } else {
+                (payload.path == repository.staged_patch_path
+                    || payload.path == repository.unstaged_patch_path)
+                    && payload.size > 0
+            }
+        })
 }
 
 fn git_text(

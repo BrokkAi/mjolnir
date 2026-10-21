@@ -75,12 +75,8 @@ struct DisplayField {
 enum ElicitationControl {
     Field(usize),
     Submit,
-    Skip,
     Cancel,
     Previous,
-    Next,
-    GoBack,
-    SubmitAnyway,
 }
 
 /// A process-local copy of an unanswered form. The request is retained in the
@@ -408,21 +404,21 @@ impl ElicitationDialog {
         interaction: Interaction<ElicitationControl>,
     ) -> Option<ElicitationResponse> {
         match interaction {
-            Interaction::Activate(ElicitationControl::Submit) => self.answer_and_next(),
+            Interaction::Activate(ElicitationControl::Submit) => {
+                if self.confirming_unanswered {
+                    self.accept()
+                } else {
+                    self.answer_and_next()
+                }
+            }
             Interaction::Activate(ElicitationControl::Previous) => {
-                self.navigate(false);
+                if self.confirming_unanswered {
+                    self.go_back();
+                } else {
+                    self.navigate(false);
+                }
                 None
             }
-            Interaction::Activate(ElicitationControl::Next) => {
-                self.navigate(true);
-                None
-            }
-            Interaction::Activate(ElicitationControl::GoBack) => {
-                self.go_back();
-                None
-            }
-            Interaction::Activate(ElicitationControl::SubmitAnyway) => self.accept(),
-            Interaction::Activate(ElicitationControl::Skip) => Some(ElicitationResponse::Decline),
             Interaction::Activate(ElicitationControl::Cancel) | Interaction::Cancel => {
                 Some(ElicitationResponse::Cancel)
             }
@@ -579,7 +575,6 @@ impl ElicitationDialog {
         match self.form.borrow().focused() {
             Some(ElicitationControl::Field(index)) => index,
             Some(ElicitationControl::Submit) => self.display_fields.len(),
-            Some(ElicitationControl::Skip) => self.display_fields.len() + 1,
             Some(ElicitationControl::Cancel) => self.display_fields.len() + 2,
             _ => self.current_question,
         }
@@ -590,7 +585,7 @@ impl ElicitationDialog {
         let control = match index.cmp(&field_count) {
             std::cmp::Ordering::Less => ElicitationControl::Field(index),
             std::cmp::Ordering::Equal => ElicitationControl::Submit,
-            std::cmp::Ordering::Greater if index == field_count + 1 => ElicitationControl::Skip,
+            // Older upgrade drafts used field_count + 1 for the removed Skip action.
             _ => ElicitationControl::Cancel,
         };
         if index < field_count && index != self.current_question {
@@ -600,45 +595,22 @@ impl ElicitationDialog {
         self.form.borrow_mut().focus(control);
     }
 
-    fn actions(&self) -> Vec<(ElicitationControl, &'static str, bool)> {
-        if self.confirming_unanswered {
-            return vec![
-                (ElicitationControl::GoBack, "Go back", true),
-                (ElicitationControl::SubmitAnyway, "Submit anyway", true),
-            ];
-        }
-        let mut actions = vec![(
-            ElicitationControl::Submit,
-            if self.current_question + 1 < self.display_fields.len() {
-                "Answer and next"
-            } else {
-                "Submit all"
-            },
-            true,
-        )];
-        if self.display_fields.len() > 1 {
-            actions.push((
+    fn actions(&self) -> [(ElicitationControl, &'static str, bool); 3] {
+        [
+            (ElicitationControl::Submit, "Answer & Next", true),
+            (
                 ElicitationControl::Previous,
                 "Previous",
-                self.current_question > 0,
-            ));
-            actions.push((
-                ElicitationControl::Next,
-                "Next",
-                self.current_question + 1 < self.display_fields.len(),
-            ));
-        }
-        actions.extend([
-            (ElicitationControl::Skip, "Skip", true),
+                self.confirming_unanswered || self.current_question > 0,
+            ),
             (ElicitationControl::Cancel, "Cancel", true),
-        ]);
-        actions
+        ]
     }
 
     fn reset_controls(&mut self) {
         let mut form = Form::new();
         let first = if self.confirming_unanswered {
-            ElicitationControl::GoBack
+            ElicitationControl::Previous
         } else if let Some(display) = self.display_fields.get(self.current_question).copied() {
             let id = ElicitationControl::Field(self.current_question);
             form.declare(
@@ -1658,7 +1630,7 @@ fn render_elicitation_body(
         let mut form = dialog.form.borrow_mut();
         ButtonRow::render(frame, chunks[2], &dialog.actions(), &mut form);
         form.end_frame(if dialog.confirming_unanswered {
-            ElicitationControl::GoBack
+            ElicitationControl::Previous
         } else {
             ElicitationControl::Field(dialog.current_question)
         });
@@ -1767,10 +1739,10 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
         .copied()
         .filter(|_| !dialog.confirming_unanswered)
     else {
-        let label = match focus.saturating_sub(dialog.display_fields.len()) {
-            0 => "Submit these answers",
-            1 => "Skip this question and let the agent continue",
-            _ => "Cancel this question",
+        let label = if dialog.confirming_unanswered {
+            "Answer & Next submits; Previous returns to unanswered questions"
+        } else {
+            "Submit these answers"
         };
         return FocusContent {
             title: None,

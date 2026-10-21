@@ -633,6 +633,7 @@ async fn a_review_waits_for_the_recovery_copy_instead_of_giving_up() {
             changed_lines: 1,
             files: Vec::new(),
             merged_in: Vec::new(),
+            unattributed: None,
         }],
     }));
 
@@ -694,6 +695,7 @@ async fn a_review_refused_for_another_reason_does_not_wait() {
             changed_lines: 1,
             files: Vec::new(),
             merged_in: Vec::new(),
+            unattributed: None,
         }],
     }));
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -876,6 +878,7 @@ async fn resolving_a_review_that_has_no_verdict_is_refused() {
             changed_lines: 1,
             files: Vec::new(),
             merged_in: Vec::new(),
+            unattributed: None,
         }],
     }));
 
@@ -959,6 +962,7 @@ async fn a_turn_that_changed_nothing_resolves_without_choosing_a_reviewer() {
             changed_lines: 0,
             files: Vec::new(),
             merged_in: Vec::new(),
+            unattributed: None,
         }],
     }));
     let (_, _, reply) = manager
@@ -1030,6 +1034,7 @@ async fn a_capture_the_recovery_copy_refused_is_retried_before_choosing_a_review
             changed_lines: 0,
             files: Vec::new(),
             merged_in: Vec::new(),
+            unattributed: None,
         }],
     }));
     let (_, _, reply) = manager
@@ -1167,6 +1172,7 @@ async fn observation_bursts_do_not_drop_the_final_idle_edge() {
             changed_lines: 1,
             files: Vec::new(),
             merged_in: Vec::new(),
+            unattributed: None,
         }],
     }));
     starting
@@ -1213,6 +1219,7 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
             changed_lines: 1,
             files: Vec::new(),
             merged_in: Vec::new(),
+            unattributed: None,
         }],
     }));
     tokio::time::timeout(Duration::from_secs(5), open_gate.entered())
@@ -1327,6 +1334,7 @@ async fn a_review_open_at_a_restart_is_reported_by_the_next_daemon_and_keeps_its
             changed_lines: 1,
             files: Vec::new(),
             merged_in: Vec::new(),
+            unattributed: None,
         }],
     }));
     let _first_request = manager.next().await;
@@ -1631,6 +1639,7 @@ async fn a_failed_review_clears_durable_active_state_and_the_prompt_hold() {
             changed_lines: 1,
             files: Vec::new(),
             merged_in: Vec::new(),
+            unattributed: None,
         }],
     }));
     let (_, _, reply) = manager
@@ -1757,6 +1766,7 @@ async fn a_clean_reviewer_report_resolves_the_review() {
             changed_lines: 1,
             files: Vec::new(),
             merged_in: Vec::new(),
+            unattributed: None,
         }],
     }));
 
@@ -1918,6 +1928,7 @@ fn elicitation_event(ordinal: u64, previous_digest: &str, id: &str, message: &st
                 title: None,
                 description: None,
                 fields: Vec::new(),
+                tool_permission: None,
             },
         },
     };
@@ -1945,6 +1956,7 @@ async fn open_a_review_to_its_first_poll(
             changed_lines: 1,
             files: Vec::new(),
             merged_in: Vec::new(),
+            unattributed: None,
         }],
     }));
     let (_, _, reply) = manager
@@ -2043,6 +2055,7 @@ async fn an_answer_to_a_reviewers_question_reaches_that_role() {
             title: None,
             description: None,
             fields: Vec::new(),
+            tool_permission: None,
         },
     }
     .session_request()
@@ -2488,6 +2501,7 @@ async fn a_findings_verdict_is_forwarded_without_a_manual_resolve() {
                             changed_lines: 1,
                             files: Vec::new(),
                             merged_in: Vec::new(),
+                            unattributed: None,
                         }],
                     }),
                     ReviewerAction::Start { .. } => Ok(ReviewerOutcome::Started(Box::new(

@@ -181,11 +181,69 @@ async fn authenticated_message_route_passes_sender_and_target_to_daemon_operatio
     assert_eq!(result["via"], "mailbox");
     let requests = backend.message_requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].sender_session_id.as_deref(), Some("sender-1"));
+    assert_eq!(requests[0].sender_session_id, "sender-1");
     assert_eq!(requests[0].target_session_id, "recipient");
     assert_eq!(requests[0].text, "check the final patch");
     assert_eq!(requests[0].request_id, "request-1");
     assert!(requests[0].created_at_ms > 0);
+}
+
+/// A message with no sender comes from the user's own shell, so it is the
+/// user's prompt and takes the prompt endpoint's path: it waits for a session
+/// still starting, and its request id is the command id, so a retry after an
+/// ambiguous reply names the same command and the worker answers the same
+/// turn.
+#[tokio::test]
+async fn a_message_without_a_sender_is_submitted_as_the_users_prompt() {
+    let backend = Arc::new(FakeBackend {
+        live_view: Some(live_view("flash", &["high"])),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), waiting_for_its_worker);
+    let send = || {
+        bearer(Request::post("/api/v1/sessions/session-1/message"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"request_id":"user-message-1","text":"check the final patch"}"#,
+            ))
+            .unwrap()
+    };
+    let held = tokio::spawn(app.clone().oneshot(send()));
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !held.is_finished() && backend.submissions.lock().unwrap().is_empty(),
+        "a message to a session that is still starting waits for it, as a prompt does"
+    );
+
+    snapshot_tx.send_modify(|snapshot| snapshot.sessions[0].capabilities.prompt = true);
+    let first = held.await.unwrap().unwrap();
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    let first = json_body(first).await;
+    assert_eq!(
+        first,
+        serde_json::json!({"session_id":"session-1","via":"turn","turn_id":1})
+    );
+    let again = app.oneshot(send()).await.unwrap();
+    assert_eq!(again.status(), StatusCode::ACCEPTED);
+    assert_eq!(json_body(again).await, first);
+
+    let plain_prompt = mj_core::relay::RelayCommand::Prompt {
+        prompt: vec![agent_client_protocol::schema::v1::ContentBlock::Text(
+            agent_client_protocol::schema::v1::TextContent::new("check the final patch"),
+        )],
+    };
+    assert_eq!(
+        *backend.submissions.lock().unwrap(),
+        vec![
+            ("user-message-1".to_owned(), plain_prompt.clone()),
+            ("user-message-1".to_owned(), plain_prompt),
+        ],
+        "both attempts are the same plain prompt under the request id"
+    );
+    assert!(
+        backend.message_requests.lock().unwrap().is_empty(),
+        "nothing went to the mailbox route"
+    );
 }
 
 #[tokio::test]
@@ -816,7 +874,7 @@ impl SessionHandleBackend for FakeSession {
 }
 
 struct CapturedSessionMessageRequest {
-    sender_session_id: Option<String>,
+    sender_session_id: String,
     target_session_id: String,
     text: String,
     request_id: String,
@@ -1065,9 +1123,12 @@ impl SubagentBackend for FakeBackend {
             Ok(self.prompt_ordinal)
         })
     }
+    fn resolve_message_target(&self, requested_id: String) -> BoxFuture<'_, AnyResult<String>> {
+        Box::pin(async move { Ok(requested_id) })
+    }
     fn deliver_message(
         &self,
-        sender_session_id: Option<String>,
+        sender_session_id: String,
         target_session_id: String,
         text: String,
         request_id: String,
@@ -3276,8 +3337,8 @@ fn idle(outcome: Option<MaterializedTurnOutcome>) -> WaitObservation {
 
 /// A wait must never conclude that a turn finished from a state that only
 /// says nobody can see the session. `mj wait` and the sub-agent wait share
-/// this one decision. Durable turn ownership remains a guard even when the
-/// published activity state says idle.
+/// this one decision. A session the daemon has no live view of reports what
+/// its durable record last knew as `Unknown`, which is never idle.
 // Hard-won: a11622fe: an unaccounted session could still own work that a false finish would endanger.
 #[test]
 fn a_wait_never_concludes_finished_while_the_session_is_unaccounted_for() {
@@ -3285,8 +3346,15 @@ fn a_wait_never_concludes_finished_while_the_session_is_unaccounted_for() {
 
     // The #1025 window: the durable record says a turn is running and the
     // daemon has no live view. The wait keeps waiting.
-    let running = WaitObservation {
-        lifecycle: Some(ViewerLifecycleCategory::Live),
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let mut session = snapshot.sessions[0].clone();
+    session.capabilities.prompt = true;
+    session.activity_state = Some(mj_core::activity::while_disconnected(
+        MaterializedExecutionState::Running { started_at_ms: 1 },
+        Some(1),
+    ));
+    let durable = TurnState {
         execution: MaterializedExecutionState::Running { started_at_ms: 1 },
         active_turn: Some(MaterializedTurn {
             command_id: "api-1".into(),
@@ -3295,23 +3363,16 @@ fn a_wait_never_concludes_finished_while_the_session_is_unaccounted_for() {
             started_at_ms: 1,
             steered_into: None,
         }),
-        ..WaitObservation::default()
+        last_turn_outcome: Some(completed(5, "end_turn")),
     };
+    let running = build_observation(&snapshot, &session, None, Some(&durable), None);
     assert_eq!(resolve_wait(&running, &request), None);
-
-    // The projection lagging the other way: the flag says idle while the turn
-    // record is still open. "Newest turn" must not answer from that either.
-    let lagging = WaitObservation {
-        execution: MaterializedExecutionState::Idle,
-        ..running.clone()
-    };
-    assert_eq!(resolve_wait(&lagging, &request), None);
 
     // Queued work behind a finished turn is not an ending for "newest turn".
     let queued = WaitObservation {
         execution: MaterializedExecutionState::Idle,
         active_turn: None,
-        queued: 1,
+        queued: vec!["prompt-9".into()],
         last_turn_outcome: Some(completed(7, "end_turn")),
         ..WaitObservation::default()
     };
@@ -3447,10 +3508,12 @@ fn a_legacy_capacity_outcome_only_ends_the_wait_once_no_retry_is_armed() {
         timeout_secs: None,
     };
     let mut pending = idle(Some(completed(10, "ModelCapacity")));
+    // Older workers named the retry after the completion ordinal too, with
+    // the `capacity-retry-` prefix.
     pending.capacity_retry = Some(CapacityRetry {
         attempt: 1,
         retry_at_ms: 60_000,
-        command_id: "capacity-retry-10".into(),
+        command_id: "capacity-retry-12".into(),
         submitted: false,
     });
     assert_eq!(
@@ -3473,20 +3536,419 @@ fn server_retry_assessment_and_generic_retry_keep_the_wait_open() {
         ..WaitRequest::default()
     };
     for stop_reason in ["end_turn", "error"] {
-        let mut pending = idle(Some(completed(10, stop_reason)));
-        pending.retry_assessment_pending = true;
+        let turn = completed(10, stop_reason);
+        let mut pending = idle(Some(turn.clone()));
+        pending.turn_assessment = Some(assessment_of(
+            &turn,
+            mj_core::assessment::Status::Pending,
+            None,
+        ));
         assert_eq!(resolve_wait(&pending, &request), None);
-        pending.retry_assessment_pending = false;
+        pending.turn_assessment = Some(assessment_of(
+            &turn,
+            mj_core::assessment::Status::Scheduled,
+            Some(mj_core::assessment::Action::RetryProvider),
+        ));
         pending.capacity_retry = Some(CapacityRetry {
             attempt: 1,
             retry_at_ms: 60_000,
-            command_id: "server-retry-10".into(),
+            command_id: format!("server-retry-{}", turn.completed_ordinal),
             submitted: false,
         });
         assert_eq!(resolve_wait(&pending, &request), None);
         pending.capacity_retry = None;
         assert!(resolve_wait(&pending, &request).is_some());
     }
+}
+
+/// What a wait decides from while the daemon holds a live, connected view of
+/// the worker: the projection and the operational state the worker published,
+/// read through the same `build_observation` the wait loop uses.
+fn live_observation(
+    materialized: mj_core::state::MaterializedSession,
+    operational: mj_core::relay::RelayOperationalState,
+) -> WaitObservation {
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let mut session = snapshot.sessions[0].clone();
+    session.capabilities.prompt = true;
+    let live = ManagedSessionView {
+        connected: true,
+        error: None,
+        snapshot: Some(mj_core::state::ManagedSessionSnapshot {
+            window: mj_core::state::ProjectionWindow::of(&materialized),
+            materialized,
+            operational,
+            subagent_requests: Vec::new(),
+            subagent_completions: Vec::new(),
+            subagent_queue_error: None,
+            latest_credential_sync_signal: None,
+            worker_build: None,
+        }),
+    };
+    build_observation(&snapshot, &session, Some(&live), None, None)
+}
+
+/// The operational state a worker publishes, reporting `activity`.
+fn worker_state(
+    activity: mj_core::activity::ActivityState,
+) -> mj_core::relay::RelayOperationalState {
+    let root = tempfile::tempdir().unwrap();
+    let mut operational = mj_worker::relay::DurableRelay::open(root.path(), "session-1", "test")
+        .unwrap()
+        .operational_state();
+    operational.activity = Some(activity);
+    operational
+}
+
+/// The worker's assessment record for `turn`.
+fn assessment_of(
+    turn: &MaterializedTurnOutcome,
+    status: mj_core::assessment::Status,
+    action: Option<mj_core::assessment::Action>,
+) -> mj_core::assessment::TurnAssessment {
+    let mut assessment = mj_core::assessment::TurnAssessment::pending(
+        turn.command_id.clone(),
+        turn.completed_ordinal,
+        turn.completed_at_ms,
+        mj_core::activity::verdict::CompletionEvidence::bounded("end_turn", None),
+    );
+    assessment.status = status;
+    assessment.action = action;
+    assessment
+}
+
+/// A backend that can read back a finished turn's summary.
+fn summarizing_backend() -> Arc<dyn SubagentBackend> {
+    Arc::new(FakeBackend {
+        summary: Some(TurnSummary {
+            turn_number: 1,
+            turn_started_at_ms: 100,
+            last_changed_at_ms: 900,
+            final_message: Some("Done.".into()),
+            tool_calls: 0,
+        }),
+        ..FakeBackend::default()
+    })
+}
+
+fn projection_with(outcome: MaterializedTurnOutcome) -> mj_core::state::MaterializedSession {
+    let mut materialized = mj_core::state::MaterializedSession::empty("session-1");
+    materialized.last_turn_outcome = Some(outcome);
+    materialized
+}
+
+/// Session 979dc: prompt turn 20 ended while a build ran in the background,
+/// and Jev said Wait. The build finished, Claude Code ran a turn of its own and
+/// ended it, and Jev said Uncertain about that one. The worker kept the Wait it
+/// had recorded against turn 20, as a worker older than this fix still does.
+/// The session is idle, so a session wait answers, and a wait on turn 20
+/// answers with how turn 20 ended.
+// Hard-won: #1304: a stored expect-continuation verdict held every wait on an idle session open.
+#[test]
+fn a_stored_expect_continuation_verdict_holds_no_wait_on_an_idle_session() {
+    use mj_core::activity::{ActivityState, verdict};
+    use mj_core::assessment::{Action, Status};
+    let turn = MaterializedTurnOutcome {
+        diagnostic: None,
+        usage: None,
+        command_id: "api-b098".into(),
+        accepted_ordinal: Some(20),
+        turn_start_position: Some(21),
+        completed_ordinal: 6449,
+        completed_at_ms: 500,
+        outcome: TurnOutcomeKind::Completed {
+            stop_reason: "end_turn".into(),
+        },
+    };
+    let mut operational = worker_state(ActivityState::Idle {
+        since_ms: Some(900),
+    });
+    operational.turn_completion = Some(verdict::TurnCompletion {
+        command_id: "api-b098".into(),
+        completed_ordinal: 6449,
+        decision: verdict::Decision::ExpectContinuation,
+    });
+    let mut harness_turn = assessment_of(
+        &MaterializedTurnOutcome {
+            command_id: "harness-turn-6451".into(),
+            completed_ordinal: 6460,
+            ..turn.clone()
+        },
+        Status::Assessed,
+        Some(Action::Uncertain),
+    );
+    harness_turn.reason = "assessment_uncertain".into();
+    operational.assessment = Some(Box::new(harness_turn));
+    let observation = live_observation(projection_with(turn), operational);
+
+    assert_eq!(
+        resolve_wait(&observation, &WaitRequest::default()).map(|decision| decision.outcome),
+        Some(WaitOutcome::Finished),
+        "the session is idle"
+    );
+    let decision = resolve_wait(
+        &observation,
+        &WaitRequest {
+            turn_id: Some(20),
+            ..WaitRequest::default()
+        },
+    )
+    .expect("turn 20 ended");
+    assert_eq!(decision.outcome, WaitOutcome::Finished);
+    assert_eq!(decision.turn_id, Some(20));
+}
+
+/// Session b0522: after prompt turn 7 ended, the harness ran a turn of its own
+/// for hours. That turn is the session's work, not turn 7's: a wait on turn 7
+/// answers at turn 7's end and reports the running turn as what comes next,
+/// and a session wait follows the session until that turn settles.
+// Hard-won: #1304: a turn the harness started itself held a wait on the prompted turn open.
+#[tokio::test]
+async fn a_turn_the_harness_starts_itself_holds_only_the_session_wait() {
+    use mj_core::activity::ActivityState;
+    let mut materialized = projection_with(completed(7, "end_turn"));
+    // The projection marks a turn the harness opened as Running, with no
+    // turn record of its own.
+    materialized.execution = MaterializedExecutionState::Running {
+        started_at_ms: 1_000,
+    };
+    let harness_turn = ActivityState::Turn {
+        started_at_ms: Some(1_000),
+        last_activity_at_ms: Some(2_000),
+    };
+    let observation = live_observation(materialized.clone(), worker_state(harness_turn.clone()));
+    let on_turn_7 = WaitRequest {
+        turn_id: Some(7),
+        ..WaitRequest::default()
+    };
+    let decision = resolve_wait(&observation, &on_turn_7).expect("turn 7 ended");
+    assert_eq!(decision.outcome, WaitOutcome::Finished);
+    assert_eq!(decision.turn_id, Some(7));
+    assert_eq!(
+        resolve_wait(&observation, &WaitRequest::default()),
+        None,
+        "the session is still working"
+    );
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let backend = summarizing_backend();
+    let response = finish_wait(
+        &backend,
+        "session-1",
+        ApiSession::from(&snapshot.sessions[0]),
+        observation,
+        decision,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        response.next,
+        Some(harness_turn),
+        "what the session does next"
+    );
+
+    materialized.execution = MaterializedExecutionState::Idle;
+    let settled = live_observation(
+        materialized,
+        worker_state(ActivityState::Idle {
+            since_ms: Some(3_000),
+        }),
+    );
+    assert_eq!(
+        resolve_wait(&settled, &WaitRequest::default()).map(|decision| decision.outcome),
+        Some(WaitOutcome::Finished)
+    );
+}
+
+/// The provider refused turn 10 and Jev judged the failure transient, so the
+/// worker sends the request again. Turn 10 has not ended while that retry is
+/// armed, queued or running; the retry's own ending answers for it. A retry
+/// the worker armed for some other turn does not hold turn 10.
+// Hard-won: #1304: a wait on a turn answered while the worker's retry of that turn was still running.
+#[test]
+fn a_wait_on_a_turn_follows_the_workers_retry_of_it() {
+    use mj_core::activity::ActivityState;
+    let refused = completed(10, "end_turn");
+    let retry_id = format!("server-retry-{}", refused.completed_ordinal);
+    let on_turn_10 = WaitRequest {
+        turn_id: Some(10),
+        ..WaitRequest::default()
+    };
+    let armed_for = |command_id: &str| {
+        let mut operational = worker_state(ActivityState::Retry);
+        operational.capacity_retry = Some(CapacityRetry {
+            attempt: 1,
+            retry_at_ms: 60_000,
+            command_id: command_id.into(),
+            submitted: false,
+        });
+        live_observation(projection_with(refused.clone()), operational)
+    };
+    assert_eq!(resolve_wait(&armed_for(&retry_id), &on_turn_10), None);
+
+    let retry_turn = MaterializedTurn {
+        command_id: retry_id.clone(),
+        accepted_ordinal: Some(15),
+        turn_start_position: 16,
+        started_at_ms: 2_000,
+        steered_into: None,
+    };
+    let mut queued = projection_with(refused.clone());
+    queued.queued_prompts = vec![mj_core::state::MaterializedQueuedPrompt {
+        command_id: retry_id.clone(),
+        kind: Default::default(),
+        content: Vec::new(),
+        queued_at_ms: 2_000,
+        accepted_ordinal: Some(15),
+    }];
+    assert_eq!(
+        resolve_wait(
+            &live_observation(queued, worker_state(ActivityState::Idle { since_ms: None })),
+            &on_turn_10
+        ),
+        None,
+        "the retry is queued"
+    );
+    let mut running = projection_with(refused.clone());
+    running.execution = MaterializedExecutionState::Running {
+        started_at_ms: 2_000,
+    };
+    running.active_turn = Some(retry_turn);
+    let turn = ActivityState::Turn {
+        started_at_ms: Some(2_000),
+        last_activity_at_ms: Some(2_500),
+    };
+    assert_eq!(
+        resolve_wait(&live_observation(running, worker_state(turn)), &on_turn_10),
+        None,
+        "the retry is running"
+    );
+
+    let retried = MaterializedTurnOutcome {
+        command_id: retry_id,
+        accepted_ordinal: Some(15),
+        turn_start_position: Some(16),
+        completed_ordinal: 20,
+        ..refused.clone()
+    };
+    let decision = resolve_wait(
+        &live_observation(
+            projection_with(retried),
+            worker_state(ActivityState::Idle { since_ms: None }),
+        ),
+        &on_turn_10,
+    )
+    .expect("the retry ended");
+    assert_eq!(decision.outcome, WaitOutcome::Finished);
+    assert_eq!(decision.turn_id, Some(15));
+
+    assert_eq!(
+        resolve_wait(&armed_for("server-retry-30"), &on_turn_10).map(|decision| decision.outcome),
+        Some(WaitOutcome::Finished),
+        "a retry of another turn does not resend turn 10"
+    );
+}
+
+/// The turn's own assessment record is the owner of Jev's verdict on it. A
+/// verdict that the reply asks the user something ends the wait as
+/// `input_required`; while Jev is still reading the reply, the turn has not
+/// ended; a verdict about some other turn says nothing about this one.
+#[test]
+fn a_wait_reads_jev_s_verdict_from_the_turn_s_own_assessment() {
+    use mj_core::activity::ActivityState;
+    use mj_core::assessment::{Action, Status};
+    let turn = completed(7, "end_turn");
+    let idle = || worker_state(ActivityState::Idle { since_ms: None });
+    let observe = |assessment: mj_core::assessment::TurnAssessment| {
+        let mut operational = idle();
+        operational.retry_assessment_pending =
+            matches!(assessment.status, Status::Pending | Status::Failed);
+        operational.assessment = Some(Box::new(assessment));
+        live_observation(projection_with(turn.clone()), operational)
+    };
+    for request in [
+        WaitRequest::default(),
+        WaitRequest {
+            turn_id: Some(7),
+            ..WaitRequest::default()
+        },
+    ] {
+        let decision = resolve_wait(
+            &observe(assessment_of(
+                &turn,
+                Status::Assessed,
+                Some(Action::AwaitInput),
+            )),
+            &request,
+        )
+        .expect("Jev answered");
+        assert_eq!(decision.outcome, WaitOutcome::InputRequired);
+        assert_eq!(
+            decision.stop_reason.as_deref(),
+            Some(mj_core::acp::AWAITING_INPUT_STOP_REASON)
+        );
+        assert!(decision.turn.is_some(), "the reply is still the turn's");
+
+        assert_eq!(
+            resolve_wait(
+                &observe(assessment_of(&turn, Status::Pending, None)),
+                &request
+            ),
+            None,
+            "Jev is still reading the reply"
+        );
+        // A failed check retries minutes later, without limit; the turn ends
+        // with what the harness said rather than waiting on it.
+        let failed = resolve_wait(
+            &observe(assessment_of(&turn, Status::Failed, None)),
+            &request,
+        )
+        .expect("a failed check holds no wait");
+        assert_eq!(failed.outcome, WaitOutcome::Finished);
+    }
+
+    let other_turn = MaterializedTurnOutcome {
+        command_id: "harness-turn-30".into(),
+        completed_ordinal: 31,
+        ..turn.clone()
+    };
+    for status in [Status::Pending, Status::Assessed] {
+        assert_eq!(
+            resolve_wait(
+                &observe(assessment_of(&other_turn, status, Some(Action::AwaitInput))),
+                &WaitRequest {
+                    turn_id: Some(7),
+                    ..WaitRequest::default()
+                }
+            )
+            .map(|decision| decision.outcome),
+            Some(WaitOutcome::Finished),
+            "a verdict about another turn says nothing about turn 7"
+        );
+    }
+}
+
+/// The projection can keep saying Running after a turn ended, with nothing the
+/// worker can see behind it: no prompt, no turn of the harness's own, no step.
+/// The worker's activity owns "is the session settled", and it says idle.
+#[test]
+fn a_session_wait_follows_the_workers_activity_over_a_stale_running_flag() {
+    let mut materialized = projection_with(completed(7, "end_turn"));
+    materialized.execution = MaterializedExecutionState::Running { started_at_ms: 1 };
+    let observation = live_observation(
+        materialized,
+        worker_state(mj_core::activity::ActivityState::Idle { since_ms: None }),
+    );
+    assert_eq!(
+        observation.execution,
+        MaterializedExecutionState::Running { started_at_ms: 1 }
+    );
+    assert_eq!(
+        resolve_wait(&observation, &WaitRequest::default()).map(|decision| decision.outcome),
+        Some(WaitOutcome::Finished)
+    );
 }
 
 #[test]
@@ -3528,10 +3990,14 @@ fn rejections_stopped_sessions_and_an_empty_session_each_end_the_wait() {
 
     let mut running = idle(None);
     running.execution = MaterializedExecutionState::Running { started_at_ms: 1 };
+    running.activity = mj_core::activity::ActivityState::Turn {
+        started_at_ms: Some(1),
+        last_activity_at_ms: None,
+    };
     assert_eq!(resolve_wait(&running, &anything), None);
 
     let mut queued = idle(Some(completed(10, "end_turn")));
-    queued.queued = 1;
+    queued.queued = vec!["prompt-11".into()];
     assert_eq!(
         resolve_wait(&queued, &anything),
         None,
@@ -4048,6 +4514,10 @@ fn input_aware_wait_is_opt_in_and_respects_completed_turns_and_stopping() {
     let mut observation = WaitObservation {
         pending_elicitations: vec![input_request()],
         execution: MaterializedExecutionState::Running { started_at_ms: 1 },
+        activity: mj_core::activity::ActivityState::Turn {
+            started_at_ms: Some(1),
+            last_activity_at_ms: None,
+        },
         ..Default::default()
     };
     assert!(resolve_wait(&observation, &WaitRequest::default()).is_none());
@@ -4428,8 +4898,10 @@ async fn suspension_rejects_destruction_flags_and_removed_routes() {
     }
 }
 
-#[test]
-fn both_wait_forms_follow_continuation() {
+/// Mjolnir's automatic continuation starts a new command. A session wait
+/// follows it; a wait on the turn before it answers, and names it as `next`.
+#[tokio::test]
+async fn only_the_session_wait_follows_automatic_continuation() {
     let observation = WaitObservation {
         activity: mj_core::activity::ActivityState::CheckingContinuation,
         execution: MaterializedExecutionState::Idle,
@@ -4441,7 +4913,25 @@ fn both_wait_forms_follow_continuation() {
         turn_id: Some(7),
         ..Default::default()
     };
-    assert!(resolve_wait(&observation, &request).is_none());
+    let decision = resolve_wait(&observation, &request).expect("turn 7 ended");
+    assert_eq!(decision.outcome, WaitOutcome::Finished);
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let backend = summarizing_backend();
+    let response = finish_wait(
+        &backend,
+        "session-1",
+        ApiSession::from(&snapshot.sessions[0]),
+        observation,
+        decision,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        response.next,
+        Some(mj_core::activity::ActivityState::CheckingContinuation)
+    );
 }
 
 #[test]
@@ -4487,7 +4977,10 @@ fn session_wait_uses_the_workers_published_jev_activity() {
         let observation = build_observation(&snapshot, &session, Some(&live), None, None);
         assert_eq!(observation.activity, activity);
         assert!(resolve_wait(&observation, &WaitRequest::default()).is_none());
-        assert!(resolve_wait(&observation, &explicit).is_none());
+        assert!(
+            resolve_wait(&observation, &explicit).is_some(),
+            "turn 7 ended, whatever the session does next"
+        );
         let observation = WaitObservation {
             start_status: Some(StartStatus::Submitted { turn_id: 7 }),
             ..observation
@@ -4498,7 +4991,8 @@ fn session_wait_uses_the_workers_published_jev_activity() {
         );
     }
     // Jev can judge a reply finished even with an abandoned background task.
-    // Consume that published decision rather than recounting the processes.
+    // Follow the worker's published activity rather than recounting the
+    // processes, and rather than the viewer's older copy of it.
     let operational = &mut live.snapshot.as_mut().unwrap().operational;
     operational
         .background_commands
@@ -4509,11 +5003,6 @@ fn session_wait_uses_the_workers_published_jev_activity() {
             can_stop: false,
         });
     operational.activity = Some(ActivityState::Idle { since_ms: Some(20) });
-    operational.turn_completion = Some(mj_core::activity::verdict::TurnCompletion {
-        command_id: "prompt-7".into(),
-        completed_ordinal: 20,
-        decision: mj_core::activity::verdict::Decision::InferIdle,
-    });
     session.activity_state = Some(ActivityState::Expecting { since_ms: 10 });
     let observation = build_observation(&snapshot, &session, Some(&live), None, None);
     assert_eq!(
@@ -4522,6 +5011,13 @@ fn session_wait_uses_the_workers_published_jev_activity() {
             .outcome,
         WaitOutcome::Finished
     );
+    // The daemon's continuation check is published over the worker's state,
+    // as the dashboard shows it; the actor's own view never carries it.
+    session.activity_state = Some(ActivityState::CheckingContinuation);
+    let checking = build_observation(&snapshot, &session, Some(&live), None, None);
+    assert_eq!(checking.activity, ActivityState::CheckingContinuation);
+    assert!(resolve_wait(&checking, &WaitRequest::default()).is_none());
+    assert!(resolve_wait(&checking, &explicit).is_some());
 
     live.connected = false;
     session.activity_state = Some(ActivityState::Idle { since_ms: None });
@@ -4540,29 +5036,43 @@ fn session_wait_uses_the_workers_published_jev_activity() {
     assert!(resolve_wait(&unknown, &WaitRequest::default()).is_none());
 }
 
+/// A turn the quota stopped ended as `quota_limit`, with the recovery's
+/// notice, whether or not a resume is scheduled: the resume is a new command.
+/// Jev's quota verdict says the same before the recovery is recorded.
 #[test]
-fn quota_recovery_keeps_wait_pending_and_unknown_reset_reports_quota() {
-    let mut pending = idle(Some(completed(10, "end_turn")));
-    pending.quota_recovery = Some(mj_core::continuation::QuotaRecovery {
+fn a_quota_stop_ends_the_turn_as_quota_limit_whether_or_not_a_resume_is_scheduled() {
+    let turn = completed(10, "end_turn");
+    let mut stopped = idle(Some(turn.clone()));
+    stopped.quota_recovery = Some(mj_core::continuation::QuotaRecovery {
         user_command_id: "user-request".into(),
-        completed_command_id: pending
-            .last_turn_outcome
-            .as_ref()
-            .unwrap()
-            .command_id
-            .clone(),
+        completed_command_id: turn.command_id.clone(),
         profile_id: "test-profile".into(),
         reset_at_ms: Some(1000),
         retry_at_ms: Some(61000),
-        notice: "No reliable reset time".into(),
+        notice: "Resumes after the reset".into(),
         submitted: false,
     });
-    assert!(resolve_wait(&pending, &WaitRequest::default()).is_none());
-    pending.quota_recovery.as_mut().unwrap().retry_at_ms = None;
+    let on_the_turn = WaitRequest {
+        turn_id: Some(10),
+        ..WaitRequest::default()
+    };
+    for retry_at_ms in [Some(61000), None] {
+        stopped.quota_recovery.as_mut().unwrap().retry_at_ms = retry_at_ms;
+        for request in [&WaitRequest::default(), &on_the_turn] {
+            let decision = resolve_wait(&stopped, request).unwrap();
+            assert_eq!(decision.outcome, WaitOutcome::QuotaLimit);
+            assert_eq!(decision.message.as_deref(), Some("Resumes after the reset"));
+        }
+    }
+
+    let mut judged = idle(Some(turn.clone()));
+    judged.turn_assessment = Some(assessment_of(
+        &turn,
+        mj_core::assessment::Status::Deferred,
+        Some(mj_core::assessment::Action::RecoverQuota),
+    ));
     assert_eq!(
-        resolve_wait(&pending, &WaitRequest::default())
-            .unwrap()
-            .outcome,
+        resolve_wait(&judged, &on_the_turn).unwrap().outcome,
         WaitOutcome::QuotaLimit
     );
 }
@@ -5183,59 +5693,6 @@ async fn a_session_wait_on_a_child_answers_with_its_handback() {
     .await;
     assert_eq!(response.final_message.as_deref(), Some("Report delivered."));
     assert_eq!(response.report_source.as_deref(), Some("last_message"));
-}
-
-#[test]
-fn both_wait_forms_use_recorded_jev_outcomes_and_targeted_wait_ignores_later_activity() {
-    use mj_core::activity::{
-        ActivityState,
-        verdict::{Decision, TurnCompletion},
-    };
-    let mut observation = idle(Some(completed(7, "end_turn")));
-    let targeted = WaitRequest {
-        turn_id: Some(7),
-        ..Default::default()
-    };
-    for (decision, expected) in [
-        (Decision::ExpectContinuation, None),
-        (Decision::InferIdle, Some(WaitOutcome::Finished)),
-        (Decision::AwaitingInput, Some(WaitOutcome::InputRequired)),
-    ] {
-        observation.turn_completion = Some(TurnCompletion {
-            command_id: "prompt-7".into(),
-            completed_ordinal: 20,
-            decision,
-        });
-        for request in [&WaitRequest::default(), &targeted] {
-            assert_eq!(
-                resolve_wait(&observation, request).map(|d| d.outcome),
-                expected
-            );
-        }
-        if expected.is_some() {
-            assert_eq!(
-                resolve_wait(&observation, &targeted)
-                    .unwrap()
-                    .turn
-                    .unwrap()
-                    .completed_position,
-                20,
-                "the returned summary includes the continuation Jev judged"
-            );
-        }
-        // The completion record belongs to this command, not the current
-        // activity. Later work must not reinterpret a settled target.
-        observation.activity = ActivityState::Goal;
-        assert_eq!(
-            resolve_wait(&observation, &targeted).map(|d| d.outcome),
-            expected
-        );
-        assert!(resolve_wait(&observation, &WaitRequest::default()).is_none());
-        observation.activity = ActivityState::default();
-    }
-    observation.turn_completion.as_mut().unwrap().command_id = "different-command".into();
-    observation.activity = ActivityState::Expecting { since_ms: 20 };
-    assert!(resolve_wait(&observation, &targeted).is_none());
 }
 
 /// A live actor that has not delivered its first projection, so a wait reads
