@@ -215,13 +215,68 @@ fn absolute_environment_path(name: &str) -> Option<PathBuf> {
         .filter(|path| path.is_absolute())
 }
 
+/// The XDG base directory `name`, or `fallback` beneath the user's home.
+fn xdg_home(name: &str, fallback: &str) -> Option<PathBuf> {
+    absolute_environment_path(name)
+        .or_else(|| crate::path_input::user_home().map(|home| home.join(fallback)))
+}
+
+/// Whether a MiMo Code profile's own `config/` tree carries a configuration
+/// file, which makes it authoritative over the stock XDG configuration.
+fn mimo_config_is_seeded(config: &Path) -> bool {
+    ["mimocode.jsonc", "mimocode.json"]
+        .into_iter()
+        .any(|name| config.join(name).is_file())
+}
+
+/// MiMo Code's configuration trees for a profile `home`, lowest priority
+/// first. See [`HarnessKind::configuration_sources`].
+fn mimo_configuration_sources(
+    home: &Path,
+    is_default_home: bool,
+    stock_config: Option<&Path>,
+) -> Vec<PathBuf> {
+    let managed = home.join("config");
+    let mut sources = Vec::new();
+    if is_default_home
+        && !mimo_config_is_seeded(&managed)
+        && let Some(stock) = stock_config
+    {
+        sources.push(stock.to_path_buf());
+    }
+    sources.push(managed);
+    sources
+}
+
+/// MiMo Code's data directory for a profile `home`. See
+/// [`HarnessKind::data_source`].
+fn mimo_data_source(home: &Path, is_default_home: bool, stock_data: Option<&Path>) -> PathBuf {
+    let managed = home.join("data");
+    if is_default_home
+        && !managed.join("auth.json").is_file()
+        && let Some(stock) = stock_data
+    {
+        stock.to_path_buf()
+    } else {
+        managed
+    }
+}
+
 /// The file inside a harness home that proves the harness is logged in.
 ///
 /// Setup, quota checks, credential sync, and the target-side worker all read
 /// the same path, so it is decided here beside [`HarnessKind`] rather than in
 /// any one of them.
 pub fn harness_authentication_marker(kind: HarnessKind, home: &Path) -> PathBuf {
-    home.join(kind.credential_file_name())
+    match kind {
+        // MiMo Code's stock installation keeps its login in the XDG data
+        // directory rather than beneath the installer's `~/.mimocode`
+        // directory, which is what a conventional profile home names.
+        // `data_source` resolves that layout and the MIMOCODE_HOME layout a
+        // configured root uses.
+        HarnessKind::Mimo => kind.data_source(home).join("auth.json"),
+        _ => home.join(kind.credential_file_name()),
+    }
 }
 
 impl HarnessKind {
@@ -278,9 +333,74 @@ impl HarnessKind {
         host: HarnessHost,
         environment: &mut BTreeMap<String, String>,
     ) {
+        // A MiMo Code profile at the conventional home names the directory the
+        // official installer populates with its executable. That install keeps
+        // configuration and the login in the person's XDG trees, so pointing
+        // `MIMOCODE_HOME` at the installer directory for `mj login` would
+        // start a second, empty profile and leave the person's own one
+        // untouched. The exception is a login Mjolnir already wrote into the
+        // profile root: update that login in place, while still reading the
+        // person's stock configuration so their providers are offered.
+        if self == Self::Mimo && self.is_default_home(home) {
+            if home.join("data/auth.json").is_file() {
+                environment.insert(self.home_env().into(), crate::target_path::text(home));
+                if let Some(stock) = xdg_home("XDG_CONFIG_HOME", ".config") {
+                    environment.insert(
+                        "MIMOCODE_CONFIG_DIR".into(),
+                        crate::target_path::text(&stock.join(self.id())),
+                    );
+                }
+                environment.insert("MIMOCODE_DISABLE_AUTOUPDATE".into(), "1".into());
+            }
+            return;
+        }
         if self.keeps_login_in_home(host) && !self.is_own_nested_home(home) {
             self.configure_home_environment(home, environment);
         }
+    }
+
+    /// Whether `home` is the conventional home [`HarnessKind::default_home_leaf`]
+    /// names beneath the user's home.
+    pub fn is_default_home(self, home: &Path) -> bool {
+        crate::path_input::user_home()
+            .is_some_and(|user| home == user.join(self.default_home_leaf()))
+    }
+
+    /// The configuration trees a session stages for `home`, lowest priority
+    /// first.
+    ///
+    /// Every harness has one, at `home` itself. MiMo Code's stock installation
+    /// is the exception: its configuration is the XDG configuration directory,
+    /// `~/.config/mimocode`, while its data and login are in
+    /// `~/.local/share/mimocode`. A profile whose home is the conventional
+    /// `~/.mimocode` therefore names the installer's directory. Its own
+    /// `config/` tree still stages last so Mjolnir's synced skills and any
+    /// managed settings win, with the person's stock configuration beneath
+    /// them until the profile has a configuration file of its own. Any other
+    /// MiMo home is a `MIMOCODE_HOME` root and stages only its `config/` tree.
+    pub fn configuration_sources(self, home: &Path) -> Vec<PathBuf> {
+        if self != Self::Mimo {
+            return vec![home.to_path_buf()];
+        }
+        let stock = xdg_home("XDG_CONFIG_HOME", ".config").map(|base| base.join(self.id()));
+        mimo_configuration_sources(home, self.is_default_home(home), stock.as_deref())
+    }
+
+    /// The directory holding the login and native session data a session
+    /// stages for `home`.
+    ///
+    /// Every harness keeps it at `home` itself. MiMo Code's stock installation
+    /// keeps it in the XDG data directory, `~/.local/share/mimocode`; a
+    /// `MIMOCODE_HOME` root keeps it in `data/` beneath that root. The
+    /// conventional `~/.mimocode` profile uses the XDG tree unless the profile
+    /// root already holds its own login, which is how a `mj login` against a
+    /// MIMOCODE_HOME root is found again.
+    pub fn data_source(self, home: &Path) -> PathBuf {
+        if self != Self::Mimo {
+            return home.to_path_buf();
+        }
+        let stock = xdg_home("XDG_DATA_HOME", ".local/share").map(|base| base.join(self.id()));
+        mimo_data_source(home, self.is_default_home(home), stock.as_deref())
     }
 
     /// Whether `home` is the person's own home for a harness with an XDG home
@@ -1446,6 +1566,60 @@ mod tests {
             inputs.capabilities_key("muse", true),
             upgraded.capabilities_key("muse", true),
             "a new managed installation advertises new models and efforts"
+        );
+    }
+
+    /// The stock MiMo Code installation keeps its configuration and login in
+    /// XDG, not beneath the installer's `~/.mimocode` directory. A profile at
+    /// that conventional home must adopt both, while its own synced skills
+    /// still stage over the stock configuration and its own login wins once it
+    /// has one.
+    #[test]
+    fn a_conventional_mimo_home_adopts_the_stock_xdg_configuration_and_login() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join(".mimocode");
+        let stock_config = root.path().join(".config/mimocode");
+        let stock_data = root.path().join(".local/share/mimocode");
+        std::fs::create_dir_all(home.join("config/skills/mj")).unwrap();
+        std::fs::create_dir_all(&stock_config).unwrap();
+        std::fs::create_dir_all(&stock_data).unwrap();
+        std::fs::write(stock_data.join("auth.json"), b"{}").unwrap();
+
+        assert_eq!(
+            mimo_configuration_sources(&home, true, Some(&stock_config)),
+            vec![stock_config.clone(), home.join("config")],
+            "synced skills sit over the person's stock configuration"
+        );
+        assert_eq!(
+            mimo_data_source(&home, true, Some(&stock_data)),
+            stock_data,
+            "an empty installer directory adopts the person's stock login"
+        );
+
+        std::fs::write(home.join("config/mimocode.jsonc"), b"{}").unwrap();
+        assert_eq!(
+            mimo_configuration_sources(&home, true, Some(&stock_config)),
+            vec![home.join("config")],
+            "a profile configuration replaces the stock one rather than merging"
+        );
+
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        std::fs::write(home.join("data/auth.json"), b"{}").unwrap();
+        assert_eq!(
+            mimo_data_source(&home, true, Some(&stock_data)),
+            home.join("data"),
+            "a login Mjolnir created in the profile root wins over the stock one"
+        );
+
+        assert_eq!(
+            HarnessKind::Mimo.configuration_sources(&home),
+            vec![home.join("config")],
+            "a configured MIMOCODE_HOME root never reads the stock trees"
+        );
+        assert_eq!(
+            harness_authentication_marker(HarnessKind::Mimo, &home),
+            home.join("data/auth.json"),
+            "a staged home proves its login beside its own data"
         );
     }
 }

@@ -92,6 +92,20 @@ database and WAL, exposed in TUI and documentation, and covered by focused
 regressions. The pinned package's real `mimo acp` process returned a valid ACP
 initialize response outside the restricted sandbox.
 
+Follow-up (2026-10-22): the first real session failed every prompt with
+`ACP prompt returned no session updates`. The staged profile had no
+`data/auth.json`, because the conventional `~/.mimocode` home is the official
+installer's executable directory, not a `MIMOCODE_HOME` root. A stock MiMo Code
+install keeps its configuration in `~/.config/mimocode` and its login in
+`~/.local/share/mimocode/auth.json`, so Mjolnir never found or staged the login;
+MiMo Code then logged `Invalid API Key` to its own log and ended the turn with
+no ACP update. Staging now resolves the stock XDG trees for a profile at the
+conventional home, layers the profile's own `config/` over the stock
+configuration so synced skills still win, and prefers a login that Mjolnir
+created in the profile root once one exists. `mj login` for that profile leaves
+`MIMOCODE_HOME` unset so it signs in to the stock install. A configured
+`MIMOCODE_HOME` root keeps its existing `config/` and `data/` layout.
+
 Validation passed for the full core, checkpoint, worker, client, controller, and TUI
 suites; controller validation skipped one unrelated host-tool digest test
 because this host lacks `shasum`. TUI validation passed apart from one stale

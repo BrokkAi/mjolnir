@@ -593,7 +593,10 @@ instead. Those variables are `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
 `KIMI_CODE_HOME`, `GROK_HOME`, MiMo Code's `MIMOCODE_HOME`, and
 `XDG_CONFIG_HOME` for Muse and OpenCode. Muse and OpenCode also reserve
 `XDG_DATA_HOME`; their homes must end in `/muse` and `/opencode`,
-respectively.
+respectively. A MiMo Code profile at the conventional `~/.mimocode` home reads
+the stock `~/.config/mimocode` configuration and
+`~/.local/share/mimocode/auth.json` login; every other MiMo home is a
+`MIMOCODE_HOME` root.
 
 Profiles do not select target-side executables. All bare workers, including
 localhost, SSH, and EC2, resolve an exact pinned runtime from their managed
@@ -1159,7 +1162,7 @@ Harness-home variables influence automatic first-run discovery and explicit
 | Grok Build | `GROK_HOME` | `~/.grok` |
 | Muse Code | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` |
 | OpenCode | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` |
-| MiMo Code | `MIMOCODE_HOME` | `~/.mimocode` |
+| MiMo Code | `MIMOCODE_HOME` | `~/.mimocode` (the stock install keeps `config/` and `data/` in XDG) |
 
 The release installer separately accepts `MJOLNIR_INSTALL_DIR` (preferred over
 `INSTALL_DIR`), `MJOLNIR_GITHUB_OWNER`, `MJOLNIR_VERSION`, `GITHUB_TOKEN`, and

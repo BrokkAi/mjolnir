@@ -57,7 +57,7 @@ marks models or counters that cannot be priced from the recorded information.
 | Grok Build | `grok` | `GROK_HOME` | `~/.grok` | `auth.json` | yes |
 | Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
 | OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db` | yes |
-| MiMo Code | `mimo` | `MIMOCODE_HOME` | `~/.mimocode` | `data/auth.json` | yes |
+| MiMo Code | `mimo` | `MIMOCODE_HOME` | `~/.mimocode` (stock XDG config and login when unset) | `data/auth.json`, or `~/.local/share/mimocode/auth.json` for the stock install | yes |
 
 There are seven harness kinds. Codex can use its built-in Amazon Bedrock
 providers; see [Codex on Amazon Bedrock](#codex-on-amazon-bedrock). It can also
@@ -447,12 +447,17 @@ Logins come only from the profile; one made inside a session lasts until that
 session next reloads. Checkpoints keep the session database without its logins. Do
 not override `XDG_CONFIG_HOME` or `XDG_DATA_HOME` in the profile environment.
 
-For MiMo Code, configure `kind = "mimo"` and a home that is used as its
-`MIMOCODE_HOME`, for example `home = "/home/me/.mimocode"` or
-`/home/me/accounts/work/mimo`. Discovery uses `$MIMOCODE_HOME` when set.
-Mjolnir gives each session a private copy of that root with separate `config/`
-and `data/` trees, including on a bare runtime on this machine. Do not override
-`MIMOCODE_HOME` in the profile environment.
+For MiMo Code, configure `kind = "mimo"`. A profile at the conventional
+`~/.mimocode` home, which is where the official installer keeps its executable,
+uses the person's stock XDG configuration and login:
+`~/.config/mimocode` and `~/.local/share/mimocode/auth.json`. That keeps an
+existing `mimo auth login` working without a second sign-in. Any other home is
+a `MIMOCODE_HOME` root, for example
+`home = "/home/me/accounts/work/mimo"`, with its own `config/` and `data/`
+trees; discovery uses `$MIMOCODE_HOME` when set. Mjolnir gives each session a
+private root with those `config/` and `data/` trees, including on a bare
+runtime on this machine. Do not override `MIMOCODE_HOME` in the profile
+environment.
 
 Run:
 

@@ -242,10 +242,10 @@ pub(super) fn stage_profile(
         // directory; they are exported below.
         mj_core::config::HarnessKind::OpenCode => &["opencode.json", "opencode.jsonc"],
         mj_core::config::HarnessKind::Mimo => {
-            // MIMOCODE_HOME keeps the complete config tree beside session
-            // data. Copy configuration including skills, agents, and plugins,
-            // but only the login from the data directory.
-            &["config", "data/auth.json"]
+            // MiMo Code's configuration and login may live in separate trees
+            // (see `configuration_sources` and `data_source`), so they are
+            // staged below.
+            &[]
         }
     };
     let allowlist: Vec<&str> = harness_files
@@ -265,6 +265,23 @@ pub(super) fn stage_profile(
         .iter()
         .map(|owned| source.join(owned))
         .collect::<Vec<_>>();
+    // MiMo Code's stock installation splits its configuration directory from
+    // its data directory. Stage both into the `MIMOCODE_HOME` root the session
+    // runs from, but carry only the login from the data directory: the native
+    // session database and logs belong to the profile, not to a new session.
+    // This runs before the allowlist below so Mjolnir's synced skills, which
+    // live under `config/skills`, overwrite any same-named stock entries.
+    if harness == mj_core::config::HarnessKind::Mimo {
+        for config in harness.configuration_sources(source) {
+            if config.is_dir() {
+                copy_profile_entry_except(&config, &destination.join("config"), &harness_owned)?;
+            }
+        }
+        let login = harness.data_source(source).join("auth.json");
+        if login.is_file() {
+            copy_profile_entry(&login, &destination.join(harness.credential_file_name()))?;
+        }
+    }
     allowlist.par_iter().try_for_each(|name| -> Result<()> {
         let from = source.join(name);
         if from.exists() {
