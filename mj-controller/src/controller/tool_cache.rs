@@ -6,7 +6,7 @@ use anyhow::{Context, Result, ensure};
 use mj_core::config::{Config, TargetTemplate, stored_target};
 use mj_core::state::ToolCachePlacement;
 
-use super::cache_host::CacheHost;
+use super::cache_host::{CacheHost, HostPlatform};
 use crate::targets::{self, CommandExecutor};
 
 pub(super) fn prepare(
@@ -61,10 +61,17 @@ fn prepare_checked(
         return Ok(None);
     }
     let host = CacheHost::for_path_target(template)?;
-    // Container bind mounts and host filesystem probes here require Linux,
-    // as the existing mbx integration does. Other hosts keep native defaults.
-    if !super::mbx::host_supports_cache(&host, executor)? {
-        return Ok(None);
+    let container = !matches!(
+        template,
+        TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }
+    );
+    // A container shares these directories through a bind mount, which needs
+    // the host's own kernel. A bare session on a Mac runs on the Mac itself.
+    // Other hosts keep native defaults.
+    match host.platform(executor)? {
+        HostPlatform::Linux => {}
+        HostPlatform::Darwin if !container => {}
+        HostPlatform::Darwin | HostPlatform::Windows => return Ok(None),
     }
     let home = host.home(executor)?;
     let directory = match settings.and_then(|settings| settings.tools_directory.clone()) {
@@ -72,10 +79,6 @@ fn prepare_checked(
         None => mj_core::target_path::join(&home, Path::new(".cache/mjolnir/build")),
     };
     let nx_home = mj_core::target_path::join(&home, Path::new(".nx"));
-    let container = !matches!(
-        template,
-        TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }
-    );
     let nx_destination = if container {
         mj_core::target_path::join(
             Path::new(
@@ -158,7 +161,7 @@ mod tests {
         fn execute(&self, command: &targets::CommandSpec) -> Result<targets::CommandOutput> {
             let (status, stdout, stderr) = match command.program.as_str() {
                 "uname" => (0, "Linux x86_64\n", ""),
-                "stat" => (0, "ext4\n", ""),
+                "sh" if command.purpose == "probe mount source filesystem" => (0, "ext4\n", ""),
                 "mkdir"
                     if command
                         .args
@@ -180,6 +183,57 @@ mod tests {
         fn notify_notice(&self, notice: &str) {
             self.notices.lock().unwrap().push(notice.to_owned());
         }
+    }
+
+    /// A Mac host whose commands all succeed, recording what ran.
+    #[derive(Default)]
+    struct MacHost {
+        ran: Mutex<Vec<String>>,
+    }
+
+    impl CommandExecutor for MacHost {
+        fn execute(&self, command: &targets::CommandSpec) -> Result<targets::CommandOutput> {
+            self.ran.lock().unwrap().push(command.program.clone());
+            let stdout = match command.program.as_str() {
+                "uname" => "Darwin arm64\n",
+                "sh" if command.purpose == "probe mount source filesystem" => "apfs\n",
+                "mkdir" => "",
+                other => anyhow::bail!("unexpected preparation program {other}"),
+            };
+            Ok(targets::CommandOutput {
+                status: 0,
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    // Hard-won: #1330: bare sessions on a Mac got no native build caches or mbx launchers.
+    #[cfg(unix)]
+    #[test]
+    fn a_mac_prepares_native_caches_for_bare_sessions_but_not_containers() {
+        let mut config = Config::default().with_local_targets();
+        config.machines.insert(
+            "local".into(),
+            mj_core::config::Machine::Local {
+                build_cache: Some(mj_core::config::TargetBuildCache {
+                    tools_directory: Some("/cache/native".into()),
+                    ..Default::default()
+                }),
+            },
+        );
+
+        let bare = MacHost::default();
+        let mut mounts = Vec::new();
+        let placement = prepare(&config, "localhost", &mut mounts, &bare).unwrap();
+        assert_eq!(placement.directory, Path::new("/cache/native"));
+        assert!(mounts.is_empty(), "a bare session mounts nothing");
+
+        // Its containers run Linux in a VM that these host paths do not describe.
+        let container = MacHost::default();
+        assert!(prepare(&config, "podman", &mut mounts, &container).is_none());
+        assert!(mounts.is_empty());
+        assert_eq!(*container.ran.lock().unwrap(), ["uname"]);
     }
 
     #[test]

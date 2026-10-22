@@ -1268,7 +1268,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             // Provisioning probes the mount source's filesystem before it
             // builds the run arguments; a local disk keeps the overlay.
-            if command.program == "stat" {
+            if command.purpose == "probe mount source filesystem" {
                 return Ok(CommandOutput {
                     status: 0,
                     stdout: b"ext4\n".to_vec(),

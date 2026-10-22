@@ -1351,13 +1351,20 @@ pub enum BuildCacheOff {
     /// Nothing on the machine's settings page can turn it on: the global
     /// switch, the host's mbx, or its filesystem. The text says which.
     Unavailable(String),
+    /// The host's platform keeps its containers from sharing its mbx, so
+    /// Mjolnir neither configures nor installs one there. On macOS the
+    /// preview's `native_mbx` is the one bare sessions on the Mac use. The
+    /// text says what the host's own mbx still serves.
+    UnsupportedPlatform(String),
 }
 
 impl std::fmt::Display for BuildCacheOff {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TurnedOff => formatter.write_str("turned off for this machine"),
-            Self::Unavailable(reason) => formatter.write_str(reason),
+            Self::Unavailable(reason) | Self::UnsupportedPlatform(reason) => {
+                formatter.write_str(reason)
+            }
         }
     }
 }

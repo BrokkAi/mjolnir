@@ -1048,12 +1048,35 @@ pub(super) fn parse_podman_version(host: PodmanHost<'_>, stdout: &[u8]) -> Resul
     Ok(candidate.to_owned())
 }
 
-/// Filesystem type of each directory, probed on the host that runs the
-/// container engine. `ssh` names that host for a remote Podman target; `None`
-/// probes this machine.
+/// Print the filesystem type of each argument, one per line. macOS `stat`
+/// cannot name one, so there `df` names the mount point holding the path and
+/// the last `mount` entry for that point, the one on top, names its type.
+const FILESYSTEM_TYPES_SCRIPT: &str = r#"if [ "$(uname -s)" != Darwin ]; then
+    exec stat -f -c %T -- "$@"
+fi
+mounts=$(mount) || exit 1
+for path do
+    point=$(df -P -- "$path" | sed -n '2s/^.*[0-9]%[[:space:]]*//p')
+    [ -n "$point" ] || { printf 'df named no mount point for %s\n' "$path" >&2; exit 1; }
+    filesystem=$(printf '%s\n' "$mounts" | {
+        found=
+        while IFS= read -r line; do
+            case $line in
+                *" on $point ("*) rest=${line##*" on $point ("}; found=${rest%%[,)]*} ;;
+            esac
+        done
+        printf '%s' "$found"
+    })
+    [ -n "$filesystem" ] || { printf 'mount lists no filesystem at %s\n' "$point" >&2; exit 1; }
+    printf '%s\n' "$filesystem"
+done"#;
+
+/// Filesystem type of each directory, probed on the host that owns it: the
+/// one that runs the container engine, or a bare session's own machine.
+/// `ssh` names that host; `None` probes this machine.
 ///
-/// The reply is positional, so the whole batch fails unless `stat` answered for
-/// every directory in order.
+/// The reply is positional, so the whole batch fails unless the host answered
+/// for every directory in order.
 pub fn probe_filesystem_types(
     ssh: Option<&SshTarget>,
     paths: &[PathBuf],
@@ -1063,11 +1086,10 @@ pub fn probe_filesystem_types(
         return Ok(Vec::new());
     }
     let mut args = vec![
-        "stat".to_owned(),
-        "-f".to_owned(),
+        "sh".to_owned(),
         "-c".to_owned(),
-        "%T".to_owned(),
-        "--".to_owned(),
+        FILESYSTEM_TYPES_SCRIPT.to_owned(),
+        "hel-filesystem".to_owned(),
     ];
     args.extend(paths.iter().map(|path| path.to_string_lossy().into_owned()));
     let host = match ssh {
