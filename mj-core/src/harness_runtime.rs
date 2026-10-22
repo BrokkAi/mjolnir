@@ -216,6 +216,10 @@ impl NpmBridge {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HarnessPin {
+    /// Identity of the installed content, and the directory name under the
+    /// harness cache. Change it whenever the installed bytes change, including
+    /// a change to the harness asset `package.json`, so caches written by an
+    /// earlier packaging are replaced instead of reused.
     pub install_id: &'static str,
     pub display_version: &'static str,
     pub entrypoint: &'static str,
@@ -234,7 +238,10 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             entrypoint: "node_modules/.bin/codex-acp",
         },
         HarnessKind::Claude => HarnessPin {
-            install_id: "claude-agent-acp-0.94.0_claude-2.1.306",
+            // pkg2: the asset lists @anthropic-ai/claude-code in allowScripts.
+            // Installs made before that change kept the package's native-binary
+            // stub, so their identity must not match this pin.
+            install_id: "claude-agent-acp-0.94.0_claude-2.1.306_pkg2",
             display_version: "claude-agent-acp 0.94.0 + Claude Code 2.1.306",
             entrypoint: "node_modules/.bin/claude-agent-acp",
         },

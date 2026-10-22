@@ -375,8 +375,8 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
   ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
   │ Settings › Runtimes                                                                          │
-  │ Add a runtime and choose its machine, or use Detect runtimes to find container engines here. │
-  │                                                                                              │
+  │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │
+  │ run.                                                                                         │
   │                                                                                              │
   │   podman                                                 9 settings  ›     Add               │
   │                                                                            Remove            │
@@ -535,8 +535,8 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
   ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
   │ Settings › Runtimes                                                                          │
-  │ Add a runtime and choose its machine, or use Detect runtimes to find container engines here. │
-  │                                                                                              │
+  │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │
+  │ run.                                                                                         │
   │                                                                                              │
   │   podman                                                 9 settings  ›     Add               │
   │                                                                            Remove            │
@@ -567,8 +567,8 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
   ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
   │ Settings › Runtimes                                                                          │
-  │ Add a runtime and choose its machine, or use Detect runtimes to find container engines here. │
-  │                                                                                              │
+  │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │
+  │ run.                                                                                         │
   │                                                                                              │
   │   podman                                                 9 settings  ›     Add               │
   │                                                                            Remove            │
@@ -600,8 +600,8 @@ focused control: Some(Add)
 
   ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
   │ Settings › Runtimes                                                                          │
-  │ Add a runtime and choose its machine, or use Detect runtimes to find container engines here. │
-  │                                                                                              │
+  │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │
+  │ run.                                                                                         │
   │                                                                                              │
   │ Name for the new entry                                                               Apply   │
   │                                                                                              │

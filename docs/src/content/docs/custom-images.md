@@ -65,13 +65,14 @@ installation cost. Codex images should install the bridge version pinned by
 Mjolnir and set `CODEX_PATH` to the installed Codex executable so the bridge
 runs the selected provider.
 
-Mjolnir-owned worker and bridge commands use non-login shells and do not source
-`/etc/profile` or user dotfiles. Images must therefore expose required tools on
-their ordinary process `PATH`; profile-only PATH setup is not part of the
-container contract. The documented `!command` surface always runs the command
-through `bash -lc`, so a custom image must also provide `bash` on `PATH` for
-that surface to work. Those commands intentionally use the session user's
-shell environment.
+Mjolnir-owned worker and bridge commands are started with the environment the
+worker discovered, not under a login shell of their own. Images must therefore
+expose required tools on their ordinary process `PATH`; PATH setup that exists
+only in a user dotfile is visible only if the image user's own shell reads it
+during the worker's startup probe. The documented `!command` surface always runs
+the command through `bash -lc`, so a custom image must also provide `bash` on
+`PATH` for that surface to work. Those commands intentionally use the session
+user's shell environment.
 
 Muse Code requires both `muse-acp` on `PATH` and the native `muse` executable.
 Set `MUSE_CLI` to the native binary's absolute path. Install the pinned

@@ -500,6 +500,7 @@ impl Seek for BoundedBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::io::Read as _;
 
     fn refusal(result: Result<FetchedPath, SessionExportError>) -> String {

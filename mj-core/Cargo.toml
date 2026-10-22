@@ -24,6 +24,9 @@ include = [
     "assets/skills/**/*.md",
     # Delegation guidance embedded with `include_str!` by `subagent`.
     "assets/subagent-delegation.md",
+    # OpenCode provider environment embedded with `include_str!` by the
+    # harness runtime config.
+    "assets/opencode-provider-environment.txt",
     "Cargo.toml",
     "Cargo.lock",
     "/README.md",

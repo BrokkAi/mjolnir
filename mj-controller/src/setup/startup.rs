@@ -8,7 +8,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 
 use super::{
-    DiscoveredHome, GithubRepository, build_config, discover_github_repository, discover_profiles,
+    DiscoveredHome, GithubRepository, add_machine_runtimes, build_config,
+    discover_github_repository, discover_profiles, probe_machines,
 };
 use crate::doctor::{
     CheckStatus, DoctorCheck, DoctorOptions, current_apple_platform, probe_executor,
@@ -209,6 +210,16 @@ pub fn run_setup_command(config_path: &Path) -> Result<()> {
     writeln!(output, "Welcome to Mjolnir")?;
     for line in report.summary() {
         writeln!(output, "{line}")?;
+    }
+    // A machine is a session target only through its runtimes, so setup adds
+    // them for every machine that has none yet.
+    let machines: Vec<_> = Config::load_from(config_path)?
+        .machines_without_runtimes()
+        .map(|(id, machine)| (id.to_owned(), machine.clone()))
+        .collect();
+    let found = probe_machines(&machines, &probes);
+    for (machine, runtimes) in add_machine_runtimes(config_path, &found, &|| false)? {
+        writeln!(output, "Runtimes for {machine}: {}.", runtimes.join(", "))?;
     }
     let checks = run_with_config_path(
         config_path,

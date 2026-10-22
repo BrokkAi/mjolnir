@@ -1,5 +1,7 @@
 //! Actionable host and configuration prerequisite checks.
 
+#[cfg(unix)]
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -192,6 +194,9 @@ pub fn run_with_config_path(
     let (loaded, mut checks) = configuration_checks(config_path);
     let config: ConfigStatus<'_> = loaded.as_ref().map_err(|gap| *gap);
     checks.push(harness_discovery_check(config, executor));
+    if let Some(check) = session_environment_check() {
+        checks.push(check);
+    }
     checks.extend(harness_checks(config, executor));
     checks.extend(subagent_eligibility_checks(config));
     checks.extend(secret_checks(config, config_path));
@@ -215,6 +220,7 @@ pub fn run_with_config_path(
     checks.extend(ssh_bare_checks(config, executor));
     checks.extend(ssh_podman_checks(config, executor, options.smoke));
     checks.extend(ssh_docker_checks(config, executor, options.smoke));
+    checks.extend(machine_runtime_checks(config, executor));
     checks.extend(storage_checks(config, executor));
     checks.extend(build_cache_checks(offered, executor));
     checks.extend(build_cache_release_check(
@@ -315,6 +321,116 @@ fn build_cache_release_check(
             latest.host, latest.remediation
         ),
     ))
+}
+
+/// Report the environment a session worker on this machine starts from.
+///
+/// The profile checks cover harness homes and authentication, so doctor used to
+/// call a Node-based profile ready while every launch failed: the account's
+/// shell never put Node on the `PATH` the worker receives. Show the shell, how
+/// long its startup took, and the Node tools a session will find. This stays a
+/// warning rather than a fixable failure when they are missing, because Muse,
+/// OpenCode, Kimi and Grok sessions do not need Node.
+#[cfg(unix)]
+fn session_environment_check() -> Option<DoctorCheck> {
+    let started = std::time::Instant::now();
+    let resolved = mj_core::login_environment::account_shell()
+        .and_then(|shell| Ok((shell, mj_core::login_environment::discover()?)));
+    let elapsed = started.elapsed();
+    match resolved {
+        Ok((shell, environment)) => Some(session_environment_check_from(
+            &shell,
+            &environment,
+            elapsed,
+        )),
+        Err(error) => Some(DoctorCheck::fixable(
+            "session.environment",
+            "Session environment",
+            format!(
+                "Sessions cannot start until the account's shell environment can be read: {error}"
+            ),
+            "A startup file may be waiting for input, exiting early, or taking longer than the \
+             probe allows. Fix that file, then rerun `mj doctor`; an explicit \
+             [profiles.<id>.environment] PATH cannot be used until the probe succeeds.",
+        )),
+    }
+}
+
+#[cfg(not(unix))]
+fn session_environment_check() -> Option<DoctorCheck> {
+    None
+}
+
+#[cfg(unix)]
+fn session_environment_check_from(
+    shell: &Path,
+    environment: &BTreeMap<String, String>,
+    elapsed: Duration,
+) -> DoctorCheck {
+    let path = environment
+        .get("PATH")
+        .map(String::as_str)
+        .unwrap_or_default();
+    let entries = std::env::split_paths(path).count();
+    let shell_name = shell
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("the account shell");
+    let node = resolve_on_path(path, "node");
+    let npm = resolve_on_path(path, "npm");
+    let npx = resolve_on_path(path, "npx");
+    let found = [("node", &node), ("npm", &npm), ("npx", &npx)];
+    let missing = found
+        .iter()
+        .filter_map(|(name, path)| path.is_none().then_some(*name))
+        .collect::<Vec<_>>();
+    let milliseconds = elapsed.as_millis();
+    if missing.is_empty() {
+        return DoctorCheck::ready(
+            "session.environment",
+            "Session environment",
+            format!(
+                "Sessions start {shell_name} as an interactive login shell ({milliseconds} ms) and \
+                 find node at {}, npm at {}, and npx at {}; their PATH has {entries} entries.",
+                node.expect("node was found").display(),
+                npm.expect("npm was found").display(),
+                npx.expect("npx was found").display(),
+            ),
+        );
+    }
+    DoctorCheck::warning(
+        "session.environment",
+        "Session environment",
+        format!(
+            "Sessions start {shell_name} as an interactive login shell ({milliseconds} ms), but \
+             their PATH ({entries} entries) has no {}. Codex, Claude and MiMo Code sessions \
+             install a managed harness with Node.js and will fail until it is there.",
+            join_english(&missing),
+        ),
+        "Install Node.js 22 or newer where your shell startup files set PATH (~/.zprofile or \
+         ~/.zshrc for zsh, ~/.bash_profile or ~/.bashrc for bash), or set an explicit \
+         [profiles.<id>.environment] PATH, then restart the worker or resume the session.",
+    )
+}
+
+#[cfg(unix)]
+fn resolve_on_path(path: &str, name: &str) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(unix)]
+fn join_english(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        [first, second] => format!("{first} and {second}"),
+        _ => {
+            let (last, rest) = items.split_last().expect("more than two items");
+            format!("{} and {last}", rest.join(", "))
+        }
+    }
 }
 
 fn harness_discovery_check(
@@ -1516,7 +1632,7 @@ fn docker_image_check(
 ///
 /// Both SSH-backed checks run this first: an unreachable host makes every
 /// later probe fail with a misleading message.
-enum SshConnectivity {
+pub(crate) enum SshConnectivity {
     Reachable,
     Failed { detail: String, remediation: String },
 }
@@ -1525,7 +1641,10 @@ enum SshConnectivity {
 ///
 /// Hel never generates keys, runs `ssh-copy-id`, or accepts a host key on the
 /// user's behalf; it only says exactly which command would fix the failure.
-fn ssh_connectivity(ssh: &RuntimeSshTarget, executor: &impl CommandExecutor) -> SshConnectivity {
+pub(crate) fn ssh_connectivity(
+    ssh: &RuntimeSshTarget,
+    executor: &impl CommandExecutor,
+) -> SshConnectivity {
     let destination = &ssh.destination;
     let command = ssh_connectivity_probe(ssh);
     match executor.execute(&command) {
@@ -1705,6 +1824,26 @@ fn ssh_bare_check(
     }
 }
 
+/// What a failed remote Podman preflight on `destination` says, and the fix.
+pub(crate) fn ssh_podman_failure(destination: &str, error: &anyhow::Error) -> (String, String) {
+    let remediation = match podman_remediation_match(error) {
+        Some(remediation) => {
+            format!("On {destination}: {remediation} See {PODMAN_DOCUMENTATION_URL}.")
+        }
+        None => format!(
+            "Verify `ssh {destination}` succeeds noninteractively from this host, then install rootless Podman 4.0 or newer there. See {PODMAN_DOCUMENTATION_URL}."
+        ),
+    };
+    (podman_failure_detail(error), remediation)
+}
+
+/// The fix for a failed remote Docker preflight on `destination`.
+pub(crate) fn ssh_docker_failure_remediation(destination: &str) -> String {
+    format!(
+        "Verify `ssh {destination}` succeeds noninteractively from this host, then install and start Docker Engine there; make sure `docker info` succeeds for the configured SSH user."
+    )
+}
+
 /// Two checks per `ssh-podman` target: the same Podman probes run over SSH,
 /// then the host limits that only bite under provisioning load.
 fn ssh_podman_checks(
@@ -1777,15 +1916,7 @@ fn ssh_podman_runtime_check(
     let preflight = match verify_ssh_podman(ssh, executor) {
         Ok(preflight) => preflight,
         Err(error) => {
-            let detail = podman_failure_detail(&error);
-            let remediation = match podman_remediation_match(&error) {
-                Some(remediation) => {
-                    format!("On {destination}: {remediation} See {PODMAN_DOCUMENTATION_URL}.")
-                }
-                None => format!(
-                    "Verify `ssh {destination}` succeeds noninteractively from this host, then install rootless Podman 4.0 or newer there. See {PODMAN_DOCUMENTATION_URL}."
-                ),
-            };
+            let (detail, remediation) = ssh_podman_failure(destination, &error);
             return DoctorCheck::fixable(check_id, title, detail, remediation);
         }
     };
@@ -2163,6 +2294,78 @@ fn storage_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
         .collect()
 }
 
+/// One check per SSH or EC2 machine that no runtime runs on: no session can
+/// use such a machine, and the check says what probing it found instead.
+fn machine_runtime_checks(
+    config: ConfigStatus<'_>,
+    executor: &impl CommandExecutor,
+) -> Vec<DoctorCheck> {
+    let Ok(config) = config else {
+        return Vec::new();
+    };
+    config
+        .machines_without_runtimes()
+        .filter_map(|(id, machine)| crate::setup::probe_machine(id, machine, executor))
+        .map(|probe| machine_runtime_check(&probe))
+        .collect()
+}
+
+fn machine_runtime_check(probe: &crate::setup::MachineProbe) -> DoctorCheck {
+    use crate::setup::MachineProbeOutcome;
+    let id = &probe.machine_id;
+    let check_id = format!("machine.{id}");
+    let title = format!("Runtimes for machine {id}");
+    let missing = format!("Machine {id} has no runtime, so no session can run there");
+    match &probe.outcome {
+        MachineProbeOutcome::Unreachable {
+            detail,
+            remediation,
+        } => DoctorCheck::fixable(
+            check_id,
+            title,
+            format!("{missing}, and it did not answer: {detail}"),
+            remediation.clone(),
+        ),
+        MachineProbeOutcome::Answered(_) => {
+            if probe.runtimes().is_empty() {
+                let found = probe
+                    .rejected()
+                    .map(|runtime| {
+                        let detail = runtime.detail.trim();
+                        let stop = if detail.ends_with('.') { "" } else { "." };
+                        format!("{}: {detail}{stop}", runtime.kind.label())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let remediation = probe
+                    .rejected()
+                    .filter_map(|runtime| runtime.remediation.as_deref())
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                DoctorCheck::fixable(
+                    check_id,
+                    title,
+                    format!("{missing}, and it can run none. {found}"),
+                    remediation,
+                )
+            } else {
+                let kinds = probe
+                    .usable()
+                    .map(|runtime| runtime.kind.label())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                DoctorCheck::fixable(
+                    check_id,
+                    title,
+                    format!("{missing}. It can run these runtimes: {kinds}."),
+                    "Start `mj` or run `mj setup` to add them.",
+                )
+            }
+        }
+    }
+}
+
 /// One check per `ssh-docker` target: Docker daemon, image, and optional
 /// remote OverlayFS smoke test, all executed on the SSH host.
 fn ssh_docker_checks(
@@ -2210,14 +2413,11 @@ fn ssh_docker_check(
     let preflight = match verify_ssh_docker(ssh, executor) {
         Ok(preflight) => preflight,
         Err(error) => {
-            let detail = format!("{error:#}");
             return DoctorCheck::fixable(
                 check_id,
                 title,
-                detail,
-                format!(
-                    "Verify `ssh {destination}` succeeds noninteractively from this host, then install and start Docker Engine there; make sure `docker info` succeeds for the configured SSH user."
-                ),
+                format!("{error:#}"),
+                ssh_docker_failure_remediation(destination),
             );
         }
     };

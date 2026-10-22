@@ -1,4 +1,10 @@
-//! Target-account login exports, isolated from the process that launched Mjolnir.
+//! Target-account shell exports, isolated from the process that launched Mjolnir.
+//!
+//! Discovery starts the account's shell as an interactive login shell, the way a
+//! terminal starts it, so the version managers people actually install (nvm,
+//! pyenv, asdf, mise, volta, sdkman, Homebrew on Linux) put their tools on
+//! `PATH`. The shell still starts from a cleared, seeded environment, so nothing
+//! the launcher exported can leak into a session.
 
 use std::collections::BTreeMap;
 
@@ -108,9 +114,41 @@ pub fn discover() -> Result<Environment> {
     anyhow::bail!("target login environment requires a Unix account")
 }
 
+/// Interactive startup runs plugin and version managers, so the probe allows
+/// more time than a profile read needs. The deadline still fails a startup file
+/// that waits for input instead of hanging a session.
+#[cfg(unix)]
+const DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[cfg(unix)]
 pub fn discover() -> Result<Environment> {
-    discover_account(Account::current()?, std::time::Duration::from_secs(5))
+    let started = std::time::Instant::now();
+    let account = Account::current()?;
+    let shell = account.shell.clone();
+    let environment = discover_account(account, DISCOVERY_TIMEOUT)?;
+    let path_entries = environment
+        .get("PATH")
+        .map(|path| std::env::split_paths(path).count())
+        .unwrap_or(0);
+    tracing::info!(
+        shell = %shell.display(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        path_entries,
+        "resolved the account's shell environment"
+    );
+    Ok(environment)
+}
+
+/// The shell the probe starts, for diagnostics that explain where a session's
+/// environment came from.
+#[cfg(unix)]
+pub fn account_shell() -> Result<std::path::PathBuf> {
+    Ok(Account::current()?.shell)
+}
+
+#[cfg(not(unix))]
+pub fn account_shell() -> Result<std::path::PathBuf> {
+    anyhow::bail!("target shell environment requires a Unix account")
 }
 
 #[cfg(unix)]
@@ -195,6 +233,12 @@ impl Account {
     }
 }
 
+/// Reproduce the environment a terminal gives this account.
+///
+/// `-l` reads the login startup files (`/etc/profile`, `~/.zprofile`) and `-i`
+/// reads the interactive ones (`~/.zshrc`, `~/.bashrc`), where version managers
+/// install themselves. A terminal starts a single shell that is both, so the
+/// probe starts the account's shell the same way.
 #[cfg(unix)]
 fn discover_account(account: Account, timeout: std::time::Duration) -> Result<Environment> {
     use crate::targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
@@ -213,8 +257,8 @@ fn discover_account(account: Account, timeout: std::time::Duration) -> Result<En
         .shell
         .to_str()
         .context("target shell path is not UTF-8")?;
-    let mut command = CommandSpec::new(shell, ["-l", "-c", &script])
-        .purpose("initialize target login environment");
+    let mut command = CommandSpec::new(shell, ["-l", "-i", "-c", &script])
+        .purpose("initialize target shell environment");
     command.clear_env = true;
     command.cwd = Some(account.home.clone());
     command.env = account.environment()?;
@@ -410,6 +454,23 @@ mod tests {
         .unwrap();
         assert_eq!(environment["EMPTY"], "");
         assert_eq!(environment["VALUE"], "a=b\nline");
+    }
+
+    #[test]
+    fn shell_environment_includes_interactive_startup_exports() {
+        let home = fixture();
+        std::fs::write(
+            home.path().join(".shellrc"),
+            "export INTERACTIVE_SETTING='from shellrc'\nexport PATH=\"/interactive/bin:$PATH\"\n",
+        )
+        .unwrap();
+        let environment = discover_account(account(home.path()), Duration::from_secs(5)).unwrap();
+        assert_eq!(environment["INTERACTIVE_SETTING"], "from shellrc");
+        assert!(
+            environment["PATH"].starts_with("/interactive/bin:"),
+            "{}",
+            environment["PATH"]
+        );
     }
 
     #[test]

@@ -1037,6 +1037,66 @@ impl Config {
         }
     }
 
+    /// The runtimes that run on machine `machine_id`.
+    pub fn machine_runtimes<'a>(
+        &'a self,
+        machine_id: &'a str,
+    ) -> impl Iterator<Item = (&'a str, &'a TargetTemplate)> + 'a {
+        self.targets
+            .iter()
+            .filter(move |(_, target)| {
+                target_machine_id(target, &self.machines) == Some(machine_id)
+            })
+            .map(|(id, target)| (id.as_str(), target))
+    }
+
+    /// The SSH and EC2 machines no runtime runs on, which no session can
+    /// use until one does.
+    pub fn machines_without_runtimes(&self) -> impl Iterator<Item = (&str, &Machine)> {
+        self.machines
+            .iter()
+            .filter(|(id, machine)| {
+                !matches!(machine, Machine::Local { .. })
+                    && self.machine_runtimes(id).next().is_none()
+            })
+            .map(|(id, machine)| (id.as_str(), machine))
+    }
+
+    /// The runtimes from `found` to add for machine `machine_id`, under
+    /// collision-free ids: each kind (bare, podman, docker) the machine does
+    /// not run yet. `probed` is the machine as it was when `found` was
+    /// learned; when the machine has since changed or gone, nothing is
+    /// added, because what was found describes a host this configuration no
+    /// longer names. Every surface that adds a machine's runtimes, from the
+    /// file under its lock to the Settings draft, decides here.
+    pub fn machine_runtime_additions(
+        &self,
+        machine_id: &str,
+        probed: &Machine,
+        found: impl IntoIterator<Item = (String, TargetTemplate)>,
+    ) -> BTreeMap<String, TargetTemplate> {
+        if self.machines.get(machine_id) != Some(probed) {
+            return BTreeMap::new();
+        }
+        let mut kinds: BTreeSet<&str> = self
+            .machine_runtimes(machine_id)
+            .map(|(_, target)| runtime_kind_name(target))
+            .collect();
+        let mut known = self.targets.clone();
+        let mut added = BTreeMap::new();
+        for (base, target) in found {
+            if target_machine_id(&target, &self.machines) != Some(machine_id)
+                || !kinds.insert(runtime_kind_name(&target))
+            {
+                continue;
+            }
+            let id = unique_config_id(&known, &base);
+            known.insert(id.clone(), target.clone());
+            added.insert(id, target);
+        }
+        added
+    }
+
     pub fn is_unconfigured(&self) -> bool {
         self.profiles.is_empty() && self.bundles.is_empty() && self.targets.is_empty()
     }

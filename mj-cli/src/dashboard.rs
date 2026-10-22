@@ -961,6 +961,11 @@ pub(crate) async fn run_dashboard_for_workspace(
             if let Some(check) = context.dashboard.take_target_availability_check() {
                 actions::apply_dashboard_action(&mut context, check).await?;
             }
+            // A machine no runtime runs on, found at startup or brought by a
+            // save or another client's edit, is probed for its runtimes.
+            if let Some(check) = context.dashboard.take_machine_runtime_check() {
+                actions::apply_dashboard_action(&mut context, check).await?;
+            }
             // The Sessions pane is a list of conversations, not a list of
             // things to go and open, so the transcript follows its selection.
             context.reconcile_conversation_attachments();

@@ -251,6 +251,77 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     assert_eq!(program, "claude");
     assert_eq!(arguments, ["auth", "login"]);
     assert_eq!(profile_quota_source(&native), "Claude subscription quota");
+
+    // A machine no runtime runs on is asked what it could run: one runs a
+    // worker and Docker, one does not answer, one can run nothing Mjolnir
+    // supports, and an EC2 template needs no host to answer.
+    let mut machines = Config::default();
+    for (id, host) in [
+        ("builder", "builder.example.test"),
+        ("laptop", "laptop.example.test"),
+        ("pi", "pi.example.test"),
+    ] {
+        machines.machines.insert(
+            id.to_owned(),
+            mj_core::config::Machine::Ssh {
+                ssh: mj_core::config::SshConnection {
+                    host: host.into(),
+                    user: Some("dev".into()),
+                    identity_file: None,
+                    extra_args: vec![],
+                },
+                workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
+                build_cache: None,
+            },
+        );
+    }
+    machines.machines.insert(
+        "spot".to_owned(),
+        mj_core::config::Machine::AwsEc2 {
+            aws_profile: None,
+            region: "us-east-2".into(),
+            launch_template: "lt-0123456789abcdef0".into(),
+            launch_template_version: None,
+            ssh_user: "ubuntu".into(),
+            address_source: Default::default(),
+            identity_file: None,
+            ssh_args: vec![],
+        },
+    );
+    let podman_missing = crate::targets::ssh_podman_probe_fixture(&[(
+        "version",
+        127,
+        "",
+        "sh: 1: podman: not found",
+    )]);
+    let probes = FakeExecutor::new([
+        // builder
+        Ok(output(b"")),
+        Ok(output(b"Linux x86_64\n")),
+        Ok(output(&podman_missing)),
+        Ok(output(b"27.5.1 linux\n")),
+        // laptop
+        Ok(failed(b"Host key verification failed.")),
+        // pi
+        Ok(output(b"")),
+        Ok(output(b"Linux riscv64\n")),
+        Ok(output(&podman_missing)),
+        Ok(CommandOutput {
+            status: 127,
+            stdout: vec![],
+            stderr: b"bash: line 1: docker: command not found".to_vec(),
+        }),
+    ]);
+    checks.extend(machine_runtime_checks(Ok(&machines), &probes));
+    assert!(probes.responses.borrow().is_empty());
+    assert!(
+        probes
+            .commands
+            .borrow()
+            .iter()
+            .all(|command| command.program == "ssh")
+    );
+
     for check in &mut checks {
         check.detail = check
             .detail
@@ -1302,6 +1373,62 @@ fn settings_fixes_name_the_bound_settings_key() {
 /// published guide, and the human report prints the fix once, not also inside
 /// the detail.
 // Hard-won: 527f018a: installed users were sent to a repository docs path and the Podman fix was printed twice.
+#[cfg(unix)]
+#[test]
+fn session_environment_reports_node_paths_and_warns_when_they_are_missing() {
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join("tools");
+    std::fs::create_dir_all(&bin).unwrap();
+    for name in ["node", "npm", "npx"] {
+        std::fs::write(bin.join(name), b"").unwrap();
+    }
+    let environment = BTreeMap::from([("PATH".to_owned(), bin.to_string_lossy().into_owned())]);
+
+    let ready = session_environment_check_from(
+        Path::new("/bin/zsh"),
+        &environment,
+        Duration::from_millis(1200),
+    );
+    assert_eq!(ready.status, CheckStatus::Ready, "{ready:?}");
+    assert!(
+        ready
+            .detail
+            .contains("zsh as an interactive login shell (1200 ms)"),
+        "{}",
+        ready.detail
+    );
+    assert!(
+        ready.detail.contains(bin.join("node").to_str().unwrap()),
+        "{}",
+        ready.detail
+    );
+
+    std::fs::remove_file(bin.join("npm")).unwrap();
+    let warning = session_environment_check_from(
+        Path::new("/bin/zsh"),
+        &environment,
+        Duration::from_millis(1200),
+    );
+    assert_eq!(warning.status, CheckStatus::Warning, "{warning:?}");
+    assert!(warning.detail.contains("has no npm."), "{}", warning.detail);
+    assert!(
+        warning
+            .remediation
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Node.js 22"),
+        "{warning:?}"
+    );
+
+    std::fs::remove_file(bin.join("npx")).unwrap();
+    let two = session_environment_check_from(
+        Path::new("/bin/zsh"),
+        &environment,
+        Duration::from_millis(1200),
+    );
+    assert!(two.detail.contains("has no npm and npx."), "{}", two.detail);
+}
+
 #[test]
 fn missing_podman_names_its_fix_once_and_links_the_published_guide() {
     for response in [

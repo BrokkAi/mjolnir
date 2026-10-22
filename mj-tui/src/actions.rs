@@ -1949,6 +1949,7 @@ impl DashboardState {
                 // cleared entry is re-probed on the next render.
                 self.target_readiness.clear();
                 self.project_directory_checks.clear();
+                self.recheck_machine_runtimes();
                 DashboardAction::RefreshAll
             }
             CommandId::ManageProfiles => {

@@ -792,10 +792,10 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "The agent's account directory, such as ~/.codex. Sign in with the agent's own login command."
         }
         "machines" => {
-            "Add an SSH host or EC2 launch template. Build cache settings are here: a machine's runtimes share them."
+            "Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its build cache settings."
         }
         "targets" => {
-            "Add a runtime and choose its machine, or use Detect runtimes to find container engines here."
+            "Add a runtime and choose its machine, or use Detect runtimes to find what every machine can run."
         }
         "machine" => "Which machine this runtime runs on.",
         "phone" => {

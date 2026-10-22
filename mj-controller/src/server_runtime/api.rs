@@ -2152,7 +2152,11 @@ fn fetch_arguments(
     path: &Path,
     mode: FetchMode,
 ) -> std::result::Result<Vec<String>, ExportError> {
-    let (root, target_path) = if path.is_absolute() {
+    // The path is target-side POSIX text whatever host the daemon runs on, so
+    // classify it by its root component: on a Windows daemon a Linux target's
+    // `/tmp/x` has no prefix and `is_absolute` would misfire, treating it as
+    // relative and refusing it as a climb out of the boundary.
+    let (root, target_path) = if path.has_root() {
         let (root, _) = export_root_and_path(layout, Path::new("."))?;
         (root, path.to_string_lossy().into_owned())
     } else {

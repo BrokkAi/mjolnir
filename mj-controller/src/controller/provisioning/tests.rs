@@ -40,7 +40,10 @@ impl ProbeExecutor {
 
 impl CommandExecutor for ProbeExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        assert_eq!(command.program, "stat", "only the probe may run here");
+        assert_eq!(
+            command.purpose, "probe mount source filesystem",
+            "only the probe may run here"
+        );
         Ok(match self.answer {
             Ok(filesystem) => CommandOutput {
                 status: 0,
@@ -143,7 +146,7 @@ impl CommandExecutor for DockerDesktopExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let stdout = match command.program.as_str() {
             "docker" => "Docker Desktop 4.40.0 (187762)\n",
-            "stat" => "ext4\n",
+            "sh" if command.purpose == "probe mount source filesystem" => "ext4\n",
             other => panic!("unexpected command {other}"),
         };
         Ok(CommandOutput {

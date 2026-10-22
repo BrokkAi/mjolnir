@@ -8439,12 +8439,20 @@ document.documentElement.append(keyboardViewportProbe);
 
 function syncKeyboardInset() {
   const viewport = window.visualViewport;
-  const layoutHeight = keyboardViewportProbe.getBoundingClientRect().height || window.innerHeight;
-  const visibleBottom = viewport ? viewport.height + viewport.offsetTop : layoutHeight;
-  const inset = viewport
-    ? Math.max(0, layoutHeight - visibleBottom)
-    : 0;
-  document.documentElement.style.setProperty('--keyboard-inset', `${Math.round(inset)}px`);
+  const focused = document.activeElement;
+  const editing = focused?.isContentEditable || focused?.matches('input:read-write, textarea:read-write');
+  let inset = 0;
+  // Browser chrome and pinch zoom also resize the visual viewport. Limit
+  // keyboard compensation to text entry at the page's normal scale.
+  if (viewport && editing && (viewport.scale ?? 1) === 1) {
+    const layoutHeight = keyboardViewportProbe.getBoundingClientRect().height || window.innerHeight;
+    const visibleBottom = viewport.height + viewport.offsetTop;
+    inset = Math.max(0, layoutHeight - visibleBottom);
+  }
+  const value = `${Math.round(inset)}px`;
+  if (document.documentElement.style.getPropertyValue('--keyboard-inset') !== value) {
+    document.documentElement.style.setProperty('--keyboard-inset', value);
+  }
 }
 
 const elicitationControlSelector =

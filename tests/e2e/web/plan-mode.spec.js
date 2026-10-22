@@ -685,6 +685,60 @@ test('elicitation enum and custom answers submit exact content and survive snaps
   await expect(page.locator('#prompt-text')).toHaveText(draft);
 });
 
+// Hard-won: da2613a9d: toolbar viewport changes resized conversations as if a keyboard were open.
+test('phone viewport events keep reading and zooming stable while still sizing the keyboard', async ({ page }) => {
+  await mockViewerApi(page);
+  const reading = await page.locator('#conversation').boundingBox();
+  await page.evaluate(() => {
+    const viewport = window.visualViewport;
+    window.fixtureViewport = { height: viewport.height, offsetTop: viewport.offsetTop, scale: viewport.scale };
+    for (const key of ['height', 'offsetTop', 'scale']) {
+      Object.defineProperty(viewport, key, { configurable: true, get: () => window.fixtureViewport[key] });
+    }
+  });
+  const samples = await page.evaluate(async () => {
+    const results = [];
+    // Firefox's toolbar can update the visual viewport before dvh catches up.
+    // Replay both resize and scroll events across paints without editing.
+    for (let index = 0; index < 24; index += 1) {
+      window.fixtureViewport.height = index % 2 ? 844 : 780;
+      window.visualViewport.dispatchEvent(new Event('resize'));
+      window.visualViewport.dispatchEvent(new Event('scroll'));
+      window.dispatchEvent(new Event('resize'));
+      await new Promise(requestAnimationFrame);
+      const box = document.querySelector('#conversation').getBoundingClientRect();
+      results.push({ x: box.x, y: box.y, width: box.width, height: box.height });
+    }
+    return results;
+  });
+  expect(samples).toEqual(Array(24).fill(reading));
+
+  await page.locator('#prompt-text').focus();
+  const editing = await page.locator('#conversation').boundingBox();
+  await page.evaluate(() => {
+    // A visual-only keyboard resize, including the pan used to reveal input.
+    Object.assign(window.fixtureViewport, { height: 464, offsetTop: 40 });
+    window.visualViewport.dispatchEvent(new Event('resize'));
+  });
+  await expect.poll(() => page.evaluate(() =>
+    document.documentElement.style.getPropertyValue('--keyboard-inset'),
+  )).toBe('340px');
+  expect((await page.locator('#conversation').boundingBox()).height).toBe(editing.height - 340);
+
+  await page.evaluate(() => {
+    // Pinch zoom also shrinks the visual viewport, without opening a keyboard.
+    Object.assign(window.fixtureViewport, { height: 422, offsetTop: 0, scale: 2 });
+    window.visualViewport.dispatchEvent(new Event('resize'));
+  });
+  await expect(page.locator('#conversation')).toHaveJSProperty('offsetHeight', Math.round(editing.height));
+  await page.locator('#prompt-text').blur();
+  await page.evaluate(() => {
+    Object.assign(window.fixtureViewport, { height: 780, scale: 1 });
+    window.visualViewport.dispatchEvent(new Event('resize'));
+  });
+  expect(await page.locator('#conversation').boundingBox()).toEqual(reading);
+});
+
 test('phone elicitation prompts stay above choices and the focused answer fits beside its actions', async ({ page }, testInfo) => {
   await mockViewerApi(page, [claudeTwoQuestionRequest()], [], {
     native_subagents: [{ stable_id: 'retained-helper', state: 'completed' }],
