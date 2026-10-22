@@ -27,7 +27,9 @@ installation. Container replacement must retain this behavior.
 - [x] (2026-10-21) Pass the real storage-preserving replacement regression.
 - [x] (2026-10-21) Run the full controller suite and pass workspace Clippy,
   formatting and diff checks. Two timing failures passed individual reruns.
-- [ ] Commit on master, push upstream, install, and verify daemon handoff.
+- [x] (2026-10-22 04:03Z) Commit 3792baaca on master, push upstream, install
+  through scripts/install.sh, and verify normal daemon handoff. Daemon 3893067
+  reports this build and remained up for more than 90 seconds.
 
 ## Surprises & Discoveries
 
@@ -73,8 +75,13 @@ The full controller run completed with 2033 passes, 18 ignored, and two daemon
 timing failures; each failed test passed when rerun individually. Morannon's
 new real perf integration test launches and cleans up its container correctly,
 then fails with `No permission to enable task-clock event` under the unchanged
-host policy. Runtime prerequisite changes remain blocked on explicit approval. Push and
-installation are independently authorized and still to be completed.
+host policy. Runtime prerequisite changes remain blocked on explicit approval.
+Commit 3792baaca was pushed and installed with both matching x86_64 Linux
+workers. A normal `mj sessions --json` request coordinated the daemon handoff;
+`mj daemon status` subsequently reported the same build after 91 seconds of
+uptime. No manual daemon restart or host security-policy mutation was used.
+The code and installation are delivered; successful profiling on morannon is
+still outstanding until the pending host-settings approval is answered.
 
 ## Context and Orientation
 
@@ -158,3 +165,5 @@ Updated after the real upgrade regression and required validation completed;
 recorded the two timing-sensitive tests' successful individual reruns.
 Recorded the actual generated SSH integration test's confirmed host-policy
 failure; no host security settings have been changed.
+Recorded the pushed implementation, completed installation, and stable normal
+daemon handoff. This final planning-only update does not change installed code.
