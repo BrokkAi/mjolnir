@@ -234,7 +234,7 @@ list, `{"object": "list", "data": [{"id": "..."}]}`, which carries only model
 ids. DeepSeek is one of those:
 
 ```toml
-model = "deepseek-v4-pro"
+model = "deepseek-flash"
 model_provider = "deepseek"
 model_reasoning_effort = "high"
 
