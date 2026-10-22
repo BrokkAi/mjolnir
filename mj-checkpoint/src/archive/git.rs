@@ -1260,12 +1260,10 @@ fn read_blobs<'a>(
 /// captures comparable as "what the agent changed".
 pub fn capture_worktree_tree(runner: &dyn GitCommandRunner, repository: &Path) -> Result<String> {
     let scratch = ScratchIndex::create(runner, repository)?;
-    let real_index = git_text(
-        runner,
-        repository,
-        ["rev-parse", "--path-format=absolute", "--git-path", "index"],
-    )
-    .context("locate the real Git index")?;
+    let (_, real_index) = operation::git_paths(runner, repository, ["index"].into_iter())
+        .context("locate the real Git index")?
+        .pop()
+        .context("Git omitted the real index location")?;
     match std::fs::copy(&real_index, &scratch.path) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -2045,12 +2043,9 @@ fn ensure_branch_available_for_checkout(
         );
     }
 
-    let worktrees = run_git(
-        runner,
-        repository,
-        ["worktree", "list", "--porcelain", "-z"],
-        &[],
-    )?;
+    // Git 2.25 has no `worktree list -z`. A branch line holds a ref name,
+    // which cannot contain a newline.
+    let worktrees = run_git(runner, repository, ["worktree", "list", "--porcelain"], &[])?;
     ensure!(
         worktrees.status == 0,
         "{}",
@@ -2060,7 +2055,7 @@ fn ensure_branch_available_for_checkout(
     ensure!(
         !worktrees
             .stdout
-            .split(|byte| *byte == 0)
+            .split(|byte| *byte == b'\n')
             .any(|field| field == branch_field.as_bytes()),
         "restore committed branch: branch {branch:?} is checked out in another worktree"
     );

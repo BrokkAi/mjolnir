@@ -352,7 +352,7 @@ fn copy_tree(from: &Path, to: &Path) {
 
 fn capture(source: &Path, base: &str) -> RepositorySnapshot {
     let snapshot = collect_git_snapshot(
-        &SystemGit,
+        &crate::test_support::Git225,
         source,
         &GitCollectionSpec {
             id: "repo".into(),
@@ -376,7 +376,8 @@ fn restore(lab: &Lab, archive: &Path, name: &str) -> PathBuf {
     let workspace = lab.directory.path().join(name);
     fs::create_dir_all(&workspace).unwrap();
     let destination = clone_repository(&workspace, &lab.origin, "repo");
-    crate::checkpoint::restore_repositories(archive, &workspace, &SystemGit).unwrap();
+    crate::checkpoint::restore_repositories(archive, &workspace, &crate::test_support::Git225)
+        .unwrap();
     destination
 }
 
@@ -434,6 +435,7 @@ fn parents(repository: &Path) -> Vec<String> {
 }
 
 // Hard-won: #1319: a clone mid-merge could not be checkpointed, so suspend failed forever
+// Hard-won: 5a3457a30: Git 2.25 echoed --path-format=absolute, so every clone checkpoint failed to locate its operation state.
 #[test]
 fn a_clone_stopped_in_a_conflicted_merge_resumes_mid_merge() {
     let lab = lab();

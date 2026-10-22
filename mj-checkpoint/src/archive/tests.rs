@@ -2572,6 +2572,7 @@ fn a_missing_session_file_refusal_names_the_directory_it_searched() {
     );
 }
 
+// Hard-won: c61f0d6fe: Git 2.25 echoed --path-format=absolute, so the capture started from HEAD instead of the real index.
 #[test]
 fn review_capture_preserves_tracked_ignored_files_and_staged_deletions() {
     let repository = tempfile::tempdir().unwrap();
@@ -2592,9 +2593,11 @@ fn review_capture_preserves_tracked_ignored_files_and_staged_deletions() {
         "ignore tracked files",
     );
     let index_before_ignored_capture = fs::read(repository.path().join(".git/index")).unwrap();
-    let baseline_tree = capture_worktree_tree(&SystemGit, repository.path()).unwrap();
+    let baseline_tree =
+        capture_worktree_tree(&crate::test_support::Git225, repository.path()).unwrap();
     fs::write(repository.path().join("new-ignored"), b"ignored\n").unwrap();
-    let ignored_only_tree = capture_worktree_tree(&SystemGit, repository.path()).unwrap();
+    let ignored_only_tree =
+        capture_worktree_tree(&crate::test_support::Git225, repository.path()).unwrap();
     assert_eq!(
         baseline_tree, ignored_only_tree,
         "a new ignored file does not change the captured review tree"
@@ -2612,7 +2615,7 @@ fn review_capture_preserves_tracked_ignored_files_and_staged_deletions() {
     fs::write(repository.path().join("forced"), b"forced\n").unwrap();
     git(repository.path(), &["add", "-f", "forced"]);
     let index = fs::read(repository.path().join(".git/index")).unwrap();
-    let tree = capture_worktree_tree(&SystemGit, repository.path()).unwrap();
+    let tree = capture_worktree_tree(&crate::test_support::Git225, repository.path()).unwrap();
     assert_eq!(
         git(repository.path(), &["show", &format!("{tree}:unchanged")]),
         b"base\n"

@@ -280,16 +280,17 @@ fn entry_exists(path: &Path) -> Result<bool> {
 }
 
 /// Where Git keeps each named Git-directory entry in this checkout.
-fn git_paths<'a>(
+///
+/// Git 2.25 has no `--path-format=absolute`: it prints the option back and
+/// exits successfully. `--git-path` answers relative to the directory Git ran
+/// in, so a relative answer is joined to it.
+pub(super) fn git_paths<'a>(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     names: impl Iterator<Item = &'a str>,
 ) -> Result<Vec<(&'a str, PathBuf)>> {
     let names = names.collect::<Vec<_>>();
-    let mut arguments = vec![
-        OsString::from("rev-parse"),
-        OsString::from("--path-format=absolute"),
-    ];
+    let mut arguments = vec![OsString::from("rev-parse")];
     for name in &names {
         arguments.extend([OsString::from("--git-path"), OsString::from(name)]);
     }
@@ -301,7 +302,7 @@ fn git_paths<'a>(
             stdin: Vec::new(),
             env: Vec::new(),
         },
-        "locate the Git operation state",
+        "locate Git directory entries",
     )?;
     let lines = output
         .strip_suffix(b"\n")
@@ -310,7 +311,7 @@ fn git_paths<'a>(
         .collect::<Vec<_>>();
     ensure!(
         lines.len() == names.len(),
-        "git rev-parse located {} of {} Git operation state entries",
+        "git rev-parse located {} of {} Git directory entries",
         lines.len(),
         names.len()
     );
@@ -318,7 +319,7 @@ fn git_paths<'a>(
         .into_iter()
         .zip(lines)
         .map(|(name, line)| {
-            let path = mj_core::path_input::from_git_bytes(line)?;
+            let path = repository.join(mj_core::path_input::from_git_bytes(line)?);
             ensure!(
                 path.is_absolute(),
                 "Git reported a relative location {} for {name}",

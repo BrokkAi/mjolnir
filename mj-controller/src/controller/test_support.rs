@@ -435,6 +435,61 @@ impl crate::targets::CommandExecutor for FixtureRemoteExecutor {
     }
 }
 
+/// Runs commands for real, but answers as Git 2.25.1 does to the newer
+/// options managed checkouts have used. SSH machines on Ubuntu 20.04 still
+/// run that Git.
+pub(super) struct Git225Executor;
+
+impl Git225Executor {
+    fn refusal(command: &crate::targets::CommandSpec) -> Option<crate::targets::CommandOutput> {
+        let has = |option: &str| command.args.iter().any(|argument| argument == option);
+        let (status, stderr) = if has("worktree") && has("-z") {
+            (129, "error: unknown switch `z'".to_owned())
+        } else if !has("fetch") {
+            return None;
+        } else if has("--no-write-fetch-head") {
+            (
+                129,
+                "error: unknown option `no-write-fetch-head'".to_owned(),
+            )
+        } else {
+            let negative = command
+                .args
+                .iter()
+                .find(|argument| argument.starts_with('^'))?;
+            (128, format!("fatal: invalid refspec '{negative}'"))
+        };
+        Some(crate::targets::CommandOutput {
+            status,
+            stdout: Vec::new(),
+            stderr: stderr.into_bytes(),
+        })
+    }
+}
+
+impl crate::targets::CommandExecutor for Git225Executor {
+    fn execute(
+        &self,
+        command: &crate::targets::CommandSpec,
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        match Self::refusal(command) {
+            Some(refused) => Ok(refused),
+            None => ProcessExecutor.execute(command),
+        }
+    }
+
+    fn execute_with_stdin(
+        &self,
+        command: &crate::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        match Self::refusal(command) {
+            Some(refused) => Ok(refused),
+            None => ProcessExecutor.execute_with_stdin(command, input),
+        }
+    }
+}
+
 /// A managed raw session whose worktree really exists in `repository`.
 pub(crate) fn managed_worktree_session(repository: &Path, session_id: &str) -> SessionRecord {
     managed_checkout_session(repository, session_id, ManagedCheckoutKind::Worktree)

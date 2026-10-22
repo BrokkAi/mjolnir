@@ -626,17 +626,13 @@ fn refresh_source_origin(
         }
     };
     let purpose = "fetch origin";
+    // Git 2.25 has no `--no-write-fetch-head`, so this fetch replaces the
+    // source's FETCH_HEAD, as the person's own `git fetch` would.
     command_stdout(
         executor.execute(&managed_network_git_command(
             target,
             repository,
-            [
-                "fetch",
-                "--no-tags",
-                "--no-write-fetch-head",
-                "--no-recurse-submodules",
-                "origin",
-            ],
+            ["fetch", "--no-tags", "--no-recurse-submodules", "origin"],
             purpose,
         ))?,
         purpose,
@@ -2143,16 +2139,24 @@ fn copy_source_origin_refs(
         "read cached origin branches",
     )?;
     let mut has_branches = false;
+    let mut has_head = false;
     for line in refs.lines() {
         let (name, _) = line
             .split_once(' ')
             .context("malformed source remote ref")?;
-        has_branches |= name != "refs/remotes/origin/HEAD";
+        if name == "refs/remotes/origin/HEAD" {
+            has_head = true;
+        } else {
+            has_branches = true;
+        }
     }
     if has_branches {
         // Dissociation copies objects reachable from the clone's own refs, not
         // source-only remote refs whose objects live in an alternate store.
         // Fetch their objects and refs together from the trusted local seed.
+        // Git 2.25 has neither `--no-write-fetch-head` nor negative refspecs,
+        // so the fetch writes FETCH_HEAD and copies origin/HEAD, which the
+        // clone then drops.
         execute_checked(
             executor,
             managed_git_command(
@@ -2161,16 +2165,27 @@ fn copy_source_origin_refs(
                 [
                     "fetch",
                     "--no-tags",
-                    "--no-write-fetch-head",
                     "--no-recurse-submodules",
                     "--",
                     &checkout.source_repository.to_string_lossy(),
                     "+refs/remotes/origin/*:refs/remotes/origin/*",
-                    "^refs/remotes/origin/HEAD",
                 ],
                 "preserve cached origin branches",
             ),
         )?;
+        if has_head {
+            // The source's origin/HEAD is symbolic; the fetch copied it as a
+            // fixed commit that would never follow origin's default branch.
+            execute_checked(
+                executor,
+                managed_git_command(
+                    &checkout.target,
+                    staging,
+                    ["update-ref", "--no-deref", "-d", "refs/remotes/origin/HEAD"],
+                    "drop copied origin HEAD",
+                ),
+            )?;
+        }
     }
     Ok(())
 }
@@ -2400,15 +2415,17 @@ fn retained_managed_worktree_branch_available(
     match output.status {
         1 => Ok(false),
         0 => {
+            // Git 2.25 has no `worktree list -z`. A branch line holds a ref
+            // name, which cannot contain a newline.
             let worktrees = managed_git_stdout(
                 executor,
                 &worktree.target,
                 &worktree.source_repository,
-                ["worktree", "list", "--porcelain", "-z"],
+                ["worktree", "list", "--porcelain"],
                 "check retained managed worktree checkout",
             )?;
             let branch_field = format!("branch {branch_ref}");
-            if worktrees.split('\0').any(|field| field == branch_field) {
+            if worktrees.lines().any(|field| field == branch_field) {
                 bail!(
                     "managed worktree branch is still checked out: {}",
                     worktree.branch

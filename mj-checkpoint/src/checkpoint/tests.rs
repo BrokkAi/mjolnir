@@ -2018,6 +2018,7 @@ fn a_checkout_restore_lands_on_the_branch_the_caller_names() {
 }
 
 // Hard-won: 5dd34548: workspace restore could check out a branch already held by another worktree or return a raw Git error.
+// Hard-won: d1e6bd62c: Git 2.25 has no `worktree list -z`, so the occupied-branch check failed.
 #[test]
 fn a_workspace_restore_refuses_a_branch_checked_out_in_another_worktree() {
     let temp = tempfile::tempdir().unwrap();
@@ -2046,7 +2047,8 @@ fn a_workspace_restore_refuses_a_branch_checked_out_in_another_worktree() {
     );
     let before = git(&destination, &["rev-parse", "HEAD"]);
 
-    let error = restore_repositories(&archive_path, &restore_root, &SystemGit).unwrap_err();
+    let error = restore_repositories(&archive_path, &restore_root, &crate::test_support::Git225)
+        .unwrap_err();
 
     assert!(
         format!("{error:#}").contains("is checked out in another worktree"),
