@@ -148,15 +148,11 @@ impl Controller {
             launch.subtle_subagents,
         )?;
         apply_staged_execution_setting(profile.kind, launch.execution_policy, &profile_stage)?;
+        // The `mj-agents` registration is not staged here: the worker writes
+        // it on every start, because an upgrade or recovery replaces the
+        // launch configuration without restaging this profile.
         if profile.kind == mj_core::config::HarnessKind::Claude {
             configure_claude_mailbox_hook(&profile_stage, worker_root)?;
-            configure_claude_subagent_mcp(
-                &profile_stage,
-                worker_root,
-                launch.subagent_mcp_role(),
-                launch.agent_mailboxes_enabled,
-                launch.subtle_subagents,
-            )?;
         }
         // A session without project memory gets no replica, no baseline and
         // no history server: nothing of the workspace's memory reaches it.
@@ -461,7 +457,7 @@ impl Controller {
             launch
                 .environment
                 .remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
-            // This controller stages the message-only registration for every
+            // This controller grants the message-only server to every
             // top-level session; the worker trusts only this marker.
             launch.environment.insert(
                 mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV.into(),

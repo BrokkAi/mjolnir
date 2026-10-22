@@ -2974,11 +2974,14 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
         staged_settings["profile"], "destination",
         "the destination profile must be staged in its place"
     );
+    // The worker writes the `mj-agents` rules when it starts, so the staged
+    // profile may have no allow list yet.
     assert!(
         !staged_settings["permissions"]["allow"]
             .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("mcp__mj-agents__list_profiles")),
+            .is_some_and(
+                |allow| allow.contains(&serde_json::json!("mcp__mj-agents__list_profiles"))
+            ),
         "Mjolnir delegation exposes no profile discovery tool"
     );
     assert!(destination_home.join("settings.json").is_file());

@@ -775,19 +775,24 @@ async fn poll_item_timeline(
     }
     for event in mapped.events {
         api.control.check_enabled()?;
-        let suppress = authored_during_session_turn(
+        // The session already knows what it posted. Delivering it, even
+        // without a wake, echoes the session's own words back into its context.
+        if authored_during_session_turn(
             login.as_deref(),
             event.author.as_deref(),
             Some(&event.timestamp),
             &watch.creator_session_id,
             &mut turn_windows,
         )
-        .await;
+        .await
+        {
+            continue;
+        }
         outbox.push(mailbox_outbox_row(
             event.key,
             watch.creator_session_id.clone(),
             event.body,
-            !suppress,
+            true,
             timestamp_millis(&event.timestamp)
                 .context("invalid GitHub timeline timestamp")?
                 .max(0) as u64,
@@ -1095,7 +1100,7 @@ async fn authored_during_session_turn(
                 tracing::warn!(
                     %session_id,
                     error = %format!("{error:#}"),
-                    "could not read transcript turn windows for GitHub comment or review; preserving wake"
+                    "could not read transcript turn windows for GitHub comment or review; delivering it"
                 );
                 None
             }
@@ -2011,7 +2016,7 @@ mod tests {
             data.fail.insert(1);
             data.gone.insert(3);
             // GitHub exposes the review but omits its line comments from the timeline.
-            data.review_comments.insert(2, vec![json!({"id":8,"created_at":updated,"updated_at":updated,"user":{"login":"watcher-bot"},"body":"line comment"})]);
+            data.review_comments.insert(2, vec![json!({"id":8,"created_at":updated,"updated_at":updated,"user":{"login":"reviewer"},"body":"line comment"})]);
             data.timelines.insert(2, vec![
                 json!({"event":"merged","id":200,"created_at":updated,"actor":{"login":"merge-bot"}}),
                 json!({"event":"closed","id":201,"created_at":later,"actor":{"login":"merge-bot"}}),
@@ -2116,7 +2121,7 @@ mod tests {
             "review comments use the stored cursor even when the timeline advances it"
         );
         let rows = crate::database::pending_mailbox_events(1000).unwrap();
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), 3);
         let events = rows
             .iter()
             .map(|row| serde_json::from_str::<MailboxEvent>(&row.event_json).unwrap())
@@ -2141,12 +2146,11 @@ mod tests {
         assert!(
             !events
                 .iter()
-                .find(|event| event.key.ends_with(":comment:10"))
-                .unwrap()
-                .wake
+                .any(|event| event.key.ends_with(":comment:10")),
+            "the creator's own comment during its turn is not delivered"
         );
         assert!(
-            !events
+            events
                 .iter()
                 .find(|event| event.key.ends_with(":review-comment:8"))
                 .unwrap()
