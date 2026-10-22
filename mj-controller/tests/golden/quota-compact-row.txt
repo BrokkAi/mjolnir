@@ -15,4 +15,4 @@ grok | Month 60% left | error: none | long-window: Month
 kimi | Week 94% left, resets 12:22 Aug 18 | error: none
 === short-window projection (2 window rows) ===
 70% remaining | exhausts before reset: true | 5H 70% left, resets later
-80% remaining | exhausts before reset: false | no quota windows reported
+80% remaining | exhausts before reset: false | 5H 80% left, resets later

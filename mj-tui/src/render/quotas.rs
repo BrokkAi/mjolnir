@@ -114,8 +114,8 @@ pub(crate) fn minimized_quota_line(
                 });
             }
             let quota = quota.filter(|quota| quota.error.is_none());
-            let Some(weekly) = quota
-                .and_then(ProfileQuota::weekly_window)
+            let Some(primary) = quota
+                .and_then(ProfileQuota::summary_window)
                 .and_then(quota_remaining_percent)
             else {
                 return Some(SummaryReading {
@@ -127,18 +127,23 @@ pub(crate) fn minimized_quota_line(
             // An untouched weekly window says everything there is to say; the
             // five-hour figure only matters once the week is being spent.
             let five_hour = quota
-                .filter(|_| weekly < 100)
+                .filter(|quota| {
+                    quota
+                        .weekly_window()
+                        .and_then(quota_remaining_percent)
+                        .is_some_and(|weekly| weekly < 100)
+                })
                 .and_then(ProfileQuota::five_hour_window)
                 .and_then(quota_remaining_percent);
             let value = match five_hour {
-                Some(five_hour) => format!("{weekly}%/{five_hour}%"),
-                None => format!("{weekly}%"),
+                Some(five_hour) => format!("{primary}%/{five_hour}%"),
+                None => format!("{primary}%"),
             };
             Some(SummaryReading {
                 name: id.to_owned(),
                 value,
                 color: Some(headroom_color(
-                    five_hour.map_or(weekly, |five_hour| weekly.min(five_hour)),
+                    five_hour.map_or(primary, |five_hour| primary.min(five_hour)),
                 )),
             })
         })
@@ -297,7 +302,7 @@ pub(crate) fn weekly_quota_exhausted(quota: &ProfileQuota) -> bool {
 }
 
 pub(crate) fn five_hour_quota_bar(quota: &ProfileQuota) -> Line<'static> {
-    let five_hour = if weekly_quota_exhausted(quota) {
+    let five_hour = if quota.weekly_window().is_none() || weekly_quota_exhausted(quota) {
         None
     } else {
         quota.five_hour_window()
@@ -306,17 +311,21 @@ pub(crate) fn five_hour_quota_bar(quota: &ProfileQuota) -> Line<'static> {
 }
 
 pub(crate) fn quota_reset_cells(quota: &ProfileQuota, now: u64) -> (String, String) {
-    let mut weekly = quota
-        .weekly_window()
-        .map(|window| window.reset_display(now, quota.banked_resets_for_window(window)))
-        .unwrap_or_default();
+    let long_window = quota.weekly_window();
+    let mut primary = match long_window {
+        Some(window) => window.reset_display(now, quota.banked_resets_for_window(window)),
+        None => quota
+            .five_hour_window()
+            .map(|window| window.reset_display(now, None))
+            .unwrap_or_default(),
+    };
     if let Some(extra) = quota.extra.as_deref() {
-        if !weekly.is_empty() {
-            weekly.push_str(" · ");
+        if !primary.is_empty() {
+            primary.push_str(" · ");
         }
-        weekly.push_str(extra);
+        primary.push_str(extra);
     }
-    let five_hour = if weekly_quota_exhausted(quota) {
+    let five_hour = if long_window.is_none() || weekly_quota_exhausted(quota) {
         String::new()
     } else {
         quota
@@ -324,7 +333,7 @@ pub(crate) fn quota_reset_cells(quota: &ProfileQuota, now: u64) -> (String, Stri
             .map(|window| window.reset_display(now, None))
             .unwrap_or_default()
     };
-    (weekly, five_hour)
+    (primary, five_hour)
 }
 
 pub(crate) struct QuotaTableRow {
@@ -417,7 +426,7 @@ pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<Quot
                         ),
                         Some(quota) if quota.error.is_none() => {
                             let (weekly_reset, five_hour_reset) = quota_reset_cells(quota, now);
-                            let weekly = quota_bar(quota.weekly_window());
+                            let weekly = quota_bar(quota.summary_window());
                             let five_hour = five_hour_quota_bar(quota);
                             let weekly_chart = !weekly.spans.is_empty();
                             let five_hour_chart = !five_hour.spans.is_empty();
