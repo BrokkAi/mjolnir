@@ -1302,6 +1302,62 @@ fn settings_fixes_name_the_bound_settings_key() {
 /// published guide, and the human report prints the fix once, not also inside
 /// the detail.
 // Hard-won: 527f018a: installed users were sent to a repository docs path and the Podman fix was printed twice.
+#[cfg(unix)]
+#[test]
+fn session_environment_reports_node_paths_and_warns_when_they_are_missing() {
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join("tools");
+    std::fs::create_dir_all(&bin).unwrap();
+    for name in ["node", "npm", "npx"] {
+        std::fs::write(bin.join(name), b"").unwrap();
+    }
+    let environment = BTreeMap::from([("PATH".to_owned(), bin.to_string_lossy().into_owned())]);
+
+    let ready = session_environment_check_from(
+        Path::new("/bin/zsh"),
+        &environment,
+        Duration::from_millis(1200),
+    );
+    assert_eq!(ready.status, CheckStatus::Ready, "{ready:?}");
+    assert!(
+        ready
+            .detail
+            .contains("zsh as an interactive login shell (1200 ms)"),
+        "{}",
+        ready.detail
+    );
+    assert!(
+        ready.detail.contains(bin.join("node").to_str().unwrap()),
+        "{}",
+        ready.detail
+    );
+
+    std::fs::remove_file(bin.join("npm")).unwrap();
+    let warning = session_environment_check_from(
+        Path::new("/bin/zsh"),
+        &environment,
+        Duration::from_millis(1200),
+    );
+    assert_eq!(warning.status, CheckStatus::Warning, "{warning:?}");
+    assert!(warning.detail.contains("has no npm."), "{}", warning.detail);
+    assert!(
+        warning
+            .remediation
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Node.js 22"),
+        "{warning:?}"
+    );
+
+    std::fs::remove_file(bin.join("npx")).unwrap();
+    let two = session_environment_check_from(
+        Path::new("/bin/zsh"),
+        &environment,
+        Duration::from_millis(1200),
+    );
+    assert!(two.detail.contains("has no npm and npx."), "{}", two.detail);
+}
+
 #[test]
 fn missing_podman_names_its_fix_once_and_links_the_published_guide() {
     for response in [

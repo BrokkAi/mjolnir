@@ -35,7 +35,50 @@ pub(super) enum CacheHost {
     Ssh(SshTarget),
 }
 
+/// A cache host's operating system, which decides which of its sessions can
+/// use what the host itself has installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HostPlatform {
+    /// Containers run on the host's own kernel, so they can mount its caches
+    /// and run its mbx.
+    Linux,
+    /// Bare sessions run on the Mac itself and use its native tools. Its
+    /// containers run Linux in a virtual machine, which can neither run a
+    /// macOS executable nor rely on the Mac's filesystems for shared locks.
+    Darwin,
+    /// A Windows controller. It has no `uname` to ask, runs no bare workers,
+    /// and its container engine runs in a VM this machine's paths do not
+    /// reach.
+    Windows,
+}
+
 impl CacheHost {
+    /// Ask the host itself, not the controller or a container on that host.
+    pub(super) fn platform(&self, executor: &impl CommandExecutor) -> Result<HostPlatform> {
+        if self.ssh().is_none() && !cfg!(unix) {
+            return Ok(HostPlatform::Windows);
+        }
+        let command = self.command(
+            vec!["uname".into(), "-sm".into()],
+            "detect build cache host platform",
+        );
+        let output = executor.execute(&command)?;
+        ensure!(
+            output.status == 0,
+            "{} failed with status {}: {}",
+            command.purpose,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        let platform = targets::TargetPlatform::parse(
+            std::str::from_utf8(&output.stdout).context("decode build cache host platform")?,
+        )?;
+        Ok(match platform.os {
+            targets::TargetOs::Linux => HostPlatform::Linux,
+            targets::TargetOs::Darwin => HostPlatform::Darwin,
+        })
+    }
+
     pub(super) fn for_target(target: &targets::TargetTemplate) -> Option<Self> {
         match target {
             targets::TargetTemplate::LocalPodman(_)

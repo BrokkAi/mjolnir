@@ -144,6 +144,10 @@ cannot be launched by a session. And a worker keeps the environment it discovere
 when it started, so after changing a startup file, stop and resume the session
 rather than expecting a running worker to reread it.
 
+`mj doctor` reports which shell sessions start, how long that startup took, and
+the `node`, `npm` and `npx` a session will find. Use it when a tool works in your
+terminal but a session cannot launch it.
+
 An explicit profile setting wins over discovery:
 
 ```toml

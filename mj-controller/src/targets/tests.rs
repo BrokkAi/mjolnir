@@ -1829,11 +1829,9 @@ fn filesystem_probe_answers_positionally_and_reaches_the_podman_host() {
         vec!["ext4".to_owned(), "nfs".to_owned()]
     );
     let seen = executor.seen.borrow();
-    assert_eq!(seen[0].program, "stat");
-    assert_eq!(
-        seen[0].args,
-        ["-f", "-c", "%T", "--", "/host/cache", "/host/models"]
-    );
+    assert_eq!(seen[0].program, "sh");
+    assert_eq!(seen[0].args[0], "-c");
+    assert_eq!(seen[0].args[3..], ["/host/cache", "/host/models"]);
 
     let remote = PodmanPreflightExecutor::with_outputs([podman_output(b"ext4\nnfs\n")]);
     probe_filesystem_types(Some(&ssh()), &paths, &remote).unwrap();
@@ -1841,11 +1839,35 @@ fn filesystem_probe_answers_positionally_and_reaches_the_podman_host() {
     assert_eq!(seen[0].program, "ssh");
     assert!(
         seen[0].args.last().is_some_and(|remote| {
-            remote == "'stat' '-f' '-c' '%T' '--' '/host/cache' '/host/models'"
+            remote.starts_with("'sh' '-c' ")
+                && remote.ends_with("'hel-filesystem' '/host/cache' '/host/models'")
         }),
         "{:?}",
         seen[0].args
     );
+}
+
+/// The probe asks the host's own tools, whose output differs by platform:
+/// macOS `stat` cannot name a filesystem, so there it reads `df` and `mount`.
+#[cfg(unix)]
+#[test]
+fn filesystem_probe_names_this_hosts_filesystems_in_order() {
+    let root = tempfile::tempdir().unwrap();
+    let spaced = root.path().join("a directory with spaces");
+    std::fs::create_dir(&spaced).unwrap();
+    let paths = [root.path().to_path_buf(), spaced];
+
+    let filesystems =
+        probe_filesystem_types(None, &paths, &crate::targets::ProcessExecutor).unwrap();
+
+    assert_eq!(filesystems.len(), 2, "{filesystems:?}");
+    assert!(
+        filesystems
+            .iter()
+            .all(|filesystem| !filesystem.is_empty() && !filesystem.contains(char::is_whitespace)),
+        "{filesystems:?}"
+    );
+    assert_eq!(filesystems[0], filesystems[1]);
 }
 
 #[test]
