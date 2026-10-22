@@ -294,6 +294,7 @@ async fn install_into(
                 staging.path(),
                 CODEX_PACKAGE_JSON,
                 CODEX_PACKAGE_LOCK,
+                harness,
                 environment,
             )
             .await?
@@ -303,6 +304,7 @@ async fn install_into(
                 staging.path(),
                 CLAUDE_PACKAGE_JSON,
                 CLAUDE_PACKAGE_LOCK,
+                harness,
                 environment,
             )
             .await?
@@ -316,6 +318,7 @@ async fn install_into(
                 staging.path(),
                 MIMO_PACKAGE_JSON,
                 MIMO_PACKAGE_LOCK,
+                harness,
                 environment,
             )
             .await?
@@ -383,6 +386,7 @@ async fn install_npm(
     staging: &Path,
     package_json: &[u8],
     package_lock: &[u8],
+    harness: HarnessKind,
     environment: &BTreeMap<String, String>,
 ) -> Result<()> {
     require_node_22(environment).await?;
@@ -401,7 +405,83 @@ async fn install_npm(
         "install exact managed npm harness",
         MANAGED_INSTALL_TIMEOUT,
     )
-    .await
+    .await?;
+    verify_install_scripts_ran(staging, harness, environment).await
+}
+
+/// npm 12 and later refuse dependency install scripts unless the package is
+/// listed in the root `allowScripts` field. A refused script is only a warning,
+/// so the install would otherwise publish a harness whose entrypoint is the
+/// package's "not installed" stub. Report that here, where the message can say
+/// which asset to edit, instead of letting the bridge fail to start later.
+async fn verify_install_scripts_ran(
+    staging: &Path,
+    harness: HarnessKind,
+    environment: &BTreeMap<String, String>,
+) -> Result<()> {
+    let mut command = tokio::process::Command::new("npm");
+    command
+        .args(["install-scripts", "ls", "--json"])
+        .current_dir(staging)
+        .env_clear()
+        .envs(environment);
+    let output =
+        mj_core::subprocess::run_bounded(&mut command, 1024 * 1024, HARNESS_COMMAND_TIMEOUT)
+            .await
+            .context("read managed harness install-script status")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        // npm versions that do not gate install scripts have no such command.
+        if stderr.contains("Unknown command") || stdout.contains("Unknown command") {
+            return Ok(());
+        }
+        return Err(anyhow!(
+            "read managed harness install-script status failed: {}",
+            output_summary(&output)
+        ));
+    }
+    let pending =
+        pending_install_scripts(&stdout).context("read managed harness install-script status")?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "managed {} harness install skipped install scripts for {}. npm gates dependency install \
+         scripts, so add each package to allowScripts in \
+         mj-worker/assets/harnesses/{}/package.json and reinstall.",
+        harness.display_name(),
+        pending.join(", "),
+        harness.id()
+    )
+}
+
+/// Collect the `pkg@version` keys npm reports as waiting for approval.
+fn pending_install_scripts(stdout: &str) -> Result<Vec<String>> {
+    let status: serde_json::Value = serde_json::from_str(stdout)?;
+    let groups = match &status {
+        serde_json::Value::Object(object) => object
+            .get("allowScripts")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+        serde_json::Value::Array(groups) => groups.clone(),
+        _ => bail!("unexpected install-script status"),
+    };
+    let mut pending = Vec::new();
+    for changes in groups
+        .iter()
+        .filter_map(|group| group.get("changes").and_then(serde_json::Value::as_array))
+    {
+        for change in changes {
+            if change.get("change").and_then(serde_json::Value::as_str) == Some("pending")
+                && let Some(key) = change.get("key").and_then(serde_json::Value::as_str)
+            {
+                pending.push(key.to_owned());
+            }
+        }
+    }
+    Ok(pending)
 }
 
 /// Install the native Muse server a managed Muse session drives.
@@ -932,6 +1012,23 @@ INSTALLER
     }
 
     #[test]
+    fn pending_install_scripts_names_packages_npm_blocked() {
+        // Recorded from npm 12.0.2, which blocks dependency install scripts
+        // unless the root package lists them in allowScripts.
+        let recorded = r#"{"allowScripts":[{"name":"esbuild","changes":[{"key":"esbuild@0.25.0","change":"pending"}]}]}"#;
+        assert_eq!(
+            pending_install_scripts(recorded).unwrap(),
+            vec!["esbuild@0.25.0"]
+        );
+        assert!(
+            pending_install_scripts(r#"{"allowScripts":[]}"#)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(pending_install_scripts("not json").is_err());
+    }
+
+    #[test]
     fn muse_pin_matches_runtime_metadata() {
         use mj_core::harness_runtime::{MUSE_ACP_PACKAGE, MUSE_ACP_VERSION, MUSE_VERSION};
         let metadata: serde_json::Value =
@@ -1055,7 +1152,7 @@ INSTALLER
         executable(
             &bin.join("npm"),
             &format!(
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 12.0.0; exit 0; fi\nprintf x >> '{}'\nmkdir -p node_modules/.bin node_modules/@openai/codex/bin\nprintf '#!/bin/sh\\nexit 0\\n' > node_modules/.bin/codex-acp\nchmod 755 node_modules/.bin/codex-acp\nprintf '// managed codex' > node_modules/@openai/codex/bin/codex.js\n",
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 12.0.0; exit 0; fi\nif [ \"$1\" = install-scripts ]; then printf '{{\"allowScripts\":[]}}'; exit 0; fi\nprintf x >> '{}'\nmkdir -p node_modules/.bin node_modules/@openai/codex/bin\nprintf '#!/bin/sh\\nexit 0\\n' > node_modules/.bin/codex-acp\nchmod 755 node_modules/.bin/codex-acp\nprintf '// managed codex' > node_modules/@openai/codex/bin/codex.js\n",
                 installs.display()
             ),
         );

@@ -406,13 +406,19 @@ its `config.toml` names a custom model provider or its `auth.json` records
 
 ### PATH discovery
 
-Mjolnir-owned workers and bridges use non-login shells. On every bare runtime,
-whether on this machine, an SSH machine, or an EC2 machine, each worker
-performs one bounded login-shell probe and carries only
-the discovered `PATH` into the non-login runtime. An explicit
-`[profiles.<id>.environment]` `PATH` wins. Agent-requested `!` shell commands are
-different: they intentionally run through `bash -lc` in the session user's
-login environment.
+On every bare runtime, whether on this machine, an SSH machine, or an EC2
+machine, each worker performs one bounded probe of the account's shell and
+starts it the way a terminal does: as an interactive login shell (`zsh -l -i`
+for zsh, `bash -l -i` for bash). The probe begins from a cleared environment, so
+nothing the process that launched Mjolnir exported leaks into the session, but
+it reads the same startup files a terminal reads. Tools that a version manager
+adds to `PATH` — nvm, pyenv, asdf, mise, volta, sdkman, or Homebrew on Linux —
+are therefore visible to sessions without extra configuration.
+
+Shell aliases and shell functions are not environment variables, so they never
+reach a session. An explicit `[profiles.<id>.environment]` `PATH` wins over the
+probe. Agent-requested `!` shell commands are different: they intentionally run
+through `bash -lc` in the session user's login environment.
 
 Profile configuration changes take effect after the worker restarts or the
 session resumes. Credential and skill reconciliation has its own live sync path
