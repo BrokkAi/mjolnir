@@ -1,5 +1,6 @@
 //! Actionable host and configuration prerequisite checks.
 
+#[cfg(unix)]
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -419,6 +420,7 @@ fn resolve_on_path(path: &str, name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+#[cfg(unix)]
 fn join_english(items: &[&str]) -> String {
     match items {
         [] => String::new(),

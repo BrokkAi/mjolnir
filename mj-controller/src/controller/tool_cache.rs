@@ -186,11 +186,13 @@ mod tests {
     }
 
     /// A Mac host whose commands all succeed, recording what ran.
+    #[cfg(unix)]
     #[derive(Default)]
     struct MacHost {
         ran: Mutex<Vec<String>>,
     }
 
+    #[cfg(unix)]
     impl CommandExecutor for MacHost {
         fn execute(&self, command: &targets::CommandSpec) -> Result<targets::CommandOutput> {
             self.ran.lock().unwrap().push(command.program.clone());
