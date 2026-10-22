@@ -147,6 +147,10 @@ fn fetch_with_limits(
         #[cfg(unix)]
         allowed.push(PathBuf::from("/tmp"));
     }
+    // The temporary directory is usually `/tmp` itself; a refusal names each
+    // directory once.
+    let mut seen = std::collections::HashSet::new();
+    allowed.retain(|root| seen.insert(root.clone()));
     let mut resolved_roots = Vec::new();
     for root in &allowed {
         match root.canonicalize() {
