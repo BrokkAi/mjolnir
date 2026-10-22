@@ -673,6 +673,7 @@ impl RuntimeState {
         branch: BranchDisposition,
         kind: LifecycleKind,
     ) -> Result<()> {
+        let report_cleanup = self.snapshot_subagent_report_cleanup(&session_id).await;
         let children = blocking({
             let session_id = session_id.clone();
             move || {
@@ -693,6 +694,8 @@ impl RuntimeState {
             .await
             .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
         }
+        self.finish_subagent_report_cleanup(&session_id, report_cleanup)
+            .await;
         self.preempt_active_lifecycle(&session_id).await?;
         let exists = blocking({
             let session_id = session_id.clone();

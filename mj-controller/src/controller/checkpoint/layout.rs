@@ -1,6 +1,32 @@
 use super::*;
 
 impl Controller {
+    /// Report roots may be shared by several parents; the persisted child
+    /// directory is the ownership boundary, never a scan of that shared root.
+    pub(super) fn checkpoint_report_directories(&self, session_id: &str) -> Result<Vec<PathBuf>> {
+        let mut directories = Vec::new();
+        for child in self
+            .state
+            .subagents
+            .values()
+            .filter(|child| child.parent_session_id == session_id)
+        {
+            if let Some(directory) =
+                crate::database::load_subagent_report(&child.child_session_id)?.report_dir
+            {
+                let path = PathBuf::from(directory);
+                ensure!(
+                    path.file_name().and_then(|name| name.to_str())
+                        == Some(child.child_session_id.as_str()),
+                    "persisted report directory does not name its child"
+                );
+                directories.push(path);
+            }
+        }
+        directories.sort();
+        Ok(directories)
+    }
+
     /// Where a session's repositories live on its target, and what each one
     /// contributes to an export.
     ///

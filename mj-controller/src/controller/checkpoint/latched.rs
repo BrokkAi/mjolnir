@@ -186,7 +186,9 @@ impl Controller {
                 &remote_archive,
             )
         };
+        let report_directories = self.checkpoint_report_directories(session_id)?;
         let mut target_files = None;
+        let mut prestaged_capture = None;
         if releases_after_capture
             && let Some(native_session_id) = session.native_session_id.as_deref()
         {
@@ -200,6 +202,7 @@ impl Controller {
                 harness_home: target_path(&harness_home),
                 workspace_root: target_path(&workspace_root),
                 repositories: repositories.clone(),
+                report_directories: Some(report_directories.clone()),
                 allow_empty_native: false,
                 stage_path: target_path(&remote_stage),
                 refresh_existing: false,
@@ -220,14 +223,17 @@ impl Controller {
             };
             match prestaged {
                 Ok(output) => match serde_json::from_slice::<CapturedCheckpoint>(&output.stdout) {
-                    Ok(captured) => tracing::info!(
-                        session_id,
-                        prestage_ms = prestage_started.elapsed().as_millis() as u64,
-                        native_bytes = captured.native_bytes,
-                        repository_bytes = captured.repository_bytes,
-                        reused_native = captured.reused_native,
-                        "checkpoint target state prestaged while ACP dispatch remained active"
-                    ),
+                    Ok(captured) => {
+                        prestaged_capture = Some(captured.clone());
+                        tracing::info!(
+                            session_id,
+                            prestage_ms = prestage_started.elapsed().as_millis() as u64,
+                            native_bytes = captured.native_bytes,
+                            repository_bytes = captured.repository_bytes,
+                            reused_native = captured.reused_native,
+                            "checkpoint target state prestaged while ACP dispatch remained active"
+                        );
+                    },
                     Err(error) => tracing::warn!(
                         session_id,
                         error = format!("{error:#}"),
@@ -270,6 +276,9 @@ impl Controller {
                 held_relay,
             )
             .await?;
+        if let Some(captured) = &prestaged_capture {
+            record_checkpoint_report_notice(&mut relay, session_id, captured).await;
+        }
         let (barrier, barrier_command_id) = loop {
             let snapshot = relay.connection_mut().sync().await?;
             // Restored native identity is not current-process readiness.
@@ -562,6 +571,7 @@ impl Controller {
                 harness_home: target_path(&harness_home),
                 workspace_root: target_path(&workspace_root),
                 repositories,
+                report_directories: Some(report_directories),
                 canonical_session,
                 output_path: target_path(&remote_archive),
             };
@@ -578,6 +588,7 @@ impl Controller {
                     harness_home: spec.harness_home.clone(),
                     workspace_root: spec.workspace_root.clone(),
                     repositories: spec.repositories.clone(),
+                    report_directories: spec.report_directories.clone(),
                     allow_empty_native: !current_native_session_received_prompt(
                         &spec.canonical_session,
                     ),
@@ -618,6 +629,7 @@ impl Controller {
                     session.harness_kind,
                 )
                 .await?;
+                record_checkpoint_report_notice(&mut relay, session_id, &captured).await;
                 let pack_spec = CheckpointPackSpec {
                     protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
                     relay_root: spec.relay_root.clone(),

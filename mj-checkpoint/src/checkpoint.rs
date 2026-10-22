@@ -112,6 +112,9 @@ pub struct CheckpointExportSpec {
     pub harness_home: PathBuf,
     pub workspace_root: PathBuf,
     pub repositories: Vec<CheckpointRepositorySpec>,
+    /// Exact child directories owned by this session. Absent on older controllers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_directories: Option<Vec<PathBuf>>,
     /// Controller projection latched at the relay's checkpoint barrier.
     pub canonical_session: CanonicalSessionSnapshot,
     pub output_path: PathBuf,
@@ -131,6 +134,9 @@ pub struct CheckpointCaptureSpec {
     pub harness_home: PathBuf,
     pub workspace_root: PathBuf,
     pub repositories: Vec<CheckpointRepositorySpec>,
+    /// Exact child directories owned by this session. Absent on older controllers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_directories: Option<Vec<PathBuf>>,
     pub allow_empty_native: bool,
     pub stage_path: PathBuf,
     /// Refresh a prestaged generation when its native source tree is unchanged.
@@ -148,9 +154,25 @@ pub struct CheckpointPackSpec {
     pub output_path: PathBuf,
 }
 
+/// Report files omitted from a sealed generation, retained when it is refreshed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointReportOmissions {
+    pub files: u64,
+    pub bytes: u64,
+    pub largest_directories: Vec<CheckpointReportDirectory>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointReportDirectory {
+    pub child_id: String,
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapturedCheckpoint {
+    #[serde(default)]
+    pub omitted_reports: CheckpointReportOmissions,
     pub stage_path: PathBuf,
     pub native_bytes: u64,
     pub repository_bytes: u64,
@@ -244,6 +266,8 @@ pub fn read_json_from<T: serde::de::DeserializeOwned>(
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CheckpointStageManifest {
+    #[serde(default)]
+    omitted_reports: CheckpointReportOmissions,
     protocol_version: u32,
     session: SessionManifest,
     target: TargetManifest,

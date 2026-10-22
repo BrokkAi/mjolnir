@@ -970,6 +970,7 @@ impl Controller {
                 let deferred = if self.state.subagents.contains_key(session_id) {
                     targets::borrowed_worker_cleanup_plan(&backend, session_id)?
                         .execute(executor)?;
+                    self.remove_child_report_directory(session_id, executor);
                     false
                 } else if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
                     plan.execute(executor)?;
@@ -1152,6 +1153,7 @@ impl Controller {
                     if self.state.subagents.contains_key(session_id) {
                         targets::borrowed_worker_cleanup_plan(&backend, session_id)?
                             .execute(executor)?;
+                        self.remove_child_report_directory(session_id, executor);
                     } else if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
                         plan.execute(executor)?;
                         deferred = true;
@@ -1240,6 +1242,7 @@ impl Controller {
         if let Some(mut operation) = crate::database::load_move_operation(session_id)? {
             self.cleanup_prepared_move_destination(&mut operation, executor)?;
         }
+        self.remove_child_report_directory(session_id, executor);
         let mut retained_checkout = None;
         if let mj_core::state::Checkout::ManagedWorktree { worktree, .. } =
             self.state.checkout(session_id)?
@@ -1380,9 +1383,13 @@ impl Controller {
                     if self.state.subagents.contains_key(session_id) {
                         targets::borrowed_worker_cleanup_plan(&backend, session_id)?
                             .execute(executor)?;
+                        self.remove_child_report_directory(session_id, executor);
                     } else {
                         execute_target_cleanup(&backend, &session, &self.config, executor)?;
                     }
+                }
+                if session.target.is_none() {
+                    self.remove_child_report_directory(session_id, executor);
                 }
                 if let mj_core::state::Checkout::ManagedWorktree { worktree, .. } =
                     self.state.checkout(session_id)?

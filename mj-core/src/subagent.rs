@@ -777,7 +777,7 @@ pub const HANDBACK_REMINDER_TEXT: &str = "[handback reminder] Your turn ended wi
 /// A child's delegated authority and reporting requirements. Shared
 /// by the first-prompt note, the child's server instructions and the handback
 /// tool description, so the three cannot drift apart.
-pub const HANDBACK_REPORT_RULES: &str = "Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Write anything longer (logs, tables, full findings) to files in your report directory and list their paths in the report; never put it in the report itself. Fix mechanical errors yourself (compile errors, lint and format findings, test failures your own change caused) and list each fix in one line of your report. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When a parent decision blocks further progress, hand back the question with the evidence needed to decide. The parent owns consequential design decisions and final acceptance.";
+pub const HANDBACK_REPORT_RULES: &str = "Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Write anything longer (logs, tables, full findings) to files in your report directory and list their paths in the report; never put it in the report itself. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix mechanical errors yourself (compile errors, lint and format findings, test failures your own change caused) and list each fix in one line of your report. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When a parent decision blocks further progress, hand back the question with the evidence needed to decide. The parent owns consequential design decisions and final acceptance.";
 
 /// What a child's first prompt opens with when it has the tool. It leads the
 /// prompt rather than trailing a parent's long instructions, where live runs
@@ -809,6 +809,23 @@ pub const PROJECT_REPORT_ROOT_DIR: &str = ".mj/agents";
 
 /// Archive prefix for the report files a checkpoint carries.
 pub const ARCHIVE_REPORT_DIR: &str = "mj-agent-reports";
+
+/// The most sub-agent report bytes one checkpoint carries. Reports are the
+/// details a child's short handback points to, so a checkpoint keeps the
+/// newest files up to this bound rather than failing over them.
+pub const MAX_CHECKPOINT_REPORT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Controller-authored launch environment used by every child's MCP server.
+pub const CHILD_REPORT_DIR_ENV: &str = "MJ_CHILD_REPORT_DIR";
+pub const CHILD_REPORT_LIMIT_ENV: &str = "MJ_CHILD_REPORT_LIMIT_BYTES";
+
+/// The most bytes one child's report directory may hold when it hands back:
+/// an equal share of [`MAX_CHECKPOINT_REPORT_BYTES`] for each child that can
+/// run at once, so the live children's reports fit in one checkpoint.
+#[must_use]
+pub fn max_child_report_bytes(max_concurrent_children: usize) -> u64 {
+    MAX_CHECKPOINT_REPORT_BYTES / max_concurrent_children.max(1) as u64
+}
 
 /// Cut `text` to [`MAX_HANDBACK_CHARS`] characters, saying how much was left
 /// out and how the parent can get it. Returns the text and whether it was cut.
@@ -1970,6 +1987,19 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("unexpected"), "{error}");
+    }
+
+    #[test]
+    fn child_report_shares_fit_the_checkpoint_even_at_configuration_boundaries() {
+        for concurrent in [0, 1, 6, 7, usize::MAX] {
+            let limit = max_child_report_bytes(concurrent);
+            assert!(
+                u128::from(limit) * concurrent.max(1) as u128
+                    <= u128::from(MAX_CHECKPOINT_REPORT_BYTES)
+            );
+        }
+        assert_eq!(max_child_report_bytes(0), MAX_CHECKPOINT_REPORT_BYTES);
+        assert_eq!(max_child_report_bytes(6), 11_184_810);
     }
 
     // Hard-won: cc7e6a2a: Real child reports of 27 to 62 KB were inlined into waits and triggered 21 repeated polls.

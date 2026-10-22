@@ -368,6 +368,7 @@ fn exported_checkpoint_json() -> Vec<u8> {
 }
 fn export_spec_fixture() -> CheckpointExportSpec {
     CheckpointExportSpec {
+        report_directories: None,
         protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
         session: mj_checkpoint::archive::SessionManifest {
             id: LATCH_RELAY_SESSION.into(),
@@ -2659,6 +2660,7 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
             Ok(CommandOutput {
                 status: 0,
                 stdout: serde_json::to_vec(&CapturedCheckpoint {
+                    omitted_reports: Default::default(),
                     stage_path: spec.stage_path,
                     native_bytes: 256 * 1024,
                     repository_bytes: 0,
@@ -4110,4 +4112,129 @@ async fn a_relay_job_runs_on_the_actors_own_connection_and_defers_to_a_lease() {
     run_status(&handle).await.unwrap();
     assert_eq!(relay_starts(&start_log), 1);
     channels.shutdown.shutdown().await.unwrap();
+}
+
+// Hard-won: #1331: a preceding report warning concealed the actual capture failure.
+#[test]
+fn checkpoint_failure_summary_names_the_error_after_report_warnings() {
+    let locator = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
+        workspace_storage: Default::default(),
+    };
+    for (stderr, expected) in [
+        (
+            "sub-agent reports exceed the 67108864-byte checkpoint limit; the oldest 3 were left out\nError: repository capture failed\n\nCaused by:\n    unsupported untracked file type at app/.mj/lanes\n",
+            "repository capture failed: unsupported untracked file type at app/.mj/lanes",
+        ),
+        (
+            "sub-agent reports exceed the 67108864-byte checkpoint limit; the oldest 3 were left out\n",
+            "target exited without reporting its error",
+        ),
+    ] {
+        let executor = ExportExecutor::new(1, stderr);
+        let error = run_checkpoint_staging_command(
+            &executor,
+            &locator,
+            LATCH_RELAY_SESSION,
+            &export_spec_fixture(),
+            export_stdin_command,
+            "capture target checkpoint",
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("capture target checkpoint failed with status 1: {expected}")
+        );
+    }
+}
+
+// Hard-won: #1331: successful captures silently omitted reports, and retries must not flood the transcript.
+#[cfg(unix)]
+#[tokio::test]
+async fn checkpoint_report_notices_are_deduplicated_in_the_relay_transcript() {
+    const CHILD: &str = "MJ_TEST_CHECKPOINT_REPORT_NOTICE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let test_name = format!(
+            "{}::checkpoint_report_notices_are_deduplicated_in_the_relay_transcript",
+            module_path!()
+                .strip_prefix("mj_controller::")
+                .unwrap_or(module_path!())
+        );
+        IsolatedTest::new(test_name)
+            .env(CHILD, "1")
+            .env("MJ_DATA_DIR", directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let relay_root = tempfile::tempdir().unwrap();
+    let (_channels, _handle, mut relay, barrier_command_id, _) =
+        latch_a_live_checkpoint(relay_root.path(), None, ReleaseSupport::Supported, false).await;
+    relay
+        .submit(
+            new_command_id("end-report-test-barrier").unwrap(),
+            RelayCommand::ReleaseCheckpoint { barrier_command_id },
+        )
+        .await
+        .unwrap();
+    let mut captured = CapturedCheckpoint {
+        stage_path: "stage".into(),
+        native_bytes: 0,
+        repository_bytes: 0,
+        reused_native: false,
+        omitted_reports: mj_checkpoint::checkpoint::CheckpointReportOmissions {
+            files: 3,
+            bytes: 128 * 1024 * 1024,
+            largest_directories: vec![mj_checkpoint::checkpoint::CheckpointReportDirectory {
+                child_id: "large-child".into(),
+                bytes: 150 * 1024 * 1024,
+            }],
+        },
+    };
+    for _ in 0..2 {
+        submit_checkpoint_report_notice(&mut relay, &captured)
+            .await
+            .unwrap();
+    }
+    let notices = |snapshot: &mj_core::state::ManagedSessionSnapshot| {
+        snapshot
+            .materialized
+            .transcript
+            .iter()
+            .filter_map(|item| {
+                if let mj_core::transcript::TranscriptBody::System { text } = &item.body {
+                    text.starts_with("This checkpoint left out ")
+                        .then(|| text.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = notices(&relay.sync_snapshot().await.unwrap());
+    assert_eq!(first.len(), 1);
+    assert!(first[0].contains("3 sub-agent report files (128 MiB)"));
+    assert!(first[0].contains("large-child (150 MiB)"));
+    // Reconstructing the caller from capture JSON does not lose de-duplication.
+    captured = serde_json::from_slice(&serde_json::to_vec(&captured).unwrap()).unwrap();
+    submit_checkpoint_report_notice(&mut relay, &captured)
+        .await
+        .unwrap();
+    assert_eq!(notices(&relay.sync_snapshot().await.unwrap()), first);
+    captured.omitted_reports = Default::default();
+    submit_checkpoint_report_notice(&mut relay, &captured)
+        .await
+        .unwrap();
+    submit_checkpoint_report_notice(&mut relay, &captured)
+        .await
+        .unwrap();
+    assert_eq!(notices(&relay.sync_snapshot().await.unwrap()).len(), 2);
+    captured.omitted_reports.files = 3;
+    submit_checkpoint_report_notice(&mut relay, &captured)
+        .await
+        .unwrap();
+    assert_eq!(notices(&relay.sync_snapshot().await.unwrap()).len(), 3);
 }

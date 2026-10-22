@@ -429,6 +429,26 @@ impl Controller {
             },
             &target,
         )?;
+        // Read by the target-side MCP server from launch.json beside its socket,
+        // independently of how each harness starts or registers that server.
+        for name in [
+            mj_core::subagent::CHILD_REPORT_DIR_ENV,
+            mj_core::subagent::CHILD_REPORT_LIMIT_ENV,
+        ] {
+            launch.environment.remove(name);
+        }
+        if subagent.is_some()
+            && let Some(report_dir) = crate::database::load_subagent_report(session_id)?.report_dir
+        {
+            launch
+                .environment
+                .insert(mj_core::subagent::CHILD_REPORT_DIR_ENV.into(), report_dir);
+            launch.environment.insert(
+                mj_core::subagent::CHILD_REPORT_LIMIT_ENV.into(),
+                mj_core::subagent::max_child_report_bytes(self.config.subagents.max_concurrent)
+                    .to_string(),
+            );
+        }
         if subagent.is_some() {
             launch.environment.insert(
                 mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV.into(),

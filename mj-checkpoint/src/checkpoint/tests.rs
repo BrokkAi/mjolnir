@@ -217,6 +217,7 @@ fn an_opencode_checkpoint_keeps_live_sessions_and_no_login_secret() {
 
     restore_checkpoint(
         &CheckpointRestoreSpec {
+            report_root: None,
             archive_path: spec.output_path.clone(),
             workspace_root: spec.workspace_root.clone(),
             relay_root: temp.path().join("restored-relay"),
@@ -1219,6 +1220,7 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
     let output = worker_root.join("source.hel.zip");
     (
         CheckpointExportSpec {
+            report_directories: None,
             protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
             session: SessionManifest {
                 id: SESSION.into(),
@@ -1294,8 +1296,19 @@ fn staged_checkpoint_preserves_export_contents_and_defers_canonical_history() {
     fs::write(&large_native, vec![b'n'; 128 * 1024]).unwrap();
     export_checkpoint(&export_spec).unwrap();
 
+    let reports = export_spec
+        .workspace_root
+        .join(mj_core::subagent::REPORT_ROOT_DIR)
+        .join("large-child");
+    fs::create_dir_all(&reports).unwrap();
+    File::create(reports.join("build-artifact"))
+        .unwrap()
+        .set_len(mj_core::subagent::MAX_CHECKPOINT_REPORT_BYTES + 1)
+        .unwrap();
+
     let stage_path = export_spec.relay_root.join("checkpoint-stage-test");
     let capture_spec = CheckpointCaptureSpec {
+        report_directories: None,
         protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
         session: export_spec.session.clone(),
         target: export_spec.target.clone(),
@@ -1315,6 +1328,11 @@ fn staged_checkpoint_preserves_export_contents_and_defers_canonical_history() {
     );
     let captured = capture_checkpoint(&capture_spec, &SystemGit).unwrap();
     assert!(!captured.reused_native);
+    assert_eq!(captured.omitted_reports.files, 1);
+    assert_eq!(
+        captured.omitted_reports.bytes,
+        mj_core::subagent::MAX_CHECKPOINT_REPORT_BYTES + 1
+    );
     assert!(captured.native_bytes >= 128 * 1024);
     assert!(stage_path.join(CHECKPOINT_STAGE_MANIFEST).is_file());
     let native_stage = stage_path.join("native/00000000");
@@ -1323,6 +1341,7 @@ fn staged_checkpoint_preserves_export_contents_and_defers_canonical_history() {
     refresh_spec.refresh_existing = true;
     let refreshed = capture_checkpoint(&refresh_spec, &SystemGit).unwrap();
     assert!(refreshed.reused_native);
+    assert_eq!(refreshed.omitted_reports, captured.omitted_reports);
     assert_eq!(refreshed.native_bytes, captured.native_bytes);
     assert_eq!(
         fs::metadata(&native_stage).unwrap().modified().unwrap(),
@@ -1357,6 +1376,7 @@ fn prestage_catch_up_recaptures_native_history_that_changed_before_the_barrier()
     let (export_spec, _) = fixture(temp.path());
     let stage_path = export_spec.relay_root.join("checkpoint-stage-test");
     let mut capture_spec = CheckpointCaptureSpec {
+        report_directories: None,
         protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
         session: export_spec.session,
         target: export_spec.target,
@@ -1453,6 +1473,7 @@ fn checkpoint_packaging_throughput() {
     git(&repository_root, &["add", "."]);
     git(&repository_root, &["commit", "-m", "benchmark"]);
     let capture_spec = CheckpointCaptureSpec {
+        report_directories: None,
         protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
         session: archive.manifest.session.clone(),
         target: archive.manifest.target.clone(),
@@ -1476,6 +1497,7 @@ fn checkpoint_packaging_throughput() {
     let catch_up_started = std::time::Instant::now();
     capture_checkpoint(
         &CheckpointCaptureSpec {
+            report_directories: None,
             refresh_existing: true,
             ..capture_spec
         },
@@ -1664,6 +1686,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         &spec.relay_root,
         &spec.harness_home,
         &spec.workspace_root,
+        None,
         false,
         &NoNativeCheckpointState,
     )
@@ -1708,6 +1731,7 @@ fn checkpoint_collects_memory_from_a_legacy_worker_launch_config() {
         &spec.relay_root,
         &spec.harness_home,
         &spec.workspace_root,
+        None,
         false,
         &NoNativeCheckpointState,
     )
@@ -1771,6 +1795,7 @@ fn checkpoints_collect_memory_through_a_legacy_worker_profile_link() {
         let stage_path = spec.relay_root.join("checkpoint-stage");
         capture_checkpoint(
             &CheckpointCaptureSpec {
+                report_directories: None,
                 protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
                 session: spec.session.clone(),
                 target: spec.target.clone(),
@@ -2269,6 +2294,7 @@ fn assert_canonical_restore_rejected_before_mutation(
 
     let error = restore_checkpoint(
         &CheckpointRestoreSpec {
+            report_root: None,
             archive_path: invalid_archive.to_path_buf(),
             workspace_root: spec.workspace_root.clone(),
             relay_root: relay_root.clone(),
@@ -2653,6 +2679,7 @@ fn checkpoint_wire_requires_the_new_capture_mode_and_rejects_legacy_fields() {
         QueueRestorePolicy::Discard
     );
     let deferred = CheckpointRestoreSpec {
+        report_root: None,
         queue_policy: QueueRestorePolicy::Defer,
         ..decoded
     };
@@ -2735,6 +2762,7 @@ fn restore_into(temp: &Path, spec: &CheckpointExportSpec, discard_queued_prompts
     let relay_root = temp.join(format!("restored-relay-{discard_queued_prompts}"));
     restore_checkpoint(
         &CheckpointRestoreSpec {
+            report_root: None,
             archive_path: spec.output_path.clone(),
             workspace_root: spec.workspace_root.clone(),
             relay_root: relay_root.clone(),
@@ -2776,6 +2804,7 @@ fn a_native_restore_seeds_the_accepted_model_and_effort_and_a_text_handoff_does_
         let relay_root = temp.path().join(format!("seeded-relay-{restore_native}"));
         restore_checkpoint(
             &CheckpointRestoreSpec {
+                report_root: None,
                 archive_path: spec.output_path.clone(),
                 workspace_root: spec.workspace_root.clone(),
                 relay_root: relay_root.clone(),
@@ -2819,6 +2848,7 @@ fn a_native_restore_seeds_effort_stored_under_the_harness_option_id() {
     let relay_root = temp.path().join("option-id-relay");
     restore_checkpoint(
         &CheckpointRestoreSpec {
+            report_root: None,
             archive_path: spec.output_path.clone(),
             workspace_root: spec.workspace_root.clone(),
             relay_root: relay_root.clone(),
@@ -2873,6 +2903,7 @@ fn a_native_restore_says_whether_the_continued_session_ever_received_a_prompt() 
             let relay_root = temp.path().join(format!("relay-{name}"));
             restore_checkpoint(
                 &CheckpointRestoreSpec {
+                    report_root: None,
                     archive_path: spec.output_path.clone(),
                     workspace_root: spec.workspace_root.clone(),
                     relay_root: relay_root.clone(),
@@ -2959,6 +2990,7 @@ fn image_checkpoint_fixture(
     let restored_relay = temp.join("restored-image-relay");
     restore_checkpoint(
         &CheckpointRestoreSpec {
+            report_root: None,
             archive_path: spec.output_path.clone(),
             workspace_root: spec.workspace_root.clone(),
             relay_root: restored_relay.clone(),
@@ -3095,6 +3127,7 @@ fn restore_refuses_a_relay_root_that_already_holds_relay_state() {
 
     let error = restore_checkpoint(
         &CheckpointRestoreSpec {
+            report_root: None,
             archive_path: spec.output_path.clone(),
             workspace_root: spec.workspace_root.clone(),
             relay_root: relay_root.clone(),
@@ -3136,6 +3169,7 @@ fn restore_refuses_to_seed_the_relay_through_a_dangling_symlink() {
 
     let error = restore_checkpoint(
         &CheckpointRestoreSpec {
+            report_root: None,
             archive_path: spec.output_path.clone(),
             workspace_root: spec.workspace_root.clone(),
             relay_root,
@@ -3171,6 +3205,7 @@ fn restore_refuses_a_native_artifact_under_a_symlinked_directory() {
 
     let error = restore_checkpoint(
         &CheckpointRestoreSpec {
+            report_root: None,
             archive_path: spec.output_path.clone(),
             workspace_root: spec.workspace_root.clone(),
             relay_root: temp.path().join("symlinked-native-relay"),
@@ -3225,6 +3260,7 @@ fn restore_writes_native_artifacts_privately_under_the_harness_home() {
 
     restore_checkpoint(
         &CheckpointRestoreSpec {
+            report_root: None,
             archive_path: spec.output_path.clone(),
             workspace_root: spec.workspace_root.clone(),
             relay_root: temp.path().join("restored-native-relay"),
@@ -3268,6 +3304,7 @@ fn incompatible_schema_is_rejected_before_restore_mutates_target() {
         let relay_root = temp.path().join(format!("relay-{schema_version}"));
         let error = restore_checkpoint(
             &CheckpointRestoreSpec {
+                report_root: None,
                 archive_path: incompatible,
                 workspace_root: spec.workspace_root.clone(),
                 relay_root: relay_root.clone(),
@@ -3377,65 +3414,133 @@ fn parallel_repository_collection_preserves_manifest_order() {
 /// them back even when the harness history is not restored.
 #[test]
 fn checkpoint_carries_subagent_reports_and_restores_them_beside_the_repositories() {
-    let temp = tempfile::tempdir().unwrap();
-    let (spec, _) = fixture(temp.path());
-    let reports = spec
-        .workspace_root
-        .join(mj_core::subagent::REPORT_ROOT_DIR)
-        .join("child-1");
-    fs::create_dir_all(reports.join("logs")).unwrap();
-    fs::write(reports.join("findings.md"), b"full findings").unwrap();
-    fs::write(reports.join("logs/test.log"), b"test output").unwrap();
-    export_checkpoint(&spec).unwrap();
-    assert_eq!(
-        read_archive_verified(&spec.output_path)
-            .unwrap()
-            .manifest
-            .schema_version,
-        crate::archive::ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
-    );
+    for explicit in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut spec, _) = fixture(temp.path());
+        let relative_root = if explicit {
+            Path::new("app").join(mj_core::subagent::PROJECT_REPORT_ROOT_DIR)
+        } else {
+            PathBuf::from(mj_core::subagent::REPORT_ROOT_DIR)
+        };
+        let reports = spec.workspace_root.join(&relative_root).join("child-1");
+        if explicit {
+            // Bare projects exclude this internal root when preparing reports.
+            fs::OpenOptions::new()
+                .append(true)
+                .open(spec.workspace_root.join("app/.git/info/exclude"))
+                .unwrap()
+                .write_all(b"\n/.mj/agents/\n")
+                .unwrap();
+            spec.report_directories = Some(vec![reports.clone()]);
+            let unrelated = spec
+                .workspace_root
+                .join(&relative_root)
+                .join("another-parents-child");
+            fs::create_dir_all(&unrelated).unwrap();
+            fs::write(unrelated.join("private.md"), b"another parent's report").unwrap();
+        }
+        fs::create_dir_all(reports.join("logs")).unwrap();
+        fs::write(reports.join("findings.md"), b"full findings").unwrap();
+        fs::write(reports.join("logs/test.log"), b"test output").unwrap();
+        export_checkpoint(&spec).unwrap();
+        assert_eq!(
+            read_archive_verified(&spec.output_path)
+                .unwrap()
+                .manifest
+                .schema_version,
+            crate::archive::ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
+        );
 
-    let restored_workspace = temp.path().join("restored-workspace");
-    fs::create_dir_all(&restored_workspace).unwrap();
-    // A file already on the target is newer than the archive's copy.
-    let kept = restored_workspace
-        .join(mj_core::subagent::REPORT_ROOT_DIR)
-        .join("child-1/findings.md");
-    fs::create_dir_all(kept.parent().unwrap()).unwrap();
-    fs::write(&kept, b"newer findings").unwrap();
-    restore_checkpoint(
-        &CheckpointRestoreSpec {
-            archive_path: spec.output_path.clone(),
-            workspace_root: restored_workspace.clone(),
-            relay_root: temp.path().join("restored-report-relay"),
-            harness_home: temp.path().join("restored-report-harness"),
-            restore_repositories: false,
-            restore_native: false,
-            queue_policy: QueueRestorePolicy::Restore,
-            primary_repository_root: None,
-        },
-        &SystemGit,
-    )
-    .unwrap();
-    let restored = restored_workspace
-        .join(mj_core::subagent::REPORT_ROOT_DIR)
-        .join("child-1");
-    assert_eq!(
-        fs::read(restored.join("logs/test.log")).unwrap(),
-        b"test output"
-    );
-    assert_eq!(
-        fs::read(restored.join("findings.md")).unwrap(),
-        b"newer findings"
-    );
+        let restored_workspace = temp.path().join("restored-workspace");
+        fs::create_dir_all(&restored_workspace).unwrap();
+        // A file already on the target is newer than the archive's copy.
+        let kept = restored_workspace
+            .join(&relative_root)
+            .join("child-1/findings.md");
+        fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        fs::write(&kept, b"newer findings").unwrap();
+        restore_checkpoint(
+            &CheckpointRestoreSpec {
+                report_root: explicit.then(|| restored_workspace.join(&relative_root)),
+                archive_path: spec.output_path.clone(),
+                workspace_root: restored_workspace.clone(),
+                relay_root: temp.path().join("restored-report-relay"),
+                harness_home: temp.path().join("restored-report-harness"),
+                restore_repositories: false,
+                restore_native: false,
+                queue_policy: QueueRestorePolicy::Restore,
+                primary_repository_root: None,
+            },
+            &SystemGit,
+        )
+        .unwrap();
+        assert!(
+            !restored_workspace
+                .join(&relative_root)
+                .join("another-parents-child")
+                .exists()
+        );
+        let restored = restored_workspace.join(&relative_root).join("child-1");
+        assert_eq!(
+            fs::read(restored.join("logs/test.log")).unwrap(),
+            b"test output"
+        );
+        assert_eq!(
+            fs::read(restored.join("findings.md")).unwrap(),
+            b"newer findings"
+        );
+
+        #[cfg(unix)]
+        if explicit {
+            let unsafe_workspace = temp.path().join("unsafe-workspace");
+            let outside = temp.path().join("outside");
+            fs::create_dir_all(unsafe_workspace.join("app")).unwrap();
+            fs::create_dir_all(&outside).unwrap();
+            std::os::unix::fs::symlink(&outside, unsafe_workspace.join("app/.mj")).unwrap();
+            let error = restore_checkpoint(
+                &CheckpointRestoreSpec {
+                    archive_path: spec.output_path.clone(),
+                    report_root: Some(unsafe_workspace.join(&relative_root)),
+                    workspace_root: unsafe_workspace,
+                    relay_root: temp.path().join("unsafe-relay"),
+                    harness_home: temp.path().join("unsafe-harness"),
+                    restore_repositories: false,
+                    restore_native: false,
+                    queue_policy: QueueRestorePolicy::Restore,
+                    primary_repository_root: None,
+                },
+                &SystemGit,
+            )
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("symlink"));
+            assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+        }
+
+        // A child sees exactly the same workspace, but its own launch identity
+        // prevents it from archiving the parent's (and siblings') reports.
+        fs::write(
+            spec.relay_root.join("launch.json"),
+            br#"{"handback_tool":true}"#,
+        )
+        .unwrap();
+        let mut child = spec.clone();
+        child.output_path = spec.relay_root.join("child.zip");
+        export_checkpoint(&child).unwrap();
+        let child_archive = read_archive_verified(&child.output_path).unwrap();
+        assert!(child_archive.manifest.payloads.iter().all(|artifact| {
+            !matches!(&artifact.role, PayloadRole::NativeArtifact { relative_path }
+            if relative_path.starts_with(mj_core::subagent::ARCHIVE_REPORT_DIR))
+        }));
+    }
 }
 
 #[test]
 fn subagent_reports_past_the_limit_keep_the_newest_files() {
     let temp = tempfile::tempdir().unwrap();
     assert!(
-        super::capture::collect_subagent_reports(temp.path())
+        super::capture::collect_subagent_reports(temp.path(), None)
             .unwrap()
+            .0
             .is_empty(),
         "no report directory, nothing to carry"
     );
@@ -3444,7 +3549,7 @@ fn subagent_reports_past_the_limit_keep_the_newest_files() {
         .join(mj_core::subagent::REPORT_ROOT_DIR)
         .join("c");
     fs::create_dir_all(&reports).unwrap();
-    let half = (super::capture::MAX_SUBAGENT_REPORT_BYTES / 2 + 1) as usize;
+    let half = (mj_core::subagent::MAX_CHECKPOINT_REPORT_BYTES / 2 + 1) as usize;
     let old = reports.join("old.log");
     fs::write(&old, vec![b'o'; half]).unwrap();
     File::options()
@@ -3456,7 +3561,11 @@ fn subagent_reports_past_the_limit_keep_the_newest_files() {
     fs::write(reports.join("new.log"), vec![b'n'; half]).unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(&old, reports.join("link.log")).unwrap();
-    let artifacts = super::capture::collect_subagent_reports(temp.path()).unwrap();
+    let (artifacts, omitted) = super::capture::collect_subagent_reports(temp.path(), None).unwrap();
+    assert_eq!(omitted.files, 1);
+    assert_eq!(omitted.bytes, half as u64);
+    assert_eq!(omitted.largest_directories[0].child_id, "c");
+    assert_eq!(omitted.largest_directories[0].bytes, 2 * half as u64);
     let paths = artifacts
         .iter()
         .map(|artifact| artifact.relative_path.clone())
@@ -3474,7 +3583,7 @@ fn a_report_written_after_the_prestage_changes_the_source_fingerprint() {
     let workspace = temp.path().join("workspace");
     fs::create_dir_all(&harness).unwrap();
     fs::create_dir_all(&workspace).unwrap();
-    let before = super::capture::checkpoint_source_fingerprint(&harness, &workspace).unwrap();
+    let before = super::capture::checkpoint_source_fingerprint(&harness, &workspace, None).unwrap();
     assert_eq!(
         before,
         super::capture::native_source_fingerprint(&harness).unwrap(),
@@ -3484,7 +3593,42 @@ fn a_report_written_after_the_prestage_changes_the_source_fingerprint() {
     fs::create_dir_all(&reports).unwrap();
     fs::write(reports.join("r.md"), b"report").unwrap();
     assert_ne!(
-        super::capture::checkpoint_source_fingerprint(&harness, &workspace).unwrap(),
+        super::capture::checkpoint_source_fingerprint(&harness, &workspace, None).unwrap(),
         before
     );
+    let directories = vec![workspace.join("project/.mj/agents/owned")];
+    fs::create_dir_all(&directories[0]).unwrap();
+    let selected =
+        super::capture::checkpoint_source_fingerprint(&harness, &workspace, Some(&directories))
+            .unwrap();
+    fs::write(reports.join("unrelated.md"), b"another parent's report").unwrap();
+    assert_eq!(
+        super::capture::checkpoint_source_fingerprint(&harness, &workspace, Some(&directories))
+            .unwrap(),
+        selected
+    );
+    fs::write(directories[0].join("report.md"), b"our report").unwrap();
+    assert_ne!(
+        super::capture::checkpoint_source_fingerprint(&harness, &workspace, Some(&directories))
+            .unwrap(),
+        selected
+    );
+}
+
+#[test]
+fn captured_checkpoint_accepts_an_older_workers_json() {
+    let captured: CapturedCheckpoint = serde_json::from_str(
+        r#"{"stage_path":"stage","native_bytes":12,"repository_bytes":34,"reused_native":true}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        captured.omitted_reports,
+        CheckpointReportOmissions::default()
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    let json = serde_json::to_value(&spec).unwrap();
+    assert!(json.get("report_directories").is_none());
+    let decoded: CheckpointExportSpec = serde_json::from_value(json).unwrap();
+    assert!(decoded.report_directories.is_none());
 }

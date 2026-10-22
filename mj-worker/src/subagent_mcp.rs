@@ -38,7 +38,7 @@ static CODEX_SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
 /// A child's server instructions: its report reaches the parent through `handback`.
 static CHILD_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "You are a Mjolnir sub-agent working for another session. Deliver your report for each task by calling handback once, as your last action. The session that started you reads that report, not the rest of this conversation. If a parent decision blocks further progress, hand back your question and stop; its answer arrives as your next prompt. Your report directory is named in your first prompt. {}",
+        "You are a Mjolnir sub-agent. Call handback once as your last action; your parent reads that report. If a parent decision blocks progress, hand back your question and stop; its answer arrives as your next prompt. Your first prompt names your report directory. {}",
         mj_core::subagent::HANDBACK_REPORT_RULES
     )
 });
@@ -255,6 +255,96 @@ impl Default for ParentTools {
     }
 }
 
+/// Every harness already supplies the worker socket. Its adjacent launch file
+/// carries controller-authored settings even when the harness filters its env.
+struct ChildReportBudget {
+    directory: PathBuf,
+    limit: u64,
+}
+
+impl ChildReportBudget {
+    fn from_socket(socket: &Path) -> Result<Option<Self>> {
+        let path = socket.with_file_name("launch.json");
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+        };
+        let launch: Value =
+            serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+        let environment = &launch["environment"];
+        let (Some(directory), Some(limit)) = (
+            environment[mj_core::subagent::CHILD_REPORT_DIR_ENV].as_str(),
+            environment[mj_core::subagent::CHILD_REPORT_LIMIT_ENV].as_str(),
+        ) else {
+            // Older controllers did not configure a report budget.
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            directory: directory.into(),
+            limit: limit.parse().context("parse child report byte limit")?,
+        }))
+    }
+
+    fn note(&self) -> String {
+        format!("Report directory limit: {} bytes.", self.limit)
+    }
+
+    fn check(&self) -> Result<()> {
+        let mut pending = vec![self.directory.clone()];
+        let mut total = 0_u64;
+        let mut largest = Vec::new();
+        while let Some(path) = pending.pop() {
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("inspect report {}", path.display()));
+                }
+            };
+            if metadata.is_dir() {
+                for entry in std::fs::read_dir(&path)
+                    .with_context(|| format!("read report directory {}", path.display()))?
+                {
+                    pending.push(
+                        entry
+                            .with_context(|| format!("read report entry in {}", path.display()))?
+                            .path(),
+                    );
+                }
+            } else if metadata.is_file() {
+                let size = metadata.len();
+                total = total.saturating_add(size);
+                largest.push((size, path));
+                largest.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+                largest.truncate(10);
+            }
+            // symlink_metadata never follows links, including directory links.
+        }
+        if total > self.limit {
+            let files = largest
+                .into_iter()
+                .map(|(size, path)| {
+                    format!(
+                        "  {size} bytes: {}",
+                        path.strip_prefix(&self.directory)
+                            .unwrap_or(&path)
+                            .display()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "Handback refused: report directory {} holds {total} bytes; limit is {} bytes. Largest files:\n{files}\nDelete build outputs, binaries and downloads; keep only text evidence (logs, tables, findings), then call handback again.",
+                self.directory.display(),
+                self.limit
+            );
+        }
+        Ok(())
+    }
+}
+
 pub fn run_mcp_stdio(
     socket: &Path,
     harness: Option<HarnessKind>,
@@ -303,6 +393,11 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
     options: ParentTools,
 ) -> Result<()> {
     let socket = socket.to_path_buf();
+    let report_budget = if role == SubagentMcpRole::Child {
+        ChildReportBudget::from_socket(&socket)?
+    } else {
+        None
+    };
     let parent_instructions = match harness {
         Some(HarnessKind::Codex) => CODEX_SERVER_INSTRUCTIONS.as_str(),
         _ => SERVER_INSTRUCTIONS.as_str(),
@@ -313,7 +408,14 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
             tool_definitions_with_options(harness, options),
         ),
         SubagentMcpRole::MessageOnly => (MESSAGE_ONLY_INSTRUCTIONS, vec![send_message_tool()]),
-        SubagentMcpRole::Child => (CHILD_INSTRUCTIONS.as_str(), child_tool_definitions()),
+        SubagentMcpRole::Child => {
+            let mut tools = child_tool_definitions();
+            if let Some(budget) = &report_budget {
+                let description = tools[0]["description"].as_str().unwrap();
+                tools[0]["description"] = json!(format!("{description} {}", budget.note()));
+            }
+            (CHILD_INSTRUCTIONS.as_str(), tools)
+        }
     };
     crate::mcp_stdio::serve(
         reader,
@@ -504,6 +606,11 @@ fn call_with_budget_and_options(
             }
         }
         "handback" if role == SubagentMcpRole::Child => {
+            if let Some(budget) = ChildReportBudget::from_socket(socket)?
+                && let Err(error) = budget.check()
+            {
+                return Ok((json!({"error": format!("{error:#}")}), true));
+            }
             let args: HandbackArgs = serde_json::from_value(params.arguments)?;
             SubagentToolAction::Handback {
                 message: args.message,
@@ -678,7 +785,7 @@ fn tool_definitions_with_options(
         send_message_tool(),
         tool(
             "close",
-            "Stop one child session and retain its conversation. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, use list_agents after close and confirm the closing child is stopped before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
+            "Stop one child session and retain its conversation. Closing a child deletes its report directory, so read the files you need first. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, use list_agents after close and confirm the closing child is stopped before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
             child,
         ),
     ]
@@ -705,7 +812,7 @@ fn child_tool_definitions() -> Vec<Value> {
     vec![tool(
         "handback",
         &format!(
-            "Deliver the task report to your parent, once as your last action. Repeating it in the same turn is refused. Your parent reads this report, not your conversation. {}",
+            "Hand back once, as your last action. Repeats in one turn are refused. {}",
             mj_core::subagent::HANDBACK_REPORT_RULES
         ),
         json!({"type":"object","properties":{"message":{"type":"string","description":"Your report, at most 4,000 characters; details go in files in your report directory."}},"required":["message"],"additionalProperties":false}),
@@ -1252,11 +1359,21 @@ mod tests {
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
             json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
         );
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("launch.json"),
+            serde_json::to_vec(&json!({"environment": {
+                (mj_core::subagent::CHILD_REPORT_DIR_ENV): directory.path().join("reports"),
+                (mj_core::subagent::CHILD_REPORT_LIMIT_ENV): "11184810"
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
         let output = Arc::new(Mutex::new(Vec::new()));
         run(
             input.as_bytes(),
             SharedWriter(Arc::clone(&output)),
-            Path::new("unused.sock"),
+            &directory.path().join("subagents.sock"),
             None,
             SubagentMcpRole::Child,
         )
@@ -1275,6 +1392,13 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == "handback")
             .unwrap();
+        assert!(
+            handback["description"]
+                .as_str()
+                .unwrap()
+                .contains("Report directory limit: 11184810 bytes")
+        );
+        assert!(handback["description"].as_str().unwrap().len() <= 1800);
         let prompt = mj_core::subagent::handback_prompt_note("/workspace/reports/child");
         for instructions in [
             prompt.as_str(),
@@ -1517,14 +1641,139 @@ mod tests {
         );
     }
 
+    // Hard-won: #1331: binary artifacts silently displaced report evidence in checkpoints.
+    #[test]
+    fn handback_refuses_oversized_reports_and_lists_the_ten_largest_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let reports = dir.path().join("reports");
+        std::fs::create_dir_all(reports.join("nested")).unwrap();
+        for size in 1..=12 {
+            std::fs::File::create(reports.join("nested").join(format!("artifact-{size:02}")))
+                .unwrap()
+                .set_len(size)
+                .unwrap();
+        }
+        let socket = dir.path().join("subagents.sock");
+        std::fs::write(
+            dir.path().join("launch.json"),
+            serde_json::to_vec(&json!({
+                "environment": {
+                    (mj_core::subagent::CHILD_REPORT_DIR_ENV): reports,
+                    (mj_core::subagent::CHILD_REPORT_LIMIT_ENV): "77"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let (value, is_error) = call(
+            &socket,
+            None,
+            SubagentMcpRole::Child,
+            Some(&json!({"name":"handback", "arguments":{"message":"done"}})),
+            &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
+        )
+        .unwrap();
+        assert!(is_error, "{value}");
+        let error = value["error"].as_str().unwrap();
+        assert!(
+            error.contains("holds 78 bytes; limit is 77 bytes"),
+            "{error}"
+        );
+        let files = error
+            .lines()
+            .filter(|line| line.starts_with("  "))
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 10, "{error}");
+        assert!(
+            files[0].contains("12 bytes: nested") && files[0].ends_with("artifact-12"),
+            "{error}"
+        );
+        assert!(files[9].ends_with("artifact-03"), "{error}");
+        assert!(!error.contains("artifact-02"), "{error}");
+        assert!(
+            error.contains("Delete build outputs, binaries and downloads"),
+            "{error}"
+        );
+        assert!(error.contains("call handback again"), "{error}");
+    }
+
+    #[test]
+    fn older_launch_files_without_both_report_settings_skip_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("subagents.sock");
+        assert!(ChildReportBudget::from_socket(&socket).unwrap().is_none());
+        for environment in [
+            json!({}),
+            json!({
+                (mj_core::subagent::CHILD_REPORT_DIR_ENV): "/missing"
+            }),
+            json!({
+                (mj_core::subagent::CHILD_REPORT_LIMIT_ENV): "1"
+            }),
+        ] {
+            std::fs::write(
+                dir.path().join("launch.json"),
+                serde_json::to_vec(&json!({"environment":environment})).unwrap(),
+            )
+            .unwrap();
+            assert!(ChildReportBudget::from_socket(&socket).unwrap().is_none());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn report_budget_does_not_follow_file_or_directory_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let reports = dir.path().join("reports");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&reports).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::File::create(outside.join("large"))
+            .unwrap()
+            .set_len(1_000_000)
+            .unwrap();
+        std::os::unix::fs::symlink(&outside, reports.join("directory-link")).unwrap();
+        std::os::unix::fs::symlink(outside.join("large"), reports.join("file-link")).unwrap();
+        std::os::unix::fs::symlink(outside.join("missing"), reports.join("broken-link")).unwrap();
+        ChildReportBudget {
+            directory: reports,
+            limit: 0,
+        }
+        .check()
+        .unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_child_sends_its_report_as_a_handback_request() {
+        for configured in [false, true] {
+            child_sends_its_report(configured);
+        }
+    }
+
+    #[cfg(unix)]
+    fn child_sends_its_report(configured: bool) {
         use std::io::{BufReader, Read};
         use std::os::unix::net::UnixListener;
 
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("subagents.sock");
+        if configured {
+            let reports = dir.path().join("reports");
+            std::fs::create_dir(&reports).unwrap();
+            std::fs::write(reports.join("evidence.log"), "evidence").unwrap();
+            std::fs::write(
+                dir.path().join("launch.json"),
+                serde_json::to_vec(&json!({
+                    "environment": {
+                        (mj_core::subagent::CHILD_REPORT_DIR_ENV): reports,
+                        (mj_core::subagent::CHILD_REPORT_LIMIT_ENV): "8"
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
         let listener = UnixListener::bind(&socket).unwrap();
         let (sent, received) = std::sync::mpsc::channel::<Value>();
         std::thread::spawn(move || {

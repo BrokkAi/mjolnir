@@ -98,7 +98,221 @@ fn prepare_report_dir(
     Ok(absolute)
 }
 
+// Work in the root's pinned current directory: rm never follows a child
+// symlink. A report root, or the `.mj` holding a project's root, that is a
+// symlink is refused before any deletion; symlinked ancestors above it are
+// ordinary (macOS `/var`, a home directory on another volume) and allowed.
+// An absent root is already clean.
+const REMOVE_REPORT_DIRS_SCRIPT: &str = r#"set -eu
+cd
+root=$1
+shift
+case "$root" in /*) ;; *) root="$(pwd -P)/$root" ;; esac
+if [ -L "$root" ]; then echo 'refusing a symlinked report root' >&2; exit 1; fi
+case "$root" in
+*/.mj/agents)
+    if [ -L "${root%/agents}" ]; then echo 'refusing a symlinked report root' >&2; exit 1; fi ;;
+esac
+[ -e "$root" ] || exit 0
+cd -- "$root"
+status=0
+for child do
+    case "$child" in ''|*[!0123456789abcdefABCDEF]*) echo 'invalid report child id' >&2; exit 1;; esac
+    rm -rf -- "$child" || status=1
+done
+# A shared bare-project root survives while anyone else's reports remain.
+name=${root##*/}
+cd ..
+remaining=$(ls -A -- "$name")
+if [ -z "$remaining" ]; then
+    rmdir -- "$name"
+fi
+exit "$status"
+"#;
+
+/// A pre-close snapshot survives the cascade deleting the children's rows.
+pub(crate) struct SubagentReportCleanup {
+    backend: mj_core::targets::TargetLocator,
+    session_id: String,
+    root: String,
+    child_ids: Vec<String>,
+}
+
+impl SubagentReportCleanup {
+    pub(crate) fn run(&self, executor: &impl mj_core::targets::CommandExecutor) {
+        if let Err(error) = self.execute(executor) {
+            tracing::warn!(
+                session_id = %self.session_id,
+                report_root = %self.root,
+                error = format!("{error:#}"),
+                "could not remove sub-agent report directories"
+            );
+        }
+    }
+
+    fn execute(&self, executor: &impl mj_core::targets::CommandExecutor) -> Result<()> {
+        validate_report_root(&self.root)?;
+        for child in &self.child_ids {
+            ensure!(
+                !child.is_empty() && child.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "invalid sub-agent report child id {child:?}"
+            );
+        }
+        let mut argv = vec![
+            "sh".into(),
+            "-c".into(),
+            REMOVE_REPORT_DIRS_SCRIPT.into(),
+            "mj-remove-reports".into(),
+            self.root.clone(),
+        ];
+        argv.extend(self.child_ids.iter().cloned());
+        let command = mj_core::targets::command_on_locator(
+            &self.backend,
+            &self.session_id,
+            argv,
+            "remove sub-agent report directories",
+        )?;
+        super::execute_checked(executor, command)?;
+        Ok(())
+    }
+}
+
+fn validate_report_root(root: &str) -> Result<()> {
+    let path = Path::new(root);
+    ensure!(
+        path.ends_with(mj_core::subagent::REPORT_ROOT_DIR)
+            || path.ends_with(mj_core::subagent::PROJECT_REPORT_ROOT_DIR),
+        "invalid sub-agent report root {root:?}"
+    );
+    ensure!(
+        !path.components().any(|component| matches!(
+            component,
+            std::path::Component::ParentDir | std::path::Component::CurDir
+        )),
+        "sub-agent report root contains traversal: {root:?}"
+    );
+    Ok(())
+}
+
 impl Controller {
+    /// Snapshot all relations before a daemon close/destroy cascades children.
+    pub(crate) fn subagent_report_cleanup(
+        &self,
+        parent_session_id: &str,
+    ) -> Result<Option<SubagentReportCleanup>> {
+        let parent = self
+            .state
+            .sessions
+            .get(parent_session_id)
+            .with_context(|| format!("unknown parent session {parent_session_id}"))?;
+        let child_ids: Vec<String> = self
+            .state
+            .subagents
+            .values()
+            .filter(|child| child.parent_session_id == parent_session_id)
+            .map(|child| child.child_session_id.clone())
+            .collect();
+        // Without children there is nothing to remove, so no target command.
+        if child_ids.is_empty() {
+            return Ok(None);
+        }
+        let Some(locator) = parent.target.as_ref() else {
+            return Ok(None);
+        };
+        let backend = super::backend::backend_locator(locator, parent, &self.config)?;
+        let checkout = self.state.checkout(parent_session_id)?;
+        let (root, _) = subagent_report_root(parent, &backend, &checkout);
+        Ok(Some(SubagentReportCleanup {
+            backend,
+            session_id: parent_session_id.to_owned(),
+            root,
+            child_ids,
+        }))
+    }
+
+    /// Only a child hook calls this, after its owning worker has stopped.
+    pub(super) fn remove_child_report_directory(
+        &self,
+        child_session_id: &str,
+        executor: &impl mj_core::targets::CommandExecutor,
+    ) {
+        let result = (|| -> Result<()> {
+            let Some(relation) = self.state.subagents.get(child_session_id) else {
+                return Ok(());
+            };
+            let child = self
+                .state
+                .sessions
+                .get(child_session_id)
+                .context("sub-agent session is missing")?;
+            let parent = self.state.sessions.get(&relation.parent_session_id);
+            let directory = crate::database::load_subagent_report(child_session_id)?.report_dir;
+            let root = if let Some(directory) = directory {
+                let path = Path::new(&directory);
+                ensure!(
+                    mj_core::target_path::is_absolute(path),
+                    "persisted report directory is not absolute"
+                );
+                ensure!(
+                    path.file_name().and_then(|name| name.to_str()) == Some(child_session_id),
+                    "persisted report directory does not name its child"
+                );
+                path.parent()
+                    .context("report directory has no root")?
+                    .to_str()
+                    .context("report root is not UTF-8")?
+                    .to_owned()
+            } else if let Some(parent) = parent {
+                let locator = parent
+                    .target
+                    .as_ref()
+                    .context("parent has no reachable report target")?;
+                let backend = super::backend::backend_locator(locator, parent, &self.config)?;
+                subagent_report_root(parent, &backend, &self.state.checkout(&parent.id)?).0
+            } else {
+                anyhow::bail!("child has no recorded report directory or live parent");
+            };
+            let mut last_error = None;
+            for session in std::iter::once(child).chain(parent) {
+                let Some(locator) = &session.target else {
+                    continue;
+                };
+                let attempt = (|| {
+                    let backend = super::backend::backend_locator(locator, session, &self.config)?;
+                    SubagentReportCleanup {
+                        backend,
+                        session_id: session.id.clone(),
+                        root: root.clone(),
+                        child_ids: vec![child_session_id.to_owned()],
+                    }
+                    .execute(executor)
+                })();
+                match attempt {
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        tracing::warn!(
+                            child_session_id,
+                            target_session_id = %session.id,
+                            error = format!("{error:#}"),
+                            "could not remove child reports through this target"
+                        );
+                        last_error = Some(error);
+                    }
+                }
+            }
+            Err(last_error.unwrap_or_else(|| {
+                anyhow::anyhow!("neither child nor parent has a reachable report target")
+            }))
+        })();
+        if let Err(error) = result {
+            tracing::warn!(
+                child_session_id,
+                error = format!("{error:#}"),
+                "could not remove the sub-agent report directory"
+            );
+        }
+    }
+
     /// Create the directory that holds a parent's children's report
     /// directories on the parent's target, and return its absolute path.
     ///
@@ -596,6 +810,83 @@ pub(super) fn subagent_report_root(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    // Hard-won: #1331: report cleanup must not escape into unrelated reports or symlink targets.
+    #[test]
+    fn report_cleanup_preserves_other_children_and_refuses_path_and_symlink_escapes() {
+        use mj_core::targets::{ProcessExecutor, TargetLocator};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".mj/agents");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(root.join("aa")).unwrap();
+        std::fs::create_dir_all(root.join("bb")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep"), "outside report").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("cc")).unwrap();
+        let mut cleanup = SubagentReportCleanup {
+            backend: TargetLocator::LocalBare {
+                worker_root: temp
+                    .path()
+                    .join("0123456789abcdef0123456789abcdef")
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+            session_id: "0123456789abcdef0123456789abcdef".into(),
+            root: root.to_str().unwrap().into(),
+            child_ids: vec!["aa".into(), "cc".into()],
+        };
+        cleanup.execute(&ProcessExecutor).unwrap();
+        assert!(!root.join("aa").exists());
+        assert!(!root.join("cc").exists());
+        assert!(root.join("bb").is_dir(), "another parent's child survives");
+        assert!(
+            outside.join("keep").is_file(),
+            "child symlinks are never followed"
+        );
+
+        cleanup.child_ids = vec!["../outside".into()];
+        assert!(cleanup.execute(&ProcessExecutor).is_err());
+        cleanup.child_ids = vec!["bb".into()];
+        cleanup.root = format!("{}/../.mj/agents", temp.path().display());
+        assert!(cleanup.execute(&ProcessExecutor).is_err());
+        cleanup.root = outside.to_str().unwrap().into();
+        assert!(cleanup.execute(&ProcessExecutor).is_err());
+
+        // A symlinked `.mj` or report root is refused.
+        let elsewhere = temp.path().join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("agents/bb")).unwrap();
+        let linked_project = temp.path().join("linked-project");
+        std::fs::create_dir(&linked_project).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, linked_project.join(".mj")).unwrap();
+        cleanup.root = linked_project.join(".mj/agents").to_str().unwrap().into();
+        assert!(cleanup.execute(&ProcessExecutor).is_err());
+        assert!(elsewhere.join("agents/bb").is_dir());
+        let linked_root = temp.path().join("linked-root");
+        std::fs::create_dir_all(&linked_root).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("agents"), linked_root.join(".mj-agents"))
+            .unwrap();
+        cleanup.root = linked_root.join(".mj-agents").to_str().unwrap().into();
+        assert!(cleanup.execute(&ProcessExecutor).is_err());
+        assert!(elsewhere.join("agents/bb").is_dir());
+
+        // A symlinked ancestor above the root is ordinary and allowed.
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(temp.path(), &alias).unwrap();
+        std::fs::create_dir(root.join("dd")).unwrap();
+        cleanup.root = alias.join(".mj/agents").to_str().unwrap().into();
+        cleanup.child_ids = vec!["dd".into()];
+        cleanup.execute(&ProcessExecutor).unwrap();
+        assert!(!root.join("dd").exists());
+        assert!(root.join("bb").is_dir());
+        cleanup.child_ids = vec!["bb".into()];
+
+        cleanup.root = root.to_str().unwrap().into();
+        cleanup.execute(&ProcessExecutor).unwrap();
+        assert!(!root.exists(), "only an empty report root is removed");
+        cleanup.execute(&ProcessExecutor).unwrap();
+        assert!(outside.join("keep").is_file());
+    }
 
     fn run_prepare_script(directory: &Path, exclude_in: Option<&Path>) -> String {
         let argv = prepare_report_dir_argv(

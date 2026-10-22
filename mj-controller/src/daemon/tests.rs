@@ -5730,6 +5730,14 @@ async fn a_graceful_stop_waits_for_a_destroy_in_flight() {
     let parent_id = "0123456789abcdef0123456789abcdef";
     let child_id = "11111111111111111111111111111111";
     let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    parent.project_directory = Some(root.path().join("project"));
+    let reports = root.path().join("project/.mj/agents");
+    std::fs::create_dir_all(reports.join(child_id)).unwrap();
+    std::fs::write(
+        reports.join(child_id).join("report.log"),
+        "destroy evidence",
+    )
+    .unwrap();
     parent.target = Some(mj_core::state::TargetLocator::LocalBare {
         worker_root: root.path().join(parent_id),
     });
@@ -5816,6 +5824,10 @@ async fn a_graceful_stop_waits_for_a_destroy_in_flight() {
             .unwrap()
             .sessions
             .contains_key(parent_id)
+    );
+    assert!(
+        !reports.exists(),
+        "parent destroy removes its children's reports and empty root"
     );
 }
 
@@ -6127,6 +6139,20 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
         &runtime_test_subagent(WORKING_CHILD, LATCH_RELAY_SESSION),
     )
     .unwrap();
+
+    let reports = parent
+        .project_directory
+        .as_ref()
+        .unwrap()
+        .join(".mj/agents")
+        .join(WORKING_CHILD);
+    std::fs::create_dir_all(&reports).unwrap();
+    std::fs::write(
+        reports.join("evidence.log"),
+        "child evidence survives capture failure",
+    )
+    .unwrap();
+    crate::database::record_subagent_report_dir(WORKING_CHILD, reports.to_str().unwrap()).unwrap();
 
     let (channels, state) = serve_live_session(&relay_root).await;
     LiveParent {
@@ -6465,6 +6491,16 @@ async fn a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running() {
     assert_eq!(stored.sessions[WORKING_CHILD].state, SessionState::Running);
     assert!(stored.subagents.contains_key(WORKING_CHILD));
     assert!(
+        parent
+            ._directory
+            .path()
+            .join("checkout/.mj/agents")
+            .join(WORKING_CHILD)
+            .join("evidence.log")
+            .is_file(),
+        "a failed parent checkpoint must leave child reports untouched"
+    );
+    assert!(
         crate::database::load_stopped_subagents(LATCH_RELAY_SESSION)
             .unwrap()
             .is_empty()
@@ -6488,6 +6524,32 @@ async fn a_suspend_stops_the_sub_agents_once_the_parents_checkpoint_is_verified(
     }
     let _writer = crate::database::install_isolated_test_writer();
     let parent = live_parent_with_a_working_sub_agent(ParentRecoveryCopy::Installed).await;
+
+    let report_root = parent._directory.path().join("checkout/.mj/agents");
+    let stopped_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let unrelated_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let parent_record =
+        crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
+    let stopped = runtime_test_session(
+        stopped_id,
+        &parent_record.workspace_id,
+        SessionState::Stopped,
+    );
+    crate::database::save_subagent_session(
+        &stopped,
+        &runtime_test_subagent(stopped_id, LATCH_RELAY_SESSION),
+    )
+    .unwrap();
+    for id in [stopped_id, unrelated_id] {
+        std::fs::create_dir_all(report_root.join(id)).unwrap();
+        std::fs::write(
+            report_root.join(id).join("report.log"),
+            "shared project evidence",
+        )
+        .unwrap();
+    }
+    // Reload so the pre-close relation snapshot includes an already-stopped child.
+    parent.state.reload_controller().await.unwrap();
 
     tokio::time::timeout(
         Duration::from_secs(60),
@@ -6516,6 +6578,16 @@ async fn a_suspend_stops_the_sub_agents_once_the_parents_checkpoint_is_verified(
             handed_back: false,
         }]
     );
+    assert!(!report_root.join(WORKING_CHILD).exists());
+    assert!(
+        !report_root.join(stopped_id).exists(),
+        "the extra pass covers stopped children"
+    );
+    assert!(
+        report_root.join(unrelated_id).join("report.log").is_file(),
+        "another session's reports keep the shared project root alive"
+    );
+
     // The parent went through a checkpointed close: its relay was sealed.
     let sealed = parent.journal().lines().any(|line| {
         let event: mj_core::relay::RelayEvent = serde_json::from_str(line).unwrap();

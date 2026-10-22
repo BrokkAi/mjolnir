@@ -785,6 +785,32 @@ fn failed_subagent_controller(worker_root: &std::path::Path, session_id: &str) -
     }
 }
 
+fn seed_child_reports(
+    controller: &mut Controller,
+    child_id: &str,
+    directory: &std::path::Path,
+) -> PathBuf {
+    let parent_id = "abcdefabcdefabcdefabcdefabcdefab";
+    let mut parent = checkpoint_test_session(parent_id);
+    parent.target_template_id = "local".into();
+    parent.project_directory = Some(directory.join("project"));
+    parent.target = Some(TargetLocator::LocalBare {
+        worker_root: directory.join(parent_id),
+    });
+    crate::database::save_session(&parent).unwrap();
+    controller.state.sessions.insert(parent_id.into(), parent);
+    let relation = controller.state.subagents.get_mut(child_id).unwrap();
+    relation.parent_session_id = parent_id.into();
+    crate::database::save_subagent_session(&controller.state.sessions[child_id], relation).unwrap();
+    let root = directory.join("project/.mj/agents");
+    std::fs::create_dir_all(root.join(child_id)).unwrap();
+    std::fs::create_dir_all(root.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")).unwrap();
+    std::fs::write(root.join(child_id).join("report.log"), "durable report").unwrap();
+    crate::database::record_subagent_report_dir(child_id, root.join(child_id).to_str().unwrap())
+        .unwrap();
+    root
+}
+
 /// I1-2: closing a failed sub-agent that still names its target takes no
 /// checkpoint (its worker is stopped and a child keeps no archive); it tears
 /// the target down and settles.
@@ -795,12 +821,17 @@ fn failed_subagent_controller(worker_root: &std::path::Path, session_id: &str) -
     ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
 )]
 fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
+    if !in_isolated_store("closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
     let worker_root = directory.path().join(session_id);
     std::fs::create_dir_all(&worker_root).unwrap();
     let mut controller = failed_subagent_controller(&worker_root, session_id);
 
+    let reports = seed_child_reports(&mut controller, session_id, directory.path());
     controller
         .suspend_session_without_checkpoint_with(session_id, &ProcessExecutor, |_| Ok(()))
         .unwrap();
@@ -809,6 +840,8 @@ fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
     assert_eq!(closed.state, SessionState::Stopped);
     assert!(closed.target.is_none());
     assert!(!worker_root.exists(), "the child's worker root is removed");
+    assert!(!reports.join(session_id).exists());
+    assert!(reports.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_dir());
 }
 
 /// An in-flight state with nobody to finish it becomes a failure the user can
@@ -1929,11 +1962,13 @@ fn force_destroy_removes_a_failed_subagent() {
     if !in_isolated_store("force_destroy_removes_a_failed_subagent") {
         return;
     }
+    let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
     let worker_root = directory.path().join(session_id);
     std::fs::create_dir_all(&worker_root).unwrap();
     let mut controller = failed_subagent_controller(&worker_root, session_id);
+    let reports = seed_child_reports(&mut controller, session_id, directory.path());
     let deleted = RefCell::new(Vec::new());
 
     controller
@@ -1952,4 +1987,63 @@ fn force_destroy_removes_a_failed_subagent() {
     assert!(!controller.state.sessions.contains_key(session_id));
     assert!(!controller.state.subagents.contains_key(session_id));
     assert_eq!(deleted.into_inner(), vec![session_id.to_owned()]);
+    assert!(!reports.join(session_id).exists());
+    assert!(reports.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_dir());
+}
+
+// Hard-won: #1331: stopped children have no target and left reports behind on destroy.
+#[cfg(unix)]
+#[test]
+fn destroying_a_stopped_child_removes_reports_through_its_live_parent() {
+    if !in_isolated_store("destroying_a_stopped_child_removes_reports_through_its_live_parent") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let child_id = "0123456789abcdef0123456789abcdef";
+    let mut controller = failed_subagent_controller(&directory.path().join(child_id), child_id);
+    let reports = seed_child_reports(&mut controller, child_id, directory.path());
+    let child = controller.state.sessions.get_mut(child_id).unwrap();
+    child.state = SessionState::Stopped;
+    child.target = None;
+    crate::database::save_session(child).unwrap();
+    controller
+        .destroy_session_controlled(child_id, &ProcessExecutor)
+        .unwrap();
+    assert!(!reports.join(child_id).exists());
+    assert!(reports.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_dir());
+}
+
+// Hard-won: #1331: report removal is best effort and must never prevent child close.
+#[cfg(unix)]
+#[test]
+fn report_removal_failure_does_not_fail_child_close() {
+    if !in_isolated_store("report_removal_failure_does_not_fail_child_close") {
+        return;
+    }
+    struct ReportFailureExecutor;
+    impl CommandExecutor for ReportFailureExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            if command.purpose == "remove sub-agent report directories" {
+                anyhow::bail!("report directory is read-only");
+            }
+            ProcessExecutor.execute(command)
+        }
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let child_id = "0123456789abcdef0123456789abcdef";
+    let mut controller = failed_subagent_controller(&directory.path().join(child_id), child_id);
+    let reports = seed_child_reports(&mut controller, child_id, directory.path());
+    controller
+        .suspend_session_without_checkpoint_with(child_id, &ReportFailureExecutor, |_| Ok(()))
+        .unwrap();
+    assert_eq!(
+        controller.state.sessions[child_id].state,
+        SessionState::Stopped
+    );
+    assert!(
+        reports.join(child_id).is_dir(),
+        "failure did not secretly delete reports"
+    );
 }

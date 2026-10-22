@@ -213,6 +213,7 @@ fn native_checkpoint_restore_relocates_muse_without_changing_identity() {
     let restored_home = directory.path().join("restored-home");
     restore_checkpoint(
         &CheckpointRestoreSpec {
+            report_root: None,
             archive_path: imported.archive_path,
             workspace_root: restored_workspace.clone(),
             relay_root: directory.path().join("restored-relay"),

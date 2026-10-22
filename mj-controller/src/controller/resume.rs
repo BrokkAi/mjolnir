@@ -722,7 +722,12 @@ impl Controller {
             } else {
                 QueueRestorePolicy::Restore
             };
+            let report_root = resumed_project_directory.as_ref().map_or_else(
+                || PathBuf::from(&workspace_root).join(mj_core::subagent::REPORT_ROOT_DIR),
+                |project| project.join(mj_core::subagent::PROJECT_REPORT_ROOT_DIR),
+            );
             let restore = CheckpointRestoreSpec {
+                report_root: Some(target_path(&report_root.to_string_lossy())),
                 archive_path: restore_archive_path(
                     &backend,
                     restored_archive,

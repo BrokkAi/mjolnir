@@ -195,6 +195,63 @@ impl RuntimeState {
         Ok(())
     }
 
+    pub(super) async fn snapshot_subagent_report_cleanup(
+        self: &Arc<Self>,
+        parent_session_id: &str,
+    ) -> Option<crate::controller::SubagentReportCleanup> {
+        let result = blocking({
+            let parent_session_id = parent_session_id.to_owned();
+            move || Controller::load()?.subagent_report_cleanup(&parent_session_id)
+        })
+        .await;
+        match result {
+            Ok(cleanup) => cleanup,
+            Err(error) => {
+                tracing::warn!(
+                    session_id = parent_session_id,
+                    error = format!("{error:#}"),
+                    "cannot snapshot sub-agent report cleanup"
+                );
+                None
+            }
+        }
+    }
+
+    pub(super) async fn finish_subagent_report_cleanup(
+        self: &Arc<Self>,
+        parent_session_id: &str,
+        cleanup: Option<crate::controller::SubagentReportCleanup>,
+    ) {
+        let Some(cleanup) = cleanup else { return };
+        if let Err(error) = blocking(move || {
+            cleanup.run(&ProcessExecutor);
+            Ok(())
+        })
+        .await
+        {
+            tracing::warn!(
+                session_id = parent_session_id,
+                error = format!("{error:#}"),
+                "sub-agent report cleanup task failed"
+            );
+        }
+    }
+
+    async fn stop_subagents_and_remove_reports(
+        self: &Arc<Self>,
+        parent_session_id: &str,
+    ) -> Result<()> {
+        // Capture relations before the cascade deletes their durable records.
+        // The caller has already verified the parent's checkpoint.
+        let cleanup = self
+            .snapshot_subagent_report_cleanup(parent_session_id)
+            .await;
+        self.stop_subagents_for_suspend(parent_session_id).await?;
+        self.finish_subagent_report_cleanup(parent_session_id, cleanup)
+            .await;
+        Ok(())
+    }
+
     /// An automatic close keeps every sub-agent. Their workers run in this
     /// session's container, so it stands down while any child still has a
     /// target. It runs under the checkpoint barrier, when the parent cannot
@@ -234,7 +291,9 @@ impl RuntimeState {
             if let Some(control) = commit {
                 Self::commit_close(&control)?;
             }
-            state.stop_subagents_for_suspend(&parent_session_id).await
+            state
+                .stop_subagents_and_remove_reports(&parent_session_id)
+                .await
         })
     }
 
@@ -518,7 +577,7 @@ impl RuntimeState {
             if let Some(control) = commit {
                 Self::commit_close(control)?;
             }
-            self.stop_subagents_for_suspend(session_id).await?;
+            self.stop_subagents_and_remove_reports(session_id).await?;
             return Ok(if route == CloseRoute::DeferredCleanup {
                 DaemonLifecycleResult::DeferredCleanup
             } else {
@@ -549,7 +608,7 @@ impl RuntimeState {
                 if let Some(control) = commit {
                     Self::commit_close(control)?;
                 }
-                self.stop_subagents_for_suspend(session_id).await?;
+                self.stop_subagents_and_remove_reports(session_id).await?;
                 controller.suspend_session_without_checkpoint(session_id, executor)?
             }
             _ => {

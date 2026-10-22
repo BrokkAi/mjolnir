@@ -70,6 +70,7 @@ async fn live_muse_checkpoint_restore_relocates_native_context_and_preserves_que
     );
     restore_checkpoint(
         &CheckpointRestoreSpec {
+            report_root: None,
             archive_path: spec.output_path.clone(),
             workspace_root: restored_workspace.clone(),
             relay_root: restored_relay.clone(),
@@ -131,6 +132,7 @@ pub(crate) fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
     let output = worker_root.join("source.hel.zip");
     (
         CheckpointExportSpec {
+            report_directories: None,
             protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
             session: SessionManifest {
                 id: SESSION.into(),

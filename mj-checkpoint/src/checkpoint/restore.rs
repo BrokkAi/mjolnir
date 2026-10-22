@@ -31,6 +31,9 @@ fn deserialize_queue_policy<'de, D: serde::Deserializer<'de>>(
 pub struct CheckpointRestoreSpec {
     pub archive_path: PathBuf,
     pub workspace_root: PathBuf,
+    /// Target-side root for report files; older controllers restore beside repositories.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_root: Option<PathBuf>,
     pub relay_root: PathBuf,
     pub harness_home: PathBuf,
     pub restore_repositories: bool,
@@ -120,7 +123,11 @@ pub fn restore_checkpoint_with_native_state(
             image_store.restore_artifact(relative_path, archive.payload(descriptor)?)?;
         }
     }
-    restore_subagent_reports(&archive, &spec.workspace_root)?;
+    let report_root = match &spec.report_root {
+        Some(root) => resolve_target_path(root)?,
+        None => spec.workspace_root.join(mj_core::subagent::REPORT_ROOT_DIR),
+    };
+    restore_subagent_reports(&archive, &spec.workspace_root, &report_root)?;
     for queued in &seed.queued_prompts {
         let blocks: Vec<agent_client_protocol::schema::v1::ContentBlock> = queued
             .content
@@ -501,7 +508,11 @@ pub(super) fn restored_native_artifact_bytes(
 fn restore_subagent_reports(
     archive: &crate::archive::VerifiedArchive,
     workspace_root: &Path,
+    report_root: &Path,
 ) -> Result<()> {
+    let root = report_root
+        .strip_prefix(workspace_root)
+        .context("report restore root is outside the workspace")?;
     for descriptor in &archive.manifest.payloads {
         let PayloadRole::NativeArtifact { relative_path } = &descriptor.role else {
             continue;
@@ -509,8 +520,9 @@ fn restore_subagent_reports(
         let Ok(report) = relative_path.strip_prefix(mj_core::subagent::ARCHIVE_REPORT_DIR) else {
             continue;
         };
-        let relative = Path::new(mj_core::subagent::REPORT_ROOT_DIR).join(report);
+        let relative = root.join(report);
         validate_relative_path(&relative)?;
+        ensure_no_symlink_ancestors(workspace_root, &relative)?;
         if fs::symlink_metadata(workspace_root.join(&relative)).is_ok() {
             continue;
         }

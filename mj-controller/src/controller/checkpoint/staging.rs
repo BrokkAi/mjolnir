@@ -65,6 +65,121 @@ pub(super) async fn release_checkpoint_after_capture(
     }
 }
 
+const REPORT_OMISSION_NOTICE_PREFIX: &str = "This checkpoint left out ";
+
+/// Tell the reader when a checkpoint left sub-agent reports out. A notice is
+/// never worth failing a checkpoint over, so a failure is only logged.
+pub(super) async fn record_checkpoint_report_notice(
+    relay: &mut ControllerRelayLease,
+    session_id: &str,
+    captured: &CapturedCheckpoint,
+) {
+    if let Err(error) = submit_checkpoint_report_notice(relay, captured).await {
+        tracing::warn!(
+            session_id,
+            error = format!("{error:#}"),
+            "could not record the checkpoint report notice"
+        );
+    }
+}
+
+/// The relay transcript owns de-duplication, so it survives daemon replacement.
+/// Only the snapshot's window is searched: in a long session the same notice
+/// may appear again, which costs less than loading the whole history on every
+/// checkpoint. The caller holds the session lifecycle owner and its relay lease.
+pub(super) async fn submit_checkpoint_report_notice(
+    relay: &mut ControllerRelayLease,
+    captured: &CapturedCheckpoint,
+) -> Result<()> {
+    let snapshot = relay.sync_snapshot().await?;
+    let previous = snapshot
+        .materialized
+        .transcript
+        .iter()
+        .rev()
+        .find_map(|item| {
+            let mj_core::transcript::TranscriptBody::System { text } = &item.body else {
+                return None;
+            };
+            text.strip_prefix(REPORT_OMISSION_NOTICE_PREFIX)?
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()
+        });
+    let omitted = &captured.omitted_reports;
+    if previous == Some(omitted.files) || (previous.is_none() && omitted.files == 0) {
+        return Ok(());
+    }
+    let text = if omitted.files == 0 {
+        format!(
+            "{REPORT_OMISSION_NOTICE_PREFIX}0 sub-agent report files; all reports fit within the checkpoint limit."
+        )
+    } else {
+        let largest = omitted
+            .largest_directories
+            .iter()
+            .map(|directory| {
+                format!(
+                    "{} ({})",
+                    directory.child_id,
+                    checkpoint_report_size(directory.bytes)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut text = format!(
+            "{REPORT_OMISSION_NOTICE_PREFIX}{} sub-agent report files ({}) because reports are limited to {} per checkpoint. A restore on another machine will not have them.",
+            omitted.files,
+            checkpoint_report_size(omitted.bytes),
+            checkpoint_report_size(mj_core::subagent::MAX_CHECKPOINT_REPORT_BYTES),
+        );
+        if !largest.is_empty() {
+            text.push_str(&format!(" Largest report directories: {largest}."));
+        }
+        text
+    };
+    relay
+        .submit(
+            new_command_id("checkpoint-report-notice")?,
+            RelayCommand::RecordNotice { text },
+        )
+        .await?;
+    Ok(())
+}
+
+fn checkpoint_report_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.0} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// Prefer Rust's final error over preceding diagnostics from older workers.
+fn checkpoint_failure_summary(stderr: &str) -> String {
+    if let Some((_, error)) = stderr
+        .rsplit_once("\nError: ")
+        .or_else(|| stderr.strip_prefix("Error: ").map(|error| ("", error)))
+    {
+        return error
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && *line != "Caused by:")
+            .collect::<Vec<_>>()
+            .join(": ");
+    }
+    stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("sub-agent reports exceed the "))
+        .unwrap_or("target exited without reporting its error")
+        .to_owned()
+}
+
 /// Run one checkpoint command on the target with its spec streamed over stdin.
 ///
 /// When the installed worker is older than this controller and cannot read the
@@ -108,8 +223,11 @@ pub(super) fn run_checkpoint_staging_command<T: serde::Serialize>(
         {
             continue;
         }
+        let summary = checkpoint_failure_summary(&failure);
+        tracing::warn!(session_id, operation, status = output.status, stderr = %failure,
+            stdout = %String::from_utf8_lossy(&output.stdout), "checkpoint target command failed");
         let error = anyhow::anyhow!(
-            "{operation} failed with status {}: {failure}",
+            "{operation} failed with status {}: {summary}",
             output.status
         );
         // The export's stderr can name paths, so it stays in the daemon log.
