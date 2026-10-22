@@ -933,15 +933,33 @@ this field omits it. For example,
 chosen baseline and the current checked-out commit. JSON metadata requires an
 updated session worker; older workers return an explicit upgrade refusal.
 
-`files` answers `application/octet-stream`. The path is relative to the
-directory the session's agent runs in — the primary repository's directory,
-whatever the target kind — so a path the agent would use means the same here.
-A `..` reaches a sibling repository of a multi-repo bundle, as in
-`../other/src/main.rs`, and stops at the workspace root those repositories
-share. A session with a single repository has no sibling to reach, so there
-`..` stops at the agent's own directory. An absolute path is `400`; a path that
-climbs past the boundary is `409`, as is one that leaves it through a symlink,
-and a file over 16 MiB is `409` — take the bundle instead.
+`files` reads a file or a directory on the session's target. A file answers
+`application/octet-stream` with its bytes; a directory answers
+`application/zip` with an archive of everything below it, in which symlinks are
+stored as links rather than followed. With `list=true` it answers
+`application/json` instead: `{ "path", "entries": [...] }`, where each entry
+has `name`, `kind` (`file`, `directory`, `symlink`, or `other`), `size` in
+bytes, `modified` as RFC 3339 in UTC or `null`, and `target` for a symlink. A
+directory lists its entries in name order; a file lists itself. Either way the
+`x-mj-fetched-path` header names where the path resolved on the target,
+form-urlencoded because a path need not be valid header text.
+
+A relative path resolves in the directory the session's agent runs in — the
+primary repository's directory, whatever the target kind — so a path the agent
+would use means the same here. A `..` reaches a sibling repository of a
+multi-repo bundle, as in `../other/src/main.rs`, and stops at the workspace root
+those repositories share. A session with a single repository has no sibling to
+reach, so there `..` stops at the agent's own directory. An absolute path is
+read as the target spells it, so a session can read evidence another session
+cites, such as a sub-agent's report or a probe in `/tmp`.
+
+After symlinks are resolved, the path must lie in that boundary, in the
+directory holding the session's sub-agent report directories, or in the
+target's temporary directory. An empty path is `400`. A path outside those
+directories is `409`, as is a path that does not exist, a file over 16 MiB, a
+directory whose archive would pass 16 MiB or whose files hold more than
+128 MiB, a listing over 16 MiB, and a worker installed before directories
+could be fetched; resuming the session upgrades the worker.
 
 `export` takes the form you want:
 
@@ -984,7 +1002,7 @@ Preconditions, all answering `409` with the reason:
 | `mj transcript --session <id>` | `GET /sessions/{id}/transcript` |
 | `mj diff --session <id>` | `GET /sessions/{id}/diff` |
 | `mj export --session <id> --kind patch\|branch\|bundle` | `POST /sessions/{id}/export` |
-| `mj export --session <id> --kind file --path <path>` | `GET /sessions/{id}/files?path=` |
+| `mj fetch --session <id> --path <path> [--ls]` | `GET /sessions/{id}/files?path=[&list=true]` |
 | `mj suspend --session <id>` | `POST /sessions/{id}/suspend` |
 | `mj resume --session <id>` | `POST /sessions/{id}/resume` |
 | `mj destroy --session <id> [--delete-branch]` | `POST /sessions/{id}/destroy` |

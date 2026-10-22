@@ -979,7 +979,7 @@ struct FakeBackend {
     /// export that cannot be produced looks like to a handler.
     diff: Option<String>,
     diff_options: Mutex<Vec<DiffOptions>>,
-    file: Option<Vec<u8>>,
+    file: Option<mj_checkpoint::archive::FetchedPath>,
     pushed: Option<PushedBranch>,
     bundle: Option<BundleExport>,
     installation_token: Option<String>,
@@ -988,7 +988,7 @@ struct FakeBackend {
     bundle_fails: bool,
     target_access_missing: bool,
     /// The path the file handler asked the backend for.
-    file_paths: Mutex<Vec<PathBuf>>,
+    file_paths: Mutex<Vec<(PathBuf, mj_checkpoint::archive::FetchMode)>>,
     file_writes: Mutex<Vec<(PathBuf, Vec<u8>, bool)>>,
     events: Mutex<Vec<crate::database::ApiEvent>>,
     /// What the live session actor reports, when this fake has one. The
@@ -1322,9 +1322,10 @@ impl SubagentBackend for FakeBackend {
         &self,
         _session_id: String,
         path: PathBuf,
-    ) -> BoxFuture<'_, Result<Vec<u8>, ExportError>> {
+        mode: mj_checkpoint::archive::FetchMode,
+    ) -> BoxFuture<'_, Result<mj_checkpoint::archive::FetchedPath, ExportError>> {
         Box::pin(async move {
-            self.file_paths.lock().unwrap().push(path);
+            self.file_paths.lock().unwrap().push((path, mode));
             self.file
                 .clone()
                 .ok_or_else(|| ExportError::Refused("this session has no live target".into()))
@@ -4328,81 +4329,101 @@ fn relay_health_names_each_way_the_live_view_can_be_unusable() {
 }
 
 #[tokio::test]
-async fn the_file_route_returns_bytes_and_refuses_a_path_that_leaves_the_workspace() {
-    let backend = Arc::new(FakeBackend {
-        file: Some(b"file bytes".to_vec()),
-        ..FakeBackend::default()
-    });
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_resolved_to() {
+    use mj_checkpoint::archive::{FetchMode, FetchedKind, FetchedPath};
+    let fetch = |kind, path: &str, bytes: &[u8]| {
+        let backend = Arc::new(FakeBackend {
+            file: Some(FetchedPath {
+                kind,
+                path: path.to_owned(),
+                bytes: bytes.to_vec(),
+            }),
+            ..FakeBackend::default()
+        });
+        let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+        (app, backend)
+    };
+    let get = |app: axum::Router, path: &str| {
+        let uri = format!(
+            "/api/v1/sessions/session-1/files?path={}",
+            url::form_urlencoded::byte_serialize(path.as_bytes()).collect::<String>()
+        );
+        async move {
+            app.oneshot(bearer(Request::get(uri)).body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+        }
+    };
 
-    let response = app
-        .clone()
-        .oneshot(
-            bearer(Request::get(
-                "/api/v1/sessions/session-1/files?path=app/README.md",
-            ))
-            .body(Body::empty())
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    let (app, backend) = fetch(FetchedKind::File, "/workspace/app/README.md", b"file bytes");
+    let response = get(app.clone(), "README.md").await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get(CONTENT_TYPE).unwrap(),
         "application/octet-stream"
     );
+    assert_eq!(
+        decode_fetched_path(response.headers()[FETCHED_PATH_HEADER].as_bytes()).as_deref(),
+        Some("/workspace/app/README.md")
+    );
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body.as_ref(), b"file bytes");
+
+    // A `..` names a sibling repository in a multi-repo bundle, and an
+    // absolute path names a report directory or scratch outside the agent's
+    // directory. Only the daemon and the target know what each may reach, so
+    // both are passed on rather than refused here (#1079, #1327).
+    for path in ["../lib/README.md", "/workspace/.mj-agents/c1/report.md"] {
+        assert_eq!(get(app.clone(), path).await.status(), StatusCode::OK);
+    }
+    assert_eq!(get(app.clone(), "").await.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
         backend.file_paths.lock().unwrap().as_slice(),
-        [PathBuf::from("app/README.md")]
+        [
+            (PathBuf::from("README.md"), FetchMode::Content),
+            (PathBuf::from("../lib/README.md"), FetchMode::Content),
+            (
+                PathBuf::from("/workspace/.mj-agents/c1/report.md"),
+                FetchMode::Content
+            ),
+        ],
+        "an empty path is not sent to the backend"
     );
 
-    // A `..` names a sibling repository in a multi-repo bundle now that a path
-    // resolves in the agent's directory. Only the daemon knows how far it may
-    // climb, so it reaches the backend rather than being refused here (#1079).
+    // `list=true` asks the target for a listing, which answers JSON.
+    let (app, backend) = fetch(FetchedKind::Listing, "/tmp/probes", b"{}");
     let response = app
-        .clone()
         .oneshot(
             bearer(Request::get(
-                "/api/v1/sessions/session-1/files?path=../lib/README.md",
+                "/api/v1/sessions/session-1/files?path=/tmp/probes&list=true",
             ))
             .body(Body::empty())
             .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(CONTENT_TYPE).unwrap(),
+        "application/json"
+    );
     assert_eq!(
         backend.file_paths.lock().unwrap().as_slice(),
-        [
-            PathBuf::from("app/README.md"),
-            PathBuf::from("../lib/README.md")
-        ]
+        [(PathBuf::from("/tmp/probes"), FetchMode::Listing)]
     );
 
-    for path in ["/etc/passwd", ""] {
-        let response = app
-            .clone()
-            .oneshot(
-                bearer(Request::get(format!(
-                    "/api/v1/sessions/session-1/files?path={path}"
-                )))
-                .body(Body::empty())
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            response.status(),
-            StatusCode::BAD_REQUEST,
-            "{path:?} must never reach the target"
-        );
-    }
+    // A directory arrives as a zip archive. The resolved path is not header
+    // text as it stands, so it travels encoded and decodes to what it was.
+    let resolved = "/tmp/rust veto/é&x=1%2F";
+    let (app, _backend) = fetch(FetchedKind::Directory, resolved, b"PK zip");
+    let response = get(app, "/tmp/rust veto").await;
+    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        backend.file_paths.lock().unwrap().len(),
-        2,
-        "a rejected path is not sent to the backend"
+        response.headers().get(CONTENT_TYPE).unwrap(),
+        "application/zip"
+    );
+    assert_eq!(
+        decode_fetched_path(response.headers()[FETCHED_PATH_HEADER].as_bytes()).as_deref(),
+        Some(resolved)
     );
 }
 

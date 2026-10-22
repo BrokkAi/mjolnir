@@ -1155,6 +1155,7 @@ fn a_file_export_resolves_a_relative_path_against_the_agents_directory() {
             worker_root: "/home/dev/.local/share/hel/workers/session".into(),
         },
         workspace_root: "/home/dev".into(),
+        report_root: "/home/dev/project/.mj/agents".into(),
         primary_repository: "project".into(),
         repositories: vec![CheckpointRepositorySpec {
             id: "project".into(),
@@ -1179,6 +1180,7 @@ fn a_file_export_resolves_a_relative_path_against_the_agents_directory() {
             borrowed_from: None,
         },
         workspace_root: "/workspace".into(),
+        report_root: "/workspace/.mj-agents".into(),
         primary_repository: "app".into(),
         repositories: vec![
             CheckpointRepositorySpec {
@@ -1255,13 +1257,35 @@ fn a_file_export_resolves_a_relative_path_against_the_agents_directory() {
         "the refusal does not suggest the path was looked for: {message}"
     );
 
-    // The boundary itself is not a file inside it.
-    for (layout, path) in [(&bundle, ".."), (&bare, ".")] {
-        assert!(matches!(
-            export_root_and_path(layout, Path::new(path)),
-            Err(ExportError::Refused(_))
-        ));
+    // The boundary itself is a directory a fetch can archive.
+    for (layout, path, root) in [
+        (&bundle, "..", "/workspace"),
+        (&bare, ".", "/home/dev/project"),
+    ] {
+        assert_eq!(
+            export_root_and_path(layout, Path::new(path)).unwrap(),
+            (root.to_owned(), String::new())
+        );
     }
+
+    // What the worker is asked to fetch. A relative path arrives joined onto
+    // its boundary; an absolute one, such as a report under the workspace root
+    // or a probe in scratch, arrives as typed (#1327). Both may resolve only
+    // inside the boundary, the report root or the target's temporary
+    // directory, so a bare session's `/home/dev/other-project` stays out.
+    let fetch = |layout, path: &str, mode| {
+        fetch_arguments(layout, Path::new(path), mode)
+            .unwrap()
+            .join(" ")
+    };
+    assert_eq!(
+        fetch(&bundle, "../lib/README.md", FetchMode::Content),
+        "fetch --path /workspace/lib/README.md --root /workspace --root /workspace/.mj-agents --temp"
+    );
+    assert_eq!(
+        fetch(&bare, "/tmp/rust-veto-cf", FetchMode::Listing),
+        "fetch --path /tmp/rust-veto-cf --root /home/dev/project --root /home/dev/project/.mj/agents --temp --list"
+    );
 }
 
 // Hard-won: 983f5078: DEBUG stderr lines contaminated the worker refusal returned to the caller.

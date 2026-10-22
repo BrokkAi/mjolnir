@@ -565,7 +565,7 @@ fn ensure_parent_may_delegate(parent: &SessionRecord) -> Result<()> {
 
 /// Where a parent's children keep their report directories, before the target
 /// resolves it, and the repository whose `info/exclude` must list it.
-fn subagent_report_root(
+pub(super) fn subagent_report_root(
     parent: &SessionRecord,
     backend: &mj_core::targets::TargetLocator,
     checkout: &mj_core::state::Checkout<'_>,
