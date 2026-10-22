@@ -62,8 +62,10 @@ mj setup instructions --platform macos
 first interactive startup. It detects installed harnesses and home-directory
 overrides, adds profiles and a bundle for the current GitHub origin, and
 preserves existing entries and preferences. Matching entries are reused;
-identifier collisions get separate names. It saves additions without questions
-and reports actionable doctor errors. Container downloads remain background
+identifier collisions get separate names. It also probes every SSH or EC2
+machine that has no runtime yet and adds the runtimes it can run. It saves
+additions without questions and reports actionable doctor errors. Container
+downloads remain background
 daemon work. Configure container options, SSH hosts, and AWS targets in Settings;
 use `mj doctor --smoke` for explicit container smoke tests.
 

@@ -251,6 +251,77 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     assert_eq!(program, "claude");
     assert_eq!(arguments, ["auth", "login"]);
     assert_eq!(profile_quota_source(&native), "Claude subscription quota");
+
+    // A machine no runtime runs on is asked what it could run: one runs a
+    // worker and Docker, one does not answer, one can run nothing Mjolnir
+    // supports, and an EC2 template needs no host to answer.
+    let mut machines = Config::default();
+    for (id, host) in [
+        ("builder", "builder.example.test"),
+        ("laptop", "laptop.example.test"),
+        ("pi", "pi.example.test"),
+    ] {
+        machines.machines.insert(
+            id.to_owned(),
+            mj_core::config::Machine::Ssh {
+                ssh: mj_core::config::SshConnection {
+                    host: host.into(),
+                    user: Some("dev".into()),
+                    identity_file: None,
+                    extra_args: vec![],
+                },
+                workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
+                build_cache: None,
+            },
+        );
+    }
+    machines.machines.insert(
+        "spot".to_owned(),
+        mj_core::config::Machine::AwsEc2 {
+            aws_profile: None,
+            region: "us-east-2".into(),
+            launch_template: "lt-0123456789abcdef0".into(),
+            launch_template_version: None,
+            ssh_user: "ubuntu".into(),
+            address_source: Default::default(),
+            identity_file: None,
+            ssh_args: vec![],
+        },
+    );
+    let podman_missing = crate::targets::ssh_podman_probe_fixture(&[(
+        "version",
+        127,
+        "",
+        "sh: 1: podman: not found",
+    )]);
+    let probes = FakeExecutor::new([
+        // builder
+        Ok(output(b"")),
+        Ok(output(b"Linux x86_64\n")),
+        Ok(output(&podman_missing)),
+        Ok(output(b"27.5.1 linux\n")),
+        // laptop
+        Ok(failed(b"Host key verification failed.")),
+        // pi
+        Ok(output(b"")),
+        Ok(output(b"Linux riscv64\n")),
+        Ok(output(&podman_missing)),
+        Ok(CommandOutput {
+            status: 127,
+            stdout: vec![],
+            stderr: b"bash: line 1: docker: command not found".to_vec(),
+        }),
+    ]);
+    checks.extend(machine_runtime_checks(Ok(&machines), &probes));
+    assert!(probes.responses.borrow().is_empty());
+    assert!(
+        probes
+            .commands
+            .borrow()
+            .iter()
+            .all(|command| command.program == "ssh")
+    );
+
     for check in &mut checks {
         check.detail = check
             .detail

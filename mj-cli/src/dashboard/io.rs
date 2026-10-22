@@ -296,6 +296,10 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         result: std::result::Result<mj_tui::SetupDetection, String>,
     },
+    MachineRuntimesChecked {
+        generation: u64,
+        result: std::result::Result<mj_tui::MachineRuntimesChecked, String>,
+    },
     BuildCachePreviewed {
         generation: u64,
         key: serde_json::Value,
@@ -1341,6 +1345,9 @@ impl DashboardContext {
             DashboardIoUpdate::SetupDiscovered { generation, result } => {
                 self.dashboard.setup_discovered(generation, result)
             }
+            DashboardIoUpdate::MachineRuntimesChecked { generation, result } => self
+                .dashboard
+                .apply_machine_runtime_check(generation, result),
             DashboardIoUpdate::FirstRunStarted => self.dashboard.begin_welcome(),
             DashboardIoUpdate::FirstRunConfigured(report) => {
                 self.dashboard.welcome_configured(report.summary())

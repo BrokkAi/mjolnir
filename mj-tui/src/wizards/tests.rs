@@ -3671,6 +3671,54 @@ fn new_wizard(dashboard: &DashboardState) -> &NewWizard {
     wizard
 }
 
+/// A machine no runtime runs on has no row, so the target step is kept to
+/// name it and say why, even when one target is all it offers.
+fn a_machine_without_a_runtime_keeps_the_target_step_and_says_why() {
+    let mut config = standard_local_targets_config();
+    let nas = mj_core::config::Machine::Ssh {
+        ssh: SshConnection {
+            host: "nas.example.test".into(),
+            user: Some("dev".into()),
+            identity_file: None,
+            extra_args: vec![],
+        },
+        workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
+        build_cache: None,
+    };
+    config.machines.insert("nas".into(), nas.clone());
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+    let Some(DashboardAction::CheckMachineRuntimes { generation, .. }) =
+        dashboard.take_machine_runtime_check()
+    else {
+        panic!("the machine is checked");
+    };
+    dashboard.apply_machine_runtime_check(
+        generation,
+        Ok(crate::MachineRuntimesChecked {
+            probes: vec![crate::MachineRuntimeProbe {
+                machine_id: "nas".into(),
+                machine: nas,
+                finding: crate::MachineFinding::Unreachable {
+                    detail: "`ssh dev@nas.example.test true` failed: Connection timed out".into(),
+                    remediation: "Check that nas.example.test is up.".into(),
+                },
+            }],
+            added: BTreeMap::new(),
+        }),
+    );
+    open_new_session_wizard(&mut dashboard);
+    answer_target_checks(&mut dashboard, &["podman", "docker"]);
+    dashboard.handle_key(key(KeyCode::Enter));
+    let wizard = new_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Target);
+    assert!(!wizard.target_step_skipped);
+    let target = captured_drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(
+        target.contains("Machine nas has no runtime: it did not answer."),
+        "{target}"
+    );
+}
+
 /// On a host without Podman or Docker, localhost is the only target the
 /// target step offers, so the wizard chooses it and goes from the profile
 /// step to the project step. The titles count three steps, Back skips the
@@ -5442,6 +5490,10 @@ fn golden_wizard_target_step() {
         (
             "new_session_skips_the_target_step_when_only_one_target_is_offered",
             new_session_skips_the_target_step_when_only_one_target_is_offered,
+        ),
+        (
+            "a_machine_without_a_runtime_keeps_the_target_step_and_says_why",
+            a_machine_without_a_runtime_keeps_the_target_step_and_says_why,
         ),
         (
             "new_session_shows_the_target_step_when_a_second_target_may_be_chosen",

@@ -634,6 +634,47 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+=== a_machine_without_a_runtime_keeps_the_target_step_and_says_why (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ≡ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________││                                                                                            │
+│No sessions yet                             ││                                                                                            │
+│Create new work or open a                                                                                                                 │
+│                                                                                                                                          │
+│                           ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
+│                           │                                                                                  │                           │
+│                           │   TARGET     KIND           CPU     MEM (GiB)     STATUS                         │                           │
+│                           │   docker     local Docker   —       —             unavailable                    │                           │
+│                           │   localhost  raw localhost  —       —                                            │                           │
+│                           │   podman     local Podman   —       —             unavailable                    │                           │
+│                           │                                                                                  │                           │
+│                           │ docker: docker is not installed                                                  │                           │
+│                           │ podman: podman is not installed                                                  │                           │
+│                           │ Machine nas has no runtime: it did not answer. `ssh dev@nas.example.test true`   │                           │
+│                           │ failed: Connection timed out. Check that nas.example.test is up.                 │                           │
+│                           │ ctrl+b shift+r recheck availability                                              │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │  ─────────────────────────╯
+│                           │                                                                                  │  ─────────────────────────╮
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │  ─────────────────────────╯
+│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
+│                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
+│                                                                                                                 ─────────────────────────╯
+│                                                                                                                 ────────────────── ▁   ▄ ╮
+│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
+│                                            ││  claude-1  Claude Code  refreshing…                                                        │
+│                                            ││  codex-1   Codex        refreshing…                                                        │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Machine nas has no runtime: it did not answer. `ssh dev@nas.example.test true` failed: Connection timed out. Check that nas.example.test is
 === new_session_shows_the_target_step_when_a_second_target_may_be_chosen (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │

@@ -13,6 +13,10 @@ use mj_core::config::{
     ProjectRepository, TargetTemplate, unique_config_id as unique_id,
 };
 
+mod machines;
+pub use machines::{
+    MachineProbe, MachineProbeOutcome, add_machine_runtimes, probe_machine, probe_machines,
+};
 mod startup;
 pub use startup::{
     SetupReport, actionable_errors, add_detected_profiles, run_setup, run_setup_command,
@@ -48,6 +52,8 @@ impl GithubRepository {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeKind {
+    /// The harness runs directly on the machine, under a worker.
+    Bare,
     Podman,
     Docker,
     AppleContainer,
@@ -56,6 +62,7 @@ pub enum RuntimeKind {
 impl RuntimeKind {
     pub fn label(self) -> &'static str {
         match self {
+            Self::Bare => "Bare",
             Self::Podman => "Podman",
             Self::Docker => "Docker",
             Self::AppleContainer => "Apple container",
@@ -500,6 +507,7 @@ pub fn local_runtime_target(runtime: RuntimeKind, image: &str) -> (&'static str,
         workspace_storage: Default::default(),
     };
     match runtime {
+        RuntimeKind::Bare => ("localhost", TargetTemplate::LocalBare),
         RuntimeKind::Podman => ("podman", TargetTemplate::LocalPodman { container }),
         RuntimeKind::Docker => ("docker", TargetTemplate::LocalDocker { container }),
         RuntimeKind::AppleContainer => (
