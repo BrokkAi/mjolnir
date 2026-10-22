@@ -1174,19 +1174,19 @@ mj transcript --session SESSION --role agent --limit 20 --json
 ```
 
 
-## Follow durable events
+## Follow events and current activity
 
 `GET /api/v1/events` streams server-sent events using the same authentication and
 version headers as the other v1 routes. Optional `session_id` and `workspace_id`
 filters apply together. Workspace filtering uses the session's current workspace.
 
-Without a cursor, the stream follows new events from the current database
-frontier. Use `after_seq=0` to replay all retained history, or resume after the
+Without a cursor, the stream follows new durable events from the current database
+frontier. Use `after_seq=0` to replay all retained durable history, or resume after the
 last delivered sequence with `after_seq=N` or the `Last-Event-ID: N` header.
 Conflicting cursors, negative or out-of-range values, and cursors ahead of this
 database return 400. Sequence IDs are global; gaps in a filtered stream are normal.
 
-Each SSE frame has an `id` equal to its durable sequence and an `event` matching
+Each durable SSE frame has an `id` equal to its sequence and an `event` matching
 the JSON `type`. For example:
 
 ```text
@@ -1205,7 +1205,7 @@ data: {"seq":42,"session_id":"SESSION","recorded_at_ms":1789200000000,"type":"in
 | `legacy_notice` | `original_type`, `message`, and nullable `command_id` for unclassified historical diagnostics. |
 | `input_required` | Nullable `turn_id`; `request` contains the normalized ACP elicitation and response schema for structured input. It is absent when Jev ends a turn with `awaiting_input`. |
 | `input_resolved` | `elicitation_id`, nullable `turn_id`, and `action`; `cleared` means the request disappeared without an explicit response observation. |
-| `activity_changed` | `activity`: the UI's `state`, nullable `details`, `is_idle`, `waiting_for_input`, and `capacity_retry`. |
+| `activity_changed` | Transient current state: `activity` contains the UI's `state`, nullable `details`, `is_idle`, `waiting_for_input`, and `capacity_retry`. These frames have no SSE `id`. |
 
 Terminal events describe the object that ended. A failed `turn_ended` is the
 signal that an accepted prompt failed. A failed `command_ended` describes its
@@ -1254,8 +1254,15 @@ incompatible executables cannot access that upgraded store.
 
 Prompt starts, completions, and explicit input transitions are journaled with
 their relay projection transaction, including intermediate transitions within one
-projection batch. Activity events record observed UI snapshots and may coalesce
-brief intermediate activity. The first observed activity is also recorded.
+projection batch. Activity is delivered from the current UI snapshot after
+durable catch-up, on every connection, and whenever it changes. Brief intermediate
+activity may coalesce. Activity frames have no SSE `id`; their JSON `seq` is the
+durable position reached by this stream, not a unique activity event ID. Multiple
+activity updates may share that position. Do not deduplicate activity by `seq`.
+Only the latest activity per session is stored, without appending activity history.
+Historical `activity_changed` rows are omitted from replay and removed in bounded
+background batches. Cleanup preserves lifecycle events and sequence frontiers;
+freed pages are reusable by SQLite without compacting the database file.
 Activity `details.kind` is `turn`, `step`, `background`, `idle`, or `lifecycle`,
 with available start/idle timestamps and a label. Unknown activity has no details.
 Idle uses the existing UI classification: no foreground or background work.
@@ -1272,11 +1279,13 @@ whether to keep waiting or call `mj interrupt-turn`. The field is absent for an
 idle session, for a session the daemon currently cannot see, and from workers
 too old to report the ACP clock.
 
-History survives session stop and daemon restart and is deleted when its session
-is forgotten. Recording begins with this version; old transitions are not
+Durable history survives session stop and daemon restart and is deleted when its
+session is forgotten. Recording begins with this version; old transitions are not
 backfilled. Consumers should save the last processed ID and deduplicate replayed
-IDs after reconnecting. Slow readers are buffered within fixed limits and cannot
-block session execution. Keepalive comments carry no application event. A storage
+IDs after reconnecting. Activity instead resynchronizes from the current snapshot
+on reconnect and does not promise replay of intermediate states. Slow readers are
+buffered within fixed limits and cannot block session execution. Keepalive
+comments carry no application event. A storage
 failure may send an unnumbered `stream_error` frame and end the stream; reconnect
 from the last processed ID. The viewer's existing `/api/events` route is separate.
 

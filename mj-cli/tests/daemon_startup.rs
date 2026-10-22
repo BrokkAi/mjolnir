@@ -205,6 +205,77 @@ fn ordinary_startup_migrates_an_old_store_without_a_daemon() {
     assert_upgraded(&path);
 }
 
+#[test]
+fn daemon_cleans_legacy_activity_history_without_removing_session_transcripts() {
+    use std::time::{Duration, Instant};
+
+    let storage = upgrade_storage();
+    let path = current_store(&storage);
+    let mut connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute_batch(
+        "PRAGMA foreign_keys=ON;
+         INSERT INTO session_contexts(session_id,bundle_id,created_at) VALUES ('kept','project','now');
+         INSERT INTO sessions(session_id,title,harness_kind,last_profile,target_template_id,state,updated_at)
+             VALUES ('kept','Kept transcript','codex','codex','podman','stopped','now');
+         INSERT INTO materialized_sessions(session_id) VALUES ('kept');
+         INSERT INTO materialized_transcript_items(session_id,stable_id,position,created_at_ms,last_changed_at_ms,body_json)
+             VALUES ('kept','user:1',1,1,1,'{\"kind\":\"user\",\"content\":[]}');"
+    ).unwrap();
+    let tx = connection.transaction().unwrap();
+    for _ in 0..2_003 {
+        tx.execute("INSERT INTO api_events(session_id,recorded_at_ms,body) VALUES ('kept',1,?1)",
+            [r#"{"type":"activity_changed","data":{"activity":{"state":"running","details":null,"is_idle":false,"waiting_for_input":false,"capacity_retry":false}}}"#]).unwrap();
+    }
+    let durable = r#"{"type":"session_fault","data":{"reason":"startup_failed","message":"keep this","command_id":null}}"#;
+    tx.execute(
+        "INSERT INTO api_events(session_id,recorded_at_ms,body) VALUES ('kept',1,?1)",
+        [durable],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    let output = mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let activity: u64 = connection.query_row(
+            "SELECT count(*) FROM api_events WHERE json_extract(body,'$.type')='activity_changed'",
+            [], |row| row.get(0),
+        ).unwrap();
+        if activity == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon left {activity} historical activity events"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let kept: String = connection
+        .query_row("SELECT body FROM api_events WHERE seq=2004", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(kept, durable);
+    let transcript: String = connection.query_row(
+        "SELECT body_json FROM materialized_transcript_items WHERE session_id='kept' AND stable_id='user:1'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(transcript, r#"{"kind":"user","content":[]}"#);
+    let frontier: u64 = connection
+        .query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name='api_events'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(frontier, 2_004);
+}
+
 /// A real process holding the old writer lock, speaking only the frozen
 /// management protocol. It deliberately cannot migrate its store. Running
 /// the new CLI must retire it before opening a current reader.

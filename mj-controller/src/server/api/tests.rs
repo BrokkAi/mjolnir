@@ -595,7 +595,14 @@ async fn event_stream_replays_then_follows_live_events_with_version_and_ids() {
         .lock()
         .unwrap()
         .extend([error_event(1), error_event(2)]);
-    let (app, _actions, _snapshots, _bundles) = api_app(backend.clone(), |_| {});
+    let (app, _actions, snapshots, _bundles) = api_app(backend.clone(), |snapshot| {
+        // A session outside the requested workspace must never appear in the
+        // activity feed, even when it changes while this stream is connected.
+        let mut other = snapshot.sessions[0].clone();
+        other.id = "other-session".into();
+        other.workspace_id = "other-workspace".into();
+        snapshot.sessions.push(other);
+    });
     let response = app
         .oneshot(
             bearer(Request::get(
@@ -619,6 +626,12 @@ async fn event_stream_replays_then_follows_live_events_with_version_and_ids() {
     let text = std::str::from_utf8(frame.data_ref().unwrap()).unwrap();
     assert!(text.contains("id: 2"), "{text}");
     assert!(text.contains("event: session_fault"), "{text}");
+    let text = next_event_frame(&mut body).await;
+    assert!(text.contains("event: activity_changed"), "{text}");
+    assert!(!text.lines().any(|line| line.starts_with("id:")), "{text}");
+    assert!(text.contains("\"seq\":2"), "{text}");
+    assert!(text.contains("\"session_id\":\"session-1\""), "{text}");
+    assert!(!text.contains("other-session"), "{text}");
     backend.events.lock().unwrap().push(error_event(3));
     let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
         .await
@@ -630,9 +643,58 @@ async fn event_stream_replays_then_follows_live_events_with_version_and_ids() {
             .unwrap()
             .contains("id: 3")
     );
+    snapshots.send_modify(|snapshot| {
+        snapshot
+            .sessions
+            .0
+            .get_mut("session-1")
+            .unwrap()
+            .activity_details = Some(
+            serde_json::from_value(serde_json::json!({
+                "kind": "step", "last_activity_at_ms": 123,
+            }))
+            .unwrap(),
+        );
+        snapshot
+            .sessions
+            .0
+            .get_mut("other-session")
+            .unwrap()
+            .is_idle = true;
+    });
+    let text = next_event_frame(&mut body).await;
+    assert!(text.contains("event: activity_changed"), "{text}");
+    assert!(text.contains("\"last_activity_at_ms\":123"), "{text}");
+    assert!(text.contains("\"seq\":3"), "{text}");
+    assert!(!text.lines().any(|line| line.starts_with("id:")), "{text}");
+    snapshots.send_modify(|snapshot| {
+        snapshot
+            .sessions
+            .0
+            .get_mut("session-1")
+            .unwrap()
+            .activity_details
+            .as_mut()
+            .unwrap()
+            .last_activity_at_ms = Some(124);
+    });
+    let text = next_event_frame(&mut body).await;
+    assert!(text.contains("\"last_activity_at_ms\":124"), "{text}");
+    assert!(text.contains("\"seq\":3"), "{text}");
     let queries = backend.event_queries.lock().unwrap();
     assert_eq!(queries[0].0.workspace_id.as_deref(), Some("default"));
     assert_eq!(queries[0].1, Some(1));
+}
+
+async fn next_event_frame(body: &mut Body) -> String {
+    let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    std::str::from_utf8(frame.data_ref().unwrap())
+        .unwrap()
+        .to_owned()
 }
 
 #[tokio::test]
@@ -717,6 +779,13 @@ async fn event_stream_without_cursor_starts_at_the_current_frontier() {
         .unwrap();
     backend.events.lock().unwrap().push(error_event(2));
     let mut body = response.into_body();
+    let activity = next_event_frame(&mut body).await;
+    assert!(activity.contains("event: activity_changed"), "{activity}");
+    assert!(activity.contains("\"seq\":1"), "{activity}");
+    assert!(
+        !activity.lines().any(|line| line.starts_with("id:")),
+        "{activity}"
+    );
     let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
         .await
         .unwrap()

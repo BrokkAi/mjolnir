@@ -1,5 +1,5 @@
 use super::*;
-use crate::database::{ApiEventFilter, ApiEventPage};
+use crate::database::{ApiEvent, ApiEventData, ApiEventFilter, ApiEventPage};
 use axum::http::HeaderMap;
 use axum::response::Sse;
 use axum::response::sse::{Event, KeepAlive};
@@ -47,6 +47,9 @@ pub(super) async fn events(
             "event cursor exceeds the supported range",
         ));
     }
+    // Subscribe before reading history. Catch-up then reads the latest activity
+    // snapshot, so changes during that read cannot fall between two owners.
+    let mut snapshots = state.snapshot_rx.clone();
     let backend = backend(&state)?.clone();
     let first = backend.events(filter.clone(), after_seq).await?;
     if after_seq.is_some_and(|cursor| cursor > first.latest_seq) {
@@ -62,10 +65,14 @@ pub(super) async fn events(
         // read without a cursor starts at the frontier it read.
         let mut delivered = after_seq.unwrap_or(first.latest_seq);
         let mut page = first;
-        let stopped = loop {
+        let mut previous_activity = super::super::ViewerSessions::default();
+        let mut snapshots_open = true;
+        let mut poll = tokio::time::interval(Duration::from_millis(250));
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let stopped = 'stream: loop {
             let next = page.next_after_seq;
             let caught_up = next >= page.latest_seq;
-            for event in page.events {
+            for event in page.events.drain(..) {
                 let seq = event.seq;
                 let encoded = Event::default()
                     .id(seq.to_string())
@@ -90,10 +97,53 @@ pub(super) async fn events(
             }
             delivered = delivered.max(next);
             if caught_up {
+                let current = snapshots.borrow_and_update().sessions.clone();
+                let activity = previous_activity
+                    .0
+                    .changes(&current.0)
+                    .filter_map(|(id, row)| {
+                        let row = row.filter(|row| matches_activity(row, &filter))?;
+                        let activity = row.api_activity();
+                        let previous = previous_activity
+                            .0
+                            .get(id)
+                            .filter(|row| matches_activity(row, &filter))
+                            .map(|row| row.api_activity());
+                        (previous.as_ref() != Some(&activity)).then(|| ApiEvent {
+                            // A transient frame's seq is its durable resume position,
+                            // not a new identity. Only durable frames receive SSE IDs.
+                            seq: delivered,
+                            session_id: id.clone(),
+                            recorded_at_ms: chrono::Utc::now().timestamp_millis(),
+                            event: ApiEventData::ActivityChanged { activity },
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                for event in activity {
+                    let encoded = match Event::default().event(event.event.kind()).json_data(&event)
+                    {
+                        Ok(event) => event,
+                        Err(error) => {
+                            tracing::error!(%error, "encode transient API activity");
+                            break 'stream Stop::Failed;
+                        }
+                    };
+                    tokio::select! {
+                        () = shutdown.cancelled() => break 'stream Stop::Shutdown,
+                        sent = tx.send(Ok(encoded)) => if sent.is_err() { return; },
+                    }
+                }
+                previous_activity = current;
                 tokio::select! {
                     () = shutdown.cancelled() => break Stop::Shutdown,
                     () = tx.closed() => return,
-                    () = tokio::time::sleep(Duration::from_millis(250)) => {}
+                    changed = snapshots.changed(), if snapshots_open => {
+                        snapshots_open = changed.is_ok();
+                        // Activity does not poll SQLite. Keep the independent
+                        // durable tick so a busy snapshot feed cannot starve it.
+                        continue;
+                    }
+                    _ = poll.tick() => {}
                 }
             }
             let result = tokio::select! {
@@ -133,6 +183,17 @@ pub(super) async fn events(
     Ok(Sse::new(ReceiverStream::new(rx))
         .keep_alive(KeepAlive::default())
         .into_response())
+}
+
+fn matches_activity(session: &ViewerSession, filter: &ApiEventFilter) -> bool {
+    filter
+        .session_id
+        .as_ref()
+        .is_none_or(|id| id == &session.id)
+        && filter
+            .workspace_id
+            .as_ref()
+            .is_none_or(|id| id == &session.workspace_id)
 }
 
 /// Why an event stream stopped before its client went away.

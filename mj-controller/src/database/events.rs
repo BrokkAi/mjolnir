@@ -59,6 +59,12 @@ pub(super) fn load_api_events_from(
     let next_after_seq = events
         .last()
         .map_or(latest_seq.max(after_seq), |event| event.seq);
+    // Historical activity is disposable. Advance over it without replaying it,
+    // including while the background cleanup is still removing old rows.
+    let events = events
+        .into_iter()
+        .filter(|event| !matches!(event.event, ApiEventData::ActivityChanged { .. }))
+        .collect();
     Ok(ApiEventPage {
         events,
         next_after_seq,
@@ -92,7 +98,7 @@ pub fn record_api_activities(
 pub(super) fn record_api_activities_with(
     connection: &mut Connection,
     activities: Vec<(String, ApiActivityState)>,
-    recorded_at_ms: i64,
+    _recorded_at_ms: i64,
 ) -> Result<()> {
     let tx = connection.transaction()?;
     for (session_id, activity) in activities {
@@ -115,16 +121,42 @@ pub(super) fn record_api_activities_with(
         if previous.as_deref() == Some(body.as_str()) {
             continue;
         }
-        insert_api_event(
-            &tx,
-            &session_id,
-            recorded_at_ms,
-            &ApiEventData::ActivityChanged { activity },
-        )?;
         tx.execute("INSERT INTO api_session_activity(session_id, body) VALUES (?1, ?2) ON CONFLICT(session_id) DO UPDATE SET body = excluded.body", params![session_id, body])?;
     }
     tx.commit()?;
     Ok(())
+}
+
+/// Each batch bounds both the scan and the deletion, including stores with
+/// millions of legacy activity rows. Never reset sqlite_sequence: old cursors
+/// still name the same durable frontier after its last row has been removed.
+pub(crate) fn prune_api_activity_events(after_seq: u64) -> Result<Option<(u64, usize)>> {
+    submit_database_write("prune API activity history", move |connection| {
+        prune_api_activity_events_with(connection, after_seq, 1_000)
+    })
+}
+
+fn prune_api_activity_events_with(
+    connection: &mut Connection,
+    after_seq: u64,
+    limit: usize,
+) -> Result<Option<(u64, usize)>> {
+    let tx = connection.transaction()?;
+    let through: Option<u64> = tx.query_row(
+        "SELECT max(seq) FROM (SELECT seq FROM api_events WHERE seq > ?1 ORDER BY seq LIMIT ?2)",
+        params![after_seq, limit as u64],
+        |row| row.get(0),
+    )?;
+    let Some(through) = through else {
+        return Ok(None);
+    };
+    let removed = tx.execute(
+        "DELETE FROM api_events WHERE seq > ?1 AND seq <= ?2
+         AND json_extract(body, '$.type') = 'activity_changed'",
+        params![after_seq, through],
+    )?;
+    tx.commit()?;
+    Ok(Some((through, removed)))
 }
 
 pub fn record_startup_fault(session_id: String, message: String) -> Result<()> {
@@ -717,7 +749,7 @@ mod tests {
     }
 
     #[test]
-    fn api_activity_events_track_changes_without_repeating_or_reviving_forgotten_sessions() {
+    fn api_activity_updates_only_current_state_without_reviving_forgotten_sessions() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.sqlite");
         save_session_to(
@@ -787,16 +819,18 @@ mod tests {
         .unwrap();
         drop(connection);
         let page = load_api_events_from(&path, &ApiEventFilter::default(), Some(0), 100).unwrap();
-        assert_eq!(page.events.len(), 4);
+        assert!(page.events.is_empty());
+        let body: String = open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT body FROM api_session_activity WHERE session_id='session-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(
-            page.events.last().unwrap().event,
-            ApiEventData::ActivityChanged { activity: unknown }
-        );
-        assert_eq!(
-            page.events[2].event,
-            ApiEventData::ActivityChanged {
-                activity: background
-            }
+            serde_json::from_str::<ApiActivityState>(&body).unwrap(),
+            unknown
         );
         delete_session_from(&path, "session-1").unwrap();
         record_api_activities_with(
@@ -805,10 +839,109 @@ mod tests {
             500,
         )
         .unwrap();
-        let page = load_api_events_from(&path, &ApiEventFilter::default(), Some(4), 100).unwrap();
+        let page = load_api_events_from(&path, &ApiEventFilter::default(), Some(0), 100).unwrap();
         assert!(page.events.is_empty());
-        assert_eq!(page.latest_seq, 4);
+        assert_eq!(page.latest_seq, 0);
     }
+    #[test]
+    fn api_activity_cleanup_is_bounded_restartable_and_keeps_replay_cursors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.sqlite");
+        save_session_to(
+            &path,
+            &super::super::tests::session("session-1", "project-1"),
+        )
+        .unwrap();
+        let mut connection = open(&path).unwrap();
+        let activity = ApiEventData::ActivityChanged {
+            activity: ApiActivityState {
+                state: "running".into(),
+                details: None,
+                is_idle: false,
+                waiting_for_input: false,
+                capacity_retry: false,
+            },
+        };
+        let durable = ApiEventData::SessionFault {
+            reason: OutcomeReason::StartupFailed,
+            message: "activity_changed is only text here".into(),
+            command_id: None,
+        };
+        let tx = connection.transaction().unwrap();
+        // More than one batch and 64 KiB, with a durable event between two
+        // stretches of disposable history and activity at the final frontier.
+        for seq in 1..=2_003 {
+            insert_api_event(
+                &tx,
+                "session-1",
+                seq,
+                if seq == 1_002 { &durable } else { &activity },
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        let before =
+            load_api_events_from(&path, &ApiEventFilter::default(), Some(0), 1_000).unwrap();
+        assert!(before.events.is_empty());
+        assert_eq!(before.next_after_seq, 1_000);
+        assert_eq!(
+            prune_api_activity_events_with(&mut connection, 0, 1_000).unwrap(),
+            Some((1_000, 1_000))
+        );
+        drop(connection);
+
+        // Simulate restarting cleanup with only its committed deletes, then
+        // append a durable event while later batches are still running.
+        let mut connection = open(&path).unwrap();
+        assert_eq!(
+            prune_api_activity_events_with(&mut connection, 0, 1_000).unwrap(),
+            Some((2_000, 999))
+        );
+        let tx = connection.transaction().unwrap();
+        insert_api_event(&tx, "session-1", 2_004, &durable).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            prune_api_activity_events_with(&mut connection, 2_000, 1_000).unwrap(),
+            Some((2_004, 3))
+        );
+        assert_eq!(
+            prune_api_activity_events_with(&mut connection, 2_004, 1_000).unwrap(),
+            None
+        );
+        let history =
+            load_api_events_from(&path, &ApiEventFilter::default(), Some(0), 100).unwrap();
+        assert_eq!(
+            history
+                .events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            [1_002, 2_004]
+        );
+        assert!(history.events.iter().all(|event| event.event == durable));
+
+        // Removing the newest activity must not make an old cursor invalid or
+        // let SQLite reuse its ID on the next durable insertion.
+        let tx = connection.transaction().unwrap();
+        insert_api_event(&tx, "session-1", 2_005, &activity).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            prune_api_activity_events_with(&mut connection, 2_004, 1_000).unwrap(),
+            Some((2_005, 1))
+        );
+        let tail =
+            load_api_events_from(&path, &ApiEventFilter::default(), Some(2_004), 100).unwrap();
+        assert!(tail.events.is_empty());
+        assert_eq!(tail.latest_seq, 2_005);
+        assert_eq!(tail.next_after_seq, 2_005);
+        let tx = connection.transaction().unwrap();
+        insert_api_event(&tx, "session-1", 2_006, &durable).unwrap();
+        tx.commit().unwrap();
+        let tail =
+            load_api_events_from(&path, &ApiEventFilter::default(), Some(2_005), 100).unwrap();
+        assert_eq!(tail.events[0].seq, 2_006);
+    }
+
     #[test]
     fn checkpoint_cleanup_does_not_end_a_turn_or_hide_control_failure() {
         use mj_core::event_outcome::TurnResultKind;
