@@ -17,8 +17,8 @@ pub(super) async fn diff(
     Ok(([(CONTENT_TYPE, "text/x-diff; charset=utf-8")], diff).into_response())
 }
 
-/// Reject a file path this API can never resolve, before it costs a round trip
-/// to the target.
+/// Reject a path a file injection can never resolve, before it costs a round
+/// trip to the target.
 ///
 /// An absolute path is always a mistake worth naming here. A `..` is not: it is
 /// how a multi-repo bundle names a sibling repository, now that a path resolves
@@ -116,6 +116,28 @@ pub(super) async fn respond_elicitation(
     .await
 }
 
+/// The response header naming where a fetched path resolved on the target. It
+/// is form-urlencoded, because a path need not be valid header text.
+pub const FETCHED_PATH_HEADER: &str = "x-mj-fetched-path";
+
+/// The target path a [`FETCHED_PATH_HEADER`] value names.
+///
+/// The value is one form-urlencoded token with no `=` or `&` left in it, so it
+/// parses as a single key.
+pub fn decode_fetched_path(value: &[u8]) -> Option<String> {
+    url::form_urlencoded::parse(value)
+        .next()
+        .map(|(path, _)| path.into_owned())
+        .filter(|path| !path.is_empty())
+}
+
+/// A file as bytes, a directory as a zip archive, or with `list=true` a JSON
+/// listing of either, from the session's target.
+///
+/// A relative path resolves in the directory the agent runs in. An absolute
+/// one is taken as the target spells it. The target accepts either only inside
+/// the session's workspace, its sub-agent report root or its temporary
+/// directory, after resolving symlinks.
 pub(super) async fn read_file(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
@@ -123,9 +145,34 @@ pub(super) async fn read_file(
 ) -> Result<Response, ApiFailure> {
     let backend = backend(&state)?.clone();
     let path = PathBuf::from(query.path.trim());
-    validate_session_file_path(&path)?;
-    let bytes = backend.read_file(session_id, path).await?;
-    Ok(([(CONTENT_TYPE, "application/octet-stream")], bytes).into_response())
+    if path.as_os_str().is_empty() {
+        return Err(ApiFailure::bad_request(
+            "path must name a file or directory on the session's target",
+        ));
+    }
+    let mode = if query.list {
+        mj_checkpoint::archive::FetchMode::Listing
+    } else {
+        mj_checkpoint::archive::FetchMode::Content
+    };
+    let fetched = backend.read_file(session_id, path, mode).await?;
+    let content_type = match fetched.kind {
+        mj_checkpoint::archive::FetchedKind::File => "application/octet-stream",
+        mj_checkpoint::archive::FetchedKind::Directory => "application/zip",
+        mj_checkpoint::archive::FetchedKind::Listing => "application/json",
+    };
+    let resolved: String = url::form_urlencoded::byte_serialize(fetched.path.as_bytes()).collect();
+    Ok((
+        [
+            (CONTENT_TYPE, content_type.to_owned()),
+            (
+                axum::http::HeaderName::from_static(FETCHED_PATH_HEADER),
+                resolved,
+            ),
+        ],
+        fetched.bytes,
+    )
+        .into_response())
 }
 
 /// Get the session's work out, in whichever form the caller asked for.

@@ -693,20 +693,42 @@ pub(crate) struct DiffArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct FetchArgs {
+    /// Session id, as `mj sessions` lists it.
+    #[arg(long)]
+    session: String,
+    /// File or directory to fetch: relative to the directory the session's
+    /// agent runs in, or absolute on the session's target. It must lie in the
+    /// session's workspace, its sub-agent report directories, or the target's
+    /// temporary directory.
+    #[arg(long)]
+    path: String,
+    /// Write the file, or the directory's zip archive, to standard output
+    /// instead of the temporary directory.
+    #[arg(long, conflicts_with = "json")]
+    stdout: bool,
+    /// List the directory, or the file, with each entry's size and
+    /// modification time, on standard output. Symlinks are listed, not
+    /// followed.
+    #[arg(long)]
+    ls: bool,
+    /// Print the result as JSON: the listing with `--ls`, otherwise where the
+    /// copy landed.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct ExportArgs {
     /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
-    /// What to export: a patch, a pushed branch, a git bundle, or one file.
+    /// What to export: a patch, a pushed branch, or a git bundle.
     #[arg(long, value_enum, default_value_t = ExportKindArg::Patch)]
     kind: ExportKindArg,
     /// Branch to push, required by `--kind branch`.
     #[arg(long, required_if_eq("kind", "branch"))]
     branch: Option<String>,
-    /// File to read, relative to the directory the agent runs in, required by
-    /// `--kind file`.
-    #[arg(long)]
-    path: Option<String>,
     /// Write the export here instead of standard output.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -720,9 +742,6 @@ pub(crate) enum ExportKindArg {
     Patch,
     Branch,
     Bundle,
-    /// One file from the session workspace, which the API serves on its own
-    /// route rather than as an export kind.
-    File,
 }
 
 #[derive(Debug, Args)]
@@ -1654,14 +1673,6 @@ pub(crate) async fn export(args: ExportArgs) -> Result<()> {
         ExportKindArg::Patch => ExportKind::Patch,
         ExportKindArg::Branch => ExportKind::Branch,
         ExportKindArg::Bundle => ExportKind::Bundle,
-        ExportKindArg::File => {
-            let path = args
-                .path
-                .as_deref()
-                .context("`--kind file` needs --path, relative to the agent's directory")?;
-            let bytes = client.read_file(&args.session, path).await?;
-            return write_bytes(&bytes, args.out.as_deref(), args.json, "file");
-        }
     };
     let request = ExportRequest {
         kind,
@@ -1689,6 +1700,111 @@ pub(crate) async fn export(args: ExportArgs) -> Result<()> {
             write_bytes(&bytes, args.out.as_deref(), args.json, format)
         }
     }
+}
+
+pub(crate) async fn fetch(args: FetchArgs) -> Result<()> {
+    let client = ApiClient::connect().await?;
+    let fetched = client.fetch(&args.session, &args.path, args.ls).await?;
+    if args.ls {
+        let listing: mj_checkpoint::archive::SessionListing =
+            serde_json::from_slice(&fetched.bytes).context("decode the listing")?;
+        if args.json {
+            return print_json(&listing);
+        }
+        for line in listing_lines(&listing) {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+    if args.stdout {
+        let mut stdout = std::io::stdout().lock();
+        stdout
+            .write_all(&fetched.bytes)
+            .context("write the fetched path")?;
+        return stdout.flush().context("write the fetched path");
+    }
+    let local = fetched_location(&std::env::temp_dir(), &args.session, &fetched)?;
+    mj_core::config::atomic_write(&local, &fetched.bytes)?;
+    if args.json {
+        return print_json(&serde_json::json!({
+            "path": local,
+            "kind": fetched.kind,
+            "source": fetched.path,
+            "bytes": fetched.bytes.len(),
+        }));
+    }
+    println!("{}", local.display());
+    Ok(())
+}
+
+/// One line per entry, as `ls -l` puts it: the size right-aligned, the
+/// modification time in UTC, then the name, with `/` after a directory and the
+/// target after a symlink. A directory's own size says nothing about what it
+/// holds and differs between filesystems, so it shows as `-`.
+fn listing_lines(listing: &mj_checkpoint::archive::SessionListing) -> Vec<String> {
+    use mj_checkpoint::archive::ListedKind;
+    let size = |entry: &mj_checkpoint::archive::ListedEntry| match entry.kind {
+        ListedKind::Directory => "-".to_owned(),
+        _ => entry.size.to_string(),
+    };
+    let width = listing
+        .entries
+        .iter()
+        .map(|entry| size(entry).len())
+        .max()
+        .unwrap_or(0);
+    listing
+        .entries
+        .iter()
+        .map(|entry| {
+            let name = match (entry.kind, &entry.target) {
+                (ListedKind::Directory, _) => format!("{}/", entry.name),
+                (ListedKind::Symlink, Some(target)) => format!("{} -> {target}", entry.name),
+                _ => entry.name.clone(),
+            };
+            format!(
+                "{:>width$}  {:<20}  {name}",
+                size(entry),
+                entry.modified.as_deref().unwrap_or("-"),
+            )
+        })
+        .collect()
+}
+
+/// Where a fetched path lands on this machine:
+/// `<temp>/mjolnir/<session>/<the path on the target>`, with `.zip` after a
+/// directory's name. Keeping the target's whole path means two sub-agents'
+/// `report.md` files, or a fetch from two sessions, never overwrite each other.
+fn fetched_location(
+    temp: &std::path::Path,
+    session: &str,
+    fetched: &mj_checkpoint::archive::FetchedPath,
+) -> Result<PathBuf> {
+    let mut components = std::path::Path::new(session).components();
+    ensure!(
+        matches!(
+            (components.next(), components.next()),
+            (Some(std::path::Component::Normal(_)), None)
+        ),
+        "session id {session:?} cannot name a directory"
+    );
+    let mut local = temp.join("mjolnir").join(session);
+    let mut named = false;
+    // Only plain names are kept, so the result cannot leave the session's
+    // directory whatever the target answered.
+    for component in std::path::Path::new(&fetched.path).components() {
+        if let std::path::Component::Normal(part) = component {
+            local.push(part);
+            named = true;
+        }
+    }
+    ensure!(named, "the target answered no path for the fetch");
+    if fetched.kind == mj_checkpoint::archive::FetchedKind::Directory {
+        let mut name = local.file_name().unwrap_or_default().to_os_string();
+        name.push(".zip");
+        local.set_file_name(name);
+    }
+    Ok(local)
 }
 
 pub(crate) async fn sessions(
@@ -2367,6 +2483,102 @@ mod tests {
     use super::*;
     use crate::{Cli, Command};
     use clap::Parser as _;
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_ls_renders_a_real_directory_listing() {
+        use mj_checkpoint::archive::{FetchMode, SessionListing, fetch_session_path};
+        let root = tempfile::tempdir().unwrap();
+        let probes = root.path().join("rust-veto-cf");
+        std::fs::create_dir_all(probes.join("nested")).unwrap();
+        std::fs::write(probes.join("report.md"), b"# Report\n").unwrap();
+        std::fs::write(probes.join("probe.log"), vec![b'x'; 120_000]).unwrap();
+        std::os::unix::fs::symlink("report.md", probes.join("latest")).unwrap();
+        let at = |seconds| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+        for (name, time) in [
+            ("nested", at(1_792_656_000)),
+            ("report.md", at(1_792_742_130)),
+            ("probe.log", at(1_792_742_160)),
+        ] {
+            std::fs::File::open(probes.join(name))
+                .unwrap()
+                .set_modified(time)
+                .unwrap();
+        }
+        let list = |path: &std::path::Path| -> SessionListing {
+            let fetched = fetch_session_path(
+                path,
+                &[root.path().to_path_buf()],
+                false,
+                FetchMode::Listing,
+            )
+            .unwrap();
+            serde_json::from_slice(&fetched.bytes).unwrap()
+        };
+        let mut directory = list(&probes);
+        // The standard library cannot set a symlink's own time, so the link's
+        // creation time is replaced; everything else is what the target read.
+        for entry in &mut directory.entries {
+            if entry.name == "latest" {
+                entry.modified = Some("2026-10-22T09:00:00Z".to_owned());
+            }
+        }
+        let output = format!(
+            "=== mj fetch --ls <directory> ===\n{}\n=== mj fetch --ls <file> ===\n{}",
+            listing_lines(&directory).join("\n"),
+            listing_lines(&list(&probes.join("probe.log"))).join("\n"),
+        );
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "fetch-ls", &output);
+    }
+
+    #[test]
+    fn a_fetched_path_lands_under_its_session_and_cannot_leave_it() {
+        use mj_checkpoint::archive::{FetchedKind, FetchedPath};
+        let temp = PathBuf::from("/scratch");
+        let fetched = |kind, path: &str| FetchedPath {
+            kind,
+            path: path.to_owned(),
+            bytes: Vec::new(),
+        };
+        // Two children's reports share a name; the target path keeps them apart.
+        assert_eq!(
+            fetched_location(
+                &temp,
+                "d8443f17",
+                &fetched(
+                    FetchedKind::File,
+                    "/workspace/d8443f17/.mj-agents/c1/report.md"
+                ),
+            )
+            .unwrap(),
+            PathBuf::from("/scratch/mjolnir/d8443f17/workspace/d8443f17/.mj-agents/c1/report.md")
+        );
+        assert_eq!(
+            fetched_location(
+                &temp,
+                "d8443f17",
+                &fetched(FetchedKind::Directory, "/tmp/rust-veto-cf")
+            )
+            .unwrap(),
+            PathBuf::from("/scratch/mjolnir/d8443f17/tmp/rust-veto-cf.zip")
+        );
+        // Whatever the target answers, the file stays in the session's directory.
+        assert_eq!(
+            fetched_location(
+                &temp,
+                "s",
+                &fetched(FetchedKind::File, "/a/../../etc/passwd")
+            )
+            .unwrap(),
+            PathBuf::from("/scratch/mjolnir/s/a/etc/passwd")
+        );
+        for session in ["../s", "a/b", "/s", ".."] {
+            assert!(
+                fetched_location(&temp, session, &fetched(FetchedKind::File, "/x")).is_err(),
+                "{session:?} must not name a directory"
+            );
+        }
+    }
 
     #[test]
     fn github_token_requires_one_owner_or_repository_selector() {
@@ -3399,23 +3611,6 @@ mod tests {
         };
         assert_eq!(args.kind, ExportKindArg::Bundle);
         assert_eq!(args.out, Some(PathBuf::from("work.bundle")));
-
-        let cli = Cli::try_parse_from([
-            "mj",
-            "export",
-            "--session",
-            "s1",
-            "--kind",
-            "file",
-            "--path",
-            "src/main.rs",
-        ])
-        .unwrap();
-        let Some(Command::Export(args)) = cli.command else {
-            panic!("expected the export subcommand");
-        };
-        assert_eq!(args.kind, ExportKindArg::File);
-        assert_eq!(args.path.as_deref(), Some("src/main.rs"));
 
         // Finding R3-11: without a branch name the API answered "a branch
         // export needs a branch name", which named no flag. The command line

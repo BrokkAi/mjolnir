@@ -670,20 +670,50 @@ impl ApiClient {
         Ok(())
     }
 
-    pub(crate) async fn read_file(&self, session_id: &str, path: &str) -> Result<Vec<u8>> {
-        let response = self
-            .send(
-                self.http
-                    .get(self.url(&format!("/sessions/{session_id}/files")))
-                    .query(&[("path", path)])
-                    .timeout(EXPORT_TIMEOUT),
-            )
-            .await?;
-        Ok(response
+    /// A file, a directory as a zip archive, or with `list` a JSON listing of
+    /// either, from the session's target, with the path it resolved to there.
+    pub(crate) async fn fetch(
+        &self,
+        session_id: &str,
+        path: &str,
+        list: bool,
+    ) -> Result<mj_checkpoint::archive::FetchedPath> {
+        use mj_checkpoint::archive::FetchedKind;
+        let mut request = self
+            .http
+            .get(self.url(&format!("/sessions/{session_id}/files")))
+            .query(&[("path", path)]);
+        if list {
+            request = request.query(&[("list", "true")]);
+        }
+        let response = self.send(request.timeout(EXPORT_TIMEOUT)).await?;
+        let headers = response.headers();
+        let kind = match headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .map(reqwest::header::HeaderValue::as_bytes)
+        {
+            Some(b"application/octet-stream") => FetchedKind::File,
+            Some(b"application/zip") => FetchedKind::Directory,
+            Some(b"application/json") if list => FetchedKind::Listing,
+            other => bail!(
+                "the daemon answered a fetch with content type {:?}",
+                other.map(String::from_utf8_lossy)
+            ),
+        };
+        let resolved = headers
+            .get(mj_controller::server::api::FETCHED_PATH_HEADER)
+            .and_then(|value| mj_controller::server::api::decode_fetched_path(value.as_bytes()))
+            .context("the daemon did not say where the path resolved; it predates `mj fetch`")?;
+        let bytes = response
             .bytes()
             .await
-            .context("read the session file")?
-            .to_vec())
+            .context("read the fetched path")?
+            .to_vec();
+        Ok(mj_checkpoint::archive::FetchedPath {
+            kind,
+            path: resolved,
+            bytes,
+        })
     }
 
     /// Export the session's work. A branch push answers JSON; a patch and a
@@ -1072,7 +1102,16 @@ mod tests {
                      headers: HeaderMap| async move {
                         record_authorization(&seen, &headers);
                         seen.lock().unwrap().push(format!("path={}", query["path"]));
-                        b"file bytes".to_vec()
+                        (
+                            [
+                                ("content-type", "application/octet-stream"),
+                                (
+                                    mj_controller::server::api::FETCHED_PATH_HEADER,
+                                    "%2Fworkspace%2Fdocs%2FREADME.md",
+                                ),
+                            ],
+                            b"file bytes".to_vec(),
+                        )
                     },
                 ),
             )
@@ -1161,10 +1200,14 @@ mod tests {
         assert_eq!(session.id, "session-2");
         assert_eq!(
             client
-                .read_file("session-1", "docs/README.md")
+                .fetch("session-1", "docs/README.md", false)
                 .await
                 .unwrap(),
-            b"file bytes"
+            mj_checkpoint::archive::FetchedPath {
+                kind: mj_checkpoint::archive::FetchedKind::File,
+                path: "/workspace/docs/README.md".to_owned(),
+                bytes: b"file bytes".to_vec(),
+            }
         );
 
         let seen = seen.lock().unwrap().clone();

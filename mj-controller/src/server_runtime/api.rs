@@ -27,6 +27,7 @@ use crate::server::api::{
     TranscriptPage, TurnSpan, TurnState, TurnSummary,
 };
 use crate::targets::{self, CancellableProcessExecutor, CommandExecutor, CommandOutput};
+use mj_checkpoint::archive::{FetchMode, FetchedPath};
 use mj_client::session::{BoxFuture, SessionControl, SessionHandle, new_command_id};
 use mj_core::relay::RelayCommand;
 
@@ -2136,13 +2137,43 @@ fn export_root_and_path(
             }
         }
     }
-    if resolved.is_empty() {
-        return Err(ExportError::Refused(format!(
-            "{} names {root} itself, not a file in it",
-            relative.display()
-        )));
-    }
     Ok((root, resolved.join("/")))
+}
+
+/// The worker `fetch` invocation for a path a caller asked to read.
+///
+/// A relative path resolves in the agent's directory, bounded as
+/// [`export_root_and_path`] describes. An absolute path is taken as the target
+/// spells it. Either way the target resolves symlinks and accepts the result
+/// only inside the export root, the session's sub-agent report root, or the
+/// target's temporary directory (#1327): the places a session's evidence lives.
+fn fetch_arguments(
+    layout: &SessionExportLayout,
+    path: &Path,
+    mode: FetchMode,
+) -> std::result::Result<Vec<String>, ExportError> {
+    let (root, target_path) = if path.is_absolute() {
+        let (root, _) = export_root_and_path(layout, Path::new("."))?;
+        (root, path.to_string_lossy().into_owned())
+    } else {
+        let (root, relative) = export_root_and_path(layout, path)?;
+        let joined = target_join(&root, Path::new(&relative));
+        (root, joined)
+    };
+    let mut arguments = vec![
+        "fetch".to_owned(),
+        "--path".to_owned(),
+        target_path,
+        "--root".to_owned(),
+        root,
+        "--root".to_owned(),
+        layout.report_root.clone(),
+        "--temp".to_owned(),
+    ];
+    if mode == FetchMode::Listing {
+        arguments.push("--list".to_owned());
+    }
+    Ok(arguments)
 }
 
 /// Join a relative path onto a target-side root.
@@ -2709,22 +2740,15 @@ impl SubagentBackend for ApiBackend {
         &self,
         session_id: String,
         path: PathBuf,
-    ) -> BoxFuture<'_, std::result::Result<Vec<u8>, ExportError>> {
+        mode: FetchMode,
+    ) -> BoxFuture<'_, std::result::Result<FetchedPath, ExportError>> {
         Box::pin(async move {
             self.require_live_target(&session_id)?;
             let layout = export_layout(session_id.clone()).await?;
-            // The path resolves in the agent's directory; how far `..` may
-            // reach depends on whether the layout has a sibling repository to
-            // reach (#1079).
-            let (root, relative) = export_root_and_path(&layout, &path)?;
-            let arguments = vec![
-                "read-file".to_owned(),
-                "--root".to_owned(),
-                root,
-                "--path".to_owned(),
-                relative,
-            ];
-            worker_command(layout, session_id, arguments, "session file read").await
+            let arguments = fetch_arguments(&layout, &path, mode)?;
+            let output =
+                worker_command(layout, session_id, arguments, "session file fetch").await?;
+            FetchedPath::decode(output).map_err(ExportError::Failed)
         })
     }
 

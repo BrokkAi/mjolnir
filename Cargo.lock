@@ -668,6 +668,7 @@ dependencies = [
  "base64",
  "blake3",
  "brokk-mj-core",
+ "chrono",
  "dirs 6.0.0",
  "flate2",
  "libc",

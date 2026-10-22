@@ -130,7 +130,11 @@ Reading a session:
 Moving work in and out:
 
 - `mj diff` — unified diff of the session's work.
-- `mj export` — the work as a patch, a pushed branch, a git bundle, or one file.
+- `mj export` — the work as a patch, a pushed branch, or a git bundle.
+- `mj fetch` — copy a file, or a directory as a zip, from a session's target
+  (its workspace, sub-agent reports, or temporary directory) into
+  `$TMPDIR/mjolnir/<session>/`; prints the local path. `--stdout` streams it
+  instead; `--ls` lists the path with sizes and modification times.
 - `mj put-file` — upload one file into an idle session's workspace.
 
 Diagnosis:

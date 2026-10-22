@@ -130,7 +130,18 @@ pub trait SubagentBackend: Send + Sync {
         session_id: String,
         path: PathBuf,
     ) -> BoxFuture<'_, std::result::Result<Vec<u8>, ExportError>> {
-        self.read_file(session_id, path)
+        Box::pin(async move {
+            let fetched = self
+                .read_file(session_id, path, mj_checkpoint::archive::FetchMode::Content)
+                .await?;
+            match fetched.kind {
+                mj_checkpoint::archive::FetchedKind::File => Ok(fetched.bytes),
+                _ => Err(ExportError::Refused(format!(
+                    "{} is a directory, not a file",
+                    fetched.path
+                ))),
+            }
+        })
     }
     /// The workspaces the store holds, in the order the terminal's tabs and the
     /// viewer's list show them.
@@ -306,12 +317,14 @@ pub trait SubagentBackend: Send + Sync {
         options: DiffOptions,
     ) -> BoxFuture<'_, Result<String, ExportError>>;
 
-    /// One file from the session's workspace.
+    /// One file, a directory as a zip archive, or a listing of either, from
+    /// the session's target.
     fn read_file(
         &self,
         session_id: String,
         path: PathBuf,
-    ) -> BoxFuture<'_, Result<Vec<u8>, ExportError>>;
+        mode: mj_checkpoint::archive::FetchMode,
+    ) -> BoxFuture<'_, Result<mj_checkpoint::archive::FetchedPath, ExportError>>;
 
     fn write_file(
         &self,

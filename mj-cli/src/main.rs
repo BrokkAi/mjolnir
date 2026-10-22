@@ -161,6 +161,9 @@ enum Command {
     Events(api_commands::EventsArgs),
     /// Atomically upload a file to an idle session workspace.
     PutFile(api_commands::PutFileArgs),
+    /// Copy a file, or a directory as a zip archive, from a session's target
+    /// into this machine's temporary directory and print where it landed.
+    Fetch(api_commands::FetchArgs),
     /// List structured input requests from a session.
     Elicitations(api_commands::ElicitationsArgs),
     /// Respond to a structured input request.
@@ -593,6 +596,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Usage(_)) => "usage",
         Some(Command::Events(_)) => "events",
         Some(Command::PutFile(_)) => "put-file",
+        Some(Command::Fetch(_)) => "fetch",
         Some(Command::Elicitations(_)) => "elicitations",
         Some(Command::Respond(_)) => "respond",
         Some(Command::Diff(_)) => "diff",
@@ -852,6 +856,9 @@ async fn run_command(
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::PutFile(args)) => api_commands::put_file(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Fetch(args)) => api_commands::fetch(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Elicitations(args)) => api_commands::elicitations(args)

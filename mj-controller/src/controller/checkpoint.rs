@@ -60,6 +60,10 @@ pub struct SessionExportLayout {
     /// names no repository.
     pub primary_repository: String,
     pub repositories: Vec<CheckpointRepositorySpec>,
+    /// The directory holding the report directories of the session's
+    /// sub-agents, as the target resolves it from the login directory. It
+    /// need not exist yet.
+    pub report_root: String,
     /// Set when the session works in a Hel-owned worktree of the user's own
     /// checkout, which is what records the branch and base commit an export
     /// compares against.
