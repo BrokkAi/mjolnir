@@ -1364,6 +1364,23 @@ fn an_exhausted_quota_reads_zero_in_the_minimized_row() {
     assert!(!quota.contains("claude-1 100%"), "{quota:?}");
 }
 
+#[test]
+fn a_rolling_only_quota_keeps_its_percentage_visible() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let mut quota = weekly_and_five_hour_quota("claude-1", 100, 40);
+    quota.windows.remove(0);
+    dashboard.apply_quota(quota);
+    minimize_all_panes(&mut dashboard);
+
+    let quota = drawn(&mut dashboard, 120, 44)
+        .into_iter()
+        .find(|line| line.contains("─ Profiles ──"))
+        .expect("the minimized Profiles row");
+
+    assert!(quota.contains("claude-1 40%"), "{quota:?}");
+    assert!(!quota.contains("claude-1 unavailable"), "{quota:?}");
+}
+
 /// A reading that cannot be trusted has to say so. A number that is
 /// actually missing, stale or inapplicable is worse than no number.
 #[test]

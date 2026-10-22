@@ -131,14 +131,24 @@ session. See [Workspaces and bundles](/workspaces-bundles/).
 
 ## The harness exists in a shell but Mjolnir cannot launch it
 
-Mjolnir-owned workers and ACP bridges use non-login shells. A binary made
-visible only by `.bashrc`, `.zshrc`, `/etc/profile`, a shell alias, or a shell
-function can therefore work interactively and still be absent from Mjolnir's
-runtime.
+Mjolnir starts the account's shell once per worker to learn the environment a
+session should have, and it starts it the way a terminal does: as an interactive
+login shell. The startup files a terminal reads — `~/.zprofile` and `~/.zshrc`
+for zsh, `~/.bash_profile` and `~/.bashrc` for bash — are read too, so a tool
+that a version manager such as nvm, pyenv, asdf or mise puts on `PATH` is
+visible to sessions.
 
-On raw local, SSH, and EC2 targets, each worker start performs one bounded
-login-shell probe and carries the discovered `PATH` into the non-login
-runtime. An explicit profile setting wins:
+Two things still differ from your terminal. A shell alias or shell function is
+not part of the environment, so a tool that exists only as an alias or function
+cannot be launched by a session. And a worker keeps the environment it discovered
+when it started, so after changing a startup file, stop and resume the session
+rather than expecting a running worker to reread it.
+
+`mj doctor` reports which shell sessions start, how long that startup took, and
+the `node`, `npm` and `npx` a session will find. Use it when a tool works in your
+terminal but a session cannot launch it.
+
+An explicit profile setting wins over discovery:
 
 ```toml
 [profiles.my-profile.environment]
@@ -202,9 +212,13 @@ mj doctor --json --smoke
 Then follow the target-specific result:
 
 - **Podman:** it must be rootless and have a valid subordinate UID/GID mapping.
-  Run `podman unshare cat /proc/self/uid_map` as the same user that runs
-  Mjolnir, then follow [Podman for
-  Mjolnir](/podman/).
+  Run `podman info --format json` as the same user that runs Mjolnir and check
+  that `host.security.rootless` is true and `host.idMappings.uidmap` covers
+  container IDs 0 and 1, then follow [Podman for Mjolnir](/podman/). On macOS
+  the `podman` client talks to a Linux VM (`podman machine`), which is
+  supported when the machine is rootless. If it is rootful, run
+  `podman machine set --rootful=false` and restart it. If `podman info` cannot
+  connect, run `podman machine start`.
 - **Docker:** the CLI must reach a Linux daemon, and writable attachments need
   working OverlayFS support on the daemon's filesystem host. Run `docker info`
   and follow [Docker for Mjolnir](/docker/).

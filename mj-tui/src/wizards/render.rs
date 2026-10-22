@@ -82,6 +82,17 @@ fn target_step_choices<W: WizardDraft>(
             }
         })
         .collect();
+    // A machine no runtime runs on has no row, so it is named here with the
+    // reason, rather than missing from the list without a word.
+    for (id, _) in dashboard.config.machines_without_runtimes() {
+        let reason = dashboard
+            .machine_runtime_reason(id)
+            .unwrap_or_else(|| "checking what it can run…".to_owned());
+        help.push(Line::styled(
+            format!("Machine {id} has no runtime: {reason}"),
+            warning,
+        ));
+    }
     if let Some(key) = dashboard.first_key_label(crate::CommandId::Refresh) {
         help.push(picker_help(&format!("{key} recheck availability")));
     }

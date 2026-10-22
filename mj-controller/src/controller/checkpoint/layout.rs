@@ -83,7 +83,10 @@ impl Controller {
                     .collect();
                 (workspace_root, bundle.primary_repo.clone(), repositories)
             };
+        let (report_root, _) =
+            crate::controller::subagents::subagent_report_root(&session, &backend, &checkout);
         Ok(SessionExportLayout {
+            report_root,
             backend,
             workspace_root,
             primary_repository,

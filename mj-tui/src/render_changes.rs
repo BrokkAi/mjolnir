@@ -266,12 +266,18 @@ impl DashboardState {
                 continue;
             }
             let (weekly, five_hour) = quota_reset_cells(quota, now);
-            if quota
-                .weekly_window()
+            let long_window = quota.weekly_window();
+            if long_window.is_some_and(|window| window.resets_at_epoch_seconds.is_some()) {
+                clocks.push(DisplayedClock {
+                    key: format!("quota:{id}:weekly"),
+                    value: weekly,
+                });
+            } else if quota
+                .five_hour_window()
                 .is_some_and(|window| window.resets_at_epoch_seconds.is_some())
             {
                 clocks.push(DisplayedClock {
-                    key: format!("quota:{id}:weekly"),
+                    key: format!("quota:{id}:primary"),
                     value: weekly,
                 });
             }
@@ -279,7 +285,8 @@ impl DashboardState {
                 .weekly_window()
                 .and_then(|window| window.remaining_percent)
                 .is_some_and(|remaining| remaining < 1);
-            if !weekly_exhausted
+            if long_window.is_some()
+                && !weekly_exhausted
                 && quota
                     .five_hour_window()
                     .is_some_and(|window| window.resets_at_epoch_seconds.is_some())

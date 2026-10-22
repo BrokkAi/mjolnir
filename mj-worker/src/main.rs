@@ -156,6 +156,23 @@ enum WorkerCommand {
         #[arg(long)]
         path: PathBuf,
     },
+    /// Write a file, a zip archive of a directory, or a JSON listing of either
+    /// to standard output, after one JSON line naming which it is and where
+    /// it resolved.
+    Fetch {
+        /// The file or directory to fetch.
+        #[arg(long)]
+        path: PathBuf,
+        /// A directory the path may resolve inside; repeatable.
+        #[arg(long = "root")]
+        roots: Vec<PathBuf>,
+        /// Also allow this machine's temporary directory.
+        #[arg(long)]
+        temp: bool,
+        /// List the path instead of reading it.
+        #[arg(long)]
+        list: bool,
+    },
     /// Atomically publish stdin as a file in the session workspace.
     WriteFile {
         #[arg(long)]
@@ -554,6 +571,23 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
         WorkerCommand::ReadFile { root, path } => write_stdout(
             &mj_checkpoint::archive::read_session_file(&root, &path).map_err(export_error)?,
         ),
+        WorkerCommand::Fetch {
+            path,
+            roots,
+            temp,
+            list,
+        } => {
+            let mode = if list {
+                mj_checkpoint::archive::FetchMode::Listing
+            } else {
+                mj_checkpoint::archive::FetchMode::Content
+            };
+            write_stdout(
+                &mj_checkpoint::archive::fetch_session_path(&path, &roots, temp, mode)
+                    .map_err(export_error)?
+                    .encode()?,
+            )
+        }
         WorkerCommand::WriteFile {
             root,
             path,

@@ -1106,6 +1106,177 @@ fn golden_build_cache() {
     mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "build-cache", &output);
 }
 
+/// A machine no runtime runs on is no session target, so its Machines row
+/// says why. Detect runtimes asks every machine in the draft what it runs
+/// and adds those runtimes under that machine.
+#[test]
+fn golden_machines_without_runtimes() {
+    use mj_core::config::{DEFAULT_WORKSPACE_PREFIX, Machine, SshConnection, TargetTemplate};
+
+    let ssh = |host: &str| SshConnection {
+        host: host.to_owned(),
+        user: Some("dev".to_owned()),
+        identity_file: None,
+        extra_args: vec![],
+    };
+    let machine = |host: &str| Machine::Ssh {
+        ssh: ssh(host),
+        workspace_prefix: DEFAULT_WORKSPACE_PREFIX.into(),
+        build_cache: None,
+    };
+    let mut output = String::new();
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let mut config = (*dashboard.config).clone();
+    config
+        .machines
+        .insert("nas".into(), machine("nas.example.test"));
+    dashboard.set_config(config);
+    let Some(DashboardAction::CheckMachineRuntimes { generation, .. }) =
+        dashboard.take_machine_runtime_check()
+    else {
+        panic!("a machine without a runtime is checked");
+    };
+    dashboard.apply_machine_runtime_check(
+        generation,
+        Ok(crate::MachineRuntimesChecked {
+            probes: vec![crate::MachineRuntimeProbe {
+                machine_id: "nas".into(),
+                machine: machine("nas.example.test"),
+                finding: crate::MachineFinding::Unreachable {
+                    detail: "`ssh dev@nas.example.test true` failed: ssh: connect to host nas.example.test port 22: Connection timed out".into(),
+                    remediation: "Check that nas.example.test is up and reachable from this machine.".into(),
+                },
+            }],
+            added: std::collections::BTreeMap::new(),
+        }),
+    );
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    dashboard.handle_paste("builder");
+    dashboard.handle_key(key(KeyCode::Enter));
+    choose(&mut dashboard, "host");
+    dashboard.handle_paste("builder.example.test");
+    dashboard.handle_key(key(KeyCode::Enter));
+    activate(&mut dashboard, SetupControl::Back);
+    append_setup_state(
+        &mut output,
+        "machines without a runtime say why",
+        &mut dashboard,
+        140,
+        34,
+    );
+
+    activate(&mut dashboard, SetupControl::Back);
+    choose(&mut dashboard, "targets");
+    let Mode::Setup(dialog) = &mut dashboard.mode else {
+        panic!("settings");
+    };
+    dialog.form.get_mut().focus(SetupControl::DetectRuntimes);
+    let generation = dialog.generation;
+    // Detection asks every machine in the draft, the unsaved one too.
+    let DashboardAction::DiscoverSetup { machines, .. } = dashboard.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("Detect runtimes starts a detection");
+    };
+    assert_eq!(
+        machines
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        ["builder", "nas"]
+    );
+    let Machine::Ssh { ssh: builder, .. } = &machines[0].1 else {
+        panic!("builder is an SSH machine");
+    };
+    dashboard.setup_discovered(
+        generation,
+        Ok(crate::setup::SetupDetection {
+            scope: DetectScope::Runtimes,
+            config: Config::default(),
+            rejected_runtimes: Vec::new(),
+            machines: vec![
+                crate::MachineRuntimeProbe {
+                    machine_id: "builder".into(),
+                    machine: machines[0].1.clone(),
+                    finding: crate::MachineFinding::Answered {
+                        runtimes: vec![
+                            (
+                                "builder".into(),
+                                TargetTemplate::SshBare {
+                                    ssh: builder.clone(),
+                                    permissions: mj_core::config::PermissionMode::Guardian,
+                                    workspace_prefix: DEFAULT_WORKSPACE_PREFIX.into(),
+                                },
+                            ),
+                            (
+                                "builder-docker".into(),
+                                TargetTemplate::SshDocker {
+                                    ssh: builder.clone(),
+                                    container: mj_core::config::ContainerTemplate {
+                                        build_cache: None,
+                                        image: mj_client::target::DEFAULT_IMAGE.into(),
+                                        pull_policy: Default::default(),
+                                        platform: None,
+                                        cpus: None,
+                                        memory: None,
+                                        environment: Default::default(),
+                                        workspace_storage: Default::default(),
+                                    },
+                                },
+                            ),
+                        ],
+                        rejected: vec![RejectedRuntime {
+                            label: "Podman".into(),
+                            detail: "Podman is not installed.".into(),
+                            remediation: None,
+                        }],
+                    },
+                },
+                crate::MachineRuntimeProbe {
+                    machine_id: "nas".into(),
+                    machine: machines[1].1.clone(),
+                    finding: crate::MachineFinding::Unreachable {
+                        detail: "`ssh dev@nas.example.test true` failed: Connection timed out"
+                            .into(),
+                        remediation: "Check that nas.example.test is up.".into(),
+                    },
+                },
+            ],
+        }),
+    );
+    append_setup_state(
+        &mut output,
+        "detection adds each machine's runtimes under it",
+        &mut dashboard,
+        140,
+        34,
+    );
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("settings");
+    };
+    for (id, kind) in [("builder", "bare"), ("builder-docker", "docker")] {
+        assert_eq!(dialog.draft["targets"][id]["kind"], kind);
+        assert_eq!(dialog.draft["targets"][id]["machine"], "builder");
+    }
+    assert!(dialog.draft["targets"].get("nas").is_none());
+
+    dashboard.handle_key(key(KeyCode::Esc));
+    choose(&mut dashboard, "machines");
+    append_setup_state(
+        &mut output,
+        "only the unreachable machine still lacks a runtime",
+        &mut dashboard,
+        140,
+        34,
+    );
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "machines-without-runtimes",
+        &output,
+    );
+}
+
 #[test]
 fn golden_settings_search() {
     use std::fmt::Write as _;
@@ -1510,6 +1681,7 @@ fn detection(scope: DetectScope, config: Config) -> crate::setup::SetupDetection
         scope,
         config,
         rejected_runtimes: Vec::new(),
+        machines: Vec::new(),
     }
 }
 
@@ -2113,7 +2285,7 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         generation,
         &preview_key,
         Ok(Some(BuildCachePreview {
-            native_mbx: None,
+            native_mbx: Some("1.26.0".into()),
             mbx_profile_file: None,
             mbx_profile_warning: None,
             mbx_manual_path_line: None,
@@ -2123,8 +2295,11 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
             application: Default::default(),
             budget_note: None,
             stats: None,
-            off_reason: Some(mj_core::state::BuildCacheOff::Unavailable(
-                "Shared mbx requires a Linux host".into(),
+            off_reason: Some(mj_core::state::BuildCacheOff::UnsupportedPlatform(
+                "mbx 1.26.0 runs natively on this Mac at /Users/builder/.local/bin/mbx; bare \
+                 sessions here use it when it is on their login PATH. Container sessions run \
+                 without the shared build cache."
+                    .into(),
             )),
         })),
         false,
@@ -2134,9 +2309,11 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         .unwrap();
     let unsupported = buffer_lines(terminal.backend().buffer()).join("\n");
     assert!(
-        unsupported.contains("Shared mbx requires a Linux host"),
+        unsupported.contains("mbx: mbx 1.26.0 runs natively on this Mac"),
         "{unsupported}"
     );
+    // Hard-won: #1330: a Mac's working native mbx was reported as missing.
+    assert!(!unsupported.contains("no mbx on the host"), "{unsupported}");
     assert!(
         !unsupported.contains("Pending application"),
         "{unsupported}"
@@ -3353,7 +3530,7 @@ fn machine_row_reports_an_unsupported_cache_host_like_its_page() {
             application: Default::default(),
             budget_note: None,
             stats: None,
-            off_reason: Some(mj_core::state::BuildCacheOff::Unavailable(
+            off_reason: Some(mj_core::state::BuildCacheOff::UnsupportedPlatform(
                 "Shared mbx requires a Linux host".into(),
             )),
         })),
@@ -3364,6 +3541,42 @@ fn machine_row_reports_an_unsupported_cache_host_like_its_page() {
         lines.iter().any(|line| line.contains("Build caches")
             && line.contains("mbx unavailable")
             && !line.contains("Enabled by default")),
+        "{lines:#?}"
+    );
+
+    // A Mac reports the mbx its bare sessions use, not a missing one.
+    dashboard.build_cache_previewed(
+        generation,
+        &key,
+        Ok(Some(mj_core::state::BuildCachePreview {
+            native_mbx: Some("1.26.0".into()),
+            mbx_profile_file: None,
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
+            directory: None,
+            max_total_size: None,
+            user_managed: false,
+            application: Default::default(),
+            budget_note: None,
+            stats: None,
+            off_reason: Some(mj_core::state::BuildCacheOff::UnsupportedPlatform(
+                "mbx 1.26.0 runs natively on this Mac".into(),
+            )),
+        })),
+        false,
+    );
+    let lines = drawn(&mut dashboard, 160, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Build caches")
+                && line.contains("mbx 1.26.0, bare sessions only")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|line| !line.contains("mbx unavailable") && !line.contains("no mbx on the host")),
         "{lines:#?}"
     );
 }
@@ -3548,7 +3761,7 @@ fn machine_page_labels_old_mbx_as_upgrade_and_hides_unavailable_actions() {
             application: Default::default(),
             budget_note: None,
             stats: None,
-            off_reason: Some(mj_core::state::BuildCacheOff::Unavailable(
+            off_reason: Some(mj_core::state::BuildCacheOff::UnsupportedPlatform(
                 "Shared mbx requires a Linux host".into(),
             )),
         })));

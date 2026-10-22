@@ -272,10 +272,26 @@ pub(crate) async fn apply_dashboard_action(
             );
         }
         DashboardAction::OpenConfig => context.dashboard.begin_setup(),
-        DashboardAction::DiscoverSetup { generation, scope } => {
+        DashboardAction::DiscoverSetup {
+            generation,
+            scope,
+            machines,
+        } => {
             super::io::spawn_setup_discovery(
                 generation,
                 scope,
+                machines,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
+        DashboardAction::CheckMachineRuntimes {
+            generation,
+            machines,
+        } => {
+            super::io::spawn_machine_runtime_check(
+                generation,
+                machines,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );

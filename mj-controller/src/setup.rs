@@ -13,6 +13,10 @@ use mj_core::config::{
     ProjectRepository, TargetTemplate, unique_config_id as unique_id,
 };
 
+mod machines;
+pub use machines::{
+    MachineProbe, MachineProbeOutcome, add_machine_runtimes, probe_machine, probe_machines,
+};
 mod startup;
 pub use startup::{
     SetupReport, actionable_errors, add_detected_profiles, run_setup, run_setup_command,
@@ -48,6 +52,8 @@ impl GithubRepository {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeKind {
+    /// The harness runs directly on the machine, under a worker.
+    Bare,
     Podman,
     Docker,
     AppleContainer,
@@ -56,6 +62,7 @@ pub enum RuntimeKind {
 impl RuntimeKind {
     pub fn label(self) -> &'static str {
         match self {
+            Self::Bare => "Bare",
             Self::Podman => "Podman",
             Self::Docker => "Docker",
             Self::AppleContainer => "Apple container",
@@ -239,10 +246,11 @@ pub(crate) fn discover_harness_homes_with_executor(
 }
 
 /// A profile standing in for a home discovery found but the user has not
-/// configured. It carries no environment, so cloud backends must be configured
-/// explicitly before their authentication can be recognized.
+/// configured. It carries only the provider keys a configured profile would
+/// inherit, so cloud backends must be configured explicitly before their
+/// authentication can be recognized.
 fn probe_profile(kind: HarnessKind, home: &Path, codex_profile: Option<String>) -> HarnessProfile {
-    HarnessProfile {
+    let mut profile = HarnessProfile {
         enabled: true,
         kind,
         home: home.to_path_buf(),
@@ -251,7 +259,9 @@ fn probe_profile(kind: HarnessKind, home: &Path, codex_profile: Option<String>) 
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile,
-    }
+    };
+    profile.inherit_provider_key();
+    profile
 }
 
 pub(crate) fn harness_is_authenticated_with_executor(
@@ -281,11 +291,12 @@ fn harness_is_authenticated_with(
     if profile.auth_scheme() == mj_core::config::AuthScheme::AwsCredentialChain {
         return true;
     }
-    // OpenCode keeps its logins in its own database; doctor reports a
-    // database it cannot read.
+    // OpenCode keeps its logins in its own database, or takes a provider key
+    // from its environment; doctor reports a database it cannot read.
     if profile.auth_scheme() == mj_core::config::AuthScheme::NativeLoginStore {
         return crate::opencode_logins::profile_logins(profile)
-            .is_ok_and(|logins| logins.is_some());
+            .is_ok_and(|logins| logins.is_some())
+            || !profile.opencode_environment_logins().is_empty();
     }
     if profile.authentication_marker().is_file()
         || (kind == HarnessKind::Kimi && home.join("credentials").is_file())
@@ -496,6 +507,7 @@ pub fn local_runtime_target(runtime: RuntimeKind, image: &str) -> (&'static str,
         workspace_storage: Default::default(),
     };
     match runtime {
+        RuntimeKind::Bare => ("localhost", TargetTemplate::LocalBare),
         RuntimeKind::Podman => ("podman", TargetTemplate::LocalPodman { container }),
         RuntimeKind::Docker => ("docker", TargetTemplate::LocalDocker { container }),
         RuntimeKind::AppleContainer => (

@@ -214,6 +214,15 @@ impl Environment {
         &self.sources
     }
 
+    /// The names of the variables [`Self::inherit`] supplied, which no entry
+    /// spells.
+    pub fn inherited_names(&self) -> impl Iterator<Item = &str> {
+        self.resolved
+            .keys()
+            .filter(|key| !self.sources.contains_key(*key))
+            .map(String::as_str)
+    }
+
     /// The values the entries stand for.
     pub fn resolved(&self) -> &BTreeMap<String, String> {
         &self.resolved

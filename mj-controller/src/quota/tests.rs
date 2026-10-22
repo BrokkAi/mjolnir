@@ -983,7 +983,40 @@ async fn test_kimi_usage(headers: HeaderMap) -> (StatusCode, Json<Value>) {
         (
             StatusCode::OK,
             Json(serde_json::json!({
-                "usage": {"name": "Weekly", "used": 1, "limit": 100}
+                "limits": [{
+                    "window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
+                    "detail": {
+                        "limit": "100",
+                        "used": "25",
+                        "remaining": "75",
+                        "resetTime": "2026-09-22T12:22:15.593402Z"
+                    }
+                }],
+                "usages": {
+                    "limit_5h": {
+                        "used_ratio": 0.25,
+                        "reset_time": "2026-09-22T12:22:15Z"
+                    },
+                    "limit_7d": {
+                        "used_ratio": 0.1,
+                        "reset_time": "2026-09-29T12:22:15Z"
+                    },
+                    "limit_month_total": {
+                        "used_ratio": 0.0056,
+                        "reset_time": "2026-10-22T00:00:00Z"
+                    },
+                    "limit_month_code": {
+                        "used_ratio": 0.002,
+                        "reset_time": "2026-10-22T00:00:00Z"
+                    }
+                },
+                "boosterWallet": {
+                    "balance": {
+                        "type": "BOOSTER",
+                        "amount": "20000000000",
+                        "amountLeft": "10000000000"
+                    }
+                }
             })),
         )
     } else {
@@ -1019,8 +1052,15 @@ async fn kimi_quota_refreshes_after_unauthorized_and_retries() {
         axum::serve(listener, app).await.unwrap();
     });
 
+    let endpoint = format!("http://{address}");
+    let environment = BTreeMap::from([
+        ("KIMI_CODE_BASE_URL".into(), format!("{endpoint}/coding/v1")),
+        ("KIMI_CODE_OAUTH_HOST".into(), endpoint),
+    ]);
     let home = tempfile::tempdir().unwrap();
-    let credentials_path = home.path().join("credentials/kimi-code.json");
+    let runtime = crate::kimi_auth::KimiRuntimeAuth::resolve(home.path(), &environment).unwrap();
+    let credentials_path = runtime.credentials_path.clone();
+    let environment = environment.into_iter().collect::<HashMap<_, _>>();
     tokio::fs::create_dir_all(credentials_path.parent().unwrap())
         .await
         .unwrap();
@@ -1043,15 +1083,23 @@ async fn kimi_quota_refreshes_after_unauthorized_and_retries() {
     )
     .await
     .unwrap();
-    let endpoint = format!("http://{address}");
-    let environment = HashMap::from([
-        ("KIMI_CODE_BASE_URL".into(), format!("{endpoint}/coding/v1")),
-        ("KIMI_CODE_OAUTH_HOST".into(), endpoint),
-    ]);
-
     let (windows, _) = query_kimi(home.path(), &environment).await.unwrap();
 
-    assert_eq!(windows[0].used, Some(1));
+    assert_eq!(windows[0].label, "5H");
+    assert_eq!(windows[0].used, Some(25));
+    assert_eq!(windows[0].remaining_percent, Some(75));
+    assert_eq!(
+        windows
+            .iter()
+            .map(|window| (window.label.as_str(), window.remaining_percent))
+            .collect::<Vec<_>>(),
+        [
+            ("5H", Some(75)),
+            ("Week", Some(90)),
+            ("Month", Some(99)),
+            ("Month code", Some(99)),
+        ]
+    );
     let form = {
         let forms = state.refresh_forms.lock().unwrap();
         assert_eq!(forms.len(), 1);
@@ -1071,6 +1119,51 @@ async fn kimi_quota_refreshes_after_unauthorized_and_retries() {
     assert_eq!(saved.access_token, "fresh-access");
     assert_eq!(saved.refresh_token, "fresh-refresh");
     assert!(!home.path().join("oauth/kimi-code.lock").exists());
+    server.abort();
+}
+
+async fn test_kimi_api_key_usage(headers: HeaderMap) -> (StatusCode, Json<Value>) {
+    let accepted = headers
+        .get(reqwest::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        == Some("Bearer profile-api-key");
+    let payload = serde_json::json!({
+        "usages": {
+            "limit_5h": {
+                "used_ratio": 0.4,
+                "reset_time": "2026-09-22T12:22:15Z"
+            }
+        }
+    });
+    if accepted {
+        (StatusCode::OK, Json(payload))
+    } else {
+        (StatusCode::UNAUTHORIZED, Json(serde_json::json!({})))
+    }
+}
+
+#[tokio::test]
+async fn kimi_quota_accepts_an_api_key_without_oauth_credentials() {
+    let app = Router::new().route("/coding/v1/usages", get(test_kimi_api_key_usage));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let home = tempfile::tempdir().unwrap();
+    let environment = HashMap::from([
+        ("KIMI_API_KEY".into(), "profile-api-key".into()),
+        (
+            "KIMI_CODE_BASE_URL".into(),
+            format!("http://{address}/coding/v1"),
+        ),
+    ]);
+    let (windows, _) = query_kimi(home.path(), &environment).await.unwrap();
+
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].label, "5H");
+    assert_eq!(windows[0].remaining_percent, Some(60));
     server.abort();
 }
 

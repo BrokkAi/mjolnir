@@ -55,12 +55,14 @@ pub struct RejectedRuntime {
 }
 
 /// What one detection run found: entries for the scope it was asked about,
-/// and the runtimes it turned down.
+/// and the runtimes it turned down. A runtime detection also reports what
+/// each machine in the draft can run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupDetection {
     pub scope: DetectScope,
     pub config: Config,
     pub rejected_runtimes: Vec<RejectedRuntime>,
+    pub machines: Vec<crate::MachineRuntimeProbe>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1422,19 +1424,25 @@ impl SetupDialog {
 
     /// What the machine page's build cache row says when the resolved preview
     /// shows the host cannot share the cache.
-    fn build_cache_row_unavailable(&self) -> Option<&'static str> {
+    fn build_cache_row_unavailable(&self) -> Option<String> {
         use mj_core::state::BuildCacheOff;
         let (_, key) = self.build_cache_machine_page()?;
         let preview = self.build_cache_preview.as_ref()?;
         if preview.key != key {
             return None;
         }
-        match &preview.result {
-            BuildCachePreviewResult::Ready(Some(preview)) => match preview.off_reason {
-                Some(BuildCacheOff::Unavailable(_)) => Some("mbx unavailable"),
-                _ => None,
-            },
-            _ => None,
+        let BuildCachePreviewResult::Ready(Some(preview)) = &preview.result else {
+            return None;
+        };
+        match (&preview.off_reason, &preview.native_mbx) {
+            // Only a Mac reports its own mbx while its containers cannot use it.
+            (Some(BuildCacheOff::UnsupportedPlatform(_)), Some(version)) => {
+                Some(format!("mbx {version}, bare sessions only"))
+            }
+            (Some(BuildCacheOff::Unavailable(_) | BuildCacheOff::UnsupportedPlatform(_)), _) => {
+                Some("mbx unavailable".to_owned())
+            }
+            (Some(BuildCacheOff::TurnedOff) | None, _) => None,
         }
     }
 
@@ -1617,7 +1625,9 @@ impl SetupDialog {
         }
         match &preview.result {
             BuildCachePreviewResult::Ready(Some(preview)) => match &preview.off_reason {
-                Some(BuildCacheOff::Unavailable(reason)) => Some(reason.as_str()),
+                Some(
+                    BuildCacheOff::Unavailable(reason) | BuildCacheOff::UnsupportedPlatform(reason),
+                ) => Some(reason.as_str()),
                 Some(BuildCacheOff::TurnedOff) | None => None,
             },
             _ => None,
@@ -2539,13 +2549,30 @@ impl DashboardState {
                 dialog.notice = Some(
                     match scope {
                         DetectScope::Profiles => "Looking for installed agents…",
-                        DetectScope::Runtimes => "Looking for usable container runtimes…",
+                        DetectScope::Runtimes => "Looking for usable runtimes on every machine…",
                     }
                     .into(),
                 );
+                // A draft that does not parse probes no machine; the result
+                // then asks for the draft to be reviewed.
+                let machines = match scope {
+                    DetectScope::Runtimes => config_from_draft(dialog.draft.clone())
+                        .map(|draft| {
+                            draft
+                                .machines
+                                .into_iter()
+                                .filter(|(_, machine)| {
+                                    !matches!(machine, mj_core::config::Machine::Local { .. })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    DetectScope::Profiles => Vec::new(),
+                };
                 action = DashboardAction::DiscoverSetup {
                     generation: dialog.generation,
                     scope,
+                    machines,
                 };
             }
             Some(Interaction::Activate(InstallMbx)) => {
@@ -2619,6 +2646,10 @@ impl DashboardState {
                     None => "no mbx on the host".to_owned(),
                 };
                 match &preview.off_reason {
+                    // The reason already names the host's own mbx and what uses it.
+                    Some(mj_core::state::BuildCacheOff::UnsupportedPlatform(reason)) => {
+                        reason.clone()
+                    }
                     Some(reason) => {
                         format!("The mbx build cache is unavailable: {reason} ({host_mbx}).")
                     }
@@ -2839,7 +2870,8 @@ impl DashboardState {
                 let SetupDetection {
                     scope,
                     config,
-                    rejected_runtimes,
+                    mut rejected_runtimes,
+                    machines,
                 } = detection;
                 // Reconcile against the current draft, including edits made
                 // while discovery was running, rather than dropping collisions.
@@ -2854,6 +2886,7 @@ impl DashboardState {
                     }
                 };
                 let additions = current.setup_additions(&config);
+                let local_targets = additions.targets.clone();
                 let discovered = serde_json::to_value(additions).expect("config serializes");
                 // A detection only writes its own section, so a profile run
                 // cannot add machines and a runtime run cannot add projects.
@@ -2877,11 +2910,62 @@ impl DashboardState {
                         }
                     }
                 }
+                // Each machine's runtimes are decided against the draft as it
+                // is now, the same way a probe at startup decides against the
+                // file: a kind the machine already runs is not added twice,
+                // and a machine edited while it was probed gets nothing.
+                let mut found_on_machines = false;
+                if section == "targets" {
+                    let mut current = current;
+                    current.targets.extend(local_targets);
+                    for probe in &machines {
+                        let crate::MachineFinding::Answered { runtimes, rejected } = &probe.finding
+                        else {
+                            rejected_runtimes.push(RejectedRuntime {
+                                label: probe.machine_id.clone(),
+                                detail: crate::machine_runtimes::finding_reason(&probe.finding),
+                                remediation: None,
+                            });
+                            continue;
+                        };
+                        found_on_machines |= !runtimes.is_empty();
+                        rejected_runtimes.extend(rejected.iter().map(|runtime| RejectedRuntime {
+                            label: format!("{} on {}", runtime.label, probe.machine_id),
+                            ..runtime.clone()
+                        }));
+                        let additions = current.machine_runtime_additions(
+                            &probe.machine_id,
+                            &probe.machine,
+                            runtimes.iter().cloned(),
+                        );
+                        if additions.is_empty() {
+                            continue;
+                        }
+                        current.targets.extend(additions.clone());
+                        // Stored against the draft's own machines, so each
+                        // runtime names the machine it was found on.
+                        let stored = serde_json::to_value(Config {
+                            machines: current.machines.clone(),
+                            targets: additions,
+                            ..Config::default()
+                        })
+                        .expect("config serializes");
+                        if let Some(entries) = stored["targets"].as_object() {
+                            for (key, value) in entries {
+                                dialog.draft["targets"]
+                                    .as_object_mut()
+                                    .unwrap()
+                                    .insert(key.clone(), value.clone());
+                                added.push(key.clone());
+                            }
+                        }
+                    }
+                }
                 schema::expand(&mut dialog.draft, &mut Vec::new());
                 populate_subagent_profile_choices(&mut dialog.draft);
                 let found_any = match scope {
                     DetectScope::Profiles => !config.profiles.is_empty(),
-                    DetectScope::Runtimes => !config.targets.is_empty(),
+                    DetectScope::Runtimes => !config.targets.is_empty() || found_on_machines,
                 };
                 dialog.notice = Some(detection_notice(
                     scope,
@@ -2894,6 +2978,43 @@ impl DashboardState {
         }
         dialog.prepare();
     }
+}
+
+/// How many lines a machine row's missing-runtime reason may take.
+const MACHINE_NOTE_LINES: usize = 3;
+
+/// Why machine `id` in the Settings draft has no runtime, or `None` when a
+/// runtime in the draft runs on it. A machine as the configuration has it
+/// reports what its last check found; one the draft adds or changes reports
+/// what saving it will do.
+fn machine_without_runtime_note(
+    dashboard: &DashboardState,
+    dialog: &SetupDialog,
+    id: &str,
+) -> Option<String> {
+    if id == mj_core::config::LOCAL_MACHINE_ID {
+        return None;
+    }
+    let runs_one = dialog.draft["targets"]
+        .as_object()
+        .is_some_and(|targets| targets.values().any(|target| target["machine"] == id));
+    if runs_one {
+        return None;
+    }
+    let saved =
+        serde_json::from_value::<mj_core::config::Machine>(dialog.draft["machines"][id].clone())
+            .ok()
+            .is_some_and(|machine| dashboard.config.machines.get(id) == Some(&machine));
+    if !saved {
+        return Some("Save to find what it can run and add those runtimes.".to_owned());
+    }
+    Some(match dashboard.machine_runtime_reason(id) {
+        Some(reason) => format!("No runtime: {reason}"),
+        None if dashboard.config.machine_runtimes(id).next().is_some() => {
+            "Saving finds what it can run and adds those runtimes again.".to_owned()
+        }
+        None => "Mjolnir checks what it can run when Settings closes.".to_owned(),
+    })
 }
 
 /// What the Settings screen says after a detection run: the entries it added
@@ -2917,11 +3038,9 @@ fn detection_notice(
             (DetectScope::Profiles, true) => {
                 "Every coding agent found on this machine already has a profile.".to_owned()
             }
-            (DetectScope::Runtimes, false) => {
-                "No usable runtime was found on this machine.".to_owned()
-            }
+            (DetectScope::Runtimes, false) => "No usable runtime was found.".to_owned(),
             (DetectScope::Runtimes, true) => {
-                "Every usable runtime found on this machine is already listed.".to_owned()
+                "Every usable runtime found is already listed.".to_owned()
             }
         });
     } else {
@@ -2962,6 +3081,7 @@ fn setup_dialog_mut(mode: &mut Mode) -> Option<&mut SetupDialog> {
 pub(crate) fn render_setup(
     frame: &mut Frame,
     area: Rect,
+    dashboard: &DashboardState,
     dialog: &SetupDialog,
     surfaces: &mut FrameSurfaces,
 ) {
@@ -3220,7 +3340,7 @@ pub(crate) fn render_setup(
                         .or_else(|| dialog.archive_space_automatic_label(key))
                         .or_else(|| {
                             (key == "build_cache")
-                                .then(|| dialog.build_cache_row_unavailable().map(str::to_owned))
+                                .then(|| dialog.build_cache_row_unavailable())
                                 .flatten()
                         }),
                 ),
@@ -3234,6 +3354,14 @@ pub(crate) fn render_setup(
             } else {
                 summary
             };
+            let missing_runtime = (dialog.path == ["machines"])
+                .then(|| machine_without_runtime_note(dashboard, dialog, key))
+                .flatten();
+            let summary = if missing_runtime.is_some() {
+                "No runtime  ›".to_owned()
+            } else {
+                summary
+            };
             let summary = if choice_editor && index == dialog.selected {
                 String::new()
             } else {
@@ -3241,6 +3369,23 @@ pub(crate) fn render_setup(
             };
             rows.push(setting_row(&name, &summary, body.width));
             row_map.push(Some(index));
+            // A machine no runtime runs on is no session target, so its row
+            // says why, the same reason the session picker gives.
+            if let Some(note) = missing_runtime {
+                let width = body.width.saturating_sub(SETTING_GUTTER.len() as u16 + 4);
+                let warning = ratatui::style::Style::default().fg(theme::palette().warning);
+                let lines = mj_chat::components::wrap_lines([Line::raw(note)], width);
+                let cut = lines.len() > MACHINE_NOTE_LINES;
+                for (number, line) in lines.into_iter().take(MACHINE_NOTE_LINES).enumerate() {
+                    let mut text = line.to_string();
+                    if cut && number + 1 == MACHINE_NOTE_LINES {
+                        text = truncate(&format!("{text}…"), usize::from(width));
+                    }
+                    rows.push(Line::styled(format!("{SETTING_GUTTER}    {text}"), warning));
+                    row_map.push(None);
+                    row_enabled.push(true);
+                }
+            }
             let unavailable = mbx_unavailable
                 .as_deref()
                 .filter(|_| is_build_cache_field(&child_path, "enabled"));

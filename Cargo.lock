@@ -631,7 +631,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-chat"
-version = "2.52.0"
+version = "2.53.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -661,13 +661,14 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-checkpoint"
-version = "2.52.0"
+version = "2.53.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
  "base64",
  "blake3",
  "brokk-mj-core",
+ "chrono",
  "dirs 6.0.0",
  "flate2",
  "libc",
@@ -684,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-client"
-version = "2.52.0"
+version = "2.53.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -708,7 +709,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-controller"
-version = "2.52.0"
+version = "2.53.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -761,7 +762,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-core"
-version = "2.52.0"
+version = "2.53.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -772,6 +773,7 @@ dependencies = [
  "flate2",
  "getrandom 0.3.4",
  "imbl",
+ "jsonc-parser",
  "libc",
  "memchr",
  "regex",
@@ -790,7 +792,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-desktop"
-version = "2.52.0"
+version = "2.53.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -822,7 +824,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-review"
-version = "2.52.0"
+version = "2.53.0"
 dependencies = [
  "brokk-mj-core",
  "serde",
@@ -831,7 +833,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-transcript"
-version = "2.52.0"
+version = "2.53.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -847,7 +849,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-tui"
-version = "2.52.0"
+version = "2.53.0"
 dependencies = [
  "anyhow",
  "brokk-mj-chat",
@@ -866,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-voice-worker"
-version = "2.52.0"
+version = "2.53.0"
 dependencies = [
  "anyhow",
  "brokk-anvil-client",
@@ -883,7 +885,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-worker"
-version = "2.52.0"
+version = "2.53.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -918,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mjolnir"
-version = "2.52.0"
+version = "2.53.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -3175,6 +3177,15 @@ dependencies = [
  "futures-util",
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "jsonc-parser"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ecded084f9b9a718d39668a42657c32253663d1f6afb3fbb9134f0305f73f48"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

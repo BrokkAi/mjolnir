@@ -367,7 +367,21 @@ async fn refresh_profile_with_cache_root(
     cache_root: Option<PathBuf>,
 ) -> (QuotaRefreshOutcome, Option<CodexUsageClient>) {
     let cache_identity = request.cache_identity();
-    let credential_path = harness_authentication_marker(request.harness, &request.source_home);
+    let credential_path = match request.harness {
+        HarnessKind::Kimi => {
+            crate::kimi_auth::KimiRuntimeAuth::resolve(&request.source_home, &request.environment)
+                .map(|runtime| runtime.credentials_path)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(
+                        profile_id = %request.profile_id,
+                        %error,
+                        "could not resolve Kimi Code credentials"
+                    );
+                    harness_authentication_marker(request.harness, &request.source_home)
+                })
+        }
+        _ => harness_authentication_marker(request.harness, &request.source_home),
+    };
     let credential_before = credential_marker_fingerprint(&credential_path).await;
     let QuotaRefreshRequest {
         native_openai,
@@ -731,28 +745,29 @@ async fn query_kimi(
     home: &Path,
     environment: &HashMap<String, String>,
 ) -> Result<(Vec<QuotaWindow>, Option<String>)> {
-    let base = environment
-        .get("KIMI_CODE_BASE_URL")
-        .map(String::as_str)
-        .unwrap_or("https://api.kimi.com/coding/v1")
-        .trim_end_matches('/');
+    let environment = environment
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let runtime = crate::kimi_auth::KimiRuntimeAuth::resolve(home, &environment)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .context("build Kimi quota client")?;
-    let credentials_path = home.join("credentials/kimi-code.json");
-    let usage_url = format!("{base}/usages");
-    let response = fetch_bearer_with_auth_retry(&client, &usage_url, |force, rejected_token| {
-        ensure_fresh_kimi_token(
-            &client,
-            home,
-            &credentials_path,
-            environment,
-            force,
-            rejected_token,
-        )
-    })
-    .await?;
+    let usage_url = format!("{}/usages", runtime.base_url);
+    let response = match environment
+        .get("KIMI_API_KEY")
+        .map(|key| key.trim())
+        .filter(|key| !key.is_empty())
+    {
+        Some(api_key) => fetch_bearer(&client, &usage_url, api_key).await?,
+        None => {
+            fetch_bearer_with_auth_retry(&client, &usage_url, |force, rejected_token| {
+                ensure_fresh_kimi_token(&client, &runtime, force, rejected_token)
+            })
+            .await?
+        }
+    };
     if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
         return Err(RateLimited {
             retry_after: retry_after_header(response.headers()),
@@ -829,25 +844,27 @@ where
     Fut: std::future::Future<Output = Result<String>>,
 {
     let token = authenticate(false, None).await?;
-    let response = client
-        .get(url)
-        .bearer_auth(&token)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .send()
-        .await
-        .context("query quota")?;
+    let response = fetch_bearer(client, url, &token).await?;
     if response.status() != reqwest::StatusCode::UNAUTHORIZED {
         return Ok(response);
     }
 
     let refreshed = authenticate(true, Some(token)).await?;
+    fetch_bearer(client, url, &refreshed).await
+}
+
+async fn fetch_bearer(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> Result<reqwest::Response> {
     client
         .get(url)
-        .bearer_auth(refreshed)
+        .bearer_auth(token)
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
-        .context("retry quota after authentication refresh")
+        .context("query quota")
 }
 
 /// Hand back a usable Kimi Code access token, refreshing the stored pair when
@@ -857,20 +874,23 @@ where
 /// spending its new refresh token again.
 pub(crate) async fn ensure_fresh_kimi_token(
     client: &reqwest::Client,
-    home: &Path,
-    credentials_path: &Path,
-    environment: &HashMap<String, String>,
+    runtime: &crate::kimi_auth::KimiRuntimeAuth,
     force: bool,
     rejected_token: Option<String>,
 ) -> Result<String> {
-    let initial = read_kimi_credentials(credentials_path).await?;
+    let initial = read_kimi_credentials(&runtime.credentials_path).await?;
     if !force && !initial.needs_refresh() {
         return Ok(initial.access_token);
     }
 
     // Held until this function returns, released on drop.
+    let home = runtime
+        .credentials_path
+        .parent()
+        .and_then(Path::parent)
+        .context("Kimi Code credentials path has no home")?;
     let _refresh_lock = KimiRefreshLock::acquire(home, KIMI_LOCK_WAIT).await?;
-    let active = read_kimi_credentials(credentials_path).await?;
+    let active = read_kimi_credentials(&runtime.credentials_path).await?;
     let changed_while_waiting = active.differs_from(&initial);
     if (!force && !active.needs_refresh())
         || (force
@@ -883,14 +903,8 @@ pub(crate) async fn ensure_fresh_kimi_token(
         bail!("Kimi Code refresh token is missing; run `kimi login`");
     }
 
-    let oauth_host = environment
-        .get("KIMI_CODE_OAUTH_HOST")
-        .or_else(|| environment.get("KIMI_OAUTH_HOST"))
-        .map(String::as_str)
-        .unwrap_or("https://auth.kimi.com")
-        .trim_end_matches('/');
     let response = client
-        .post(format!("{oauth_host}/api/oauth/token"))
+        .post(format!("{}/api/oauth/token", runtime.oauth_host))
         .header(reqwest::header::ACCEPT, "application/json")
         .form(&[
             ("client_id", KIMI_OAUTH_CLIENT_ID),
@@ -907,7 +921,7 @@ pub(crate) async fn ensure_fresh_kimi_token(
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
         ) {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            let recovery = read_kimi_credentials(credentials_path).await?;
+            let recovery = read_kimi_credentials(&runtime.credentials_path).await?;
             if recovery.refresh_token != active.refresh_token && !recovery.access_token.is_empty() {
                 return Ok(recovery.access_token);
             }
@@ -946,7 +960,7 @@ pub(crate) async fn ensure_fresh_kimi_token(
             .to_string(),
         expires_in,
     };
-    save_kimi_credentials(credentials_path, &refreshed)?;
+    save_kimi_credentials(&runtime.credentials_path, &refreshed)?;
     Ok(refreshed.access_token)
 }
 
@@ -1111,15 +1125,40 @@ async fn break_stale_kimi_lock(path: &Path) -> bool {
 
 fn parse_kimi_usage(payload: &Value) -> (Vec<QuotaWindow>, Option<String>) {
     let mut windows = Vec::new();
+    let mut labels = BTreeSet::new();
     if let Some(summary) = payload.get("usage")
         && let Some(window) = parse_kimi_window(summary, "Weekly limit")
     {
+        labels.insert(window.label.clone());
         windows.push(window);
     }
     if let Some(limits) = payload.get("limits").and_then(Value::as_array) {
         for (index, item) in limits.iter().enumerate() {
             let detail = item.get("detail").unwrap_or(item);
-            if let Some(window) = parse_kimi_window(detail, &format!("Limit #{}", index + 1)) {
+            let fallback = kimi_limit_label(item, index);
+            if let Some(window) = parse_kimi_window(detail, &fallback)
+                && labels.insert(window.label.clone())
+            {
+                windows.push(window);
+            }
+        }
+    }
+    if let Some(usages) = payload.get("usages").and_then(Value::as_object) {
+        // `limits[]` carries absolute counts while `usages` carries ratios for
+        // the same windows. Keep the more precise absolute row when both name
+        // the same window.
+        for (keys, label) in [
+            (&["limit_5h"][..], "5H"),
+            (&["limit_7d"][..], "Week"),
+            (&["limit_month_total", "month_total"][..], "Month"),
+            (&["limit_month_code", "month_code"][..], "Month code"),
+        ] {
+            let Some(value) = keys.iter().find_map(|key| usages.get(*key)) else {
+                continue;
+            };
+            if let Some(window) = parse_kimi_ratio_window(value, label)
+                && labels.insert(window.label.clone())
+            {
                 windows.push(window);
             }
         }
@@ -1129,6 +1168,33 @@ fn parse_kimi_usage(payload: &Value) -> (Vec<QuotaWindow>, Option<String>) {
         .and_then(value_i64)
         .map(|value| format!("booster {} remaining", value / 1_000_000));
     (windows, extra)
+}
+
+fn kimi_limit_label(item: &Value, index: usize) -> String {
+    let duration = item
+        .pointer("/window/duration")
+        .and_then(value_i64)
+        .or_else(|| item.get("duration").and_then(value_i64));
+    let unit = item
+        .pointer("/window/timeUnit")
+        .or_else(|| item.pointer("/window/time_unit"))
+        .or_else(|| item.get("timeUnit"))
+        .or_else(|| item.get("time_unit"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let seconds = duration.map(|duration| match unit.as_str() {
+        "TIME_UNIT_MINUTE" | "MINUTE" | "MINUTES" => duration.saturating_mul(60),
+        "TIME_UNIT_HOUR" | "HOUR" | "HOURS" => duration.saturating_mul(3_600),
+        "TIME_UNIT_DAY" | "DAY" | "DAYS" => duration.saturating_mul(86_400),
+        _ => duration,
+    });
+    match seconds {
+        Some(18_000) => "5H".to_owned(),
+        Some(604_800) => "Week".to_owned(),
+        None if index == 0 => "5H".to_owned(),
+        _ => format!("Limit #{}", index + 1),
+    }
 }
 
 fn parse_kimi_window(value: &Value, fallback: &str) -> Option<QuotaWindow> {
@@ -1145,17 +1211,8 @@ fn parse_kimi_window(value: &Value, fallback: &str) -> Option<QuotaWindow> {
         .or_else(|| value.get("title"))
         .and_then(Value::as_str)
         .unwrap_or(fallback);
-    let label = if provider_label.to_ascii_lowercase().contains("week") {
-        "Week".to_string()
-    } else if provider_label.to_ascii_lowercase().contains("5h") || fallback.starts_with("Limit #")
-    {
-        "5H".to_string()
-    } else {
-        provider_label.to_string()
-    };
-    let reset_value = ["resetAt", "reset_at", "resetTime", "reset_time"]
-        .iter()
-        .find_map(|key| value.get(*key));
+    let label = canonical_kimi_label(provider_label);
+    let reset_value = kimi_reset_value(value);
     let resets = reset_value.and_then(normalize_kimi_reset);
     let resets_at_epoch_seconds = reset_value.and_then(kimi_reset_epoch_seconds);
     let remaining_percent = match (used, limit) {
@@ -1174,10 +1231,56 @@ fn parse_kimi_window(value: &Value, fallback: &str) -> Option<QuotaWindow> {
     })
 }
 
+fn parse_kimi_ratio_window(value: &Value, label: &str) -> Option<QuotaWindow> {
+    let used_ratio = value
+        .get("used_ratio")
+        .or_else(|| value.get("usedRatio"))
+        .and_then(value_f64)
+        .filter(|ratio| ratio.is_finite())?
+        .clamp(0.0, 1.0);
+    let used_percent = (used_ratio * 100.0).ceil().clamp(0.0, 100.0) as u8;
+    let reset_value = kimi_reset_value(value);
+    Some(QuotaWindow {
+        label: label.to_owned(),
+        remaining_percent: Some(100 - used_percent),
+        used: None,
+        limit: None,
+        resets: reset_value.and_then(normalize_kimi_reset),
+        resets_at_epoch_seconds: reset_value.and_then(kimi_reset_epoch_seconds),
+    })
+}
+
+fn canonical_kimi_label(label: &str) -> String {
+    let lowercase = label.to_ascii_lowercase();
+    if lowercase.contains("5h") || lowercase.contains("5-hour") || lowercase.contains("5 hour") {
+        "5H".to_owned()
+    } else if lowercase.contains("week") || lowercase.contains("7d") {
+        "Week".to_owned()
+    } else if lowercase.contains("month") && lowercase.contains("code") {
+        "Month code".to_owned()
+    } else if lowercase.contains("month") {
+        "Month".to_owned()
+    } else {
+        label.to_owned()
+    }
+}
+
+fn kimi_reset_value(value: &Value) -> Option<&Value> {
+    ["resetAt", "reset_at", "resetTime", "reset_time"]
+        .iter()
+        .find_map(|key| value.get(*key))
+}
+
 fn value_i64(value: &Value) -> Option<i64> {
     value
         .as_i64()
         .or_else(|| value.as_str()?.parse::<i64>().ok())
+}
+
+fn value_f64(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.parse::<f64>().ok())
 }
 
 fn normalize_kimi_reset(value: &Value) -> Option<String> {

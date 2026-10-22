@@ -117,7 +117,7 @@ A machine is a host: `local` (this computer), `ssh` (a named host), or
 | What you get | Runtime | Machine | Execution policy | Session boundary |
 | --- | --- | --- | --- | --- |
 | Local checkout or isolated clone | `bare` | `local`, on a Linux or macOS controller host | Configured approvals | Existing directory or independent clone under `.mj/clones/` |
-| Podman container | `podman` | `local`, on Linux or WSL2 | Unconstrained | Disposable container |
+| Podman container | `podman` | `local`, on Linux, WSL2, or macOS with a rootless `podman machine` | Unconstrained | Disposable container |
 | Docker container | `docker` | `local`, with a reachable Linux Docker daemon, including a VM on macOS | Unconstrained | Disposable container |
 | Apple container | `apple-container` | `local`, on macOS 26+ with Apple silicon | Unconstrained | Disposable container |
 | Remote checkout or isolated clone | `bare` | an `ssh` machine, a named Linux host | Guardian or unconstrained | Existing directory or independent clone on that host |
@@ -138,7 +138,8 @@ architecture, or capacity pool. Per-runtime requirements are collected in
 the [Targets guide](/targets/).
 
 The controller, viewer, and local bare worker run on Linux and macOS. On macOS,
-Apple Container, Docker through a Linux VM, and remote targets are also available. Native Windows is not
+Podman through a rootless `podman machine`, Apple Container, Docker through a
+Linux VM, and remote targets are also available. Native Windows is not
 supported; run Mjolnir under WSL2 instead.
 
 ## Where to go next

@@ -52,6 +52,7 @@ mod go;
 mod help;
 mod ingest;
 mod keybinds;
+mod machine_runtimes;
 mod modal_surface;
 mod notify;
 mod row_index;
@@ -124,6 +125,7 @@ pub use crate::ingest::{
     PreparedMaterializedSessionSummary,
 };
 pub use crate::keybinds::KeyRoute;
+pub use crate::machine_runtimes::{MachineFinding, MachineRuntimeProbe, MachineRuntimesChecked};
 pub use crate::render::sessions::{NOTICE_NAME_CELLS, fit_session_name};
 pub use crate::resume::resume_profile_placeholders;
 pub use crate::review_settings::{ReviewSettingsChoices, ReviewSettingsDiscoveryResult};
@@ -573,6 +575,14 @@ pub enum DashboardAction {
     DiscoverSetup {
         generation: u64,
         scope: DetectScope,
+        /// The SSH and EC2 machines in the Settings draft, whose runtimes a
+        /// runtime detection probes as well as this machine's.
+        machines: Vec<(String, mj_core::config::Machine)>,
+    },
+    /// Probe machines that no runtime runs on and write the runtimes found.
+    CheckMachineRuntimes {
+        generation: u64,
+        machines: Vec<(String, mj_core::config::Machine)>,
     },
     SaveSetup {
         generation: u64,
@@ -919,6 +929,9 @@ pub struct DashboardState {
     pub(crate) version_label: String,
     pub(crate) target_readiness: BTreeMap<String, wizards::TargetReadiness>,
     pub(crate) target_readiness_generation: u64,
+    /// The latest check of each machine that no runtime runs on.
+    pub(crate) machine_runtime_checks: BTreeMap<String, machine_runtimes::MachineRuntimeCheck>,
+    pub(crate) machine_runtime_generation: u64,
     /// How far tests have moved the readiness clock forward. An `Instant`
     /// cannot precede boot, and a fresh CI machine has been up for less than
     /// the readiness TTL, so tests age answers by advancing this instead.
@@ -1231,6 +1244,8 @@ impl DashboardState {
             .to_owned(),
             target_readiness: BTreeMap::new(),
             target_readiness_generation: 0,
+            machine_runtime_checks: BTreeMap::new(),
+            machine_runtime_generation: 0,
             #[cfg(test)]
             readiness_clock_advance: std::time::Duration::ZERO,
             project_directory_checks: BTreeMap::new(),

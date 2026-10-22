@@ -523,9 +523,71 @@ pub(crate) fn spawn_first_run_setup(
     )
 }
 
+/// What probing one machine found, as the dashboard reports it.
+fn machine_runtime_probe(probe: mj_controller::setup::MachineProbe) -> mj_tui::MachineRuntimeProbe {
+    use mj_controller::setup::MachineProbeOutcome;
+    let finding = match &probe.outcome {
+        MachineProbeOutcome::Answered(_) => mj_tui::MachineFinding::Answered {
+            runtimes: probe.runtimes(),
+            rejected: probe
+                .rejected()
+                .map(|runtime| RejectedRuntime {
+                    label: runtime.kind.label().to_owned(),
+                    detail: runtime.detail.clone(),
+                    remediation: runtime.remediation.clone(),
+                })
+                .collect(),
+        },
+        MachineProbeOutcome::Unreachable {
+            detail,
+            remediation,
+        } => mj_tui::MachineFinding::Unreachable {
+            detail: detail.clone(),
+            remediation: remediation.clone(),
+        },
+    };
+    mj_tui::MachineRuntimeProbe {
+        machine_id: probe.machine_id,
+        machine: probe.machine,
+        finding,
+    }
+}
+
+/// Probe machines that no runtime runs on and write the runtimes they can
+/// run, off the event loop. Each machine is its own host, so they are probed
+/// at once, and quitting cancels the probes.
+pub(crate) fn spawn_machine_runtime_check(
+    generation: u64,
+    machines: Vec<(String, mj_core::config::Machine)>,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) -> JoinHandle<()> {
+    spawn_cancellable_io(
+        tracker,
+        "detecting machine runtimes",
+        updates,
+        move |cancelled| {
+            use mj_controller::setup;
+            let executor =
+                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(60));
+            let probes = setup::probe_machines(&machines, &executor);
+            let added =
+                setup::add_machine_runtimes(&mj_core::config::config_path(), &probes, &|| {
+                    executor.is_cancelled()
+                })?;
+            Ok(mj_tui::MachineRuntimesChecked {
+                probes: probes.into_iter().map(machine_runtime_probe).collect(),
+                added,
+            })
+        },
+        move |result| DashboardIoUpdate::MachineRuntimesChecked { generation, result },
+    )
+}
+
 pub(crate) fn spawn_setup_discovery(
     generation: u64,
     scope: DetectScope,
+    machines: Vec<(String, mj_core::config::Machine)>,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
@@ -533,7 +595,7 @@ pub(crate) fn spawn_setup_discovery(
         tracker,
         match scope {
             DetectScope::Profiles => "detecting agent profiles",
-            DetectScope::Runtimes => "detecting container runtimes",
+            DetectScope::Runtimes => "detecting runtimes",
         },
         updates,
         move |cancelled| {
@@ -542,12 +604,23 @@ pub(crate) fn spawn_setup_discovery(
                 CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
             let mut config = Config::default();
             let mut rejected_runtimes = Vec::new();
+            let mut machine_probes = Vec::new();
             match scope {
                 DetectScope::Profiles => {
                     config = setup::profiles_config(&setup::discover_profiles(&executor));
                 }
                 DetectScope::Runtimes => {
-                    for runtime in setup::discover_runtimes(&executor) {
+                    // The machines are other hosts, probed while this one is.
+                    let (local, machines) = std::thread::scope(|scope| {
+                        let machines = scope.spawn(|| setup::probe_machines(&machines, &executor));
+                        let local = setup::discover_runtimes(&executor);
+                        let machines = machines
+                            .join()
+                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                        (local, machines)
+                    });
+                    machine_probes = machines.into_iter().map(machine_runtime_probe).collect();
+                    for runtime in local {
                         if runtime.usable() {
                             let (id, target) =
                                 setup::local_runtime_target(runtime.kind, DEFAULT_IMAGE);
@@ -571,6 +644,7 @@ pub(crate) fn spawn_setup_discovery(
                 scope,
                 config,
                 rejected_runtimes,
+                machines: machine_probes,
             })
         },
         move |result| DashboardIoUpdate::SetupDiscovered { generation, result },

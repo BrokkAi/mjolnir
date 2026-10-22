@@ -943,14 +943,19 @@ pub(super) fn worker_launch_config_with_checkout(
             harness_home: PathBuf::from(&target_profile_home),
             // The staged home mirrors the profile home, so the marker's path
             // within the profile home is the one the worker must check and
-            // the credential sync must write. Kimi's is nested
-            // (`credentials/kimi-code.json`); its file name alone named a file
-            // at the top of the staged home that Kimi never reads.
-            authentication_marker: profile
-                .authentication_marker()
-                .strip_prefix(&profile.home)
-                .ok()
-                .map(|name| name.to_string_lossy().into_owned()),
+            // the credential sync must write. A native login is named by
+            // `credential_file_name` because its source can sit outside the
+            // profile home: MiMo Code's stock install keeps it in XDG, and
+            // the staged copy is still `data/auth.json`.
+            authentication_marker: if profile.auth_scheme().syncs_login() {
+                Some(profile.kind.credential_file_name().to_owned())
+            } else {
+                profile
+                    .authentication_marker()
+                    .strip_prefix(&profile.home)
+                    .ok()
+                    .map(|name| name.to_string_lossy().into_owned())
+            },
             bridge_command: PathBuf::from(bridge_command),
             bridge_args,
             harness_runtime: harness_runtime_policy(backend),

@@ -146,7 +146,22 @@ to opening masters, and to every command when sharing is off.
 ## Machine and runtime configuration
 
 The SSH host is one `[machines.<id>]` entry, and every runtime on it names that
-machine. The machine's keys are:
+machine. Sessions run on runtimes, so a machine with no runtime is not offered
+as a session target.
+
+You do not have to write the runtimes yourself. When you save a machine under
+Settings › Machines, Mjolnir probes it over SSH and adds every runtime it can
+run: a `bare` runtime named after the machine when the host is Linux or macOS
+on x86_64 or arm64, and `<machine>-podman` and `<machine>-docker` for each
+engine that passes the same check a launch runs. A machine already in the file
+without a runtime gets the same treatment each time `mj` starts and when you
+run `mj setup`, and Settings › Runtimes › Detect runtimes probes every machine.
+A machine that answers with nothing usable, or does not answer, keeps no
+runtime; Settings › Machines, the new-session picker and `mj doctor` say why,
+with the fix. Removing one runtime of a machine is kept; to stop using a host
+altogether, remove the machine.
+
+The machine's keys are:
 
 | Key | Required | Notes |
 | --- | --- | --- |
@@ -263,7 +278,9 @@ machine = "builder"
 
 ## Verifying a target
 
-`mj doctor` includes a dedicated check per runtime on an SSH machine. It
+`mj doctor` includes a dedicated check per runtime on an SSH machine, and a
+`machine.<id>` check for a machine that has no runtime, saying what probing it
+found. It
 first probes connectivity with `ssh -o BatchMode=yes <host> true`, and its
 failure messages include the exact command to fix the common causes
 (`ssh-copy-id` for key auth, `ssh-keyscan` for an untrusted host key). For

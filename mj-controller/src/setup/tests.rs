@@ -112,6 +112,27 @@ fn failed(stderr: &[u8]) -> CommandOutput {
     }
 }
 
+fn podman_info(rootless: bool) -> CommandOutput {
+    let json = serde_json::json!({
+        "host": {
+            "security": { "rootless": rootless },
+            "serviceIsRemote": false,
+            "idMappings": {
+                "uidmap": [
+                    { "container_id": 0, "host_id": 1000, "size": 1 },
+                    { "container_id": 1, "host_id": 100000, "size": 65536 },
+                ],
+                "gidmap": [
+                    { "container_id": 0, "host_id": 1000, "size": 1 },
+                    { "container_id": 1, "host_id": 100000, "size": 65536 },
+                ],
+            },
+        }
+    })
+    .to_string();
+    ok(json.as_bytes())
+}
+
 #[test]
 fn discovers_default_and_overridden_homes_with_authentication_markers() {
     let directory = tempfile::tempdir().unwrap();
@@ -381,7 +402,7 @@ fn golden_setup_origin_discovery() {
 fn runtime_probe_requires_podman_rootless_preflight_on_linux() {
     let executor = RuntimeProbeExecutor::new([
         ok(b"podman version 5.4.2\n"),
-        ok(b"0 1000 1\n1 100000 65536\n"),
+        podman_info(true),
         ok(b"29.0.1 linux\n"),
     ]);
     let runtimes = probe_local_runtimes(&executor, &ApplePlatform::Linux);
@@ -391,17 +412,20 @@ fn runtime_probe_requires_podman_rootless_preflight_on_linux() {
     assert_eq!(executor.commands.borrow()[0].args, ["--version"]);
     assert_eq!(
         executor.commands.borrow()[1].args,
-        ["unshare", "cat", "/proc/self/uid_map"]
+        ["info", "--format", "json"]
     );
     assert_eq!(executor.commands.borrow()[2].program, "docker");
     assert!(runtimes.iter().all(|runtime| runtime.usable()));
 }
 
-// Hard-won: #1150: Unsupported macOS hosts must not be told to install the Linux-only Podman runtime.
 #[test]
-fn macos_setup_skips_unsupported_runtimes_without_install_advice() {
+fn macos_setup_probes_rootless_podman_and_keeps_platform_gated_runtimes_out() {
     for (architecture, major_version) in [("aarch64", 15), ("x86_64", 26)] {
-        let executor = RuntimeProbeExecutor::new([ok(b"29.0.1 linux\n")]);
+        let executor = RuntimeProbeExecutor::new([
+            ok(b"podman version 5.4.2\n"),
+            podman_info(true),
+            ok(b"29.0.1 linux\n"),
+        ]);
         let runtimes = probe_local_runtimes(
             &executor,
             &ApplePlatform::Macos {
@@ -409,17 +433,23 @@ fn macos_setup_skips_unsupported_runtimes_without_install_advice() {
                 major_version,
             },
         );
-        assert_eq!(executor.commands.borrow().len(), 1);
-        assert_eq!(executor.commands.borrow()[0].program, "docker");
-        for kind in [RuntimeKind::Podman, RuntimeKind::AppleContainer] {
-            let runtime = runtimes
-                .iter()
-                .find(|runtime| runtime.kind == kind)
-                .unwrap();
-            assert_eq!(runtime.status, CheckStatus::Unsupported);
-            assert!(!runtime.usable());
-            assert!(runtime.remediation.is_none());
-        }
+        assert_eq!(executor.commands.borrow().len(), 3);
+        assert_eq!(executor.commands.borrow()[0].program, "podman");
+        assert_eq!(executor.commands.borrow()[2].program, "docker");
+
+        let podman = runtimes
+            .iter()
+            .find(|runtime| runtime.kind == RuntimeKind::Podman)
+            .unwrap();
+        assert!(podman.usable());
+
+        let apple = runtimes
+            .iter()
+            .find(|runtime| runtime.kind == RuntimeKind::AppleContainer)
+            .unwrap();
+        assert_eq!(apple.status, CheckStatus::Unsupported);
+        assert!(!apple.usable());
+        assert!(apple.remediation.is_none());
     }
 }
 
@@ -430,6 +460,8 @@ fn supported_macos_setup_probes_apple_daemon_without_running_a_smoke_test() {
         major_version: 26,
     };
     let executor = RuntimeProbeExecutor::new([
+        ok(b"podman version 5.4.2\n"),
+        podman_info(true),
         ok(b"29.0.1 linux\n"),
         ok(b"container version 1\n"),
         ok(b"running\n"),
@@ -440,9 +472,13 @@ fn supported_macos_setup_probes_apple_daemon_without_running_a_smoke_test() {
         .find(|runtime| runtime.kind == RuntimeKind::AppleContainer)
         .unwrap();
     assert!(apple.usable());
-    assert_eq!(executor.commands.borrow().len(), 3);
+    assert_eq!(executor.commands.borrow().len(), 5);
 
-    let missing = RuntimeProbeExecutor::new([ok(b"29.0.1 linux\n")]);
+    let missing = RuntimeProbeExecutor::new([
+        ok(b"podman version 5.4.2\n"),
+        podman_info(true),
+        ok(b"29.0.1 linux\n"),
+    ]);
     let runtimes = probe_local_runtimes(&missing, &platform);
     let apple = runtimes
         .iter()

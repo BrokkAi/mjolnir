@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import time
 import uuid
+import zipfile
 
 import reliability_lab
 
@@ -570,6 +571,53 @@ def main():
         else:
             raise RuntimeError(f"parent did not finish its report wake turn: {record}")
         cli("put-file", "--session", parent, "--path", "legacy.rs", str(lab.project / "legacy.rs"))
+
+        # Another session reads what this one cites: a workspace file, and a
+        # sub-agent's report directory as a zip, each copied under its own
+        # target path; a path outside what a session shares is refused (#1327).
+        fetched_root = lab.root / "fetched"
+
+        def fetch(path, *options):
+            return subprocess.run(
+                [str(args.mj.resolve()), "--instance", args.instance, "fetch",
+                 "--session", parent, "--path", path, *options],
+                env={**env, "TMPDIR": str(fetched_root)},
+                capture_output=True,
+                text=True,
+                timeout=WAIT_SECONDS,
+            )
+
+        legacy_text = "excluded\nlegacy source evidence\nexcluded\n"
+        fetched = fetch("legacy.rs")
+        assert fetched.returncode == 0, fetched.stderr
+        local = Path(fetched.stdout.strip())
+        # The copy sits under the file's own path on the target, which here is
+        # this host, so that path names the session's file too.
+        source = Path("/") / local.relative_to(fetched_root / "mjolnir" / parent)
+        assert source.name == "legacy.rs" and source.read_text() == legacy_text, source
+        assert local.read_text() == legacy_text
+        streamed = fetch("legacy.rs", "--stdout")
+        assert streamed.returncode == 0 and streamed.stdout == legacy_text, streamed
+        report_dir = Path(spawned["report_dir"])
+        (report_dir / "probes").mkdir(parents=True, exist_ok=True)
+        (report_dir / "probes" / "probe.log").write_bytes(b"probe\n" * 20000)
+        fetched = fetch(str(report_dir), "--json")
+        assert fetched.returncode == 0, fetched.stderr
+        reports = json.loads(fetched.stdout)
+        assert reports["kind"] == "directory" and reports["path"].endswith(".zip"), reports
+        with zipfile.ZipFile(reports["path"]) as archive:
+            probe = archive.read(f"{report_dir.name}/probes/probe.log")
+        assert probe == b"probe\n" * 20000
+        listed = fetch(str(report_dir / "probes"), "--ls", "--json")
+        assert listed.returncode == 0, listed.stderr
+        entries = json.loads(listed.stdout)["entries"]
+        assert [(entry["name"], entry["kind"], entry["size"]) for entry in entries] == [
+            ("probe.log", "file", 120000)
+        ], entries
+        assert entries[0]["modified"].endswith("Z"), entries
+        refused = fetch("/etc/passwd")
+        assert refused.returncode != 0, refused.stdout
+        assert "outside the directories a session shares" in refused.stderr, refused.stderr
         legacy = tool(parent, "spawn", {
             "task_name": "legacy-accepted",
             "instructions": "Return the legacy attachment evidence.",

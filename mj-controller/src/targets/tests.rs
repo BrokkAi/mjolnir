@@ -130,6 +130,48 @@ fn podman_output(stdout: impl AsRef<[u8]>) -> CommandOutput {
     }
 }
 
+/// A `podman info --format json` result with the fields the preflight reads.
+fn podman_info_json(
+    rootless: bool,
+    service_is_remote: bool,
+    uid_map: &[(u64, u64, u64)],
+) -> String {
+    let map = |map: &[(u64, u64, u64)]| {
+        map.iter()
+            .map(|(container_id, host_id, size)| {
+                serde_json::json!({
+                    "container_id": container_id,
+                    "host_id": host_id,
+                    "size": size,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    serde_json::json!({
+        "host": {
+            "security": { "rootless": rootless },
+            "serviceIsRemote": service_is_remote,
+            "idMappings": {
+                "uidmap": map(uid_map),
+                "gidmap": map(uid_map),
+            },
+        }
+    })
+    .to_string()
+}
+
+fn rootless_podman_info() -> String {
+    podman_info_json(true, false, &[(0, 1000, 1), (1, 100000, 65536)])
+}
+
+fn rootless_machine_info() -> String {
+    podman_info_json(true, true, &[(0, 1000, 1), (1, 100000, 65536)])
+}
+
+fn rootful_podman_info() -> String {
+    podman_info_json(false, false, &[(0, 0, 1), (1, 100000, 65536)])
+}
+
 fn podman_inspection(status: &str, session_id: &str, managed: &str) -> CommandOutput {
     podman_output(
         serde_json::to_vec(&serde_json::json!([{
@@ -182,39 +224,97 @@ fn a_missing_podman_is_reported_as_a_command_that_could_not_run() {
     );
 }
 
-/// `podman unshare` refuses to run for rootful or remote Podman, so its
-/// refusal is reported with the rootless fix rather than the UID-map one.
+#[cfg(target_os = "macos")]
 #[test]
-fn podman_preflight_reports_an_unshare_refusal_as_not_rootless() {
-    for refusal in [
-        "Error: please use unshare with rootless",
-        "Error: cannot use command \"podman unshare\" with the remote podman client",
-    ] {
-        let executor = PodmanPreflightExecutor::with_outputs([
-            podman_output(b"podman version 5.4.2\n"),
-            CommandOutput {
-                status: 125,
-                stdout: vec![],
-                stderr: refusal.as_bytes().to_vec(),
-            },
-        ]);
+fn podman_preflight_accepts_a_remote_rootless_podman_machine() {
+    let executor = PodmanPreflightExecutor::with_outputs([
+        podman_output(b"podman version 5.4.2\n"),
+        podman_output(rootless_machine_info()),
+    ]);
 
-        let error = verify_local_podman(&executor).unwrap_err();
+    let preflight = verify_local_podman(&executor).expect("macOS Podman machine is supported");
 
-        assert_eq!(
-            failed_podman_postcondition(&error),
-            Some(PodmanPostcondition::Rootless)
-        );
-        let error = error.to_string();
-        assert!(error.contains("Podman is local and rootless"), "{error}");
-        assert!(error.contains(refusal), "{error}");
-        assert!(
-            error.contains("Run Mjolnir as the ordinary user"),
-            "{error}"
-        );
-        assert!(!error.contains("Run Hel"), "{error}");
-        assert!(!error.contains("Install UID-map helpers"), "{error}");
-    }
+    assert_eq!(preflight.version, "5.4.2");
+}
+
+#[test]
+fn podman_preflight_reports_a_rootful_podman_as_not_rootless() {
+    let executor = PodmanPreflightExecutor::with_outputs([
+        podman_output(b"podman version 5.4.2\n"),
+        podman_output(rootful_podman_info()),
+    ]);
+
+    let error = verify_local_podman(&executor).unwrap_err();
+
+    assert_eq!(
+        failed_podman_postcondition(&error),
+        Some(PodmanPostcondition::Rootless)
+    );
+    let error = error.to_string();
+    assert!(
+        error.contains("Postcondition Podman is rootless"),
+        "{error}"
+    );
+    assert!(error.contains("reports rootful mode"), "{error}");
+    assert!(
+        error.contains("podman machine set --rootful=false"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("Podman on macOS always uses a Linux VM"),
+        "{error}"
+    );
+}
+
+#[test]
+fn podman_preflight_reports_an_incomplete_uid_map() {
+    let executor = PodmanPreflightExecutor::with_outputs([
+        podman_output(b"podman version 5.4.2\n"),
+        podman_output(podman_info_json(true, false, &[(0, 1000, 1)])),
+    ]);
+
+    let error = verify_local_podman(&executor).unwrap_err();
+
+    assert_eq!(
+        failed_podman_postcondition(&error),
+        Some(PodmanPostcondition::UidMap)
+    );
+    let error = error.to_string();
+    assert!(error.contains("maps container UIDs 0 and 1"), "{error}");
+    assert!(error.contains("UID map 0:1000:1"), "{error}");
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn podman_preflight_rejects_a_remote_client_on_a_linux_host() {
+    let executor = PodmanPreflightExecutor::with_outputs([
+        podman_output(b"podman version 5.4.2\n"),
+        podman_output(rootless_machine_info()),
+    ]);
+
+    let error = verify_local_podman(&executor).unwrap_err();
+
+    assert_eq!(
+        failed_podman_postcondition(&error),
+        Some(PodmanPostcondition::Remote)
+    );
+    assert!(error.to_string().contains("uses a local engine"), "{error}");
+}
+
+#[test]
+fn podman_preflight_reports_unparsable_info() {
+    let executor = PodmanPreflightExecutor::with_outputs([
+        podman_output(b"podman version 5.4.2\n"),
+        podman_output(b"not json\n"),
+    ]);
+
+    let error = verify_local_podman(&executor).unwrap_err();
+
+    assert_eq!(
+        failed_podman_postcondition(&error),
+        Some(PodmanPostcondition::Info)
+    );
+    assert!(error.to_string().contains("unparsable output"), "{error}");
 }
 
 /// Launch finding R5-3: on a host without Docker, doctor and Setup said
@@ -285,7 +385,7 @@ fn podman_preflight_accepts_supported_four_series_releases() {
     for version in ["4.0.0", "4.0.3", "4.2.0", "4.3.0"] {
         let executor = PodmanPreflightExecutor::with_outputs([
             podman_output(format!("podman version {version}\n").as_bytes()),
-            podman_output(b"         0       1000          1\n         1     100000      65536\n"),
+            podman_output(rootless_podman_info()),
         ]);
         assert_eq!(
             verify_local_podman(&executor).unwrap().version,
@@ -306,14 +406,10 @@ fn batched_ssh_probes(probes: &[(&str, i32, &str, &str)]) -> CommandOutput {
 }
 
 fn passing_ssh_probes(linger: (i32, &'static str, &'static str)) -> CommandOutput {
+    let info = rootless_podman_info();
     batched_ssh_probes(&[
         ("version", 0, "podman version 5.4.2\n", ""),
-        (
-            "uid_map",
-            0,
-            "         0       1000          1\n         1     100000      65536\n",
-            "",
-        ),
+        ("info", 0, &info, ""),
         ("linger", linger.0, linger.1, linger.2),
     ])
 }
@@ -337,7 +433,7 @@ fn ssh_podman_preflight_runs_every_probe_in_one_noninteractive_ssh_command() {
     assert!(remote.contains("'sh' '-c'"));
     assert!(!remote.contains("'-lc'"));
     assert!(remote.contains("podman --version"));
-    assert!(remote.contains("/proc/self/uid_map"));
+    assert!(remote.contains("podman info --format json"));
     assert!(remote.contains("loginctl show-user"));
     assert!(preflight.warnings.is_empty());
 }
@@ -430,25 +526,25 @@ fn ssh_podman_preflight_reports_each_failing_batched_probe() {
         "{error}"
     );
 
-    let rooted = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
+    let rootful = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
         ("version", 0, "podman version 5.4.2\n", ""),
-        (
-            "uid_map",
-            125,
-            "",
-            "Error: please use unshare with rootless",
-        ),
+        ("info", 0, &rootful_podman_info(), ""),
     ])]);
-    let error = verify_ssh_podman(&ssh(), &rooted).unwrap_err().to_string();
+    let error = verify_ssh_podman(&ssh(), &rootful).unwrap_err().to_string();
     assert!(
-        error.contains("Podman is local and rootless (`podman unshare` is allowed) failed"),
+        error.contains("Postcondition Podman is rootless was not met"),
         "{error}"
     );
     assert!(error.contains("On dev@example.test: Run Mjolnir as the ordinary user"));
 
     let uid_map = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
         ("version", 0, "podman version 5.4.2\n", ""),
-        ("uid_map", 0, "         0       1000          1\n", ""),
+        (
+            "info",
+            0,
+            &podman_info_json(true, false, &[(0, 1000, 1)]),
+            "",
+        ),
     ])]);
     let error = verify_ssh_podman(&ssh(), &uid_map).unwrap_err().to_string();
     assert!(
@@ -457,11 +553,11 @@ fn ssh_podman_preflight_reports_each_failing_batched_probe() {
     );
     assert!(error.contains("On dev@example.test: Install UID-map helpers"));
 
-    let uid_map_failed = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
+    let info_failed = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
         ("version", 0, "podman version 5.4.2\n", ""),
-        ("uid_map", 1, "", "cannot find newuidmap executable"),
+        ("info", 1, "", "cannot find newuidmap executable"),
     ])]);
-    let error = verify_ssh_podman(&ssh(), &uid_map_failed)
+    let error = verify_ssh_podman(&ssh(), &info_failed)
         .unwrap_err()
         .to_string();
     assert!(
@@ -534,12 +630,7 @@ fn ssh_podman_preflight_warns_when_the_linger_value_is_unrecognized() {
     // Output that ends after the Podman probes still yields a usable target.
     let missing = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
         ("version", 0, "podman version 5.4.2\n", ""),
-        (
-            "uid_map",
-            0,
-            "         0       1000          1\n         1     100000      65536\n",
-            "",
-        ),
+        ("info", 0, &rootless_podman_info(), ""),
     ])]);
     let warnings = verify_ssh_podman(&ssh(), &missing).unwrap().warnings;
     assert_eq!(warnings.len(), 1);
@@ -559,12 +650,7 @@ fn batched_preflight_parser_keeps_multiline_and_noisy_probe_output() {
             "podman version 5.4.2\n",
             "warning: one\nwarning: two\n",
         ),
-        (
-            "uid_map",
-            3,
-            "         0       1000          1\n         1     100000      65536\n",
-            "no trailing newline",
-        ),
+        ("info", 3, "{\n  \"host\": {}\n}\n", "no trailing newline"),
     ]);
 
     let probes = parse_podman_probe_output(&stdout);
@@ -580,11 +666,11 @@ fn batched_preflight_parser_keeps_multiline_and_noisy_probe_output() {
         String::from_utf8_lossy(&version.stderr).trim(),
         "warning: one\nwarning: two"
     );
-    let uid_map = &probes["uid_map"];
-    assert_eq!(uid_map.status, 3);
-    assert_eq!(String::from_utf8_lossy(&uid_map.stdout).lines().count(), 2);
+    let info = &probes["info"];
+    assert_eq!(info.status, 3);
+    assert_eq!(String::from_utf8_lossy(&info.stdout).lines().count(), 3);
     assert_eq!(
-        String::from_utf8_lossy(&uid_map.stderr).trim(),
+        String::from_utf8_lossy(&info.stderr).trim(),
         "no trailing newline"
     );
 }
@@ -1743,11 +1829,9 @@ fn filesystem_probe_answers_positionally_and_reaches_the_podman_host() {
         vec!["ext4".to_owned(), "nfs".to_owned()]
     );
     let seen = executor.seen.borrow();
-    assert_eq!(seen[0].program, "stat");
-    assert_eq!(
-        seen[0].args,
-        ["-f", "-c", "%T", "--", "/host/cache", "/host/models"]
-    );
+    assert_eq!(seen[0].program, "sh");
+    assert_eq!(seen[0].args[0], "-c");
+    assert_eq!(seen[0].args[3..], ["/host/cache", "/host/models"]);
 
     let remote = PodmanPreflightExecutor::with_outputs([podman_output(b"ext4\nnfs\n")]);
     probe_filesystem_types(Some(&ssh()), &paths, &remote).unwrap();
@@ -1755,11 +1839,126 @@ fn filesystem_probe_answers_positionally_and_reaches_the_podman_host() {
     assert_eq!(seen[0].program, "ssh");
     assert!(
         seen[0].args.last().is_some_and(|remote| {
-            remote == "'stat' '-f' '-c' '%T' '--' '/host/cache' '/host/models'"
+            remote.starts_with("'sh' '-c' ")
+                && remote.ends_with("'hel-filesystem' '/host/cache' '/host/models'")
         }),
         "{:?}",
         seen[0].args
     );
+}
+
+/// macOS output, recorded from `df -P` and `mount`, where device names and
+/// mount points carry spaces and `%`, names share prefixes, and one point is
+/// mounted twice. Every awkward case lands in one run of the real script.
+// Hard-won: #1330: a `%` in a macOS mount point cut the mount point short and lost its filesystem.
+// Hard-won: #1330: macOS `/bin/sh`, bash 3.2, could not parse the probe's `case` patterns inside `$(...)`.
+#[cfg(unix)]
+#[test]
+fn macos_filesystem_probe_reads_awkward_mount_points_from_df_and_mount() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin = tempfile::tempdir().unwrap();
+    let tool = |name: &str, body: &str| {
+        let path = bin.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    tool("uname", "echo Darwin\n");
+    tool(
+        "mount",
+        r#"cat <<'EOF'
+/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)
+devfs on /dev (devfs, local, nobrowse)
+/dev/disk3s5 on /System/Volumes/Data (apfs, local, journaled, nobrowse, protect, root data)
+map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)
+//builder@nas._smb._tcp.local/My Share on /Volumes/My Share (smbfs, nodev, nosuid, mounted by builder)
+/dev/disk5s1 on /Volumes/My Share 2 (exfat, local, nodev, nosuid, noowners)
+/dev/disk6s1 on /Volumes/50% done (hfs, local, journaled)
+map -fstab on /Volumes/stack (autofs, automounted)
+nas:/export on /Volumes/stack (nfs, nodev, nosuid, mounted by builder)
+EOF
+"#,
+    );
+    tool(
+        "df",
+        r#"echo 'Filesystem                              512-blocks      Used Available Capacity  Mounted on'
+case $3 in
+    /Users/*) echo '/dev/disk3s5                             965595304 773624968 154366136    84%    /System/Volumes/Data' ;;
+    '/Volumes/My Share 2'/*) echo '/dev/disk5s1  1000 100 900  10%    /Volumes/My Share 2' ;;
+    '/Volumes/My Share'/*) echo '//builder@nas._smb._tcp.local/My Share  1000 100 900  10%    /Volumes/My Share' ;;
+    '/Volumes/50% done'/*) echo '/dev/disk6s1  1000 500 500  50%    /Volumes/50% done' ;;
+    /Volumes/stack/*) echo 'nas:/export  1000 100 900  10%    /Volumes/stack' ;;
+    /nowhere/*) echo 'ghost  1000 100 900  10%    /nowhere' ;;
+    *) echo '/dev/disk3s1s1  1000 100 900  10%    /' ;;
+esac
+"#,
+    );
+    let probe = |paths: &[&str]| {
+        let mut command = CommandSpec::new(
+            "/bin/sh",
+            [
+                "-c",
+                super::preflight::FILESYSTEM_TYPES_SCRIPT,
+                "hel-filesystem",
+            ]
+            .into_iter()
+            .chain(paths.iter().copied()),
+        )
+        .purpose("test macOS filesystem probe");
+        let path = std::env::var("PATH").unwrap();
+        command
+            .env
+            .insert("PATH".into(), format!("{}:{path}", bin.path().display()));
+        ProcessExecutor.execute(&command).unwrap()
+    };
+
+    let output = probe(&[
+        "/Users/builder/.cache/mjolnir/build",
+        "/Volumes/My Share/models",
+        "/Volumes/My Share 2/scratch",
+        "/Volumes/50% done/cache",
+        "/Volumes/stack/data",
+        "/opt/tools",
+    ]);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "apfs\nsmbfs\nexfat\nhfs\nnfs\napfs\n",
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // A mount point `mount` does not list fails visibly instead of guessing.
+    let output = probe(&["/nowhere/cache"]);
+    assert_ne!(output.status, 0);
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("mount lists no filesystem holding /nowhere/cache"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The probe asks the host's own tools, whose output differs by platform:
+/// macOS `stat` cannot name a filesystem, so there it reads `df` and `mount`.
+#[cfg(unix)]
+#[test]
+fn filesystem_probe_names_this_hosts_filesystems_in_order() {
+    let root = tempfile::tempdir().unwrap();
+    let spaced = root.path().join("a directory with spaces");
+    std::fs::create_dir(&spaced).unwrap();
+    let paths = [root.path().to_path_buf(), spaced];
+
+    let filesystems =
+        probe_filesystem_types(None, &paths, &crate::targets::ProcessExecutor).unwrap();
+
+    assert_eq!(filesystems.len(), 2, "{filesystems:?}");
+    assert!(
+        filesystems
+            .iter()
+            .all(|filesystem| !filesystem.is_empty() && !filesystem.contains(char::is_whitespace)),
+        "{filesystems:?}"
+    );
+    assert_eq!(filesystems[0], filesystems[1]);
 }
 
 #[test]

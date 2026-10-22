@@ -753,11 +753,14 @@ pub struct PushedBranch {
     pub remote: String,
 }
 
-/// Which file of the session's workspace to read.
+/// Which path on the session's target to read or list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileQuery {
-    /// Path relative to the session's workspace root.
+    /// Relative to the directory the session's agent runs in, or absolute.
     pub path: String,
+    /// Answer a JSON listing of the path instead of its content.
+    #[serde(default)]
+    pub list: bool,
 }
 
 /// What form the caller wants the session's work in.

@@ -1036,7 +1036,8 @@ mod tests {
             &self,
             _session_id: String,
             _path: PathBuf,
-        ) -> BoxFuture<'_, Result<Vec<u8>, ExportError>> {
+            _mode: mj_checkpoint::archive::FetchMode,
+        ) -> BoxFuture<'_, Result<mj_checkpoint::archive::FetchedPath, ExportError>> {
             Box::pin(async { Err(ExportError::Refused("not used in this test".into())) })
         }
         fn push_branch(

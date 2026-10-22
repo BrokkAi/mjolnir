@@ -404,17 +404,20 @@ pub fn verify_ssh_podman(
 pub(crate) enum PodmanPostcondition {
     Version,
     Rootless,
+    Remote,
+    Info,
     UidMap,
 }
 
 /// One Podman command whose result is checked.
 ///
-/// No probe checks rootless mode on its own: `podman unshare` refuses to run
-/// for rootful or remote Podman, so the UID-map probe reports that failure.
+/// `podman info` works through a remote client, unlike `podman unshare`. That
+/// matters on macOS, where Podman always talks to a `podman machine` VM and
+/// the client is remote by design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PodmanProbe {
     Version,
-    UidMap,
+    Info,
 }
 
 /// A rootless Podman postcondition that was not met, carrying which one.
@@ -478,28 +481,28 @@ impl PodmanProbe {
     pub(super) fn key(self) -> &'static str {
         match self {
             Self::Version => "version",
-            Self::UidMap => "uid_map",
+            Self::Info => "info",
         }
     }
 
     pub(super) fn args(self) -> &'static [&'static str] {
         match self {
             Self::Version => &["podman", "--version"],
-            Self::UidMap => &["podman", "unshare", "cat", "/proc/self/uid_map"],
+            Self::Info => &["podman", "info", "--format", "json"],
         }
     }
 
     pub(super) fn purpose(self) -> &'static str {
         match self {
             Self::Version => "check Podman version",
-            Self::UidMap => "check rootless Podman UID map",
+            Self::Info => "check rootless Podman mode and UID map",
         }
     }
 
     pub(super) fn postcondition(self) -> PodmanPostcondition {
         match self {
             Self::Version => PodmanPostcondition::Version,
-            Self::UidMap => PodmanPostcondition::UidMap,
+            Self::Info => PodmanPostcondition::Info,
         }
     }
 
@@ -507,41 +510,38 @@ impl PodmanProbe {
     fn checks(self) -> &'static str {
         match self {
             Self::Version => "that Podman 4.0.0 or newer is installed",
-            Self::UidMap => "that rootless Podman maps container UIDs 0 and 1",
+            Self::Info => "that Podman is rootless and maps container UIDs 0 and 1",
         }
     }
-}
-
-/// Whether `podman unshare` refused to run because Podman is rootful
-/// (`please use unshare with rootless`) or remote (`cannot use command
-/// "podman unshare" with the remote podman client`).
-fn unshare_refused_non_rootless(stderr: &str) -> bool {
-    stderr.contains("unshare with rootless") || stderr.contains("remote podman client")
 }
 
 impl PodmanPostcondition {
     pub(super) fn statement(self) -> &'static str {
         match self {
             Self::Version => "Postcondition `podman --version` succeeds with Podman 4.0.0 or newer",
-            Self::Rootless => {
-                "Postcondition Podman is local and rootless (`podman unshare` is allowed)"
-            }
-            Self::UidMap => {
-                "Postcondition `podman unshare cat /proc/self/uid_map` maps container UIDs 0 and 1"
-            }
+            Self::Rootless => "Postcondition Podman is rootless",
+            Self::Remote => "Postcondition Podman uses a local engine",
+            Self::Info => "Postcondition `podman info` succeeds",
+            Self::UidMap => "Postcondition `podman info` maps container UIDs 0 and 1",
         }
     }
 
     pub(crate) fn remediation(self) -> &'static str {
         match self {
             Self::Version => {
-                "Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`."
+                "Install or upgrade Podman: on macOS `brew install podman` then `podman machine init --now`; Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`."
             }
             Self::Rootless => {
-                "Run Mjolnir as the ordinary user without `sudo`; if a remote Podman connection is configured, unset `CONTAINER_HOST` or select the rootless local connection."
+                "Run Mjolnir as the ordinary user without `sudo`, and use a rootless Podman. On macOS run `podman machine set --rootful=false` and restart the machine; on Linux do not run Podman as root and unset `CONTAINER_HOST` if a remote connection is selected."
+            }
+            Self::Remote => {
+                "Unset `CONTAINER_HOST` and `CONTAINER_CONNECTION`, then select the local rootless Podman connection. On macOS the Podman machine connection is the supported local client; a manually configured remote connection is not."
+            }
+            Self::Info => {
+                "Make sure `podman info` succeeds as the user running Mjolnir. On macOS start the Podman machine with `podman machine start`, creating it with `podman machine init --now` if none exists; on Linux install the UID-map helpers (`sudo apt install -y uidmap` on Debian/Ubuntu or `sudo dnf install -y shadow-utils` on Fedora) if Podman reports one is missing."
             }
             Self::UidMap => {
-                "Install UID-map helpers (`sudo apt install -y uidmap` on Debian/Ubuntu or `sudo dnf install -y shadow-utils` on Fedora), then add subordinate ranges with `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 \"$USER\"` and start a fresh login session."
+                "Install UID-map helpers (`sudo apt install -y uidmap` on Debian/Ubuntu or `sudo dnf install -y shadow-utils` on Fedora), then add subordinate ranges with `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 \"$USER\"` and start a fresh login session. On macOS, update Podman and recreate the machine if its rootless UID map does not cover container IDs 0 and 1."
             }
         }
     }
@@ -563,23 +563,145 @@ pub(super) fn verify_podman_probes(
     let version = probe_output(PodmanProbe::Version)?;
     let version = parse_podman_version(host, &version.stdout)?;
 
-    let uid_map = probe_output(PodmanProbe::UidMap)?;
-    if !valid_rootless_uid_map(&uid_map.stdout) {
+    let info = probe_output(PodmanProbe::Info)?;
+    let info = parse_podman_info(host, &info.stdout)?;
+
+    if !info.rootless {
         return Err(probe_failure(
             host,
-            PodmanPostcondition::UidMap,
+            PodmanPostcondition::Rootless,
             format!(
-                "{}: {} was not met.",
+                "{}: {} was not met. `podman info` reports rootful mode.",
                 host.failure(),
-                PodmanPostcondition::UidMap.statement(),
+                PodmanPostcondition::Rootless.statement(),
             ),
         ));
+    }
+
+    // A remote client is expected only for a local macOS controller using a
+    // Podman machine. On Linux, `serviceIsRemote` means CONTAINER_HOST or a
+    // selected connection points this target at another host's engine, whose
+    // paths and containers are not the local ones Mjolnir records.
+    let macos_machine = matches!(host, PodmanHost::Local) && cfg!(target_os = "macos");
+    if info.service_is_remote && !macos_machine {
+        return Err(probe_failure(
+            host,
+            PodmanPostcondition::Remote,
+            format!(
+                "{}: {} was not met. `podman info` reports serviceIsRemote=true.",
+                host.failure(),
+                PodmanPostcondition::Remote.statement(),
+            ),
+        ));
+    }
+
+    for container_id in [0, 1] {
+        if !info.covers_uid(container_id) {
+            return Err(probe_failure(
+                host,
+                PodmanPostcondition::UidMap,
+                format!(
+                    "{}: {} was not met. `podman info` reports UID map {}.",
+                    host.failure(),
+                    PodmanPostcondition::UidMap.statement(),
+                    info.uid_map_description(),
+                ),
+            ));
+        }
     }
 
     Ok(PodmanPreflight {
         version,
         warnings: Vec::new(),
     })
+}
+
+/// The parts of `podman info` the preflight checks.
+#[derive(Debug)]
+struct PodmanInfo {
+    rootless: bool,
+    service_is_remote: bool,
+    /// `(container_id, host_id, size)` triples from `host.idMappings.uidmap`.
+    uid_map: Vec<(u64, u64, u64)>,
+}
+
+impl PodmanInfo {
+    fn covers_uid(&self, container_id: u64) -> bool {
+        self.uid_map.iter().any(|(start, _, size)| {
+            start
+                .checked_add(*size)
+                .is_some_and(|end| *start <= container_id && container_id < end)
+        })
+    }
+
+    fn uid_map_description(&self) -> String {
+        if self.uid_map.is_empty() {
+            "no UID mappings".to_owned()
+        } else {
+            self.uid_map
+                .iter()
+                .map(|(container, host, size)| format!("{container}:{host}:{size}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    }
+}
+
+/// Read rootless mode and the UID map from `podman info --format json`.
+///
+/// `podman info` reports the server's view, so it works for local Rootless
+/// Podman, a remote Podman machine, and an SSH host alike.
+fn parse_podman_info(host: PodmanHost<'_>, stdout: &[u8]) -> Result<PodmanInfo> {
+    let value: serde_json::Value = serde_json::from_slice(stdout).map_err(|error| {
+        probe_failure(
+            host,
+            PodmanPostcondition::Info,
+            format!(
+                "{}: `podman info --format json` returned unparsable output: {error}.",
+                host.failure()
+            ),
+        )
+    })?;
+    let rootless = value
+        .pointer("/host/security/rootless")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| podman_info_failure(host, "it did not report rootless mode"))?;
+    let service_is_remote = value
+        .pointer("/host/serviceIsRemote")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let entries = value
+        .pointer("/host/idMappings/uidmap")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| podman_info_failure(host, "it did not report a UID map"))?;
+    let mut uid_map = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let field = |name: &str| {
+            entry
+                .get(name)
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    podman_info_failure(host, &format!("it reported a UID mapping without {name}"))
+                })
+        };
+        uid_map.push((field("container_id")?, field("host_id")?, field("size")?));
+    }
+    Ok(PodmanInfo {
+        rootless,
+        service_is_remote,
+        uid_map,
+    })
+}
+
+fn podman_info_failure(host: PodmanHost<'_>, observation: &str) -> anyhow::Error {
+    probe_failure(
+        host,
+        PodmanPostcondition::Info,
+        format!(
+            "{}: `podman info` could not be used: {observation}.",
+            host.failure()
+        ),
+    )
 }
 
 /// Report either an explicitly unsafe systemd setting or an unavailable
@@ -706,17 +828,20 @@ pub(super) fn check_podman_probe_status(
     if output.status != 0 {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stderr = stderr.trim();
-        let postcondition = if probe == PodmanProbe::UidMap && unshare_refused_non_rootless(stderr)
-        {
-            PodmanPostcondition::Rootless
+        let postcondition = probe.postcondition();
+        // Podman's message is usually a sentence without a final period.
+        // End it before the remediation starts, so the fix does not read as
+        // part of the command output.
+        let reported = if stderr.ends_with(['.', '!', '?']) {
+            stderr.to_owned()
         } else {
-            probe.postcondition()
+            format!("{stderr}.")
         };
         return Err(probe_failure(
             host,
             postcondition,
             format!(
-                "{}: {} failed. Podman reported: {stderr}",
+                "{}: {} failed. Podman reported: {reported}",
                 host.failure(),
                 postcondition.statement(),
             ),
@@ -751,7 +876,7 @@ probe() {
     return "$status"
 }
 probe version podman --version || exit 0
-probe uid_map podman unshare cat /proc/self/uid_map
+probe info podman info --format json
 probe linger sh -c 'loginctl show-user "$(id -u)" --property=Linger --value'
 exit 0
 "#;
@@ -923,33 +1048,47 @@ pub(super) fn parse_podman_version(host: PodmanHost<'_>, stdout: &[u8]) -> Resul
     Ok(candidate.to_owned())
 }
 
-pub(super) fn valid_rootless_uid_map(stdout: &[u8]) -> bool {
-    let mappings = String::from_utf8_lossy(stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            Some((
-                fields.next()?.parse::<u64>().ok()?,
-                fields.next()?.parse::<u64>().ok()?,
-                fields.next()?.parse::<u64>().ok()?,
-            ))
-        })
-        .collect::<Vec<_>>();
-    [0, 1].into_iter().all(|container_id| {
-        mappings.iter().any(|(inside, _outside, length)| {
-            inside
-                .checked_add(*length)
-                .is_some_and(|end| *inside <= container_id && container_id < end)
-        })
-    })
+/// Print the filesystem type of each argument, one per line. macOS `stat`
+/// cannot name one, so there each `mount` entry, `<device> on <point>
+/// (<type>, ...)`, is matched against the end of the path's `df` line: the
+/// longest point it ends with holds the path, and among entries for that
+/// point the last, the one on top, names the type. Both device names and
+/// mount points can contain spaces and `%`, so no `df` column is parsed.
+/// That match is a function rather than inline in `$(...)`: macOS `/bin/sh`
+/// is bash 3.2, which ends a command substitution at the first `)`, so it
+/// cannot parse a `case` pattern inside one.
+pub(super) const FILESYSTEM_TYPES_SCRIPT: &str = r#"if [ "$(uname -s)" != Darwin ]; then
+    exec stat -f -c %T -- "$@"
+fi
+mounted_type() {
+    best= found=
+    while IFS= read -r line; do
+        head=${line% (*}
+        [ "$head" != "$line" ] || continue
+        case $head in *" on /"*) ;; *) continue ;; esac
+        point=/${head#* on /}
+        case $1 in *" $point") ;; *) continue ;; esac
+        [ "${#point}" -ge "${#best}" ] || continue
+        options=${line#"$head ("}
+        best=$point found=${options%%[,)]*}
+    done
+    printf '%s' "$found"
 }
+mounts=$(mount) || exit 1
+for path do
+    usage=$(df -P -- "$path" | sed -n 2p)
+    [ -n "$usage" ] || { printf 'df reported no filesystem for %s\n' "$path" >&2; exit 1; }
+    filesystem=$(printf '%s\n' "$mounts" | mounted_type "$usage")
+    [ -n "$filesystem" ] || { printf 'mount lists no filesystem holding %s\n' "$path" >&2; exit 1; }
+    printf '%s\n' "$filesystem"
+done"#;
 
-/// Filesystem type of each directory, probed on the host that runs the
-/// container engine. `ssh` names that host for a remote Podman target; `None`
-/// probes this machine.
+/// Filesystem type of each directory, probed on the host that owns it: the
+/// one that runs the container engine, or a bare session's own machine.
+/// `ssh` names that host; `None` probes this machine.
 ///
-/// The reply is positional, so the whole batch fails unless `stat` answered for
-/// every directory in order.
+/// The reply is positional, so the whole batch fails unless the host answered
+/// for every directory in order.
 pub fn probe_filesystem_types(
     ssh: Option<&SshTarget>,
     paths: &[PathBuf],
@@ -959,11 +1098,10 @@ pub fn probe_filesystem_types(
         return Ok(Vec::new());
     }
     let mut args = vec![
-        "stat".to_owned(),
-        "-f".to_owned(),
+        "sh".to_owned(),
         "-c".to_owned(),
-        "%T".to_owned(),
-        "--".to_owned(),
+        FILESYSTEM_TYPES_SCRIPT.to_owned(),
+        "hel-filesystem".to_owned(),
     ];
     args.extend(paths.iter().map(|path| path.to_string_lossy().into_owned()));
     let host = match ssh {

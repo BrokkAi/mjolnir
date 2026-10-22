@@ -333,8 +333,12 @@ impl DashboardState {
     /// has not answered yet still counts, so the step is shown while it
     /// might gain a choice. The one target must also be usable now and have
     /// no size to set: a container or EC2 target is sized on that step, so
-    /// its step is kept.
+    /// its step is kept. So is the step of a configuration with a machine no
+    /// runtime runs on, which the step names.
     pub(in crate::wizards) fn lone_target<W: WizardDraft>(&self, wizard: &W) -> Option<usize> {
+        if self.config.machines_without_runtimes().next().is_some() {
+            return None;
+        }
         let mut offered = self
             .config
             .targets

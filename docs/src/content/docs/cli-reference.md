@@ -62,8 +62,10 @@ mj setup instructions --platform macos
 first interactive startup. It detects installed harnesses and home-directory
 overrides, adds profiles and a bundle for the current GitHub origin, and
 preserves existing entries and preferences. Matching entries are reused;
-identifier collisions get separate names. It saves additions without questions
-and reports actionable doctor errors. Container downloads remain background
+identifier collisions get separate names. It also probes every SSH or EC2
+machine that has no runtime yet and adds the runtimes it can run. It saves
+additions without questions and reports actionable doctor errors. Container
+downloads remain background
 daemon work. Configure container options, SSH hosts, and AWS targets in Settings;
 use `mj doctor --smoke` for explicit container smoke tests.
 
@@ -276,8 +278,9 @@ mj wait --session <id> [--turn <turn-id>] [--timeout <seconds>] [--return-on-inp
 mj transcript --session <id> [--after-seq <seq>] [--limit <count>]
              [--role <role>]... [--finished-only] [--json]
 mj diff --session <id> [--base <revision>] [--json]
-mj export --session <id> [--kind patch|branch|bundle|file] [--branch <name>]
-           [--path <workspace-relative path>] [--out <path>] [--json]
+mj export --session <id> [--kind patch|branch|bundle] [--branch <name>]
+           [--out <path>] [--json]
+mj fetch --session <id> --path <path> [--stdout | --ls] [--json]
 mj sessions [--session <id>] [--all] [--workspace <name>] [--json]
 mj suspend --session <id> [--acknowledge-unpublished-work] [--json]
 mj destroy --session <id> [--delete-branch] [--json]
@@ -373,6 +376,8 @@ cannot be combined with a session that runs directly in the selected directory.
 - `mj put-file` uploads a file, or standard input with `-`, into an idle
   session's workspace. It refuses to replace a file unless you pass
   `--overwrite`.
+- `mj fetch` copies a file, or a directory as a zip archive, from a session's
+  target to this machine and prints where it landed. See below.
 - `mj models` lists the models and efforts a profile offers.
 - `mj set-config` applies one session setting, such as the model or effort.
   Without `--key` and `--value` it lists the settings the session's agent
@@ -550,12 +555,36 @@ remove it (this replaces `mj close --force`). `mj cancel-turn` was removed too;
 use `mj interrupt-turn`. Both old names fail with a notice naming their
 replacement and perform no lifecycle action.
 
-`mj export` writes a patch, a bundle, or one workspace file (`--kind file
---path <path>`) to `--out`, or to standard output when no file is named;
-`--kind branch` pushes the session's work and reports the branch and remote
-instead. With `--json` and `--out`, `mj export` prints one object with the
-`path`, the `bytes` written, and the `format` (`patch`, `bundle`, or `file`);
-with `--json` and no `--out` the export itself is still the output. `mj transcript`
+`mj export` writes a patch or a bundle to `--out`, or to standard output when
+no file is named; `--kind branch` pushes the session's work and reports the
+branch and remote instead. With `--json` and `--out`, `mj export` prints one
+object with the `path`, the `bytes` written, and the `format` (`patch` or
+`bundle`); with `--json` and no `--out` the export itself is still the output.
+
+`mj fetch` reads a path on a session's target, which may be another host or a
+container, so one session can read evidence another session cites. A relative
+`--path` resolves in the directory the session's agent runs in; an absolute
+one is read as the target spells it. After symlinks are resolved, the path
+must lie in the session's workspace, its sub-agent report directories, or the
+target's temporary directory. A file is copied as it is, up to 16 MiB. A
+directory arrives as a zip archive of at most 16 MiB, made from at most
+128 MiB of files; symlinks inside it are stored as links, not followed. The
+copy lands in `$TMPDIR/mjolnir/<session>/` followed by the path on the target,
+with `.zip` after a directory's name, and `mj fetch` prints that local path.
+For example, `mj fetch --session d8443f17… --path /tmp/rust-veto-cf` prints
+`/tmp/mjolnir/d8443f17…/tmp/rust-veto-cf.zip`. With `--json` it prints the
+local `path`, the `kind` (`file` or `directory`), the `source` path on the
+target, and the `bytes` written. `--stdout` writes the file, or the zip
+archive, to standard output instead.
+
+`mj fetch --ls` lists the path on standard output instead of copying it: a
+directory's entries in name order, or the file itself. Each line gives the size
+in bytes (`-` for a directory), the modification time in UTC, and the name,
+with `/` after a directory and `-> target` after a symlink. Symlinks are listed,
+not followed. With `--json` it prints the resolved `path` and an `entries`
+array; each entry has `name`, `kind` (`file`, `directory`, `symlink`, or
+`other`), `size`, `modified` (RFC 3339, or null when the target records none),
+and `target` for a symlink. `mj transcript`
 pages by `--after-seq`; use the response's `next_after_seq` for the next page.
 The selected roles are filtered before the page limit. The cursor advances
 across entries outside that selection, so a page with no matching items can
@@ -606,7 +635,7 @@ Most behavior belongs in [configuration](/configuration/). These environment var
 | `CLAUDE_CONFIG_DIR` | Claude Code home used by setup discovery and native import. |
 | `KIMI_CODE_HOME` | Kimi Code home used by setup discovery and native import. |
 | `GROK_HOME` | Grok Build home used by setup discovery and native import. |
-| `MIMOCODE_HOME` | MiMo Code profile root used by setup discovery; contains `config/` and `data/`. |
+| `MIMOCODE_HOME` | MiMo Code profile root used by setup discovery; contains `config/` and `data/`. A profile at the conventional `~/.mimocode` home uses the stock `~/.config/mimocode` and `~/.local/share/mimocode` trees instead. |
 | `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | Muse configuration and external native session storage roots, respectively. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | GitHub token available for syncing into every live target except a bare runtime on this machine. |
 | `GIT_SSH_COMMAND` | SSH command used by checkpoint/archive Git operations. |

@@ -415,12 +415,8 @@ fn ssh_machine_id(
     build_cache: Option<&TargetBuildCache>,
     target_id: &str,
 ) -> String {
-    let existing = machines
-        .iter()
-        .find(|(_, machine)| matches!(machine, Machine::Ssh { ssh: other, .. } if other == ssh))
-        .map(|(id, _)| id.clone());
-    let id = match existing {
-        Some(id) => id,
+    let id = match find_ssh_machine(machines, ssh) {
+        Some(id) => id.to_owned(),
         None => {
             let base = if validate_id("machine", &ssh.host).is_ok() {
                 ssh.host.clone()
@@ -532,32 +528,94 @@ pub fn stored_target(
             machine: ssh_machine_id(machines, ssh, None, container.build_cache.as_ref(), id),
             container: without_cache(container),
         },
-        TargetTemplate::AwsEc2 {
-            aws_profile,
-            region,
-            launch_template,
-            launch_template_version,
-            ssh_user,
-            address_source,
-            identity_file,
-            ssh_args,
-        } => StoredTarget::Bare {
+        TargetTemplate::AwsEc2 { .. } => StoredTarget::Bare {
             machine: machine_id_for(
                 machines,
-                Machine::AwsEc2 {
-                    aws_profile: aws_profile.clone(),
-                    region: region.clone(),
-                    launch_template: launch_template.clone(),
-                    launch_template_version: launch_template_version.clone(),
-                    ssh_user: ssh_user.clone(),
-                    address_source: address_source.clone(),
-                    identity_file: identity_file.clone(),
-                    ssh_args: ssh_args.clone(),
-                },
+                aws_machine(target).expect("an EC2 target has an EC2 machine"),
                 id,
             ),
             permissions: None,
         },
+    }
+}
+
+/// The EC2 machine an EC2 target launches from. Two EC2 targets are on the
+/// same machine exactly when every launch setting matches.
+fn aws_machine(target: &TargetTemplate) -> Option<Machine> {
+    let TargetTemplate::AwsEc2 {
+        aws_profile,
+        region,
+        launch_template,
+        launch_template_version,
+        ssh_user,
+        address_source,
+        identity_file,
+        ssh_args,
+    } = target
+    else {
+        return None;
+    };
+    Some(Machine::AwsEc2 {
+        aws_profile: aws_profile.clone(),
+        region: region.clone(),
+        launch_template: launch_template.clone(),
+        launch_template_version: launch_template_version.clone(),
+        ssh_user: ssh_user.clone(),
+        address_source: address_source.clone(),
+        identity_file: identity_file.clone(),
+        ssh_args: ssh_args.clone(),
+    })
+}
+
+/// The id of the SSH machine reaching `ssh`. At most one machine may hold a
+/// given connection, so the connection alone identifies it.
+fn find_ssh_machine<'a>(
+    machines: &'a BTreeMap<String, Machine>,
+    ssh: &SshConnection,
+) -> Option<&'a str> {
+    machines
+        .iter()
+        .find(|(_, machine)| matches!(machine, Machine::Ssh { ssh: other, .. } if other == ssh))
+        .map(|(id, _)| id.as_str())
+}
+
+/// The id of the machine in `machines` a fused target runs on, matched the
+/// way saving matches it, or `None` when no machine there holds it yet.
+/// Every local runtime runs on `local`, which exists whether or not
+/// `machines` names it.
+pub fn target_machine_id<'a>(
+    target: &TargetTemplate,
+    machines: &'a BTreeMap<String, Machine>,
+) -> Option<&'a str> {
+    match target {
+        TargetTemplate::LocalBare
+        | TargetTemplate::LocalPodman { .. }
+        | TargetTemplate::LocalDocker { .. }
+        | TargetTemplate::AppleContainer { .. } => Some(LOCAL_MACHINE_ID),
+        TargetTemplate::SshBare { ssh, .. }
+        | TargetTemplate::SshPodman { ssh, .. }
+        | TargetTemplate::SshDocker { ssh, .. } => find_ssh_machine(machines, ssh),
+        TargetTemplate::AwsEc2 { .. } => {
+            let wanted = aws_machine(target)?;
+            machines
+                .iter()
+                .find(|(_, machine)| **machine == wanted)
+                .map(|(id, _)| id.as_str())
+        }
+    }
+}
+
+/// The runtime half of a fused target: `bare`, `podman`, `docker` or
+/// `apple-container`, as `[targets.<id>]` spells its `kind`.
+#[must_use]
+pub const fn runtime_kind_name(target: &TargetTemplate) -> &'static str {
+    match target {
+        TargetTemplate::LocalBare
+        | TargetTemplate::SshBare { .. }
+        | TargetTemplate::AwsEc2 { .. } => "bare",
+        TargetTemplate::LocalPodman { .. } | TargetTemplate::SshPodman { .. } => "podman",
+        TargetTemplate::LocalDocker { .. } | TargetTemplate::SshDocker { .. } => "docker",
+        TargetTemplate::AppleContainer { .. } => "apple-container",
     }
 }
 

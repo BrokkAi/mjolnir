@@ -1659,7 +1659,7 @@ impl CommandExecutor for GitWithPodmanPreflightExecutor {
         let stdout: &[u8] = if command.args.iter().any(|argument| argument == "--version") {
             b"podman version 5.4.2\n"
         } else {
-            b"         0       1000          1\n         1     100000      65536\n"
+            br#"{"host":{"security":{"rootless":true},"serviceIsRemote":false,"idMappings":{"uidmap":[{"container_id":0,"host_id":1000,"size":1},{"container_id":1,"host_id":100000,"size":65536}]}}}"#
         };
         Ok(CommandOutput {
             status: 0,
