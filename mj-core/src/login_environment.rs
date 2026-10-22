@@ -122,7 +122,33 @@ const DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 
 #[cfg(unix)]
 pub fn discover() -> Result<Environment> {
-    discover_account(Account::current()?, DISCOVERY_TIMEOUT)
+    let started = std::time::Instant::now();
+    let account = Account::current()?;
+    let shell = account.shell.clone();
+    let environment = discover_account(account, DISCOVERY_TIMEOUT)?;
+    let path_entries = environment
+        .get("PATH")
+        .map(|path| std::env::split_paths(path).count())
+        .unwrap_or(0);
+    tracing::info!(
+        shell = %shell.display(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        path_entries,
+        "resolved the account's shell environment"
+    );
+    Ok(environment)
+}
+
+/// The shell the probe starts, for diagnostics that explain where a session's
+/// environment came from.
+#[cfg(unix)]
+pub fn account_shell() -> Result<std::path::PathBuf> {
+    Ok(Account::current()?.shell)
+}
+
+#[cfg(not(unix))]
+pub fn account_shell() -> Result<std::path::PathBuf> {
+    anyhow::bail!("target shell environment requires a Unix account")
 }
 
 #[cfg(unix)]

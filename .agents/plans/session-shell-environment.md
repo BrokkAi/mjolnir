@@ -20,10 +20,9 @@ The observable result: on a machine whose only `node` comes from nvm in `~/.zshr
 - [x] Add `allowScripts` to the pinned Claude harness asset and assert after `npm ci` that no install scripts are blocked.
 - [x] Bump the Claude install identity so caches written before the `allowScripts` change are replaced instead of reused.
 - [x] Update `docs/src/content/docs/profiles.md`, `docs/src/content/docs/troubleshooting.md` and `docs/src/content/docs/custom-images.md`.
-- [x] Run the workspace suite and clippy in the session clone.
+- [x] Report the session environment from `mj doctor`: shell, startup time, and the `node`, `npm` and `npx` a session will find.
+- [ ] Run the workspace suite and clippy in the session clone.
 - [ ] Commit.
-
-- [ ] (Deferred) Report the session toolchain from `mj doctor`.
 
 ## Surprises & Discoveries
 
@@ -62,8 +61,8 @@ The observable result: on a machine whose only `node` comes from nvm in `~/.zshr
 - Decision: for managed harness installs, list the packages whose install scripts are required in the pinned asset `package.json` (`allowScripts`) and verify afterwards that npm reports no pending install scripts, rather than setting `NPM_CONFIG_DANGEROUSLY_ALLOW_ALL_SCRIPTS`.
   Rationale: the asset already pins exact versions with a lockfile, so naming the package is as maintainable as the pin itself, keeps the permission explicit, and produces no warnings on npm versions that do not gate scripts. The post-install assertion turns a forgotten entry into a clear installer error instead of an unusable harness.
 
-- Decision: defer the `mj doctor` session-toolchain check to a follow-up, and leave the launch preflight as the authoritative Node check.
-  Rationale: naming which harnesses need Node in doctor would create a second owner for a fact the managed installer already owns, and the mismatch doctor showed here (profiles "ready" while launches failed) is better fixed by one authoritative check than two. Recorded as a follow-up rather than silently dropped.
+- Decision: report the environment from doctor as a warning when Node is missing, not as a fixable failure.
+  Rationale: doctor's profile checks cover homes and authentication, so they called a Node-based profile ready while every launch failed — the mismatch this plan exists to remove. Naming which harnesses need Node in doctor would create a second owner for a fact the managed installer already owns, so the check instead always reports the shell, its startup cost and the `node`/`npm`/`npx` paths a session will get, and stays a warning because Muse, OpenCode, Kimi and Grok sessions do not need Node. A probe failure is fixable, because no session can start then.
   Date/Author: 2026-10-22, primary agent.
 
 ## Outcomes & Retrospective
@@ -72,7 +71,11 @@ Sessions now start from the environment the account's terminal has. The probe st
 
 The managed Claude install now runs the package's install script. With `allowScripts` present the cached entrypoint is a Mach-O arm64 binary reporting `2.1.306 (Claude Code)`, and `npm install-scripts ls --json` reports nothing pending; with the entry removed, the installer fails loudly and names the package and the asset to edit. The `pkg2` install identity makes caches written by the earlier packaging get replaced instead of reused.
 
-Remaining: `mj doctor` still reports harness homes and authentication rather than the toolchain a session will have; that check is the natural follow-up. The preparation process-group test failed twice on this machine while it was heavily loaded and passed alone and in a later full run; it waits two seconds for a fake harness to start, which is sensitive to load and independent of this change.
+`mj doctor` now answers the question that took a conversation to settle: it names the shell sessions start, how long its startup took, and the `node`, `npm` and `npx` paths a session will receive, and it fails as fixable when the probe itself cannot complete. On the development machine it reports `zsh as an interactive login shell (1301 ms)` and the three nvm paths.
+
+The probe runs once per worker, not once per process in a session: the worker re-execs itself with the resolved environment under `--login-environment-ready`, and the ACP supervisor and reviewer are launched with that flag and inherit it. Only a genuinely separate session probes on its own. That was already true before this change and is why the environment stays consistent between the bridge, reviewers, terminals and user shells.
+
+Remaining: no automated test drives a real worker whose toolchain exists only in an interactive startup file, because the probe reads the account database rather than an environment variable; the checked-in fixture shell covers that contract one layer down. The preparation process-group test failed twice on this machine while it was heavily loaded and passed alone and in later full runs; it waits two seconds for a fake harness to start, which is sensitive to load and independent of this change.
 
 ## Context and Orientation
 
