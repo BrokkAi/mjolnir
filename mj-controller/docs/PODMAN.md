@@ -2,25 +2,32 @@
 
 This is the operational contract for a host that runs Mjolnir Podman
 targets. For a coding-agent handoff, run `mj setup instructions --platform
-linux` and `mj doctor --json`, then give the instructions page plus the output
-of `mj doctor --json` to the coding agent. The host is ready only when every
-postcondition in the Verification section below passes for the same unprivileged
-user that will run `mj`.
+linux` (or `macos`) and `mj doctor --json`, then give the instructions page
+plus the output of `mj doctor --json` to the coding agent. The host is ready
+only when every postcondition in the Verification section below passes: for
+the same unprivileged user that will run `mj` on Linux or WSL2, or for the
+rootless Podman machine on macOS.
 
 Mjolnir supports rootless Podman **4.0.0 or newer**. Podman 4 is the minimum
 because Mjolnir relies on the rootless user-namespace behavior and CLI
-interfaces that it probes (`podman unshare`). Podman 3.x is not a supported
+interfaces that it probes (`podman info`). Podman 3.x is not a supported
 Mjolnir runtime.
 
 ## Platforms
 
-Mjolnir's local Podman target requires a Linux host, including WSL2. It is not
-available on macOS: every `podman` command there is a remote client for a
-Linux VM (`podman machine`), and `podman unshare` cannot run through that
-client. Switching the machine between rootful and rootless does not change
-that. On macOS use [Docker](/docker/) or [Apple
-container](/apple-container/), or configure a Podman target on an SSH Linux
-machine ([SSH and SSH Podman](/ssh/)).
+Mjolnir's local Podman target runs rootless Podman on Linux, WSL2, or macOS
+with a `podman machine`. On macOS the `podman` CLI is a remote client for the
+machine's Linux VM; that is expected and supported. Rootful machines are not
+supported. A manually configured remote Podman connection is not supported; on
+macOS use the connection created by `podman machine`. Use the Podman `ssh`
+target for a container engine on another machine ([SSH and SSH
+Podman](/ssh/)).
+
+The machine shares `$HOME:$HOME` by default, so keep projects under your home
+directory or add the needed directory when creating the machine. Writable
+attached directories use Podman's copy-on-write overlay, which depends on the
+machine's shared filesystem; verify attachments with `mj doctor --json --smoke`
+before relying on them.
 
 New session containers run as uid and gid `0:0` in Podman's default rootless
 mapping. Container uid 0 maps to the account running Mjolnir, so files written
@@ -53,18 +60,20 @@ kind = "podman"
 image = "localhost/mjolnir/agent-dev:latest"
 ```
 
-Mjolnir invokes the local `podman` CLI as the user running Mjolnir; it does not use
-`sudo`, a shared Podman socket, or a remote Podman connection. Before each
-Podman session and while `mj doctor` evaluates Podman, Mjolnir performs
-these fast runtime checks:
+Mjolnir invokes the `podman` CLI as the user running Mjolnir; it does not use
+`sudo` or a shared Podman socket. Before each Podman session and while
+`mj doctor` evaluates Podman, Mjolnir performs these fast runtime checks:
 
 ```console
 podman --version
-podman unshare cat /proc/self/uid_map
+podman info --format json
 ```
 
-`podman unshare` runs only for local rootless Podman, so the second check also
-shows that Podman is not rootful and not using a remote connection.
+The second check reads `host.security.rootless` and `host.idMappings.uidmap`.
+It works through a remote client, so the same check covers local rootless
+Podman on Linux, a rootless `podman machine` on macOS, and a Podman host
+reached over SSH. On Linux, a `serviceIsRemote` engine is rejected because the
+local target would otherwise record containers on another host.
 
 For a session, Mjolnir starts a detached, labeled container from the configured
 image, uses `podman exec` for the worker, Git, harness, and clone commands, and
@@ -311,30 +320,42 @@ Podman as described above.
 
 ### 2. Rootless mode and subordinate mappings work
 
+On Linux and WSL2:
+
 ```console
 grep -E "^$(id -un):" /etc/subuid
 grep -E "^$(id -un):" /etc/subgid
-podman unshare cat /proc/self/uid_map
-podman unshare cat /proc/self/gid_map
+podman info --format json
+```
+
+On macOS:
+
+```console
+podman machine inspect --format '{{.Rootful}}'
+podman info --format json
 ```
 
 Expected:
 
-- Both `grep` commands print an entry for the current user.
-- Both map commands succeed. Their output must map container ID `0` and at
-  least one additional ID (normally a first line mapping ID `0` followed by a
-  line beginning at ID `1` with a large range). For example:
+- `Rootful` prints `false` on macOS.
+- `podman info` reports `"rootless": true` under `host.security`.
+- The `host.idMappings.uidmap` entries map container ID `0` and at least one
+  additional ID (normally a first entry for ID `0` followed by an entry
+  beginning at ID `1` with a large range). For example:
 
-  ```text
-           0       1000          1
-           1     100000      65536
+  ```json
+  [
+    { "container_id": 0, "host_id": 1000, "size": 1 },
+    { "container_id": 1, "host_id": 100000, "size": 65536 }
+  ]
   ```
 
-Mjolnir runs the UID-map command itself before every local-Podman session. It also
-checks that container IDs `0` and `1` are mapped, which catches a login with no
-usable subordinate range. If the map commands fail with `please use unshare
-with rootless` or `cannot use command "podman unshare" with the remote podman
-client`, see "`podman unshare` refuses to run" under "Common failures and
+- On Linux and WSL2, both `grep` commands print an entry for the current user.
+
+Mjolnir runs `podman info` itself before every local-Podman session. It checks
+the same two things, which catches a login or machine with no usable
+subordinate range. If `podman info` reports rootful mode or cannot connect, see
+"Podman reports rootful mode or cannot connect" under "Common failures and
 exact remediations" below.
 
 ### 3. The configured runtime image is available
@@ -420,21 +441,38 @@ podman system migrate
 If the example range is already assigned, the administrator must choose an
 unused range instead. Do not edit mappings for another account.
 
-### `podman unshare` refuses to run
+### Podman reports rootful mode or cannot connect
 
-`podman unshare` fails with `please use unshare with rootless` when Podman
-runs as root, and with `cannot use command "podman unshare" with the remote
-podman client` when a remote Podman connection is selected. Mjolnir must run as
-an unprivileged user. Start a normal shell, do not invoke Mjolnir through
-`sudo`, and remove a remote Podman override before retrying:
+`podman info` reports `"rootless": false` when Podman runs as root or when a
+macOS machine was created with `--rootful`. Mjolnir requires a rootless engine.
+
+On macOS, switch the machine back to rootless and restart it:
+
+```console
+podman machine set --rootful=false
+podman machine stop
+podman machine start
+```
+
+On Linux and WSL2, run Mjolnir as the ordinary user without `sudo`. If a remote
+connection is selected, unset it and check the local engine:
 
 ```console
 unset CONTAINER_HOST CONTAINER_CONNECTION
-podman unshare cat /proc/self/uid_map
+podman info --format json
 ```
 
-If a named Podman connection is selected, switch back to the local rootless
-connection with the site's normal `podman system connection default` policy.
+On macOS, `podman info` normally uses the machine connection. If it cannot
+connect, start the machine and check the selected connection:
+
+```console
+podman machine start
+podman system connection list
+```
+
+Mjolnir rejects a `serviceIsRemote` engine on Linux because the local target
+would record containers on another host. Use a Podman `ssh` target for a
+different machine instead.
 
 ### Pulls or GitHub HTTPS fail inside a container
 
@@ -447,8 +485,8 @@ never put proxy credentials in Mjolnir's committed configuration.
 ### WSL2
 
 Use a current **WSL2** distribution, not WSL1. On Windows, verify the version
-and update the WSL kernel when `podman unshare` reports `operation not
-permitted` or user namespaces are unavailable:
+and update the WSL kernel when Podman reports `operation not permitted` or user
+namespaces are unavailable:
 
 ```powershell
 wsl -l -v
