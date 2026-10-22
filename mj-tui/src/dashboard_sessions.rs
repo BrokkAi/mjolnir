@@ -1279,10 +1279,10 @@ impl DashboardState {
         if quota.is_usage_priced() {
             return plain(API_LABEL);
         }
-        let Some(weekly) = quota.weekly_window().and_then(quota_remaining_percent) else {
+        let Some(primary) = quota.summary_window().and_then(quota_remaining_percent) else {
             return plain("unavailable");
         };
-        let five_hour = if weekly_quota_exhausted(quota) {
+        let five_hour = if quota.weekly_window().is_none() || weekly_quota_exhausted(quota) {
             None
         } else {
             quota.five_hour_window().and_then(quota_remaining_percent)
@@ -1294,7 +1294,7 @@ impl DashboardState {
             )
         };
         (
-            percent(weekly),
+            percent(primary),
             five_hour.map_or_else(PickerCell::blank, percent),
         )
     }
