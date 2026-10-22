@@ -1656,7 +1656,12 @@ pub(crate) fn render_resume_wizard(
                 subagents: wizard
                     .subagent_choice_applies(dashboard)
                     .then_some(&*wizard.subagents),
-                stopped_subagents: if wizard.moving {
+                stopped_subagents: if wizard.moving
+                    && wizard
+                        .preparation
+                        .as_ref()
+                        .is_some_and(|preparation| preparation.stops_subagents)
+                {
                     dashboard
                         .subagents_not_handed_back(&wizard.session_id)
                         .len()

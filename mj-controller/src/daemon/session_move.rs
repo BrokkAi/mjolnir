@@ -37,7 +37,7 @@ impl RuntimeState {
         self: &Arc<Self>,
         selection: MoveSelection,
     ) -> Result<MovePreparation> {
-        let (source_harness, source_active) = {
+        let (source_harness, source_active, source_has_parent_role) = {
             let controller_owner = self.owner();
             let controller = controller_owner.controller();
             let source = controller
@@ -50,6 +50,10 @@ impl RuntimeState {
                 matches!(
                     source.state,
                     SessionState::Running | SessionState::Disconnected
+                ),
+                crate::controller::move_session::parent_tools_enabled(
+                    &source.subagents.clone().unwrap_or_default(),
+                    source.harness_kind,
                 ),
             )
         };
@@ -75,6 +79,16 @@ impl RuntimeState {
                 .is_none_or(|snapshot| !snapshot.operational.native_session_is_ready());
         preparation.active |= preparation.source_unavailable;
         if let Some(snapshot) = snapshot {
+            // An in-place Move stops the children itself when the source
+            // worker is too old to drain their requests.
+            preparation.stops_subagents |= preparation.in_place
+                && source_has_parent_role
+                && snapshot
+                    .operational
+                    .relay_protocol_version
+                    .is_some_and(|version| {
+                        !crate::controller::move_session::worker_drains_subagent_requests(version)
+                    });
             let mut operational = snapshot.operational;
             operational.queued_prompts.clear();
             operational.checkpoint_barrier = None;

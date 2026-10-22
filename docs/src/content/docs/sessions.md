@@ -404,6 +404,16 @@ which does not migrate a running process, installed packages, container layers,
 or files outside the declared workspace. Either way the old harness process
 stops, so running process memory is lost.
 
+A Move that rebuilds the environment stops the session's sub-agents the same
+way a suspend does (see [Sub-agents and suspend](#sub-agents-and-suspend)), and
+the confirmation warns when one is still at work. An in-place Move keeps them
+running when the destination harness has Mjolnir's sub-agent tools. After the
+swap, one line in the conversation lists the sub-agents that were kept, and
+the agent is told to collect their reports again. If the destination harness
+of an in-place Move does not have those tools, Move refuses while a sub-agent
+is running. A source worker older than relay protocol 32 cannot keep them, so
+Move stops them, and the confirmation warns about this.
+
 A Move that rebuilds the environment copies the workspace with rsync, so the
 machine running Mjolnir, the source, and the destination each need rsync 3.0 or
 newer. The rsync that ships with macOS is older; install a current one with

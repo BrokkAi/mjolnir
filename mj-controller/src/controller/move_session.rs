@@ -583,9 +583,7 @@ impl MoveSourceRelay {
             .expect("held source relay checked")
             .connection_mut()
             .protocol_version();
-        if !(mj_core::relay::RelayRequest::SetSubagentAdmission { open: false })
-            .supported_at(protocol_version)
-        {
+        if !worker_drains_subagent_requests(protocol_version) {
             return Ok(SubagentMutationDrain::UnsupportedWorkerProtocol(
                 protocol_version,
             ));
@@ -1296,6 +1294,7 @@ impl Controller {
             workspace,
             source_unavailable: false,
             in_place,
+            stops_subagents: should_stop_move_subagents(in_place, destination_has_parent_role),
             conversion,
             selection,
             source_profile_id: source.last_profile.clone(),
@@ -2645,6 +2644,13 @@ fn roleless_move_children_error(children: &[String]) -> Option<String> {
 
 fn should_stop_move_subagents(in_place: bool, destination_has_parent_role: bool) -> bool {
     !in_place || !destination_has_parent_role
+}
+
+/// Whether a source worker at this relay protocol can close sub-agent
+/// admission, which an in-place Move needs to keep the parent's children.
+pub(crate) fn worker_drains_subagent_requests(protocol_version: u32) -> bool {
+    mj_core::relay::RelayRequest::SetSubagentAdmission { open: false }
+        .supported_at(protocol_version)
 }
 
 fn subagent_mutations_pending(

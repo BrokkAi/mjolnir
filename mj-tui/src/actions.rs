@@ -2380,6 +2380,7 @@ mod tests {
             destination_checks: Default::default(),
             workspace: None,
             in_place: false,
+            stops_subagents: true,
             source_unavailable: false,
             conversion: None,
             selection: mj_core::state::MoveSelection {
