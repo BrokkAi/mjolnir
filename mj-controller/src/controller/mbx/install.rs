@@ -1422,7 +1422,7 @@ mod tests {
             "command -v mbx",
             "$HOME/.local/bin/mbx",
             "$HOME/.cargo/bin/mbx",
-            "readlink -f --",
+            "cd -P",
             "case \"$resolved\" in /*)",
         ] {
             assert!(

@@ -1049,25 +1049,33 @@ pub(super) fn parse_podman_version(host: PodmanHost<'_>, stdout: &[u8]) -> Resul
 }
 
 /// Print the filesystem type of each argument, one per line. macOS `stat`
-/// cannot name one, so there `df` names the mount point holding the path and
-/// the last `mount` entry for that point, the one on top, names its type.
-const FILESYSTEM_TYPES_SCRIPT: &str = r#"if [ "$(uname -s)" != Darwin ]; then
+/// cannot name one, so there each `mount` entry, `<device> on <point>
+/// (<type>, ...)`, is matched against the end of the path's `df` line: the
+/// longest point it ends with holds the path, and among entries for that
+/// point the last, the one on top, names the type. Both device names and
+/// mount points can contain spaces and `%`, so no `df` column is parsed.
+pub(super) const FILESYSTEM_TYPES_SCRIPT: &str = r#"if [ "$(uname -s)" != Darwin ]; then
     exec stat -f -c %T -- "$@"
 fi
 mounts=$(mount) || exit 1
 for path do
-    point=$(df -P -- "$path" | sed -n '2s/^.*[0-9]%[[:space:]]*//p')
-    [ -n "$point" ] || { printf 'df named no mount point for %s\n' "$path" >&2; exit 1; }
+    usage=$(df -P -- "$path" | sed -n 2p)
+    [ -n "$usage" ] || { printf 'df reported no filesystem for %s\n' "$path" >&2; exit 1; }
     filesystem=$(printf '%s\n' "$mounts" | {
-        found=
+        best= found=
         while IFS= read -r line; do
-            case $line in
-                *" on $point ("*) rest=${line##*" on $point ("}; found=${rest%%[,)]*} ;;
-            esac
+            head=${line% (*}
+            [ "$head" != "$line" ] || continue
+            case $head in *" on /"*) ;; *) continue ;; esac
+            point=/${head#* on /}
+            case $usage in *" $point") ;; *) continue ;; esac
+            [ "${#point}" -ge "${#best}" ] || continue
+            options=${line#"$head ("}
+            best=$point found=${options%%[,)]*}
         done
         printf '%s' "$found"
     })
-    [ -n "$filesystem" ] || { printf 'mount lists no filesystem at %s\n' "$point" >&2; exit 1; }
+    [ -n "$filesystem" ] || { printf 'mount lists no filesystem holding %s\n' "$path" >&2; exit 1; }
     printf '%s\n' "$filesystem"
 done"#;
 

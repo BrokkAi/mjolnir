@@ -66,15 +66,18 @@ fn platform_limit(
     const CONTAINERS: &str = "Container sessions run without the shared build cache, because \
         containers on macOS run Linux in a virtual machine that cannot run a macOS mbx or share \
         its cache.";
+    // The probe also searches user directories a login PATH may omit, so it
+    // cannot say that bare sessions find what it found.
     let reason = match &native {
         Some(native) => format!(
-            "mbx {} runs natively on this Mac, so bare sessions here use it from their PATH. \
-             {CONTAINERS}",
-            native.version
+            "mbx {} runs natively on this Mac at {}; bare sessions here use it when it is on \
+             their login PATH. {CONTAINERS}",
+            native.version,
+            native.program.display()
         ),
         None => format!(
             "mbx is not installed on this Mac; bare sessions here use it once it is installed \
-             natively. {CONTAINERS}"
+             natively and on their login PATH. {CONTAINERS}"
         ),
     };
     Ok(Some(PlatformLimit { native, reason }))
@@ -756,9 +759,20 @@ pub(crate) struct NativeMbx {
 
 /// Find the same native executable whether it is on PATH or in a common
 /// per-user install directory, then resolve symlinks before reporting it.
+/// Links are followed one at a time because macOS before 12.3 has no
+/// `readlink -f`; every path handed to `readlink` starts with `/`.
 pub(super) const NATIVE_VERSION_SCRIPT: &str = r#"for candidate in "$(command -v mbx 2>/dev/null || true)" "$HOME/.local/bin/mbx" "$HOME/.cargo/bin/mbx"; do
     [ -n "$candidate" ] && [ -x "$candidate" ] || continue
-    resolved=$(readlink -f -- "$candidate" 2>/dev/null) || continue
+    case "$candidate" in /*) resolved=$candidate ;; *) resolved=$PWD/$candidate ;; esac
+    hops=0
+    while [ -L "$resolved" ]; do
+        [ "$hops" -lt 40 ] || continue 2
+        link=$(readlink "$resolved" 2>/dev/null) || continue 2
+        case "$link" in /*) resolved=$link ;; *) resolved=${resolved%/*}/$link ;; esac
+        hops=$((hops + 1))
+    done
+    directory=$(cd -P "${resolved%/*}/" 2>/dev/null && pwd -P) || continue
+    resolved=${directory%/}/${resolved##*/}
     case "$resolved" in /*) ;; *) continue ;; esac
     if version=$("$resolved" --version 2>/dev/null); then
         printf '%s
@@ -1522,8 +1536,9 @@ mod tests {
                 };
                 match native {
                     Some(version) => assert!(
-                        reason.contains(&format!("mbx {version} runs natively on this Mac"))
-                            && reason.contains("bare sessions here use it"),
+                        reason.contains(&format!(
+                            "mbx {version} runs natively on this Mac at /Users/builder/.local/bin/mbx"
+                        )) && reason.contains("when it is on their login PATH"),
                         "{reason}"
                     ),
                     None => assert!(reason.contains("not installed on this Mac"), "{reason}"),
@@ -2289,14 +2304,30 @@ mod tests {
         };
         let real_mbx = real_bin.join("mbx-real");
         install(&real_mbx, "1.30.0");
-        symlink(&real_mbx, path_bin.join("mbx")).unwrap();
+        // Relative links, one of them reached through a symlinked directory.
+        symlink(&real_bin, root.path().join("alias")).unwrap();
+        symlink("mbx-real", real_bin.join("mbx-hop")).unwrap();
+        symlink("../alias/mbx-hop", path_bin.join("mbx")).unwrap();
         install(&local_bin.join("mbx"), "1.31.0");
         install(&cargo_bin.join("mbx"), "1.32.0");
         let readlink = std::env::split_paths(&std::env::var_os("PATH").unwrap())
             .map(|directory| directory.join("readlink"))
             .find(|candidate| candidate.is_file())
             .expect("readlink utility is available");
-        symlink(readlink, path_bin.join("readlink")).unwrap();
+        // Hard-won: #1330: the probe needed `readlink -f`, which macOS before 12.3 lacks.
+        std::fs::write(
+            path_bin.join("readlink"),
+            format!(
+                "#!/bin/sh\ncase $1 in -*) echo \"readlink: illegal option $1\" >&2; exit 1 ;; esac\nexec '{}' \"$@\"\n",
+                readlink.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            path_bin.join("readlink"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
 
         let mut command = CommandSpec::new("/bin/sh", ["-c", NATIVE_VERSION_SCRIPT])
             .purpose("test native mbx path resolution");
@@ -2314,7 +2345,7 @@ mod tests {
         assert_eq!(
             parse_native_probe_output(&output.stdout).unwrap(),
             NativeMbx {
-                program: real_mbx.clone(),
+                program: std::fs::canonicalize(&real_mbx).unwrap(),
                 version: "1.30.0".into(),
             }
         );

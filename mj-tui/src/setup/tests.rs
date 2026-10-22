@@ -2124,8 +2124,9 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
             budget_note: None,
             stats: None,
             off_reason: Some(mj_core::state::BuildCacheOff::UnsupportedPlatform(
-                "mbx 1.26.0 runs natively on this Mac, so bare sessions here use it from \
-                 their PATH. Container sessions run without the shared build cache."
+                "mbx 1.26.0 runs natively on this Mac at /Users/builder/.local/bin/mbx; bare \
+                 sessions here use it when it is on their login PATH. Container sessions run \
+                 without the shared build cache."
                     .into(),
             )),
         })),
