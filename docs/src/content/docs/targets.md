@@ -78,9 +78,11 @@ muse-acp's auto-review on, and disables only the sandbox
 can still be denied. Muse's guardian on raw targets is the same review with
 the sandbox kept on.
 
-Codex, Claude Code, Grok Build, OpenCode, MiMo Code, and Muse Code can preserve guardian
-approvals on raw targets. Kimi Code cannot, so Mjolnir displays a prominent
-warning when it is selected without an isolation boundary. Read [Security boundaries](/security/)
+Codex, Claude Code, Grok Build, and Muse Code can preserve guardian approvals
+on raw targets. Kimi Code cannot. OpenCode and MiMo Code ask before tools
+according to their permission rules, but have no sandbox, so a prompt is the
+only thing between the agent and the host. Mjolnir displays a prominent
+warning when any of these is selected without an isolation boundary. Read [Security boundaries](/security/)
 before choosing a raw or `yolo` target.
 
 ## Bare runtimes

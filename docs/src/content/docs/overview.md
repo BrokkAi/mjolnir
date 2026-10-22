@@ -96,16 +96,17 @@ These are the integrations shipped with Mjolnir 2.x today:
 | Kimi Code | `kimi` | Yes | Yes | Yes | No |
 | Grok Build | `grok` | Yes | Yes | Yes | Yes |
 | Muse Code | `muse` | Yes | Yes | Yes | No |
-| OpenCode | `opencode` | Yes | No | Yes | Yes |
-| MiMo Code | `mimo` | Yes | No | Yes | Yes |
+| OpenCode | `opencode` | Yes | No | Yes | No |
+| MiMo Code | `mimo` | Yes | No | Yes | No |
 
 “Native state” means Mjolnir can resume the harness's own session when the
 same harness is selected again. A cross-harness resume instead restores the
 workspace and supplies a size-bounded handoff derived from the canonical
 transcript. See [Durability and recovery](/durability/).
 
-Kimi Code does not provide a guardian approval mode. It should not be used on
-a bare, unsandboxed runtime. Muse Code and MiMo Code currently accept one
+Kimi Code does not provide a guardian approval mode, and OpenCode and MiMo Code
+run commands on the host without a sandbox. None of them should be used on a
+bare, unsandboxed runtime. Muse Code and MiMo Code currently accept one
 workspace root, so use either a one-repository bundle or one bare project
 directory, without attached directories.
 

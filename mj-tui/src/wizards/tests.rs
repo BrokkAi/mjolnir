@@ -1633,23 +1633,30 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
             .collect::<String>()
     };
 
-    let marked = profile_step(HarnessKind::Kimi);
-    assert!(
-        marked.contains(mj_chat::theme::glyphs().warning),
-        "{marked}"
-    );
-    assert!(marked.contains("No guardian approval mode"), "{marked}");
-    assert!(
-        marked.contains("do not run on a raw, unsandboxed target"),
-        "{marked}"
-    );
+    // OpenCode and MiMo Code prompt for permission but run commands on the
+    // host without a sandbox, so a prompt is not a guardian.
+    // Hard-won: fd92b0cc9: MiMo Code shipped without the raw-target warning although it has no sandbox.
+    for kind in [HarnessKind::Kimi, HarnessKind::OpenCode, HarnessKind::Mimo] {
+        let marked = profile_step(kind);
+        assert!(
+            marked.contains(mj_chat::theme::glyphs().warning),
+            "{kind:?}: {marked}"
+        );
+        assert!(
+            marked.contains("No guardian approval mode"),
+            "{kind:?}: {marked}"
+        );
+        assert!(
+            marked.contains("do not run on a raw, unsandboxed target"),
+            "{kind:?}: {marked}"
+        );
+    }
 
     for kind in [
         HarnessKind::Codex,
         HarnessKind::Claude,
         HarnessKind::Grok,
         HarnessKind::Muse,
-        HarnessKind::OpenCode,
     ] {
         let quiet = profile_step(kind);
         assert!(

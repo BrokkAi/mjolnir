@@ -56,8 +56,8 @@ marks models or counters that cannot be priced from the recorded information.
 | Kimi Code | `kimi` | `KIMI_CODE_HOME` | `~/.kimi-code` | `credentials/kimi-code.json` | no |
 | Grok Build | `grok` | `GROK_HOME` | `~/.grok` | `auth.json` | yes |
 | Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
-| OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db`, or a provider key in the environment | yes |
-| MiMo Code | `mimo` | `MIMOCODE_HOME` | `~/.mimocode` (stock XDG config and login when unset) | `data/auth.json`, or `~/.local/share/mimocode/auth.json` for the stock install | yes |
+| OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db`, or a provider key in the environment | no |
+| MiMo Code | `mimo` | `MIMOCODE_HOME` | `~/.mimocode` (stock XDG config and login when unset) | `data/auth.json`, or `~/.local/share/mimocode/auth.json` for the stock install | no |
 
 There are seven harness kinds. Codex can use its built-in Amazon Bedrock
 providers; see [Codex on Amazon Bedrock](#codex-on-amazon-bedrock). It can also
@@ -73,8 +73,10 @@ that copy. See [What a session's staged home holds](#what-a-sessions-staged-home
 conventional location. A detected home becomes the explicit `home` path in
 `config.toml`; subsequent sessions use that configured path.
 
-Kimi Code does not expose a guardian approval mode. Mjolnir warns before using
-it on a raw target. Muse's guardian is muse-acp's auto-review; see
+Kimi Code does not expose a guardian approval mode. OpenCode and MiMo Code ask
+before tools according to their permission rules, but run commands on the host
+without a sandbox, so they have no guardian either. Mjolnir warns before using
+any of them on a raw target. Muse's guardian is muse-acp's auto-review; see
 [Harness limitations](#harness-limitations).
 Container runtimes and EC2
 machines instead run every harness unconstrained inside the isolation
@@ -853,8 +855,8 @@ without them. Muse Spark can also supply utility inference for cross-harness
 handoffs; see
 [Durability and recovery](/durability/).
 
-- Kimi Code has no guardian approval mode. Prefer an isolated
-  [container target](/containers/) or EC2 rather than raw execution.
+- Kimi Code, OpenCode, and MiMo Code have no guardian approval mode. Prefer an
+  isolated [container target](/containers/) or EC2 rather than raw execution.
 - OpenCode talks to third-party providers through its own gateway, so it
   publishes no quota endpoint and its profile shows quota as unavailable. It
   reads permission rules from `opencode.json`. Its sessions live in a SQLite

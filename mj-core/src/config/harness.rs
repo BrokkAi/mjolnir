@@ -872,11 +872,16 @@ impl HarnessKind {
         Ok(())
     }
 
+    /// Whether this harness confines what it runs and reviews an action that
+    /// would leave that confinement before running it. Only such a harness is
+    /// fit for a raw target, where nothing else contains it.
+    ///
+    /// A permission prompt alone is not a guardian. OpenCode and MiMo Code ask
+    /// before tools according to their permission rules, but run every
+    /// command directly on the host; both projects' own `SECURITY.md` say
+    /// their permission system is not a sandbox.
     pub const fn supports_guardian_approvals(self) -> bool {
-        matches!(
-            self,
-            Self::Codex | Self::Claude | Self::Grok | Self::OpenCode | Self::Muse | Self::Mimo
-        )
+        matches!(self, Self::Codex | Self::Claude | Self::Grok | Self::Muse)
     }
 
     /// Shared warning for selecting a harness without guardian approvals on a

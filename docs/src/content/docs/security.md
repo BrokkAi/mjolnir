@@ -66,15 +66,18 @@ controls:
 Kimi's mode is named `auto`, but in this context it approves every call. It is
 not a low-risk guardian policy.
 
-Codex, Claude Code, Grok Build, OpenCode, MiMo Code, and Muse Code can preserve
-guardian-style approvals on a bare runtime. Muse's guardian is muse-acp's auto-review: Mjolnir
+Codex, Claude Code, Grok Build, and Muse Code can preserve guardian-style
+approvals on a bare runtime. Muse's guardian is muse-acp's auto-review: Mjolnir
 stages the `:ask-me` permission profile, selects `promptUnmatched` approvals,
 and turns auto-review on, so a read-only Muse reviewer answers each approval
 and a failed review denies the action. Muse keeps that review in containers
 too and disables only the sandbox there; with guardian approvals the sandbox
 stays on, even when a profile's `MUSE_SERVE_ARGS` passes `--disable-sandbox`.
-Kimi Code cannot preserve approvals. Mjolnir warns when a harness without
-guardian support is paired with a raw target, but a warning is not a
+Kimi Code cannot preserve approvals. OpenCode and MiMo Code ask before tools
+according to their permission rules, but run every command directly on the
+host: both projects state that their permission system is not a sandbox.
+Mjolnir warns when a harness without guardian support is paired with a raw
+target, but a warning is not a
 sandbox—choose a container or instance instead.
 
 Mjolnir does not expose arbitrary extra container-runtime arguments. Container
