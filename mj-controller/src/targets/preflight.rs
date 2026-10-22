@@ -1054,27 +1054,31 @@ pub(super) fn parse_podman_version(host: PodmanHost<'_>, stdout: &[u8]) -> Resul
 /// longest point it ends with holds the path, and among entries for that
 /// point the last, the one on top, names the type. Both device names and
 /// mount points can contain spaces and `%`, so no `df` column is parsed.
+/// That match is a function rather than inline in `$(...)`: macOS `/bin/sh`
+/// is bash 3.2, which ends a command substitution at the first `)`, so it
+/// cannot parse a `case` pattern inside one.
 pub(super) const FILESYSTEM_TYPES_SCRIPT: &str = r#"if [ "$(uname -s)" != Darwin ]; then
     exec stat -f -c %T -- "$@"
 fi
+mounted_type() {
+    best= found=
+    while IFS= read -r line; do
+        head=${line% (*}
+        [ "$head" != "$line" ] || continue
+        case $head in *" on /"*) ;; *) continue ;; esac
+        point=/${head#* on /}
+        case $1 in *" $point") ;; *) continue ;; esac
+        [ "${#point}" -ge "${#best}" ] || continue
+        options=${line#"$head ("}
+        best=$point found=${options%%[,)]*}
+    done
+    printf '%s' "$found"
+}
 mounts=$(mount) || exit 1
 for path do
     usage=$(df -P -- "$path" | sed -n 2p)
     [ -n "$usage" ] || { printf 'df reported no filesystem for %s\n' "$path" >&2; exit 1; }
-    filesystem=$(printf '%s\n' "$mounts" | {
-        best= found=
-        while IFS= read -r line; do
-            head=${line% (*}
-            [ "$head" != "$line" ] || continue
-            case $head in *" on /"*) ;; *) continue ;; esac
-            point=/${head#* on /}
-            case $usage in *" $point") ;; *) continue ;; esac
-            [ "${#point}" -ge "${#best}" ] || continue
-            options=${line#"$head ("}
-            best=$point found=${options%%[,)]*}
-        done
-        printf '%s' "$found"
-    })
+    filesystem=$(printf '%s\n' "$mounts" | mounted_type "$usage")
     [ -n "$filesystem" ] || { printf 'mount lists no filesystem holding %s\n' "$path" >&2; exit 1; }
     printf '%s\n' "$filesystem"
 done"#;

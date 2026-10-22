@@ -1851,6 +1851,7 @@ fn filesystem_probe_answers_positionally_and_reaches_the_podman_host() {
 /// mount points carry spaces and `%`, names share prefixes, and one point is
 /// mounted twice. Every awkward case lands in one run of the real script.
 // Hard-won: #1330: a `%` in a macOS mount point cut the mount point short and lost its filesystem.
+// Hard-won: #1330: macOS `/bin/sh`, bash 3.2, could not parse the probe's `case` patterns inside `$(...)`.
 #[cfg(unix)]
 #[test]
 fn macos_filesystem_probe_reads_awkward_mount_points_from_df_and_mount() {
