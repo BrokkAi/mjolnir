@@ -12,6 +12,16 @@ because Mjolnir relies on the rootless user-namespace behavior and CLI
 interfaces that it probes (`podman unshare`). Podman 3.x is not a supported
 Mjolnir runtime.
 
+## Platforms
+
+Mjolnir's local Podman target requires a Linux host, including WSL2. It is not
+available on macOS: every `podman` command there is a remote client for a
+Linux VM (`podman machine`), and `podman unshare` cannot run through that
+client. Switching the machine between rootful and rootless does not change
+that. On macOS use [Docker](/docker/) or [Apple
+container](/apple-container/), or configure a Podman target on an SSH Linux
+machine ([SSH and SSH Podman](/ssh/)).
+
 New session containers run as uid and gid `0:0` in Podman's default rootless
 mapping. Container uid 0 maps to the account running Mjolnir, so files written
 to host bind mounts belong to that account. Mjolnir sets `HOME=/home/hel` when

@@ -538,7 +538,7 @@ impl PodmanPostcondition {
                 "Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`."
             }
             Self::Rootless => {
-                "Run Mjolnir as the ordinary user without `sudo`; if a remote Podman connection is configured, unset `CONTAINER_HOST` or select the rootless local connection."
+                "Run Mjolnir as the ordinary user without `sudo`. Podman on macOS always uses a Linux VM (`podman machine`) through a remote client, so no rootful or rootless setting makes the local Podman target work there; use a Docker target, Apple container on Apple-silicon macOS 26 or newer, or a Podman target on an SSH Linux machine. On Linux, if a remote Podman connection is configured, unset `CONTAINER_HOST` or select the rootless local connection."
             }
             Self::UidMap => {
                 "Install UID-map helpers (`sudo apt install -y uidmap` on Debian/Ubuntu or `sudo dnf install -y shadow-utils` on Fedora), then add subordinate ranges with `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 \"$USER\"` and start a fresh login session."
@@ -712,11 +712,19 @@ pub(super) fn check_podman_probe_status(
         } else {
             probe.postcondition()
         };
+        // Podman's message is usually a sentence without a final period.
+        // End it before the remediation starts, so the fix does not read as
+        // part of the command output.
+        let reported = if stderr.ends_with(['.', '!', '?']) {
+            stderr.to_owned()
+        } else {
+            format!("{stderr}.")
+        };
         return Err(probe_failure(
             host,
             postcondition,
             format!(
-                "{}: {} failed. Podman reported: {stderr}",
+                "{}: {} failed. Podman reported: {reported}",
                 host.failure(),
                 postcondition.statement(),
             ),

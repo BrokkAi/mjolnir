@@ -201,10 +201,13 @@ mj doctor --json --smoke
 
 Then follow the target-specific result:
 
-- **Podman:** it must be rootless and have a valid subordinate UID/GID mapping.
-  Run `podman unshare cat /proc/self/uid_map` as the same user that runs
-  Mjolnir, then follow [Podman for
-  Mjolnir](/podman/).
+- **Podman:** it must be local, rootless, and have a valid subordinate UID/GID
+  mapping. Run `podman unshare cat /proc/self/uid_map` as the same user that
+  runs Mjolnir, then follow [Podman for Mjolnir](/podman/). A local Podman
+  target requires Linux or WSL2. On macOS, `podman` always talks to a Linux VM
+  (`podman machine`) as a remote client, so `podman unshare` cannot work and
+  switching between rootful and rootless does not help. Use a Docker target,
+  Apple container, or Podman on an SSH Linux machine instead.
 - **Docker:** the CLI must reach a Linux daemon, and writable attachments need
   working OverlayFS support on the daemon's filesystem host. Run `docker info`
   and follow [Docker for Mjolnir](/docker/).

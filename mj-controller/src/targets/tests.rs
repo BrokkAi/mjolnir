@@ -212,6 +212,17 @@ fn podman_preflight_reports_an_unshare_refusal_as_not_rootless() {
             error.contains("Run Mjolnir as the ordinary user"),
             "{error}"
         );
+        assert!(
+            error.contains("Podman on macOS always uses a Linux VM"),
+            "{error}"
+        );
+        assert!(error.contains("Docker target"), "{error}");
+        if refusal.contains("remote podman client") {
+            assert!(
+                error.contains("remote podman client. Run Mjolnir"),
+                "{error}"
+            );
+        }
         assert!(!error.contains("Run Hel"), "{error}");
         assert!(!error.contains("Install UID-map helpers"), "{error}");
     }
