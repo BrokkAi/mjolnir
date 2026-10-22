@@ -9,6 +9,8 @@ New local and SSH Podman sessions should run `perf stat` and `perf record`
 without sudo inside the container. The user requested a hardcoded PERFMON
 capability, verified for user jonathan on morannon, followed by push and
 installation. Container replacement must retain this behavior.
+The user subsequently requested restarting session
+`d8443f17cb24506c5ee26277fcf319f4` and telling it that perf is available.
 
 ## Progress
 
@@ -19,11 +21,21 @@ installation. Container replacement must retain this behavior.
   container documentation and integration regressions.
 - [x] (2026-10-21) Pass the affected launch-argument regression and fast-forward
   master to 35236ab37, which includes another session's already-installed work.
-- [ ] Correct morannon's user-scoped seccomp policy and host perf setting
-  (blocked by automatic approval review; explicit user approval requested).
+- [x] (2026-10-22) Apply the user's explicitly approved persistent host perf
+  setting and user-scoped seccomp correction. Verify boot-time sysctl
+  precedence, persistent paths, and preservation of other syscall rules.
+- [x] (2026-10-22) Run fresh rootless containers: ordinary perf stat, perf
+  record, and perf script succeed with PERFMON and seccomp enabled; perf
+  remains denied without PERFMON.
 - [x] (2026-10-21) Run the generated SSH launch and perf integration test
   against morannon; it reaches perf and confirms the host permission failure.
-- [ ] Pass the morannon perf integration test after approved host correction.
+- [x] (2026-10-22) Pass the generated morannon perf integration test after
+  approved host correction (4.61 seconds, seccomp enabled).
+- [x] (2026-10-22) Snapshot the requested session's writable layer, then
+  complete its explicit storage-preserving upgrade with CAP_PERFMON.
+- [x] (2026-10-22) Verify perf in the actual replacement container, deliver
+  the requested notification, and observe the session independently confirm
+  that perf stat, perf record, and perf script produce samples.
 - [x] (2026-10-21) Pass the real storage-preserving replacement regression.
 - [x] (2026-10-21) Run the full controller suite and pass workspace Clippy,
   formatting and diff checks. Two timing failures passed individual reruns.
@@ -47,10 +59,10 @@ exists at initial inspection.
 
 Automatic approval review rejected the exact prepared persistent host changes:
 the original request was judged insufficient authorization for host-wide perf
-policy and user-default seccomp changes. The user received the precise changes
-and scope in an asynchronous approval question. Do not retry the mutation or
-work around the rejection without that approval. Repository validation, push,
-and installation remain independently authorized.
+policy and user-default seccomp changes. The user then explicitly approved
+persisting `kernel.perf_event_paranoid=1` and correcting their user's seccomp
+profile, with a requirement that both survive reboot. That approval authorized
+the host changes applied in the follow-up turn.
 
 ## Decision Log
 
@@ -65,6 +77,12 @@ and installation remain independently authorized.
   Keep every other seccomp restriction and continue excluding system-wide
   profiling through the host's per-process policy.
   Date/Author: 2026-10-21, Codex.
+- Decision: Use the supported explicit container upgrade for the requested
+  session, with a local snapshot of its writable layer first.
+  Rationale: Ordinary worker Restart retains its container and cannot add a
+  capability. The actual workspace and caches are independently mounted;
+  the snapshot also preserves manually installed packages and layer files.
+  Date/Author: 2026-10-22, Codex.
 
 ## Outcomes & Retrospective
 
@@ -75,13 +93,35 @@ The full controller run completed with 2033 passes, 18 ignored, and two daemon
 timing failures; each failed test passed when rerun individually. Morannon's
 new real perf integration test launches and cleans up its container correctly,
 then fails with `No permission to enable task-clock event` under the unchanged
-host policy. Runtime prerequisite changes remain blocked on explicit approval.
+host policy. After explicit user approval, `/etc/sysctl.d/60-perf.conf` now
+persists level 1, and `/home/jonathan/.config/containers/containers.conf`
+selects `/home/jonathan/.config/containers/seccomp-perfmon.json`. The profile
+splits perf_event_open out of grouped deny rules and excludes CAP_PERFMON
+from both relevant denies. Other syscall rules are identical to the packaged
+profile, and seccomp remains enabled. Boot-time configuration resolves to
+the sole perf assignment of 1 through the active systemd-sysctl service.
+Fresh rootless containers now complete perf stat, perf record, and perf script;
+one smoke recorded 452 lines of sample output. The no-PERFMON control still
+fails with the original permission error. The generated mj launch integration
+test now passes against morannon with seccomp enabled.
 Commit 3792baaca was pushed and installed with both matching x86_64 Linux
 workers. A normal `mj sessions --json` request coordinated the daemon handoff;
 `mj daemon status` subsequently reported the same build after 91 seconds of
-uptime. No manual daemon restart or host security-policy mutation was used.
-The code and installation are delivered; successful profiling on morannon is
-still outstanding until the pending host-settings approval is answered.
+uptime. No manual daemon restart was needed. Code and installation are
+delivered and the approved host correction is persistent. Session
+`d8443f17cb24506c5ee26277fcf319f4` completed the supported explicit upgrade
+from agent-dev:2.52.0 to the cached agent-dev:latest. Its replacement has
+CAP_PERFMON and retains the original workspace and temporary volumes and
+cache mounts. Its previous writable layer is preserved as local image
+`localhost/mj-session-backup/d8443f17cb24:pre-perfmon-20261022T045708Z`
+(image ID fd69e5385b71c9eec3ee07b509256f12060922b676702adb8b611818694b2339).
+Ordinary perf stat, perf record, and perf script succeeded inside this exact
+replacement with seccomp mode 2, producing 439 sample-output lines. The
+notification is delivered in transcript position 256520; the session then
+independently verified profiling and confirmed success at position 256557.
+All requested work is complete. No reboot was performed; persistence was
+verified through the effective boot sysctl configuration and Podman's durable
+per-user configuration loaded by fresh containers.
 
 ## Context and Orientation
 
@@ -167,3 +207,10 @@ Recorded the actual generated SSH integration test's confirmed host-policy
 failure; no host security settings have been changed.
 Recorded the pushed implementation, completed installation, and stable normal
 daemon handoff. This final planning-only update does not change installed code.
+Updated after explicit approval: recorded the persistent host settings,
+boot-path verification, successful profiling smoke, and unchanged syscall
+restrictions outside perf_event_open.
+Recorded successful generated-launch verification and the user's additional
+request to restart and notify the specified live session.
+Recorded the completed upgrade, preserved layer snapshot, successful exact-
+container verification, and delivered notification with independent confirmation.
