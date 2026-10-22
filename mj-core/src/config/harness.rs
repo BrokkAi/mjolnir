@@ -1,6 +1,6 @@
 //! Harness identity, credentials layout and execution policy.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -1022,6 +1022,12 @@ pub struct ProfileDiscoveryInputs {
     /// changes what it advertises, so a cached catalogue from an older pin
     /// must never answer for this one.
     pub managed_install: &'static str,
+    /// The provider keys the profile takes from the environment Mjolnir runs
+    /// in, by name: which ones are set decides which providers' models
+    /// OpenCode offers. Absent when there are none, so the cache keys of
+    /// other profiles are unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inherited_environment: Vec<String>,
 }
 
 impl ProfileDiscoveryInputs {
@@ -1052,6 +1058,11 @@ impl HarnessProfile {
             environment: self.environment.sources().clone(),
             codex_profile: self.codex_profile.clone(),
             managed_install: crate::harness_runtime::pin(self.kind).install_id,
+            inherited_environment: self
+                .environment
+                .inherited_names()
+                .map(str::to_owned)
+                .collect(),
         }
     }
 
@@ -1302,17 +1313,28 @@ impl HarnessProfile {
         Ok(())
     }
 
-    /// Supply the variable that this Codex home's custom provider names as its
-    /// key (`env_key`) from the environment Mjolnir runs in, as standalone
-    /// Codex reads it from its own, unless `environment` sets it. Workers
-    /// start harnesses with a cleared environment, so without this an
-    /// exported key never reaches Codex. Done once as the configuration is
-    /// read, exactly when `{ from_env = ... }` entries resolve;
-    /// [`Self::ensure_ready`] reports the key when neither supplies it.
-    pub(super) fn inherit_provider_key(&mut self) {
+    /// Supply the provider keys this profile's harness reads from its
+    /// environment from the environment Mjolnir runs in, as the standalone
+    /// harness reads them from its own, unless `environment` sets them.
+    /// Workers start harnesses with a cleared environment, so without this an
+    /// exported key never reaches the harness. Done once as the configuration
+    /// is read, exactly when `{ from_env = ... }` entries resolve.
+    ///
+    /// For Codex that is the variable its custom provider names (`env_key`);
+    /// [`Self::ensure_ready`] reports it when neither supplies it. For
+    /// OpenCode it is every provider key variable OpenCode reads and every
+    /// variable its configuration substitutes as `{env:NAME}`.
+    pub fn inherit_provider_key(&mut self) {
         // A projection reads no files, and a malformed home is reported by
         // `ensure_ready`.
         if !super::secrets::resolves_values() {
+            return;
+        }
+        if self.kind == HarnessKind::OpenCode {
+            let OpenCodeEnvironment { keys, references } = OpenCodeEnvironment::read(&self.home);
+            for name in keys.iter().chain(&references) {
+                self.environment.inherit(name);
+            }
             return;
         }
         if let Ok(Some(provider)) = self.codex_provider()
@@ -1322,6 +1344,26 @@ impl HarnessProfile {
         {
             self.environment.inherit(env_key);
         }
+    }
+
+    /// The provider keys this OpenCode profile's environment supplies, by
+    /// variable name. OpenCode signs in to a provider with any of them
+    /// without a stored login, and prefers a stored login when it has both.
+    /// Empty for another harness.
+    pub fn opencode_environment_logins(&self) -> Vec<String> {
+        if self.kind != HarnessKind::OpenCode {
+            return Vec::new();
+        }
+        // OpenCode tests each variable for truth, so an empty one is unset.
+        OpenCodeEnvironment::read(&self.home)
+            .keys
+            .into_iter()
+            .filter(|name| {
+                self.environment
+                    .get(name)
+                    .is_some_and(|value| !value.is_empty())
+            })
+            .collect()
     }
 
     /// Whether a harness can start from this profile: every environment
@@ -1451,6 +1493,94 @@ impl AuthScheme {
     }
 }
 
+/// The provider key variables the pinned OpenCode reads from its environment:
+/// the `env` lists of its bundled models.dev catalog and the variables its
+/// built-in plugins register. `scripts/generate-opencode-provider-environment.py`
+/// generates it from OpenCode's source when the pin changes.
+const OPENCODE_PROVIDER_ENVIRONMENT: &str =
+    include_str!("../../assets/opencode-provider-environment.txt");
+
+/// What an OpenCode home reads from its environment, as OpenCode 2 does.
+///
+/// OpenCode signs in to a provider when one of the provider's key variables
+/// is set: those the pinned OpenCode names, and those a provider in the home's
+/// own configuration lists under `env`. Its configuration also substitutes
+/// `{env:NAME}` anywhere in its text. It reads `opencode.json` and
+/// `opencode.jsonc` from its configuration directory and skips, with a
+/// warning, a file that is unreadable or not valid JSONC; so does this.
+#[derive(Debug)]
+struct OpenCodeEnvironment {
+    /// The variables OpenCode accepts as a provider's key.
+    keys: BTreeSet<String>,
+    /// The variables the configuration substitutes.
+    references: BTreeSet<String>,
+}
+
+impl OpenCodeEnvironment {
+    fn read(home: &Path) -> Self {
+        let mut environment = Self {
+            keys: OPENCODE_PROVIDER_ENVIRONMENT
+                .lines()
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .map(str::to_owned)
+                .collect(),
+            references: BTreeSet::new(),
+        };
+        for name in ["opencode.json", "opencode.jsonc"] {
+            if let Ok(text) = std::fs::read_to_string(home.join(name)) {
+                environment.add_configuration(&text);
+            }
+        }
+        environment
+    }
+
+    fn add_configuration(&mut self, text: &str) {
+        // OpenCode parses with Microsoft's jsonc-parser, which accepts
+        // comments and trailing commas and nothing else beyond JSON.
+        let options = jsonc_parser::ParseOptions {
+            allow_comments: true,
+            allow_trailing_commas: true,
+            allow_loose_object_property_names: false,
+            allow_missing_commas: false,
+            allow_single_quoted_strings: false,
+            allow_hexadecimal_numbers: false,
+            allow_unary_plus_numbers: false,
+            allow_bare_decimal_point_numbers: false,
+            allow_non_finite_numbers: false,
+            allow_extended_string_escapes: false,
+        };
+        let Ok(configuration) =
+            jsonc_parser::parse_to_serde_value::<serde_json::Value>(text, &options)
+        else {
+            return;
+        };
+        static REFERENCE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"\{env:([^}]+)\}").expect("the {env:NAME} pattern is valid")
+        });
+        self.references.extend(
+            REFERENCE
+                .captures_iter(text)
+                .map(|reference| reference[1].to_owned()),
+        );
+        let providers = configuration
+            .get("provider")
+            .and_then(serde_json::Value::as_object);
+        for provider in providers
+            .into_iter()
+            .flat_map(|providers| providers.values())
+        {
+            let names = provider.get("env").and_then(serde_json::Value::as_array);
+            self.keys.extend(
+                names
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            );
+        }
+    }
+}
+
 /// The variables through which Codex takes a credential other than its own
 /// login file, or sends its requests somewhere other than OpenAI.
 ///
@@ -1540,6 +1670,23 @@ impl HarnessProfile {
 mod tests {
     use super::*;
     use crate::harness_runtime::pin;
+
+    /// The provider keys are OpenCode's own list, so they must come from the
+    /// version Mjolnir runs.
+    #[test]
+    fn opencode_provider_environment_was_generated_from_the_pinned_opencode() {
+        let header = OPENCODE_PROVIDER_ENVIRONMENT
+            .lines()
+            .next()
+            .unwrap_or_default();
+        assert!(
+            header.starts_with(&format!(
+                "# OpenCode {}:",
+                crate::harness_runtime::OPENCODE_VERSION
+            )),
+            "regenerate mj-core/assets/opencode-provider-environment.txt with scripts/generate-opencode-provider-environment.py for the pinned OpenCode; it starts {header:?}"
+        );
+    }
 
     // Hard-won: 07c1bee37: cached Muse efforts survived the managed harness upgrade.
     #[test]

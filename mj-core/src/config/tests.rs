@@ -389,6 +389,96 @@ fn a_codex_profile_inherits_its_provider_key_from_the_environment_mjolnir_runs_i
     assert!(error.contains("from_secret"), "{error}");
 }
 
+/// OpenCode signs in to a provider from a key in its environment, with no
+/// stored login. An OpenCode profile inherits exactly the variables OpenCode
+/// reads: its catalog's provider keys, the `env` lists of providers in its
+/// configuration, and `{env:NAME}` references, from JSONC as OpenCode parses
+/// it. A malformed file contributes nothing, as OpenCode skips it.
+// Hard-won: 1e1e6f92c: OpenCode sessions never received provider keys exported to Mjolnir
+#[test]
+fn an_opencode_profile_inherits_the_provider_keys_opencode_reads() {
+    let home = tempfile::tempdir().expect("temporary home");
+    fs::write(
+        home.path().join("opencode.jsonc"),
+        r#"{
+  // A gateway the person runs; its key is a configured provider's `env`.
+  "provider": {
+    "gateway": {
+      "env": ["GATEWAY_KEY"],
+      "options": { "baseURL": "{env:GATEWAY_URL}" },
+    },
+  },
+}
+"#,
+    )
+    .expect("write opencode.jsonc");
+    fs::write(
+        home.path().join("opencode.json"),
+        "{'provider': {'other': {'env': ['MALFORMED_KEY']}}}\n",
+    )
+    .expect("write opencode.json");
+    let text = format!(
+        "version = {CONFIG_VERSION}\n\n[profiles.opencode]\nkind = \"open-code\"\nhome = {:?}\n",
+        home.path().to_string_lossy()
+    );
+    let read = |process: &[(&str, &str)]| -> Config {
+        let process = process
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect();
+        with_secret_resolver(SecretResolver::fixed(process, BTreeMap::new()), || {
+            toml::from_str(&text)
+        })
+        .expect("read the configuration")
+    };
+
+    let exported = read(&[
+        ("DEEPSEEK_API_KEY", "deepseek-key"),
+        ("OPENROUTER_API_KEY", ""),
+        ("GATEWAY_KEY", "gateway-key"),
+        ("GATEWAY_URL", "https://gateway.example"),
+        ("MALFORMED_KEY", "never-read"),
+        ("UNRELATED_SECRET", "not-opencodes"),
+    ]);
+    let profile = &exported.profiles["opencode"];
+    let inherited: BTreeMap<_, _> = profile
+        .environment
+        .resolved()
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    // An empty variable is unset, for OpenCode as for `from_env`.
+    assert_eq!(
+        inherited,
+        BTreeMap::from([
+            ("DEEPSEEK_API_KEY", "deepseek-key"),
+            ("GATEWAY_KEY", "gateway-key"),
+            ("GATEWAY_URL", "https://gateway.example"),
+        ])
+    );
+    // A substituted URL is not a login.
+    assert_eq!(
+        profile.opencode_environment_logins(),
+        ["DEEPSEEK_API_KEY", "GATEWAY_KEY"]
+    );
+    let written = toml::to_string(&exported).expect("serialize");
+    assert!(!written.contains("deepseek-key"), "{written}");
+    assert!(!written.contains("DEEPSEEK_API_KEY"), "{written}");
+
+    let unset = read(&[]);
+    assert!(
+        unset.profiles["opencode"]
+            .opencode_environment_logins()
+            .is_empty()
+    );
+    // Exporting a key changes which models OpenCode offers, so a catalogue
+    // cached without it must not answer.
+    assert_ne!(
+        profile.capabilities_key("opencode"),
+        unset.profiles["opencode"].capabilities_key("opencode")
+    );
+}
+
 // Hard-won: ee59e575: users were told to delete their supported profile model catalog
 #[test]
 fn a_codex_profile_may_name_its_own_model_catalog() {

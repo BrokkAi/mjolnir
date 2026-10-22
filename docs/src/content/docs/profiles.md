@@ -56,7 +56,7 @@ marks models or counters that cannot be priced from the recorded information.
 | Kimi Code | `kimi` | `KIMI_CODE_HOME` | `~/.kimi-code` | `credentials/kimi-code.json` | no |
 | Grok Build | `grok` | `GROK_HOME` | `~/.grok` | `auth.json` | yes |
 | Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
-| OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db` | yes |
+| OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db`, or a provider key in the environment | yes |
 | MiMo Code | `mimo` | `MIMOCODE_HOME` | `~/.mimocode` (stock XDG config and login when unset) | `data/auth.json`, or `~/.local/share/mimocode/auth.json` for the stock install | yes |
 
 There are seven harness kinds. Codex can use its built-in Amazon Bedrock
@@ -446,6 +446,17 @@ once it is idle, never during a turn, and continues the same conversation.
 Logins come only from the profile; one made inside a session lasts until that
 session next reloads. Checkpoints keep the session database without its logins. Do
 not override `XDG_CONFIG_HOME` or `XDG_DATA_HOME` in the profile environment.
+
+OpenCode also signs in to a provider from a key in its environment, such as
+`DEEPSEEK_API_KEY` or `OPENROUTER_API_KEY`, with no login at all. As with
+OpenCode on its own, exporting the key is enough: when the profile does not set
+it, Mjolnir reads every provider key the pinned OpenCode reads from the
+environment it started with and passes it to the session, along with the
+variables a provider in your `opencode.json` or `opencode.jsonc` lists under
+`env` and any variable that file substitutes as `{env:NAME}`. A stored login
+wins over a key for the same provider, as it does in OpenCode. Export the key
+before running `mj`, and run `mj daemon restart` after exporting a new one;
+`mj doctor` names the keys a profile is using.
 
 For MiMo Code, configure `kind = "mimo"`. A profile at the conventional
 `~/.mimocode` home, which is where the official installer keeps its executable,
