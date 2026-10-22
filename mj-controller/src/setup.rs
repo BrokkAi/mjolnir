@@ -239,10 +239,11 @@ pub(crate) fn discover_harness_homes_with_executor(
 }
 
 /// A profile standing in for a home discovery found but the user has not
-/// configured. It carries no environment, so cloud backends must be configured
-/// explicitly before their authentication can be recognized.
+/// configured. It carries only the provider keys a configured profile would
+/// inherit, so cloud backends must be configured explicitly before their
+/// authentication can be recognized.
 fn probe_profile(kind: HarnessKind, home: &Path, codex_profile: Option<String>) -> HarnessProfile {
-    HarnessProfile {
+    let mut profile = HarnessProfile {
         enabled: true,
         kind,
         home: home.to_path_buf(),
@@ -251,7 +252,9 @@ fn probe_profile(kind: HarnessKind, home: &Path, codex_profile: Option<String>) 
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile,
-    }
+    };
+    profile.inherit_provider_key();
+    profile
 }
 
 pub(crate) fn harness_is_authenticated_with_executor(
@@ -281,11 +284,12 @@ fn harness_is_authenticated_with(
     if profile.auth_scheme() == mj_core::config::AuthScheme::AwsCredentialChain {
         return true;
     }
-    // OpenCode keeps its logins in its own database; doctor reports a
-    // database it cannot read.
+    // OpenCode keeps its logins in its own database, or takes a provider key
+    // from its environment; doctor reports a database it cannot read.
     if profile.auth_scheme() == mj_core::config::AuthScheme::NativeLoginStore {
         return crate::opencode_logins::profile_logins(profile)
-            .is_ok_and(|logins| logins.is_some());
+            .is_ok_and(|logins| logins.is_some())
+            || !profile.opencode_environment_logins().is_empty();
     }
     if profile.authentication_marker().is_file()
         || (kind == HarnessKind::Kimi && home.join("credentials").is_file())
