@@ -29,6 +29,15 @@ fn git_text(root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(git(root, args)?)?.trim_end().to_owned())
 }
 
+/// Where Git keeps `name` in the Git directory of the checkout at `root`.
+///
+/// Git 2.25 has no `--path-format=absolute`: it prints the option back and
+/// exits successfully. `--git-path` answers relative to `root`.
+fn git_path(root: &Path, name: &str) -> Result<PathBuf> {
+    let output = git_text(root, &["rev-parse", "--git-path", name])?;
+    mj_core::local_git::resolve_git_path(root, &output)
+}
+
 fn git_file(root: &Path, args: &[&str], destination: &Path) -> Result<()> {
     let status = mj_core::subprocess::run_to_file(
         Command::new("git").arg("-C").arg(root).args(args),
@@ -249,16 +258,7 @@ pub fn capture(
             })
             .map(|(name, target)| (name.to_owned(), target.to_owned()))
             .collect::<Vec<_>>();
-        let stash_log_path = PathBuf::from(git_text(
-            &root,
-            &[
-                "rev-parse",
-                "--path-format=absolute",
-                "--git-path",
-                "logs/refs/stash",
-            ],
-        )?);
-        let stash_log = match fs::read_to_string(stash_log_path) {
+        let stash_log = match fs::read_to_string(git_path(&root, "logs/refs/stash")?) {
             Ok(log) => Some(log),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.into()),
@@ -290,11 +290,7 @@ pub fn capture(
             &["diff", "--binary", "--full-index"],
             &stage.join("unstaged.patch"),
         )?;
-        let index = PathBuf::from(git_text(
-            &root,
-            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
-        )?);
-        fs::copy(index, stage.join("index"))?;
+        fs::copy(git_path(&root, "index")?, stage.join("index"))?;
         for name in ["history.bundle", "staged.patch", "unstaged.patch", "index"] {
             add_file(&mut manifest, destination, relative.join(name))?;
         }
@@ -505,21 +501,9 @@ pub fn restore(source: &Path, repositories: &[WorkspaceRepository]) -> Result<()
                 git(root, &args)?;
             }
         }
-        let index = PathBuf::from(git_text(
-            root,
-            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
-        )?);
-        fs::copy(stage.join("index"), index)?;
+        fs::copy(stage.join("index"), git_path(root, "index")?)?;
         if let Some(log) = &repository.stash_log {
-            let path = PathBuf::from(git_text(
-                root,
-                &[
-                    "rev-parse",
-                    "--path-format=absolute",
-                    "--git-path",
-                    "logs/refs/stash",
-                ],
-            )?);
+            let path = git_path(root, "logs/refs/stash")?;
             fs::create_dir_all(path.parent().unwrap())?;
             fs::write(path, log)?;
         }
