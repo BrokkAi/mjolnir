@@ -456,7 +456,7 @@ Run these commands as the user who will run `mj`:\n\n\
    no check is `fixable`. Review warnings for any target you intend to use;\n\
    `unsupported` runtimes are unavailable, not ready.\n\
 3. If you intend to use containers, start the runtime and run\n\
-   `mj doctor --json --smoke`. Do this for Docker Desktop as well as Apple\n\
+   `mj doctor --json --smoke`. Do this for Podman, Docker Desktop, and Apple\n\
    container. Resolve failures for the target you intend to use.\n\
 4. Run `mj`, then press n in the Sessions pane to start your first session.\n\
    If no profile was discovered, open Settings (Ctrl-B then s by default)\n\
@@ -472,6 +472,23 @@ and Homebrew formula include it (Homebrew keeps both binaries in libexec).\n\
 The worker installs the pinned harness version itself. Codex and Claude need\n\
 Node.js 22 or newer and npm on `PATH`. Kimi and Grok need curl and Bash.\n\
 Muse needs curl and tar. Mjolnir does not install these prerequisites.\n\n\
+## Podman\n\n\
+A local Podman target on macOS uses a rootless `podman machine`. Install\n\
+Podman and create the machine:\n\n\
+```console\n\
+brew install podman\n\
+podman machine init --now\n\
+```\n\n\
+Ensure the machine is rootless:\n\n\
+```console\n\
+podman machine set --rootful=false\n\
+podman machine stop\n\
+podman machine start\n\
+```\n\n\
+Mjolnir checks `podman info` for rootless mode and a UID map covering\n\
+container IDs 0 and 1. The machine shares `$HOME:$HOME` by default, so keep\n\
+projects under your home directory or add the directory when creating the\n\
+machine. Finish with `mj doctor --json --smoke`.\n\n\
 ## Docker Desktop\n\n\
 Start Docker Desktop and wait for its Linux daemon to be ready before setup\n\
 or the smoke test. `mj doctor --json --smoke` checks the container image and\n\
@@ -1186,11 +1203,11 @@ pub fn local_podman_runtime_check(
     executor: &impl CommandExecutor,
     platform: &ApplePlatform,
 ) -> DoctorCheck {
-    if !matches!(platform, ApplePlatform::Linux) {
+    if !matches!(platform, ApplePlatform::Linux | ApplePlatform::Macos { .. }) {
         return DoctorCheck::unsupported(
             "runtime.podman",
             "Rootless Podman",
-            "Mjolnir's local Podman target requires a Linux host; Podman machine is not supported. Use localhost or an SSH target on a Linux host.",
+            "Mjolnir's local Podman target requires Linux, WSL2, or macOS with a rootless Podman machine.",
         );
     }
     match verify_local_podman(executor) {

@@ -202,9 +202,13 @@ mj doctor --json --smoke
 Then follow the target-specific result:
 
 - **Podman:** it must be rootless and have a valid subordinate UID/GID mapping.
-  Run `podman unshare cat /proc/self/uid_map` as the same user that runs
-  Mjolnir, then follow [Podman for
-  Mjolnir](/podman/).
+  Run `podman info --format json` as the same user that runs Mjolnir and check
+  that `host.security.rootless` is true and `host.idMappings.uidmap` covers
+  container IDs 0 and 1, then follow [Podman for Mjolnir](/podman/). On macOS
+  the `podman` client talks to a Linux VM (`podman machine`), which is
+  supported when the machine is rootless. If it is rootful, run
+  `podman machine set --rootful=false` and restart it. If `podman info` cannot
+  connect, run `podman machine start`.
 - **Docker:** the CLI must reach a Linux daemon, and writable attachments need
   working OverlayFS support on the daemon's filesystem host. Run `docker info`
   and follow [Docker for Mjolnir](/docker/).

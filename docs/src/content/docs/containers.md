@@ -6,9 +6,10 @@ description: Set up a disposable container target for Mjolnir and start your fir
 ## What container targets give you
 
 Each session on a container target runs in its own disposable, labeled
-container: local Podman on Linux or WSL2, Docker with a reachable Linux daemon
-(including a VM on macOS), Apple's `container` runtime on macOS 26 or newer on
-Apple silicon, or Podman or Docker over SSH. Container
+container: local Podman on Linux, WSL2, or macOS with a rootless
+`podman machine`, Docker with a reachable Linux daemon (including a VM on
+macOS), Apple's `container` runtime on macOS 26 or newer on Apple silicon, or
+Podman or Docker over SSH. Container
 isolation always
 selects Mjolnir's `unconstrained` execution policy. The `permissions` setting is
 only available for a bare runtime on an SSH machine. Mjolnir translates the policy into the
@@ -71,8 +72,9 @@ the workspace volume are not checkpointed.
 
 Install each runtime you want to use as a target:
 
-- **Rootless Podman 4.0 or newer** on Linux or WSL2. See
-  [Podman for Mjolnir](/podman/) for installation and verification steps.
+- **Rootless Podman 4.0 or newer** on Linux, WSL2, or macOS with a rootless
+  `podman machine`. See [Podman for Mjolnir](/podman/) for installation and
+  verification steps.
 - **Docker with a reachable Linux daemon**, including Colima on macOS. See
   [Docker for Mjolnir](/docker/) for its OverlayFS and lifecycle contract.
 - **Apple's `container` CLI** on macOS 26 or newer on Apple silicon.

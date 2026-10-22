@@ -1016,10 +1016,13 @@ EXAMPLE = "value"
 ```
 
 All common container fields are accepted, and `workspace_storage` supports all
-three Podman variants. On an SSH machine the container and any workspace volume
-live on that host, so supplemental directory sources are paths on it rather
-than on the controller. It always runs the harness unconstrained inside the
-container boundary. See [Podman](/podman/) and [SSH and SSH Podman](/ssh/).
+three Podman variants. A local Podman target runs rootless Podman on Linux,
+WSL2, or macOS with a rootless `podman machine`; rootful machines and manually
+configured remote connections are not supported. On an SSH machine the
+container and any workspace volume live on that host, so supplemental
+directory sources are paths on it rather than on the controller. It always
+runs the harness unconstrained inside the container boundary. See
+[Podman](/podman/) and [SSH and SSH Podman](/ssh/).
 
 ```toml
 [targets.remote-podman]

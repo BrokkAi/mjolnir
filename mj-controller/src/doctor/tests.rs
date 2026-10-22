@@ -911,15 +911,31 @@ fn ssh_bare_config() -> Config {
     )])
 }
 
+fn rootless_podman_info() -> String {
+    serde_json::json!({
+        "host": {
+            "security": { "rootless": true },
+            "serviceIsRemote": false,
+            "idMappings": {
+                "uidmap": [
+                    { "container_id": 0, "host_id": 1000, "size": 1 },
+                    { "container_id": 1, "host_id": 100000, "size": 65536 },
+                ],
+                "gidmap": [
+                    { "container_id": 0, "host_id": 1000, "size": 1 },
+                    { "container_id": 1, "host_id": 100000, "size": 65536 },
+                ],
+            },
+        }
+    })
+    .to_string()
+}
+
 fn ssh_podman_probe_executor(linger: (i32, &str, &str)) -> FakeExecutor {
+    let info = rootless_podman_info();
     let probes = crate::targets::ssh_podman_probe_fixture(&[
         ("version", 0, "podman version 5.4.2\n", ""),
-        (
-            "uid_map",
-            0,
-            "         0       1000          1\n         1     100000      65536\n",
-            "",
-        ),
+        ("info", 0, &info, ""),
         ("linger", linger.0, linger.1, linger.2),
     ]);
     FakeExecutor::new([Ok(output(b"")), Ok(output(probes))])
@@ -1164,11 +1180,10 @@ fn image_checks_are_skipped_when_the_host_podman_preflight_fails() {
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].id, "runtime.podman");
 
+    let info = rootless_podman_info();
     let mut responses = vec![
         Ok(output(b"podman version 5.4.2\n")),
-        Ok(output(
-            b"         0       1000          1\n         1     100000      65536\n",
-        )),
+        Ok(output(info.as_bytes())),
     ];
     responses.extend([Ok(output(b"")), Ok(failed(b"")), Ok(output(b""))]);
     let executor = FakeExecutor::new(responses);
@@ -1355,7 +1370,7 @@ fn linux_instructions_embed_podman_postconditions_and_doctor_loop() {
     let instructions = setup_instructions(InstructionsPlatform::Linux);
     assert!(instructions.contains("mj doctor --json"));
     assert!(instructions.contains("mj doctor --json --smoke"));
-    assert!(instructions.contains("podman unshare cat /proc/self/uid_map"));
+    assert!(instructions.contains("podman info --format json"));
     assert!(instructions.contains("Podman **4.0.0 or newer**"));
     assert!(instructions.contains("kind = \"docker\""));
     assert!(instructions.contains("--opt type=overlay"));
@@ -1375,7 +1390,7 @@ fn setup_instructions_name_mjolnir_and_the_local_bare_prerequisites() {
         assert!(!instructions.contains("Disposable EC2"));
     }
     let macos = setup_instructions(InstructionsPlatform::Macos);
-    assert!(!macos.contains("local Podman"), "{macos}");
+    assert!(macos.contains("podman machine"), "{macos}");
 }
 
 /// Releases before this one wrote Mjolnir's own refs into user repositories

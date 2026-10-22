@@ -29,7 +29,7 @@ command exercises container creation and removal.
 | `bare` | `local` (Linux or macOS controller machine) | none | Existing local directory, optionally an isolated Git clone | no | host-owned | Machine and user-selected directory persist; a managed clone is archived and retired on suspend. |
 | `bare` | an `ssh` machine (named remote Linux host) | none beyond host/account | Existing remote Git directory, optionally an isolated clone | no | host-owned | Host and user-selected directory persist; the managed clone and staging areas are retired on suspend. |
 | `bare` | an `aws-ec2` machine (your AWS account) | disposable EC2 instance | Bundle | controller-side directory snapshot | EC2 instance type | Instance is terminated after verified stop. |
-| `podman` | `local` (Linux/WSL2) | rootless container | Bundle | copy-on-write or read-only mounts | CPU and memory | Container and workspace storage are removed after verified stop. |
+| `podman` | `local` (Linux/WSL2, or macOS with a rootless `podman machine`) | rootless container | Bundle | copy-on-write or read-only mounts | CPU and memory | Container and workspace storage are removed after verified stop. |
 | `podman` | an `ssh` machine | rootless container | Bundle | remote-host copy-on-write or read-only mounts | CPU and memory | Remote container and workspace storage are removed after verified stop. |
 | `docker` | `local` with a Linux Docker daemon (including a VM on macOS), or an `ssh` machine | Docker container | Bundle | copy-on-write or read-only OverlayFS views | CPU and memory | Container and managed workspace volume are removed after verified stop. |
 | `apple-container` | `local` (Apple-silicon macOS 26+) | Apple container VM | Bundle | read-only mounts | CPU and memory | Container is removed after verified stop. |
@@ -174,10 +174,11 @@ harness bridge. See [Container targets](/containers/) and
 kind = "podman"
 ```
 
-Rootless Podman 4.0 or newer is the reference Linux/WSL2 runtime. It is the only
-runtime with configurable workspace backing: a named volume by default, the
-container layer, or a host path managed through an operator-supplied helper.
-See [Podman](/podman/).
+Rootless Podman 4.0 or newer runs on Linux, WSL2, or macOS with a rootless
+`podman machine`. It is the only runtime with configurable workspace backing:
+a named volume by default, the container layer, or a host path managed through
+an operator-supplied helper. A rootful machine and a manually configured remote
+connection are not supported. See [Podman](/podman/).
 
 ### Docker
 
