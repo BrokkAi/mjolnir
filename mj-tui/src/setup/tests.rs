@@ -2285,7 +2285,7 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         generation,
         &preview_key,
         Ok(Some(BuildCachePreview {
-            native_mbx: None,
+            native_mbx: Some("1.26.0".into()),
             mbx_profile_file: None,
             mbx_profile_warning: None,
             mbx_manual_path_line: None,
@@ -2295,8 +2295,11 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
             application: Default::default(),
             budget_note: None,
             stats: None,
-            off_reason: Some(mj_core::state::BuildCacheOff::Unavailable(
-                "Shared mbx requires a Linux host".into(),
+            off_reason: Some(mj_core::state::BuildCacheOff::UnsupportedPlatform(
+                "mbx 1.26.0 runs natively on this Mac at /Users/builder/.local/bin/mbx; bare \
+                 sessions here use it when it is on their login PATH. Container sessions run \
+                 without the shared build cache."
+                    .into(),
             )),
         })),
         false,
@@ -2306,9 +2309,11 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         .unwrap();
     let unsupported = buffer_lines(terminal.backend().buffer()).join("\n");
     assert!(
-        unsupported.contains("Shared mbx requires a Linux host"),
+        unsupported.contains("mbx: mbx 1.26.0 runs natively on this Mac"),
         "{unsupported}"
     );
+    // Hard-won: #1330: a Mac's working native mbx was reported as missing.
+    assert!(!unsupported.contains("no mbx on the host"), "{unsupported}");
     assert!(
         !unsupported.contains("Pending application"),
         "{unsupported}"
@@ -3525,7 +3530,7 @@ fn machine_row_reports_an_unsupported_cache_host_like_its_page() {
             application: Default::default(),
             budget_note: None,
             stats: None,
-            off_reason: Some(mj_core::state::BuildCacheOff::Unavailable(
+            off_reason: Some(mj_core::state::BuildCacheOff::UnsupportedPlatform(
                 "Shared mbx requires a Linux host".into(),
             )),
         })),
@@ -3536,6 +3541,42 @@ fn machine_row_reports_an_unsupported_cache_host_like_its_page() {
         lines.iter().any(|line| line.contains("Build caches")
             && line.contains("mbx unavailable")
             && !line.contains("Enabled by default")),
+        "{lines:#?}"
+    );
+
+    // A Mac reports the mbx its bare sessions use, not a missing one.
+    dashboard.build_cache_previewed(
+        generation,
+        &key,
+        Ok(Some(mj_core::state::BuildCachePreview {
+            native_mbx: Some("1.26.0".into()),
+            mbx_profile_file: None,
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
+            directory: None,
+            max_total_size: None,
+            user_managed: false,
+            application: Default::default(),
+            budget_note: None,
+            stats: None,
+            off_reason: Some(mj_core::state::BuildCacheOff::UnsupportedPlatform(
+                "mbx 1.26.0 runs natively on this Mac".into(),
+            )),
+        })),
+        false,
+    );
+    let lines = drawn(&mut dashboard, 160, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Build caches")
+                && line.contains("mbx 1.26.0, bare sessions only")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|line| !line.contains("mbx unavailable") && !line.contains("no mbx on the host")),
         "{lines:#?}"
     );
 }
@@ -3720,7 +3761,7 @@ fn machine_page_labels_old_mbx_as_upgrade_and_hides_unavailable_actions() {
             application: Default::default(),
             budget_note: None,
             stats: None,
-            off_reason: Some(mj_core::state::BuildCacheOff::Unavailable(
+            off_reason: Some(mj_core::state::BuildCacheOff::UnsupportedPlatform(
                 "Shared mbx requires a Linux host".into(),
             )),
         })));

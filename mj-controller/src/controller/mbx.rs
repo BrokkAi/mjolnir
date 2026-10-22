@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 
-use super::cache_host::CacheHost;
+use super::cache_host::{CacheHost, HostPlatform};
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec};
 use mj_core::config::{Config, TargetBuildCache, TargetTemplate};
 use mj_core::state::{
@@ -37,27 +37,50 @@ const MBX_COPY_RELATIVE: &str = ".mjolnir/bin/mbx";
 const TALLY_RELATIVE: &str = "actions/savings/v1/tally.json";
 const RESOLUTION_LIFETIME: Duration = Duration::from_secs(600);
 const LABEL: &str = "hel-mbx";
-const UNSUPPORTED_HOST: &str = "Mjolnir's shared mbx cache requires a Linux host. Native mbx on macOS must be installed and configured separately.";
+const WINDOWS_HOST: &str = "Mjolnir's shared mbx cache requires a Linux host.";
 
-/// Ask the cache host, not the controller or a container running on that host.
-pub(super) fn host_supports_cache(
+/// Why a host's platform keeps its mbx away from its containers, and the
+/// native mbx it found there.
+struct PlatformLimit {
+    native: Option<NativeMbx>,
+    reason: String,
+}
+
+/// The one decision on whether a host's platform can share its mbx with
+/// containers, or `None` on Linux, where it can. A Mac runs mbx natively, so
+/// its own mbx is still found and reported: bare sessions there use it.
+fn platform_limit(
     host: &CacheHost,
     executor: &impl CommandExecutor,
-) -> Result<bool> {
-    // Windows is no Linux host and has no `uname` to ask; its container
-    // engine runs in a VM this machine's paths do not reach.
-    if host.ssh().is_none() && !cfg!(unix) {
-        return Ok(false);
-    }
-    let command = host.command(
-        vec!["uname".into(), "-sm".into()],
-        "detect build cache host platform",
-    );
-    let output = checked(executor.execute(&command)?, &command)?;
-    let platform = targets::TargetPlatform::parse(
-        std::str::from_utf8(&output.stdout).context("decode build cache host platform")?,
-    )?;
-    Ok(platform.os == targets::TargetOs::Linux)
+) -> Result<Option<PlatformLimit>> {
+    let native = match host.platform(executor)? {
+        HostPlatform::Linux => return Ok(None),
+        HostPlatform::Windows => {
+            return Ok(Some(PlatformLimit {
+                native: None,
+                reason: WINDOWS_HOST.into(),
+            }));
+        }
+        HostPlatform::Darwin => probe_native_version(host, executor)?,
+    };
+    const CONTAINERS: &str = "Container sessions run without the shared build cache, because \
+        containers on macOS run Linux in a virtual machine that cannot run a macOS mbx or share \
+        its cache.";
+    // The probe also searches user directories a login PATH may omit, so it
+    // cannot say that bare sessions find what it found.
+    let reason = match &native {
+        Some(native) => format!(
+            "mbx {} runs natively on this Mac at {}; bare sessions here use it when it is on \
+             their login PATH. {CONTAINERS}",
+            native.version,
+            native.program.display()
+        ),
+        None => format!(
+            "mbx is not installed on this Mac; bare sessions here use it once it is installed \
+             natively and on their login PATH. {CONTAINERS}"
+        ),
+    };
+    Ok(Some(PlatformLimit { native, reason }))
 }
 
 /// What a container target's host offers as a build cache.
@@ -278,7 +301,7 @@ pub(crate) fn apply_machine_build_cache(
     let inspected = inspect(&host, &settings, Freshness::Fresh, executor)?;
     if matches!(
         &inspected.preview.off_reason,
-        Some(BuildCacheOff::Unavailable(reason)) if reason == UNSUPPORTED_HOST
+        Some(BuildCacheOff::UnsupportedPlatform(_))
     ) {
         return Ok(());
     }
@@ -487,8 +510,8 @@ pub(crate) fn doctor_host_mbx(
     }
     checks.extend(hosts.into_iter().map(|(key, (host, targets))| {
         let status = (|| -> Result<DoctorHostMbxStatus> {
-            if !host_supports_cache(&host, executor)? {
-                return Ok(DoctorHostMbxStatus::Unsupported(UNSUPPORTED_HOST.into()));
+            if let Some(limit) = platform_limit(&host, executor)? {
+                return Ok(DoctorHostMbxStatus::Unsupported(limit.reason));
             }
             Ok(
                 match classify_native_mbx(probe_native_version(&host, executor)?) {
@@ -525,10 +548,10 @@ fn inspect_host(
     settings: &TargetBuildCache,
     executor: &impl CommandExecutor,
 ) -> Result<Inspection> {
-    if !host_supports_cache(host, executor)? {
+    if let Some(limit) = platform_limit(host, executor)? {
         return Ok(Inspection {
             preview: BuildCachePreview {
-                native_mbx: None,
+                native_mbx: limit.native.map(|native| native.version),
                 mbx_profile_file: None,
                 mbx_profile_warning: None,
                 mbx_manual_path_line: None,
@@ -538,7 +561,7 @@ fn inspect_host(
                 application: BuildCacheApplication::Pending,
                 budget_note: None,
                 stats: None,
-                off_reason: Some(BuildCacheOff::Unavailable(UNSUPPORTED_HOST.into())),
+                off_reason: Some(BuildCacheOff::UnsupportedPlatform(limit.reason)),
             },
             cache: None,
         });
@@ -736,9 +759,20 @@ pub(crate) struct NativeMbx {
 
 /// Find the same native executable whether it is on PATH or in a common
 /// per-user install directory, then resolve symlinks before reporting it.
+/// Links are followed one at a time because macOS before 12.3 has no
+/// `readlink -f`; every path handed to `readlink` starts with `/`.
 pub(super) const NATIVE_VERSION_SCRIPT: &str = r#"for candidate in "$(command -v mbx 2>/dev/null || true)" "$HOME/.local/bin/mbx" "$HOME/.cargo/bin/mbx"; do
     [ -n "$candidate" ] && [ -x "$candidate" ] || continue
-    resolved=$(readlink -f -- "$candidate" 2>/dev/null) || continue
+    case "$candidate" in /*) resolved=$candidate ;; *) resolved=$PWD/$candidate ;; esac
+    hops=0
+    while [ -L "$resolved" ]; do
+        [ "$hops" -lt 40 ] || continue 2
+        link=$(readlink "$resolved" 2>/dev/null) || continue 2
+        case "$link" in /*) resolved=$link ;; *) resolved=${resolved%/*}/$link ;; esac
+        hops=$((hops + 1))
+    done
+    directory=$(cd -P "${resolved%/*}/" 2>/dev/null && pwd -P) || continue
+    resolved=${directory%/}/${resolved##*/}
     case "$resolved" in /*) ;; *) continue ;; esac
     if version=$("$resolved" --version 2>/dev/null); then
         printf '%s
@@ -1443,15 +1477,21 @@ mod tests {
         vec![("$resolved\" --version", 1, "")]
     }
 
+    // Hard-won: #1330: a Mac's working native mbx was reported as missing.
     #[test]
     #[cfg_attr(
         windows,
         ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
     )]
-    fn darwin_hosts_skip_cache_inspection_provisioning_and_reconciliation() {
+    fn darwin_hosts_report_native_mbx_without_sharing_it_with_containers() {
         let _isolated = isolated();
         for remote in [false, true] {
-            for enabled in [None, Some(true)] {
+            for (enabled, native) in [None, Some(true)]
+                .into_iter()
+                .flat_map(|enabled| [(enabled, Some("1.16.0")), (enabled, None)])
+            {
+                // Each case asks its own host afresh.
+                RESOLUTIONS.lock().expect("mbx resolutions").clear();
                 let settings = TargetBuildCache {
                     enabled,
                     ..Default::default()
@@ -1477,32 +1517,56 @@ mod tests {
                 } else {
                     podman(Some(settings))
                 };
-                // An installed native mbx must not enable Mjolnir's integration.
+                let probe = native.map_or_else(String::new, |version| {
+                    format!("/Users/builder/.local/bin/mbx\nmbx {version}")
+                });
                 let executor = ProbeExecutor::new(&[
                     ("uname -sm", 0, "Darwin arm64\n"),
-                    ("$resolved\" --version", 0, "mbx\nmbx 1.16.0"),
+                    (
+                        "$resolved\" --version",
+                        if native.is_some() { 0 } else { 1 },
+                        &probe,
+                    ),
                 ]);
                 let preview = preview_build_cache(&machine, &executor).unwrap().unwrap();
-                assert_eq!(
-                    preview.off_reason,
-                    Some(BuildCacheOff::Unavailable(UNSUPPORTED_HOST.into()))
-                );
+                // The Mac's own mbx is reported, even one too old to share.
+                assert_eq!(preview.native_mbx.as_deref(), native);
+                let Some(BuildCacheOff::UnsupportedPlatform(reason)) = &preview.off_reason else {
+                    panic!("{:?}", preview.off_reason);
+                };
+                match native {
+                    Some(version) => assert!(
+                        reason.contains(&format!(
+                            "mbx {version} runs natively on this Mac at /Users/builder/.local/bin/mbx"
+                        )) && reason.contains("when it is on their login PATH"),
+                        "{reason}"
+                    ),
+                    None => assert!(reason.contains("not installed on this Mac"), "{reason}"),
+                }
+                assert!(reason.contains("Linux in a virtual machine"), "{reason}");
+                // The pinned Linux release cannot install or upgrade it.
+                assert_eq!(install::install_kind(&preview), None);
                 assert!(preview.directory.is_none());
+                // An installed native mbx must not enter a container.
                 assert!(resolve(&target, &executor).is_none());
                 apply_machine_build_cache(&machine, &[PathBuf::from("/existing/cache")], &executor)
                     .unwrap();
+                // Only the platform and the native mbx are asked about: no
+                // GNU-only probes and no writes.
                 let commands = executor.ran();
-                assert!(!commands.is_empty());
                 assert!(
-                    commands
-                        .iter()
-                        .all(|command| command.contains("uname") && command.contains("-sm")),
+                    commands.iter().any(|command| command.contains("-sm"))
+                        && commands.iter().all(|command| {
+                            (command.contains("uname") && command.contains("-sm"))
+                                || command.contains("--version")
+                        }),
                     "{commands:?}"
                 );
                 assert!(
-                    commands
-                        .iter()
-                        .all(|command| command.starts_with(if remote { "ssh " } else { "uname " }))
+                    commands.iter().all(|command| {
+                        !remote || command.starts_with("ssh ") && command.contains("mac.test")
+                    }),
+                    "{commands:?}"
                 );
             }
         }
@@ -1563,7 +1627,10 @@ mod tests {
         ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
     )]
     fn recorded_darwin_cache_fails_explicitly_without_writing() {
-        let executor = ProbeExecutor::new(&[("uname -sm", 0, "Darwin x86_64")]);
+        let executor = ProbeExecutor::new(&[
+            ("uname -sm", 0, "Darwin x86_64"),
+            ("$resolved\" --version", 1, ""),
+        ]);
         let recorded = SessionBuildCache {
             host: "local".into(),
             directory: PathBuf::from("/existing/cache"),
@@ -1578,8 +1645,16 @@ mod tests {
         let error =
             prepare_session_configuration(&Config::default(), &backend, &recorded, &executor)
                 .unwrap_err();
-        assert!(format!("{error:#}").contains(UNSUPPORTED_HOST));
-        assert_eq!(executor.ran(), ["uname -sm"]);
+        assert!(
+            format!("{error:#}").contains("Linux in a virtual machine"),
+            "{error:#}"
+        );
+        let ran = executor.ran();
+        assert_eq!(ran[0], "uname -sm");
+        assert!(
+            ran[1..].iter().all(|command| command.contains("--version")),
+            "{ran:?}"
+        );
     }
 
     #[test]
@@ -2229,14 +2304,30 @@ mod tests {
         };
         let real_mbx = real_bin.join("mbx-real");
         install(&real_mbx, "1.30.0");
-        symlink(&real_mbx, path_bin.join("mbx")).unwrap();
+        // Relative links, one of them reached through a symlinked directory.
+        symlink(&real_bin, root.path().join("alias")).unwrap();
+        symlink("mbx-real", real_bin.join("mbx-hop")).unwrap();
+        symlink("../alias/mbx-hop", path_bin.join("mbx")).unwrap();
         install(&local_bin.join("mbx"), "1.31.0");
         install(&cargo_bin.join("mbx"), "1.32.0");
         let readlink = std::env::split_paths(&std::env::var_os("PATH").unwrap())
             .map(|directory| directory.join("readlink"))
             .find(|candidate| candidate.is_file())
             .expect("readlink utility is available");
-        symlink(readlink, path_bin.join("readlink")).unwrap();
+        // Hard-won: #1330: the probe needed `readlink -f`, which macOS before 12.3 lacks.
+        std::fs::write(
+            path_bin.join("readlink"),
+            format!(
+                "#!/bin/sh\ncase $1 in -*) echo \"readlink: illegal option $1\" >&2; exit 1 ;; esac\nexec '{}' \"$@\"\n",
+                readlink.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            path_bin.join("readlink"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
 
         let mut command = CommandSpec::new("/bin/sh", ["-c", NATIVE_VERSION_SCRIPT])
             .purpose("test native mbx path resolution");
@@ -2254,7 +2345,7 @@ mod tests {
         assert_eq!(
             parse_native_probe_output(&output.stdout).unwrap(),
             NativeMbx {
-                program: real_mbx.clone(),
+                program: std::fs::canonicalize(&real_mbx).unwrap(),
                 version: "1.30.0".into(),
             }
         );

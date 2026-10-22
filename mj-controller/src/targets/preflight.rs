@@ -1048,12 +1048,43 @@ pub(super) fn parse_podman_version(host: PodmanHost<'_>, stdout: &[u8]) -> Resul
     Ok(candidate.to_owned())
 }
 
-/// Filesystem type of each directory, probed on the host that runs the
-/// container engine. `ssh` names that host for a remote Podman target; `None`
-/// probes this machine.
+/// Print the filesystem type of each argument, one per line. macOS `stat`
+/// cannot name one, so there each `mount` entry, `<device> on <point>
+/// (<type>, ...)`, is matched against the end of the path's `df` line: the
+/// longest point it ends with holds the path, and among entries for that
+/// point the last, the one on top, names the type. Both device names and
+/// mount points can contain spaces and `%`, so no `df` column is parsed.
+pub(super) const FILESYSTEM_TYPES_SCRIPT: &str = r#"if [ "$(uname -s)" != Darwin ]; then
+    exec stat -f -c %T -- "$@"
+fi
+mounts=$(mount) || exit 1
+for path do
+    usage=$(df -P -- "$path" | sed -n 2p)
+    [ -n "$usage" ] || { printf 'df reported no filesystem for %s\n' "$path" >&2; exit 1; }
+    filesystem=$(printf '%s\n' "$mounts" | {
+        best= found=
+        while IFS= read -r line; do
+            head=${line% (*}
+            [ "$head" != "$line" ] || continue
+            case $head in *" on /"*) ;; *) continue ;; esac
+            point=/${head#* on /}
+            case $usage in *" $point") ;; *) continue ;; esac
+            [ "${#point}" -ge "${#best}" ] || continue
+            options=${line#"$head ("}
+            best=$point found=${options%%[,)]*}
+        done
+        printf '%s' "$found"
+    })
+    [ -n "$filesystem" ] || { printf 'mount lists no filesystem holding %s\n' "$path" >&2; exit 1; }
+    printf '%s\n' "$filesystem"
+done"#;
+
+/// Filesystem type of each directory, probed on the host that owns it: the
+/// one that runs the container engine, or a bare session's own machine.
+/// `ssh` names that host; `None` probes this machine.
 ///
-/// The reply is positional, so the whole batch fails unless `stat` answered for
-/// every directory in order.
+/// The reply is positional, so the whole batch fails unless the host answered
+/// for every directory in order.
 pub fn probe_filesystem_types(
     ssh: Option<&SshTarget>,
     paths: &[PathBuf],
@@ -1063,11 +1094,10 @@ pub fn probe_filesystem_types(
         return Ok(Vec::new());
     }
     let mut args = vec![
-        "stat".to_owned(),
-        "-f".to_owned(),
+        "sh".to_owned(),
         "-c".to_owned(),
-        "%T".to_owned(),
-        "--".to_owned(),
+        FILESYSTEM_TYPES_SCRIPT.to_owned(),
+        "hel-filesystem".to_owned(),
     ];
     args.extend(paths.iter().map(|path| path.to_string_lossy().into_owned()));
     let host = match ssh {

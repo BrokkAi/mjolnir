@@ -1829,11 +1829,9 @@ fn filesystem_probe_answers_positionally_and_reaches_the_podman_host() {
         vec!["ext4".to_owned(), "nfs".to_owned()]
     );
     let seen = executor.seen.borrow();
-    assert_eq!(seen[0].program, "stat");
-    assert_eq!(
-        seen[0].args,
-        ["-f", "-c", "%T", "--", "/host/cache", "/host/models"]
-    );
+    assert_eq!(seen[0].program, "sh");
+    assert_eq!(seen[0].args[0], "-c");
+    assert_eq!(seen[0].args[3..], ["/host/cache", "/host/models"]);
 
     let remote = PodmanPreflightExecutor::with_outputs([podman_output(b"ext4\nnfs\n")]);
     probe_filesystem_types(Some(&ssh()), &paths, &remote).unwrap();
@@ -1841,11 +1839,125 @@ fn filesystem_probe_answers_positionally_and_reaches_the_podman_host() {
     assert_eq!(seen[0].program, "ssh");
     assert!(
         seen[0].args.last().is_some_and(|remote| {
-            remote == "'stat' '-f' '-c' '%T' '--' '/host/cache' '/host/models'"
+            remote.starts_with("'sh' '-c' ")
+                && remote.ends_with("'hel-filesystem' '/host/cache' '/host/models'")
         }),
         "{:?}",
         seen[0].args
     );
+}
+
+/// macOS output, recorded from `df -P` and `mount`, where device names and
+/// mount points carry spaces and `%`, names share prefixes, and one point is
+/// mounted twice. Every awkward case lands in one run of the real script.
+// Hard-won: #1330: a `%` in a macOS mount point cut the mount point short and lost its filesystem.
+#[cfg(unix)]
+#[test]
+fn macos_filesystem_probe_reads_awkward_mount_points_from_df_and_mount() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin = tempfile::tempdir().unwrap();
+    let tool = |name: &str, body: &str| {
+        let path = bin.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    tool("uname", "echo Darwin\n");
+    tool(
+        "mount",
+        r#"cat <<'EOF'
+/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)
+devfs on /dev (devfs, local, nobrowse)
+/dev/disk3s5 on /System/Volumes/Data (apfs, local, journaled, nobrowse, protect, root data)
+map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)
+//builder@nas._smb._tcp.local/My Share on /Volumes/My Share (smbfs, nodev, nosuid, mounted by builder)
+/dev/disk5s1 on /Volumes/My Share 2 (exfat, local, nodev, nosuid, noowners)
+/dev/disk6s1 on /Volumes/50% done (hfs, local, journaled)
+map -fstab on /Volumes/stack (autofs, automounted)
+nas:/export on /Volumes/stack (nfs, nodev, nosuid, mounted by builder)
+EOF
+"#,
+    );
+    tool(
+        "df",
+        r#"echo 'Filesystem                              512-blocks      Used Available Capacity  Mounted on'
+case $3 in
+    /Users/*) echo '/dev/disk3s5                             965595304 773624968 154366136    84%    /System/Volumes/Data' ;;
+    '/Volumes/My Share 2'/*) echo '/dev/disk5s1  1000 100 900  10%    /Volumes/My Share 2' ;;
+    '/Volumes/My Share'/*) echo '//builder@nas._smb._tcp.local/My Share  1000 100 900  10%    /Volumes/My Share' ;;
+    '/Volumes/50% done'/*) echo '/dev/disk6s1  1000 500 500  50%    /Volumes/50% done' ;;
+    /Volumes/stack/*) echo 'nas:/export  1000 100 900  10%    /Volumes/stack' ;;
+    /nowhere/*) echo 'ghost  1000 100 900  10%    /nowhere' ;;
+    *) echo '/dev/disk3s1s1  1000 100 900  10%    /' ;;
+esac
+"#,
+    );
+    let probe = |paths: &[&str]| {
+        let mut command = CommandSpec::new(
+            "/bin/sh",
+            [
+                "-c",
+                super::preflight::FILESYSTEM_TYPES_SCRIPT,
+                "hel-filesystem",
+            ]
+            .into_iter()
+            .chain(paths.iter().copied()),
+        )
+        .purpose("test macOS filesystem probe");
+        let path = std::env::var("PATH").unwrap();
+        command
+            .env
+            .insert("PATH".into(), format!("{}:{path}", bin.path().display()));
+        ProcessExecutor.execute(&command).unwrap()
+    };
+
+    let output = probe(&[
+        "/Users/builder/.cache/mjolnir/build",
+        "/Volumes/My Share/models",
+        "/Volumes/My Share 2/scratch",
+        "/Volumes/50% done/cache",
+        "/Volumes/stack/data",
+        "/opt/tools",
+    ]);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "apfs\nsmbfs\nexfat\nhfs\nnfs\napfs\n",
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // A mount point `mount` does not list fails visibly instead of guessing.
+    let output = probe(&["/nowhere/cache"]);
+    assert_ne!(output.status, 0);
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("mount lists no filesystem holding /nowhere/cache"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The probe asks the host's own tools, whose output differs by platform:
+/// macOS `stat` cannot name a filesystem, so there it reads `df` and `mount`.
+#[cfg(unix)]
+#[test]
+fn filesystem_probe_names_this_hosts_filesystems_in_order() {
+    let root = tempfile::tempdir().unwrap();
+    let spaced = root.path().join("a directory with spaces");
+    std::fs::create_dir(&spaced).unwrap();
+    let paths = [root.path().to_path_buf(), spaced];
+
+    let filesystems =
+        probe_filesystem_types(None, &paths, &crate::targets::ProcessExecutor).unwrap();
+
+    assert_eq!(filesystems.len(), 2, "{filesystems:?}");
+    assert!(
+        filesystems
+            .iter()
+            .all(|filesystem| !filesystem.is_empty() && !filesystem.contains(char::is_whitespace)),
+        "{filesystems:?}"
+    );
+    assert_eq!(filesystems[0], filesystems[1]);
 }
 
 #[test]

@@ -54,7 +54,12 @@ mj-controller/src/controller/worker_binary/*
 mj-controller/src/checkpoint_transfer.rs
 mj-controller/src/checkpoint_transfer/*
 
-# Build cache host support and its settings/doctor reporting.
+# Build cache host support and its settings/doctor reporting, the native
+# caches bare sessions on a Mac use, and the filesystem probe with a macOS
+# branch.
+mj-controller/src/controller/cache_host.rs
+mj-controller/src/controller/tool_cache.rs
+mj-controller/src/targets/preflight.rs
 mj-controller/src/controller/mbx.rs
 mj-controller/src/controller/mbx/*
 mj-controller/src/doctor.rs

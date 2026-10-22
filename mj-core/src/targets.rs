@@ -500,16 +500,23 @@ impl From<AdditionalMount> for AdditionalMountRepr {
 /// or `None` when it can. Unknown types are allowed: the overlay is the better
 /// mount and only a filesystem known to break it is downgraded.
 ///
-/// The names are those `stat -f -c %T` reports, matched case-insensitively.
+/// The names are those Linux `stat -f -c %T` and macOS `mount` report,
+/// matched case-insensitively.
 pub fn overlay_unsupported_filesystem(filesystem: &str) -> Option<&'static str> {
     let name = filesystem.trim().to_ascii_lowercase();
-    // FUSE reports the backing driver as `fuse.sshfs`, `fuse.s3fs`, and so on.
-    if name == "fuse" || name == "fuseblk" || name.starts_with("fuse.") {
+    // FUSE reports the backing driver as `fuse.sshfs`, `fuse.s3fs`, and so on;
+    // macFUSE reports itself.
+    if name == "fuse"
+        || name == "fuseblk"
+        || name.starts_with("fuse.")
+        || matches!(name.as_str(), "macfuse" | "osxfuse")
+    {
         return Some("FUSE filesystem");
     }
     match name.as_str() {
         "nfs" | "nfs4" | "cifs" | "smb2" | "smb3" | "9p" | "v9fs" | "virtiofs" | "ceph"
-        | "lustre" | "afs" | "glusterfs" | "ocfs2" | "gfs" | "gfs2" => Some("network filesystem"),
+        | "lustre" | "afs" | "glusterfs" | "ocfs2" | "gfs" | "gfs2" | "smbfs" | "afpfs"
+        | "webdav" => Some("network filesystem"),
         "msdos" | "vfat" | "fat" | "exfat" | "ntfs" | "ntfs3" => Some("no POSIX metadata"),
         "overlayfs" => Some("overlay stacking limit"),
         _ => None,

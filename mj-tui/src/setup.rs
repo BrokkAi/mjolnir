@@ -1424,19 +1424,25 @@ impl SetupDialog {
 
     /// What the machine page's build cache row says when the resolved preview
     /// shows the host cannot share the cache.
-    fn build_cache_row_unavailable(&self) -> Option<&'static str> {
+    fn build_cache_row_unavailable(&self) -> Option<String> {
         use mj_core::state::BuildCacheOff;
         let (_, key) = self.build_cache_machine_page()?;
         let preview = self.build_cache_preview.as_ref()?;
         if preview.key != key {
             return None;
         }
-        match &preview.result {
-            BuildCachePreviewResult::Ready(Some(preview)) => match preview.off_reason {
-                Some(BuildCacheOff::Unavailable(_)) => Some("mbx unavailable"),
-                _ => None,
-            },
-            _ => None,
+        let BuildCachePreviewResult::Ready(Some(preview)) = &preview.result else {
+            return None;
+        };
+        match (&preview.off_reason, &preview.native_mbx) {
+            // Only a Mac reports its own mbx while its containers cannot use it.
+            (Some(BuildCacheOff::UnsupportedPlatform(_)), Some(version)) => {
+                Some(format!("mbx {version}, bare sessions only"))
+            }
+            (Some(BuildCacheOff::Unavailable(_) | BuildCacheOff::UnsupportedPlatform(_)), _) => {
+                Some("mbx unavailable".to_owned())
+            }
+            (Some(BuildCacheOff::TurnedOff) | None, _) => None,
         }
     }
 
@@ -1619,7 +1625,9 @@ impl SetupDialog {
         }
         match &preview.result {
             BuildCachePreviewResult::Ready(Some(preview)) => match &preview.off_reason {
-                Some(BuildCacheOff::Unavailable(reason)) => Some(reason.as_str()),
+                Some(
+                    BuildCacheOff::Unavailable(reason) | BuildCacheOff::UnsupportedPlatform(reason),
+                ) => Some(reason.as_str()),
                 Some(BuildCacheOff::TurnedOff) | None => None,
             },
             _ => None,
@@ -2638,6 +2646,10 @@ impl DashboardState {
                     None => "no mbx on the host".to_owned(),
                 };
                 match &preview.off_reason {
+                    // The reason already names the host's own mbx and what uses it.
+                    Some(mj_core::state::BuildCacheOff::UnsupportedPlatform(reason)) => {
+                        reason.clone()
+                    }
                     Some(reason) => {
                         format!("The mbx build cache is unavailable: {reason} ({host_mbx}).")
                     }
@@ -3328,7 +3340,7 @@ pub(crate) fn render_setup(
                         .or_else(|| dialog.archive_space_automatic_label(key))
                         .or_else(|| {
                             (key == "build_cache")
-                                .then(|| dialog.build_cache_row_unavailable().map(str::to_owned))
+                                .then(|| dialog.build_cache_row_unavailable())
                                 .flatten()
                         }),
                 ),

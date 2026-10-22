@@ -8,8 +8,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 
-use super::super::cache_host::CacheHost;
-use super::{MBX_VERSION, NativeMbx, host_supports_cache, probe_native_version, version_at_least};
+use super::super::cache_host::{CacheHost, HostPlatform};
+use super::{MBX_VERSION, NativeMbx, probe_native_version, version_at_least};
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec};
 use mj_core::config::Machine;
 use mj_core::state::{BuildCacheOff, BuildCachePreview};
@@ -126,9 +126,10 @@ struct ProfileSelection {
 
 /// The install action to show for the current read-only cache preview.
 pub fn install_kind(preview: &BuildCachePreview) -> Option<MbxInstallKind> {
+    // The pinned release is a static Linux executable.
     if matches!(
         &preview.off_reason,
-        Some(BuildCacheOff::Unavailable(reason)) if reason == super::UNSUPPORTED_HOST
+        Some(BuildCacheOff::UnsupportedPlatform(_))
     ) {
         return None;
     }
@@ -153,7 +154,7 @@ fn install_mbx_with(
     let host = CacheHost::for_machine(machine)
         .context("this machine has no persistent container host where mbx can be installed")?;
     ensure!(
-        host_supports_cache(&host, executor)?,
+        host.platform(executor)? == HostPlatform::Linux,
         "mbx can only be installed on a Linux container host"
     );
     let triple = host_architecture(&host, executor)?;
@@ -828,15 +829,17 @@ mod tests {
             Some(MbxInstallKind::Upgrade)
         );
         assert_eq!(install_kind(&cache_preview(Some(MBX_VERSION), None)), None);
-        assert_eq!(
-            install_kind(&cache_preview(
-                None,
-                Some(BuildCacheOff::Unavailable(
-                    super::super::UNSUPPORTED_HOST.into()
-                ))
-            )),
-            None
-        );
+        // A Mac reports its own older mbx, which the Linux release cannot
+        // replace, as well as having none.
+        for native in [None, Some("1.16.0")] {
+            assert_eq!(
+                install_kind(&cache_preview(
+                    native,
+                    Some(BuildCacheOff::UnsupportedPlatform("macOS".into()))
+                )),
+                None
+            );
+        }
     }
 
     #[test]
@@ -1419,7 +1422,7 @@ mod tests {
             "command -v mbx",
             "$HOME/.local/bin/mbx",
             "$HOME/.cargo/bin/mbx",
-            "readlink -f --",
+            "cd -P",
             "case \"$resolved\" in /*)",
         ] {
             assert!(
