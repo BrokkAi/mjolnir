@@ -745,11 +745,20 @@ fn harness_profile_check(
             harness_login_remediation(id, profile),
         );
     }
+    let environment_logins = profile.opencode_environment_logins();
+    let from_environment = if environment_logins.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; provider keys from the environment: {}",
+            environment_logins.join(", ")
+        )
+    };
     DoctorCheck::ready(
         format!("harness.{id}"),
         title,
         format!(
-            "{} is present and authentication is available",
+            "{} is present and authentication is available{from_environment}",
             profile.home.display()
         ),
     )
@@ -1035,11 +1044,17 @@ fn harness_login_remediation(id: &str, profile: &HarnessProfile) -> String {
         // this text appears only when its configuration file is absent.
         Err(error) => return format!("{error} Check {}.", profile.home.display()),
     };
-    format!(
+    let login = format!(
         "Run `mj login --profile {id}`; it runs `{program} {}` against {}.",
         arguments.join(" "),
         profile.home.display()
-    )
+    );
+    if profile.kind == HarnessKind::OpenCode {
+        return format!(
+            "{login} Or export a provider key OpenCode reads, such as DEEPSEEK_API_KEY, and run `mj daemon restart`."
+        );
+    }
+    login
 }
 
 /// Host Podman prerequisites, then one image check per `local-podman` target.
