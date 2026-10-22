@@ -247,7 +247,12 @@ pub(crate) fn inspect_retained_container(
                 .host_config
                 .cap_add
                 .as_ref()
-                .is_none_or(Vec::is_empty)
+                .is_none_or(|capabilities| {
+                    capabilities.iter().all(|capability| {
+                        container::container_capabilities(host.engine())
+                            .contains(&capability.strip_prefix("CAP_").unwrap_or(capability))
+                    })
+                })
             && record
                 .host_config
                 .cap_drop
@@ -717,6 +722,11 @@ impl RetainedContainer {
             "--init".into(),
             "--stop-signal=KILL".into(),
         ];
+        args.extend(
+            container::container_capabilities(host.engine())
+                .iter()
+                .map(|capability| format!("--cap-add={capability}")),
+        );
         args.extend(managed_resource_identity_args(
             ManagedResourceKind::Container,
             session_id,
@@ -1176,6 +1186,15 @@ mod tests {
             String::from_utf8_lossy(&started.stderr)
         );
         let source = inspect(&host, &name, &ProcessExecutor).unwrap().unwrap();
+        assert!(
+            source
+                .host_config
+                .cap_add
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|capability| capability.trim_start_matches("CAP_") == "PERFMON")
+        );
         let error = inspect_retained_container(
             &locator,
             &session,
@@ -1295,6 +1314,8 @@ mod tests {
         recovered.replace(&session, &ProcessExecutor).unwrap();
         recovered.restore_control_state(&ProcessExecutor).unwrap();
         recovered.replace(&session, &ProcessExecutor).unwrap();
+        let upgraded = inspect(&host, &name, &ProcessExecutor).unwrap().unwrap();
+        assert_eq!(upgraded.host_config.cap_add, source.host_config.cap_add);
         let replacement = inspect_retained_container(
             &locator,
             &session,

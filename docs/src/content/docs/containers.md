@@ -93,9 +93,13 @@ OpenCode install on demand. It also carries Playwright's Chromium system
 libraries and the pre-installed Chromium headless shell in
 `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`, so headless browser tests need no
 privileged install and no run-time browser download, and the profiling tools
-`perf`, `cargo-flamegraph`, `samply`, and `heaptrack`; `perf` additionally needs
-the host's `kernel.perf_event_paranoid` set to 1 or lower, or a host/runtime
-that already provides the required capability. Mjolnir does not expose a
+`perf`, `cargo-flamegraph`, `samply`, and `heaptrack`. Mjolnir adds
+`--cap-add=PERFMON` to local and SSH Podman containers, including replacements
+that retain session storage. Rootless Podman still needs the host's
+`kernel.perf_event_paranoid` set to 1 or lower for per-process profiling with
+the default events. The runtime's seccomp profile must also permit
+`perf_event_open` with `CAP_PERFMON`; some packaged profiles have conflicting
+deny rules that block it despite that capability. Mjolnir does not expose a
 container-capability override. Optional local coverage tooling includes the
 `llvm-tools-preview` component, pinned `cargo-llvm-cov`, and `lcov` for
 `genhtml`. It's published as

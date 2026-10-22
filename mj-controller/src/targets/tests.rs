@@ -1494,6 +1494,7 @@ fn podman_containers_use_root_in_the_default_namespace() {
     )
     .unwrap();
     assert!(podman.windows(2).any(|pair| pair == ["--user", "0:0"]));
+    assert!(podman.contains(&"--cap-add=PERFMON".to_owned()));
     assert!(
         podman
             .windows(2)
@@ -1522,6 +1523,7 @@ fn podman_containers_use_root_in_the_default_namespace() {
             "{engine} must keep its own user namespace"
         );
         assert!(!args.contains(&"0:0".to_owned()), "{engine}: {args:?}");
+        assert!(!args.contains(&"--cap-add=PERFMON".to_owned()));
     }
 }
 
@@ -3557,6 +3559,66 @@ fn retiring_a_podman_generation_preserves_the_destination_temporary_volume() {
         std::fs::read_to_string(state.join("volumes")).unwrap(),
         format!("{destination_volume}\n")
     );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires a cached agent-dev image and a host that permits perf; optionally set MJ_PERF_TEST_HOST for SSH"]
+fn podman_session_container_can_record_perf_samples() {
+    assert!(
+        mj_core::config::instance_name().is_some(),
+        "use MJ_INSTANCE=perfmon-regression"
+    );
+    let ssh = std::env::var("MJ_PERF_TEST_HOST")
+        .ok()
+        .map(|destination| SshTarget {
+            destination,
+            ssh_args: vec!["-o".into(), "BatchMode=yes".into()],
+        });
+    let session = mj_core::state::new_session_id().unwrap();
+    let name = resource_name(&session).unwrap();
+    let template = ContainerTemplate {
+        image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".into(),
+        pull_policy: ImagePullPolicy::Never,
+        extra_run_args: vec![],
+        workspace_storage: PodmanWorkspaceStorage::ContainerLayer,
+        build_cache: None,
+    };
+    let locator = match &ssh {
+        Some(ssh) => TargetLocator::SshPodman {
+            ssh: ssh.clone(),
+            container_id: name.clone(),
+            workspace_storage: PodmanWorkspaceLocator::ContainerLayer,
+            borrowed_from: None,
+        },
+        None => TargetLocator::LocalPodman {
+            container_id: name.clone(),
+            workspace_storage: PodmanWorkspaceLocator::ContainerLayer,
+            borrowed_from: None,
+        },
+    };
+    let result = (|| -> Result<()> {
+        execute_checked(
+            &ProcessExecutor,
+            &podman_container_run(&template, &name, &session, &[], ssh.as_ref(), "/workspace")?,
+        )?;
+        let script = r#"set -eu
+work='i=0; while [ "$i" -lt 500000 ]; do i=$((i+1)); done'
+perf stat -- sh -c "$work"
+perf record -q -F 99 -g -o /tmp/mj-perf.data -- sh -c "$work"
+perf script -i /tmp/mj-perf.data > /tmp/mj-perf.txt
+test -s /tmp/mj-perf.txt
+"#;
+        execute_checked(
+            &ProcessExecutor,
+            &locator_command(&locator, vec!["sh".into(), "-c".into(), script.into()]),
+        )?;
+        Ok(())
+    })();
+    for command in close_plan(&locator, &session).unwrap().commands {
+        execute_checked(&ProcessExecutor, &command).unwrap();
+    }
+    result.unwrap();
 }
 
 #[cfg(unix)]

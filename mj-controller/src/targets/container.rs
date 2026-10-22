@@ -116,6 +116,14 @@ fn temporary_volume_argument(name: &str, mounts: &[AdditionalMount]) -> String {
     }
 }
 
+/// Shared by provisioning and replacements on retained storage.
+pub(super) fn container_capabilities(engine: &str) -> &'static [&'static str] {
+    match engine {
+        "podman" => &["PERFMON"],
+        _ => &[],
+    }
+}
+
 pub(super) fn container_run(
     engine: &str,
     template: &ContainerTemplate,
@@ -573,6 +581,11 @@ pub(super) fn container_run_args(
         session_id,
     ));
     args.extend(template.extra_run_args.clone());
+    args.extend(
+        container_capabilities(engine)
+            .iter()
+            .map(|capability| format!("--cap-add={capability}")),
+    );
     if engine == "podman" {
         // Rootless Podman maps container uid 0 to the host user. Keeping the
         // image user's uid mapping would force Podman to chown every image
