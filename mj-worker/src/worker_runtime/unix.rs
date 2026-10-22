@@ -1585,21 +1585,22 @@ async fn prepare_and_start_harness(
                 .clone();
             let root = root.to_owned();
             let session_id = config.session_id.clone();
-            let configure_subagents = subagent_role.is_some();
-            let registration_required =
-                subagent_role != Some(mj_core::subagent::SubagentMcpRole::MessageOnly);
+            let role = subagent_role;
+            let mailboxes_enabled = config.agent_mailboxes_enabled;
+            let subtle_subagents = config.subtle_subagents;
             let (registered, mailbox_hook_available) =
                 bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                     if step_cancel.is_cancelled() {
                         bail!("preparation cancelled before configuring the Claude profile");
                     }
-                    if configure_subagents {
-                        super::subagents::resolve_claude_mcp_paths(
-                            &root,
-                            &home,
-                            registration_required,
-                        )?;
-                    }
+                    super::subagents::configure_claude_subagent_mcp(
+                        &root,
+                        &session_id,
+                        &home,
+                        role,
+                        mailboxes_enabled,
+                        subtle_subagents,
+                    )?;
                     let mailbox_hook_available =
                         super::subagents::configure_claude_mailbox_hook(&root, &session_id, &home)?;
                     Ok((true, mailbox_hook_available))

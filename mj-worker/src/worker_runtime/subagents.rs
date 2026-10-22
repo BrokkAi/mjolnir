@@ -30,66 +30,201 @@ const CODEX_CONFIG_ENV: &str = "CODEX_CONFIG";
 const CODEX_MAILBOX_HOOK_MARKER: &str = "MJOLNIR_MAILBOX_HOOK=1 ";
 const CLAUDE_MAILBOX_HOOK_MARKER: &str = "MJOLNIR_MAILBOX_HOOK=1 ";
 
-/// Finalize the controller's staged registration on the target, where the
-/// worker root is absolute. Claude launches MCP servers from the checkout,
-/// not from the home against which remote staging paths were written.
+/// Register this launch's `mj-agents` server in the session's private Claude
+/// profile, and allow every tool it lists, before Claude starts.
 ///
-/// A delegating parent's registration is `required`. The message-only server
-/// is not: a profile staged by an older controller lacks it, and a worker
-/// upgrade replaces the launch configuration without restaging the profile.
-/// Such a session runs without `send_message` until it is restaged, rather
-/// than failing its harness preparation.
-pub(super) fn resolve_claude_mcp_paths(root: &Path, home: &Path, required: bool) -> Result<()> {
+/// The worker owns this registration, as it owns Codex's, and writes it on
+/// every start. A profile is staged once, but a worker upgrade or recovery
+/// replaces the launch configuration and binary without restaging it, so a
+/// registration written only at staging went stale: a profile staged before
+/// top-level sessions could message each other never got `send_message`.
+///
+/// Paths are absolute on the target, so Claude can launch the server from the
+/// checkout. Without a role the server is removed. Rules the person already
+/// has are kept. A home that is not a private staged directory may be the
+/// person's own, so it is never edited: a delegating parent or a child cannot
+/// start without its tools there, while a message-only session starts without
+/// `send_message`.
+pub(super) fn configure_claude_subagent_mcp(
+    root: &Path,
+    session_id: &str,
+    home: &Path,
+    role: Option<mj_core::subagent::SubagentMcpRole>,
+    agent_mailboxes_enabled: bool,
+    subtle_subagents: bool,
+) -> Result<()> {
+    use mj_core::subagent::{SUBAGENT_MCP_SERVER, SubagentMcpRole};
     anyhow::ensure!(
         root.is_absolute(),
         "Claude MCP worker root must be absolute"
     );
-    let path = home.join(".claude.json");
-    let body = match std::fs::read(&path) {
-        Ok(body) => body,
-        Err(error) if !required && error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("read staged Claude configuration {}", path.display()));
+    let config_path = home.join(".claude.json");
+    let settings_path = home.join("settings.json");
+    if !(private_claude_home(root, session_id, home)
+        && regular_file_or_absent(&config_path)
+        && regular_file_or_absent(&settings_path))
+    {
+        return match role {
+            Some(role @ (SubagentMcpRole::Parent | SubagentMcpRole::Child)) => {
+                Err(anyhow::anyhow!(
+                    "cannot register the Claude {} tools: {} is not a private staged profile",
+                    role.id(),
+                    home.display()
+                ))
+            }
+            Some(SubagentMcpRole::MessageOnly) => {
+                tracing::warn!(path = %home.display(), "skipping the Claude send_message server: the profile is not a private staged directory");
+                Ok(())
+            }
+            None => Ok(()),
+        };
+    }
+
+    edit_claude_json(&config_path, "staged Claude configuration", |config| {
+        if role.is_none() && !config.contains_key("mcpServers") {
+            return Ok(());
         }
-    };
-    let mut config: serde_json::Value = serde_json::from_slice(&body)
-        .with_context(|| format!("parse staged Claude configuration {}", path.display()))?;
-    let Some(server) = config
-        .get_mut("mcpServers")
-        .and_then(|servers| servers.get_mut(mj_core::subagent::SUBAGENT_MCP_SERVER))
-        .and_then(serde_json::Value::as_object_mut)
-    else {
-        anyhow::ensure!(
-            !required,
-            "missing staged Claude delegation server in {}",
-            path.display()
+        let servers = config
+            .entry("mcpServers")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .with_context(|| {
+                format!(
+                    "mcpServers in {} must be a JSON object",
+                    config_path.display()
+                )
+            })?;
+        let Some(role) = role else {
+            servers.remove(SUBAGENT_MCP_SERVER);
+            return Ok(());
+        };
+        let mut args = vec![
+            "worker".to_owned(),
+            "subagent-mcp".to_owned(),
+            "--socket".to_owned(),
+            root.join(SUBAGENT_SOCKET).to_string_lossy().into_owned(),
+            // The harness selects the matching MCP server instructions.
+            "--harness".to_owned(),
+            mj_core::config::HarnessKind::Claude.id().to_owned(),
+            "--role".to_owned(),
+            role.id().to_owned(),
+            "--agent-mailboxes-enabled".to_owned(),
+            agent_mailboxes_enabled.to_string(),
+        ];
+        if !subtle_subagents {
+            // Only the non-default value is written, as for Codex.
+            args.extend(["--subtle-subagents".to_owned(), "false".to_owned()]);
+        }
+        servers.insert(
+            SUBAGENT_MCP_SERVER.into(),
+            serde_json::json!({
+                "type": "stdio",
+                // Delegation is part of the session's core toolset, like
+                // Claude's native Agent tool, rather than optional discovery.
+                "alwaysLoad": true,
+                "command": root.join("hel"),
+                "args": args,
+            }),
         );
-        tracing::info!(
-            path = %path.display(),
-            "the staged Claude profile predates the message-only server; send_message is unavailable until the session is restaged"
-        );
+        Ok(())
+    })?;
+
+    let Some(role) = role else {
         return Ok(());
     };
-    let args = server
-        .get_mut("args")
-        .and_then(serde_json::Value::as_array_mut)
-        .context("staged Claude delegation server must have arguments")?;
-    let socket = args
-        .iter()
-        .position(|arg| arg.as_str() == Some("--socket"))
-        .and_then(|index| args.get_mut(index + 1))
-        .filter(|arg| arg.is_string())
-        .context("staged Claude delegation server must have a socket argument")?;
-    *socket = serde_json::to_value(root.join(SUBAGENT_SOCKET))?;
-    server.insert("command".into(), serde_json::to_value(root.join("hel"))?);
-    let mut resolved = serde_json::to_vec_pretty(&config)?;
-    resolved.push(b'\n');
-    if resolved != body {
-        mj_core::config::atomic_write(&path, &resolved)
-            .with_context(|| format!("write staged Claude configuration {}", path.display()))?;
+    // In any mode but Auto, Claude would otherwise ask a person before a
+    // child's mandatory `handback` or a parent's `spawn` (R11-1).
+    edit_claude_json(&settings_path, "staged Claude settings", |settings| {
+        let allow = settings
+            .entry("permissions")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .with_context(|| {
+                format!(
+                    "permissions in {} must be a JSON object",
+                    settings_path.display()
+                )
+            })?
+            .entry("allow")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+            .with_context(|| {
+                format!(
+                    "permissions.allow in {} must be a JSON array",
+                    settings_path.display()
+                )
+            })?;
+        for tool in role.tool_names() {
+            let rule = serde_json::Value::from(format!("mcp__{SUBAGENT_MCP_SERVER}__{tool}"));
+            if !allow.contains(&rule) {
+                allow.push(rule);
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Rewrite one of the staged Claude JSON files through `edit`, writing it only
+/// when its content changes. A missing file starts as an empty object and is
+/// created only when `edit` adds something.
+fn edit_claude_json(
+    path: &Path,
+    label: &str,
+    edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<()>,
+) -> Result<()> {
+    let body = match std::fs::read(path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => b"{}".to_vec(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read {label} {}", path.display()));
+        }
+    };
+    let original: serde_json::Value = serde_json::from_slice(&body)
+        .with_context(|| format!("parse {label} {}", path.display()))?;
+    let mut value = original.clone();
+    edit(
+        value
+            .as_object_mut()
+            .with_context(|| format!("{label} {} must be a JSON object", path.display()))?,
+    )?;
+    if value != original {
+        let mut resolved = serde_json::to_vec_pretty(&value)?;
+        resolved.push(b'\n');
+        mj_core::config::atomic_write(path, &resolved)
+            .with_context(|| format!("write {label} {}", path.display()))?;
     }
     Ok(())
+}
+
+/// Whether `home` is a Claude profile this session staged for itself:
+/// `<root>/profile` on this machine, `profiles/<session>` in a container or
+/// under a remote login (the controller's `removable_profile_root`). An
+/// earlier local session's `<root>/profile` may link to the person's own home,
+/// so each directory is checked without following links; resolving both sides
+/// would accept that link.
+fn private_claude_home(root: &Path, session_id: &str, home: &Path) -> bool {
+    let staged_directories = if home == root.join("profile") {
+        vec![root, home]
+    } else if home.file_name() == Some(session_id.as_ref())
+        && home.parent().and_then(Path::file_name) == Some("profiles".as_ref())
+    {
+        vec![home]
+    } else {
+        Vec::new()
+    };
+    !staged_directories.is_empty()
+        && staged_directories
+            .into_iter()
+            .all(|path| std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()))
+}
+
+/// A profile file is edited in place only when it is a regular file or does
+/// not exist yet; a link may lead out of the private profile.
+fn regular_file_or_absent(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata.is_file(),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
 }
 
 /// Install the mailbox command hook in the session-private Claude settings and
@@ -103,26 +238,8 @@ pub(super) fn configure_claude_mailbox_hook(
     session_id: &str,
     home: &Path,
 ) -> Result<bool> {
-    let staged_directories = if home == root.join("profile") {
-        vec![root, home]
-    } else if home.file_name() == Some(session_id.as_ref())
-        && home.parent().and_then(Path::file_name) == Some("profiles".as_ref())
-    {
-        vec![home]
-    } else {
-        Vec::new()
-    };
-    // An earlier local session's <root>/profile may link to the person's own
-    // home, so check each directory and the settings file without following
-    // links. Resolving both sides would accept that link.
-    let private = !staged_directories.is_empty()
-        && staged_directories
-            .into_iter()
-            .all(|path| std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()))
-        && match std::fs::symlink_metadata(home.join("settings.json")) {
-            Ok(metadata) => metadata.is_file(),
-            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-        };
+    let private = private_claude_home(root, session_id, home)
+        && regular_file_or_absent(&home.join("settings.json"));
     if !private {
         tracing::warn!(path = %home.display(), "skipping Claude mailbox hook repair: settings are not in a private staged directory");
         return Ok(false);
@@ -1107,10 +1224,14 @@ mod tests {
             (SubagentMcpRole::Parent, ".local/share/hel/profiles/session"),
             (SubagentMcpRole::Parent, ".local/share/hel/workers/session"),
             (SubagentMcpRole::Child, "/previous-target/workers/session"),
+            (
+                SubagentMcpRole::MessageOnly,
+                "/previous-target/workers/session",
+            ),
         ] {
             let temp = tempfile::tempdir().unwrap();
             let root = temp.path().join("worker with spaces");
-            let home = temp.path().join("profile");
+            let home = root.join("profile");
             let checkout = temp.path().join("checkout");
             for directory in [&root, &home, &checkout] {
                 std::fs::create_dir(directory).unwrap();
@@ -1130,6 +1251,8 @@ print(sys.argv[sys.argv.index('--role') + 1])
             )
             .unwrap();
             std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+            // A registration an earlier controller staged with home-relative
+            // paths from another target.
             let original = serde_json::json!({
                 "userSetting": "retained",
                 "mcpServers": {
@@ -1140,15 +1263,17 @@ print(sys.argv[sys.argv.index('--role') + 1])
                         "command": Path::new(old_root).join("hel"),
                         "args": ["worker", "subagent-mcp", "--socket",
                                  Path::new(old_root).join(SUBAGENT_SOCKET),
-                                 "--harness", "claude", "--role", role.id()]
+                                 "--harness", "claude", "--role", "parent"]
                     }
                 }
             });
             let path = home.join(".claude.json");
             std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
-            resolve_claude_mcp_paths(&root, &home, true).unwrap();
+            let configure =
+                || configure_claude_subagent_mcp(&root, "session", &home, Some(role), true, true);
+            configure().unwrap();
             let first = std::fs::read(&path).unwrap();
-            resolve_claude_mcp_paths(&root, &home, true).unwrap();
+            configure().unwrap();
             assert_eq!(std::fs::read(&path).unwrap(), first);
             let config: serde_json::Value = serde_json::from_slice(&first).unwrap();
             assert_eq!(config["userSetting"], original["userSetting"]);
@@ -1191,40 +1316,217 @@ print(sys.argv[sys.argv.index('--role') + 1])
     }
 
     // Hard-won: adc0d368: an upgraded worker failed preparation on a profile staged without the message-only server.
+    // Hard-won: f9a3130c: a profile staged before message-only sessions kept no send_message through every upgrade.
     #[test]
-    fn a_message_only_session_starts_without_a_staged_registration() {
+    fn a_message_only_session_gets_send_message_on_a_profile_staged_without_it() {
+        use mj_core::subagent::SubagentMcpRole;
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("profile");
         std::fs::create_dir(&home).unwrap();
-        // No profile file at all, then one an older controller staged.
-        resolve_claude_mcp_paths(root.path(), &home, false).unwrap();
+        // What a controller from before message-only sessions staged: other
+        // servers, no `mj-agents`, and no rule for it.
         let path = home.join(".claude.json");
-        let staged = br#"{"mcpServers":{"other":{"command":"x"}}}"#;
-        std::fs::write(&path, staged).unwrap();
-        resolve_claude_mcp_paths(root.path(), &home, false).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), staged, "left untouched");
-        // A delegating parent still requires its registration.
-        assert!(resolve_claude_mcp_paths(root.path(), &home, true).is_err());
+        std::fs::write(&path, br#"{"mcpServers":{"other":{"command":"x"}}}"#).unwrap();
+        configure_claude_subagent_mcp(
+            root.path(),
+            "session",
+            &home,
+            Some(SubagentMcpRole::MessageOnly),
+            true,
+            true,
+        )
+        .unwrap();
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(config["mcpServers"]["other"]["command"], "x");
+        let args = config["mcpServers"]["mj-agents"]["args"]
+            .as_array()
+            .unwrap();
+        let role = args.iter().position(|arg| arg == "--role").unwrap() + 1;
+        assert_eq!(args[role], "message_only");
+        let settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(
+            settings["permissions"]["allow"],
+            serde_json::json!(["mcp__mj-agents__send_message"])
+        );
+
+        // Losing the role removes the server; the person's servers stay.
+        configure_claude_subagent_mcp(root.path(), "session", &home, None, true, true).unwrap();
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(config["mcpServers"].get("mj-agents").is_none());
+        assert_eq!(config["mcpServers"]["other"]["command"], "x");
+
+        // A session with no role writes nothing it did not already have.
+        let bare = tempfile::tempdir().unwrap();
+        let bare_home = bare.path().join("profile");
+        std::fs::create_dir(&bare_home).unwrap();
+        configure_claude_subagent_mcp(bare.path(), "session", &bare_home, None, true, true)
+            .unwrap();
+        assert!(!bare_home.join(".claude.json").exists());
+        assert!(!bare_home.join("settings.json").exists());
     }
 
+    /// Launch finding R11-1: a Claude child on a model without Auto mode ran
+    /// in Accept edits, and Claude asked a person before it would run the
+    /// child's own `handback`, so the child could not report without one. The
+    /// settings allow every tool the role's `mj-agents` server lists, whatever
+    /// the mode, and keep the person's own settings and rules.
+    // Hard-won: 91244ea: a Claude child asked the person for permission before its own handback
     #[test]
-    fn claude_delegation_reports_invalid_registration_without_rewriting_it() {
+    fn the_claude_profile_allows_its_own_sub_agent_tools() {
+        use mj_core::subagent::SubagentMcpRole;
+        let profile = || {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join("profile")).unwrap();
+            root
+        };
+        let configure = |root: &tempfile::TempDir, role, subtle| {
+            let home = root.path().join("profile");
+            configure_claude_subagent_mcp(root.path(), "session", &home, Some(role), true, subtle)
+                .unwrap();
+            let settings: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(home.join("settings.json")).unwrap())
+                    .unwrap();
+            let config: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(home.join(".claude.json")).unwrap()).unwrap();
+            let allow: Vec<String> = settings["permissions"]["allow"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|rule| rule.as_str().unwrap().to_owned())
+                .collect();
+            (settings, config, allow)
+        };
+
+        // A child's only tool is handback.
+        let root = profile();
+        std::fs::write(
+            root.path().join("profile/settings.json"),
+            r#"{"model":"opus","permissions":{"allow":["Bash(ls:*)"],"deny":["WebFetch"]}}"#,
+        )
+        .unwrap();
+        let (settings, _, allow) = configure(&root, SubagentMcpRole::Child, true);
+        assert_eq!(allow, ["Bash(ls:*)", "mcp__mj-agents__handback"]);
+        assert_eq!(
+            settings["permissions"]["deny"],
+            serde_json::json!(["WebFetch"])
+        );
+        assert_eq!(settings["model"], "opus");
+
+        // A parent delegates without asking; a rule the person already has is
+        // kept once, in its place.
+        let root = profile();
+        std::fs::write(
+            root.path().join("profile/settings.json"),
+            r#"{"permissions":{"allow":["mcp__mj-agents__wait"]}}"#,
+        )
+        .unwrap();
+        let (_, config, allow) = configure(&root, SubagentMcpRole::Parent, true);
+        assert!(
+            !config["mcpServers"]["mj-agents"]["args"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("--subtle-subagents")),
+            "the default stays off the command line"
+        );
+        assert_eq!(allow[0], "mcp__mj-agents__wait");
+        assert_eq!(
+            allow
+                .iter()
+                .filter(|rule| *rule == "mcp__mj-agents__wait")
+                .count(),
+            1,
+            "{allow:?}"
+        );
+        for tool in ["spawn", "list_agents", "send_message", "close"] {
+            assert!(
+                allow.contains(&format!("mcp__mj-agents__{tool}")),
+                "{tool}: {allow:?}"
+            );
+        }
+        assert!(
+            !allow.iter().any(|rule| rule.ends_with("__handback")),
+            "a parent has no handback: {allow:?}"
+        );
+
+        // With only the straightforward type configured, the parent's server
+        // is told so and offers no task type.
+        let root = profile();
+        let (_, config, _) = configure(&root, SubagentMcpRole::Parent, false);
+        let args = config["mcpServers"]["mj-agents"]["args"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            args[args.len() - 2..],
+            [
+                serde_json::json!("--subtle-subagents"),
+                serde_json::json!("false")
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_claude_registration_never_edits_a_profile_that_may_be_the_persons_own() {
+        use mj_core::subagent::SubagentMcpRole;
+        let root = tempfile::tempdir().unwrap();
+        let own = tempfile::tempdir().unwrap();
+        std::fs::write(own.path().join(".claude.json"), b"{}").unwrap();
+        // An earlier local session linked its profile to the person's home.
+        std::os::unix::fs::symlink(own.path(), root.path().join("profile")).unwrap();
+        let home = root.path().join("profile");
+        for role in [SubagentMcpRole::Parent, SubagentMcpRole::Child] {
+            assert!(
+                configure_claude_subagent_mcp(
+                    root.path(),
+                    "session",
+                    &home,
+                    Some(role),
+                    true,
+                    true
+                )
+                .is_err(),
+                "{role:?} cannot start without its tools"
+            );
+        }
+        configure_claude_subagent_mcp(
+            root.path(),
+            "session",
+            &home,
+            Some(SubagentMcpRole::MessageOnly),
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(own.path().join(".claude.json")).unwrap(),
+            b"{}"
+        );
+        assert!(!own.path().join("settings.json").exists());
+
+        // Invalid JSON in a private profile is reported, not replaced.
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("profile");
         std::fs::create_dir(&home).unwrap();
-        let path = home.join(".claude.json");
-        assert!(resolve_claude_mcp_paths(root.path(), &home, true).is_err());
-        assert!(!path.exists());
-        for broken in [
-            "{",
-            r#"{"mcpServers":{}}"#,
-            r#"{"mcpServers":{"mj-agents":{"args":[]}}}"#,
-            r#"{"mcpServers":{"mj-agents":{"args":["--socket"]}}}"#,
-            r#"{"mcpServers":{"mj-agents":{"args":["--socket",42]}}}"#,
-        ] {
-            std::fs::write(&path, broken).unwrap();
-            assert!(resolve_claude_mcp_paths(root.path(), &home, true).is_err());
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+        for broken in ["{", "[]", r#"{"mcpServers":[]}"#] {
+            std::fs::write(home.join(".claude.json"), broken).unwrap();
+            assert!(
+                configure_claude_subagent_mcp(
+                    root.path(),
+                    "session",
+                    &home,
+                    Some(SubagentMcpRole::MessageOnly),
+                    true,
+                    true,
+                )
+                .is_err()
+            );
+            assert_eq!(
+                std::fs::read_to_string(home.join(".claude.json")).unwrap(),
+                broken
+            );
         }
     }
 

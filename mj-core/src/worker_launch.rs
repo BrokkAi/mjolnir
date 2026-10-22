@@ -419,13 +419,13 @@ pub fn resolve_subagent_mcp_role(
     managed_subagent: bool,
     handback_tool: bool,
     _legacy_agent_mailboxes_enabled: bool,
-    message_mcp_staged: bool,
+    message_mcp_granted: bool,
 ) -> Option<crate::subagent::SubagentMcpRole> {
     subagents.parent_role().or_else(|| {
         if managed_subagent {
             handback_tool.then_some(crate::subagent::SubagentMcpRole::Child)
         } else {
-            message_mcp_staged.then_some(crate::subagent::SubagentMcpRole::MessageOnly)
+            message_mcp_granted.then_some(crate::subagent::SubagentMcpRole::MessageOnly)
         }
     })
 }
