@@ -247,6 +247,11 @@ container sessions run the same harness versions as managed bare workers:
   Containerfile and the pins disagree.
 - Muse: update `mj-worker/assets/muse/runtime.json`. The image installs Muse
   from that file.
+- OpenCode: regenerate `mj-core/assets/opencode-provider-environment.txt`
+  with `scripts/generate-opencode-provider-environment.py` from a checkout of
+  the new tag. The test
+  `opencode_provider_environment_was_generated_from_the_pinned_opencode`
+  fails until you do.
 - Grok and Kimi are not in the image. They install on demand.
 
 Pushing the commit to master runs `publish-agent-dev-image.yml`, which
