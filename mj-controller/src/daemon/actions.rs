@@ -632,6 +632,15 @@ pub(super) async fn handle_action(
                 .await?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::PreviewContainerUpgrade { session_id } => {
+            Ok(DaemonReply::ContainerUpgradePreview(
+                state.preview_container_upgrade(session_id).await?,
+            ))
+        }
+        DaemonAction::UpgradeContainer(request) => {
+            state.upgrade_container(request).await?;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::RestartSession {
             session_id,
             acknowledge_container_recreation,
@@ -702,6 +711,10 @@ pub(super) async fn handle_action(
             state
                 .force_destroy_session(session_id, branch_disposition(delete_branch))
                 .await?;
+            Ok(DaemonReply::Done)
+        }
+        DaemonAction::CancelContainerUpgrade { session_id } => {
+            state.cancel_container_upgrade(&session_id).await?;
             Ok(DaemonReply::Done)
         }
         DaemonAction::CancelLifecycle { session_id } => {

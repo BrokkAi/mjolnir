@@ -42,3 +42,6 @@ scripts/install-ps1.test.mjs
 
 # ConPTY dashboard smoke.
 mj-cli/tests/terminal_windows.rs
+
+# Container replacement preserves host paths and private CLI environment files.
+mj-controller/src/targets/container_upgrade.rs

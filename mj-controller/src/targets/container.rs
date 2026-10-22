@@ -134,6 +134,7 @@ pub(super) fn container_run(
             additional_mounts,
             None,
             workspace_root,
+            true,
         )?,
     )
     .purpose("start session container")
@@ -242,6 +243,7 @@ pub(super) fn podman_container_run(
         additional_mounts,
         Some(&workspace),
         workspace_root,
+        true,
     )?;
     let mut wrapped = match &workspace {
         PodmanWorkspaceLocator::ContainerLayer | PodmanWorkspaceLocator::Volume { .. } => {
@@ -436,6 +438,7 @@ pub(super) fn docker_container_run(
         additional_mounts,
         None,
         workspace_root,
+        true,
     )?;
     let overlaid = additional_mounts
         .iter()
@@ -531,7 +534,7 @@ fn container_pids_limit_args(engine: &str, template: &ContainerTemplate) -> Vec<
 /// the container sends to PID 1. The run arguments set `--stop-signal KILL`
 /// so that stopping or removing the container does not wait out the grace
 /// period for a signal that is now ignored.
-const KEEPALIVE_SCRIPT: &str = "trap '' 1 2 3 4 5 6 7 8 10 11 12 13 14 15 16 20 21 22 24 25 26 27 29 30 31; exec sleep infinity";
+pub(super) const KEEPALIVE_SCRIPT: &str = "trap '' 1 2 3 4 5 6 7 8 10 11 12 13 14 15 16 20 21 22 24 25 26 27 29 30 31; exec sleep infinity";
 
 // Every argument is an independent input the engine needs: the template, the
 // resource identity, the mounts, and the workspace the session runs in.
@@ -544,6 +547,7 @@ pub(super) fn container_run_args(
     additional_mounts: &[AdditionalMount],
     podman_workspace: Option<&PodmanWorkspaceLocator>,
     workspace_root: &str,
+    initialize_workspace: bool,
 ) -> Result<Vec<String>> {
     validate_additional_mounts(additional_mounts)?;
     let mut args = vec!["run".to_owned()];
@@ -602,7 +606,10 @@ pub(super) fn container_run_args(
             // user in rootless Podman's default namespace.
             PodmanWorkspaceLocator::Volume { name } => args.extend([
                 "--volume".to_owned(),
-                format!("{name}:{workspace_root}:rw,U"),
+                format!(
+                    "{name}:{workspace_root}:rw{}",
+                    if initialize_workspace { ",U" } else { "" }
+                ),
             ]),
             // The host directory belongs to the host user, which rootless
             // Podman's default namespace maps to container uid 0.
@@ -744,6 +751,7 @@ mod pids_limit_tests {
                 &[],
                 None,
                 "/workspace",
+                true,
             )
             .unwrap();
             assert!(
@@ -764,6 +772,7 @@ mod pids_limit_tests {
             &[],
             None,
             "/workspace",
+            true,
         )
         .unwrap();
 

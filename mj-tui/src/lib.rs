@@ -262,6 +262,11 @@ pub enum DashboardAction {
     ConversationPanesChanged {
         focus_moved: bool,
     },
+    PreviewContainerUpgrade {
+        session_id: String,
+        upgrade_only: bool,
+    },
+    UpgradeContainer(mj_core::state::ContainerUpgradeRequest),
     RestartSession {
         session_id: String,
         acknowledge_container_recreation: bool,
@@ -890,7 +895,7 @@ pub struct DashboardState {
     /// sessions, so this summary of every session arrives beside them.
     pub(crate) launch_recency: Vec<mj_client::runtime_feed::LaunchRecency>,
     /// The daemon's verdict, delivered with its records in the same runtime frame.
-    pub(crate) container_recreation_sessions: BTreeSet<String>,
+    pub(crate) container_upgrade_sessions: BTreeSet<String>,
     pub(crate) session_operations: Tracked<BTreeMap<String, SessionOperationDisplay>>,
     /// The real composers parked in front of sessions that are not attached
     /// yet: a Starting/Resuming transition or an in-flight attach. Keyed per
@@ -1202,7 +1207,7 @@ impl DashboardState {
             checkpoint_archive_sizes: BTreeMap::new(),
             stopped_records: Default::default(),
             launch_recency,
-            container_recreation_sessions: BTreeSet::new(),
+            container_upgrade_sessions: BTreeSet::new(),
             go: None,
             simple_mode: false,
             launch_project_directory: None,

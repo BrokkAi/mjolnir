@@ -882,69 +882,6 @@ impl Controller {
         self.persist_session_state(session_id)
     }
 
-    /// Retire the target owned by a durable Restart recreation decision. Every
-    /// retry must still prove the exact sealed checkpoint before any teardown.
-    pub(crate) fn retire_restart_container(
-        &mut self,
-        session_id: &str,
-        verified: &CheckpointMetadata,
-        executor: &impl CommandExecutor,
-    ) -> Result<()> {
-        let previous = self
-            .state
-            .sessions
-            .get(session_id)
-            .context("session is missing")?
-            .clone();
-        ensure!(
-            previous.checkpoint.as_ref() == Some(verified),
-            "Restart checkpoint changed before container recreation"
-        );
-        let Some(locator) = previous.target.as_ref() else {
-            return Ok(());
-        };
-        let target = backend_locator(locator, &previous, &self.config)?;
-        ensure!(
-            target.container_engine().is_some(),
-            "Restart recreation cannot remove a non-container target"
-        );
-        ensure!(
-            !targets::is_borrowed(&target),
-            "Restart recreation cannot remove a borrowed container"
-        );
-        if previous.state == SessionState::Stopped {
-            verify_installed_checkpoint_gate(session_id, verified)?;
-            return self.cleanup_stopped_target(session_id, executor);
-        }
-        ensure!(
-            matches!(
-                previous.state,
-                SessionState::Closing
-                    | SessionState::Destroying
-                    | SessionState::Error
-                    | SessionState::Provisioning
-            ),
-            "Restart recreation cannot remove an unsealed live target"
-        );
-        if !matches!(
-            previous.state,
-            SessionState::Closing | SessionState::Destroying
-        ) {
-            let record = self.state.sessions.get_mut(session_id).unwrap();
-            record.state = SessionState::Destroying;
-            record.updated_at = now();
-            self.persist_session_transition_or_restore(
-                session_id,
-                &previous,
-                "resume checkpoint-bound Restart teardown",
-            )?;
-        }
-        if self.destroy_after_verified_checkpoint(session_id, verified, executor)? {
-            self.cleanup_stopped_target(session_id, executor)?;
-        }
-        Ok(())
-    }
-
     /// Execute cleanup only after the close state machine has installed a
     /// verified checkpoint on the record.
     fn destroy_after_verified_checkpoint(

@@ -301,7 +301,7 @@ directory paths, and destinations must be unique safe absolute paths without
 parent traversal.
 
 Attachments are per-session state in `mj.sqlite3`, not target fields in
-`config.toml`. They can be changed for the next recreation through the
+`config.toml`. They can be changed for the next explicitly created environment through the
 command palette (**prefix+:**) → **Container settings** where supported. See [Session lifecycle](/sessions/).
 
 ## CPU, memory, and instance sizing
@@ -331,8 +331,10 @@ Container `pull_policy` accepts:
 | `missing` | Pull only if absent. |
 | `never` | Never pull; fail if absent. |
 
-Running containers are never replaced in place. A refreshed image is used by
-the next new or recreated session. Digest references remain pinned and
+Refreshing an image leaves running containers unchanged. New sessions use the
+refreshed image; existing sessions require **Upgrade container and restart…**
+and explicit acknowledgment of writable-layer loss. Restart retains the current
+container and filesystem. Digest references remain pinned and
 versioned tags remain cached under `auto`: the daemon downloads either one once
 if the host lacks it, then only checks that it is still there. A `localhost/`
 or `local/` image cannot be downloaded from a registry, so a missing one is

@@ -121,16 +121,6 @@ pub enum WorkerUpgradeOutcome {
     /// The session was working when the upgrade reached it. A worker restart
     /// would have killed that work, so nothing was touched.
     Deferred,
-    /// The container runs an older image than its target names. It is
-    /// recreated from `image`, which this attempt already pulled and whose
-    /// worker it confirmed, instead of having a worker copied in; the daemon
-    /// owns that recreation, so nothing was touched here.
-    RecreateContainer { image: String },
-    /// The container is due to move to a newer image, but a sub-agent's
-    /// worker lives in it. The session's own worker was brought to this build
-    /// in place (`upgraded`) or already ran it; the move waits for the
-    /// container to be free.
-    ContainerMoveBlocked { upgraded: Option<String> },
 }
 
 impl WorkerUpgradeOutcome {
@@ -140,10 +130,7 @@ impl WorkerUpgradeOutcome {
     pub fn build(&self) -> Option<&str> {
         match self {
             Self::Upgraded { build } | Self::AlreadyCurrent { build } => Some(build),
-            // A container still due to move proves nothing worth caching.
-            Self::Deferred | Self::RecreateContainer { .. } | Self::ContainerMoveBlocked { .. } => {
-                None
-            }
+            Self::Deferred => None,
         }
     }
 }
@@ -181,51 +168,13 @@ impl Controller {
             .context("reconnect plan is empty")?;
         let installed = mj_core::worker_build::WORKER_BUILD_ID.to_owned();
         let current = worker_runs_installed_build(reported_build, &installed);
-        let session = self
-            .state
-            .sessions
-            .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?;
-        // Asked first, so a container whose worker a recovery already
-        // replaced still moves: its image and tools are an older release's.
-        let mut move_blocked = false;
-        if mj_core::state::ContainerSettings::default_image_moved(session)
-            || mj_core::state::ContainerSettings::image_unrecorded(session)
-        {
-            // One current snapshot decides the move: the image the container
-            // runs against the one its target names now, whether a sub-agent
-            // occupies it, and the image prepared for the daemon.
-            let decision = Controller::load()?;
-            let session = decision
-                .state
-                .sessions
-                .get(session_id)
-                .with_context(|| format!("unknown session {session_id}"))?;
-            // A container recorded before images were tracked is asked directly.
-            let moved = mj_core::state::ContainerSettings::default_image_moved(session)
-                || (mj_core::state::ContainerSettings::image_unrecorded(session)
-                    && decision
-                        .container_image_changed(session_id, executor)
-                        .context("read which image the session's container runs")?);
-            if moved && !decision.state.subagents_occupy_container(session_id) {
-                // Pull the new image and confirm its worker here, where the
-                // work holds no daemon handoff and a handoff cancels it, so
-                // a host that cannot build the replacement touches nothing.
-                let image = decision
-                    .prepare_container_recreation(session_id, executor)
-                    .context("prepare the new container before touching the session")?;
-                return Ok(WorkerUpgradeOutcome::RecreateContainer { image });
-            }
-            // A sub-agent's worker in this container would end with it. Keep
-            // the worker current in place meanwhile, and ask again later.
-            move_blocked = moved;
-        }
+        // Worker-binary maintenance has no authority over the container or
+        // its storage, regardless of the image a new session would use.
         if current {
-            return Ok(if move_blocked {
-                WorkerUpgradeOutcome::ContainerMoveBlocked { upgraded: None }
-            } else {
-                WorkerUpgradeOutcome::AlreadyCurrent { build: installed }
-            });
+            return Ok(WorkerUpgradeOutcome::AlreadyCurrent { build: installed });
+        }
+        if crate::database::container_upgrade_owns_target(session_id)? {
+            return Ok(WorkerUpgradeOutcome::Deferred);
         }
         let worker = WorkerInstall::for_target(&backend, executor)
             .context("resolve the worker this controller would install")?;
@@ -255,6 +204,9 @@ impl Controller {
                     .as_ref()
                     .context("worker upgrade has no target")?;
                 owner.verify_target(target)?;
+                if crate::database::container_upgrade_owns_target(session_id)? {
+                    return Ok(WorkerUpgradeOutcome::Deferred);
+                }
                 let current = Controller::load()?;
                 let current_launch = current.current_worker_launch_config(session_id, &backend)?;
                 if serde_json::to_value(&current_launch)? != serde_json::to_value(&launch)? {
@@ -351,13 +303,7 @@ impl Controller {
                 wait_for_native_session(&mut connection, executor, harness).await?;
                 crate::database::finish_worker_restart(session_id, &operation_id)?;
                 lease.finish_replacement(connection);
-                Ok(if move_blocked {
-                    WorkerUpgradeOutcome::ContainerMoveBlocked {
-                        upgraded: Some(installed),
-                    }
-                } else {
-                    WorkerUpgradeOutcome::Upgraded { build: installed }
-                })
+                Ok(WorkerUpgradeOutcome::Upgraded { build: installed })
             })
             .await
     }

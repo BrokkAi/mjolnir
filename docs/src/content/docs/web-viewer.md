@@ -59,13 +59,14 @@ During creation, **Where to run** includes resource sizing. On the final
 directories and choose their container paths and read-only, copy-on-write, or
 read-write access. Source directories must exist on the selected target's host.
 
-For an existing container session, use **⋯ → Container settings…** to edit its
-attachments, then **Restart**. Restart recreates the container when its attached
-directories or per-session size have changed, after saving a verified recovery
-copy. An unchanged container can be retained with its files and caches. Older
-containers whose applied settings were not recorded are recreated on their next
-Restart. A confirmation warns before recreation because files outside the
-workspace recovery copy, including temporary files and installed tools, may be lost.
+For an existing container session, **⋯ → Restart agent** restarts inside the same
+container and preserves its filesystem. **⋯ → Upgrade container and restart…**
+shows the current and target image and asks for explicit acknowledgment of possible
+writable-layer loss. Workspace and cache mounts are retained. Busy workers finish
+accepted work first; the pending upgrade survives daemon replacement and may be
+cancelled before replacement starts. Saved **Container settings…** apply when a
+new environment is explicitly created; Restart and image upgrade retain the
+existing mounts and limits.
 
 Use the terminal for native-session import, **Discard changes since checkpoint**,
 and configuration or secret editing. Explicit **Destroy session** is available

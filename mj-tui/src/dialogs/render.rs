@@ -48,7 +48,13 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
         Confirmation::SuspendSession { .. } => &["Cancel", "Suspend session"],
         Confirmation::InterruptWork { restart: false, .. } => &["Cancel", "Suspend now"],
         Confirmation::InterruptWork { restart: true, .. } => &["Cancel", "Restart now"],
-        Confirmation::RestartContainer { .. } => &["Cancel", "Recreate and restart"],
+        Confirmation::RestartAgent { .. } => &["Cancel", "Restart agent"],
+        Confirmation::RestartContainer {
+            upgrade_only: true, ..
+        } => &["Cancel", "Upgrade container and restart…"],
+        Confirmation::RestartContainer { .. } => {
+            &["Cancel", "Restart agent", "Upgrade container and restart…"]
+        }
         Confirmation::InterruptAll { .. } => &["Cancel", "Interrupt all"],
         Confirmation::RecoverFailed {
             recoverable: true, ..
@@ -140,6 +146,7 @@ pub(crate) fn initial_confirmation_button(confirmation: &Confirmation, labels: &
             | Confirmation::SuspendSession { .. }
             | Confirmation::InterruptWork { .. }
             | Confirmation::RestartContainer { .. }
+            | Confirmation::RestartAgent { .. }
             | Confirmation::InterruptAll { .. }
             | Confirmation::RepairRepositoryRemotes { .. }
             | Confirmation::InstallMbx { .. }
@@ -1429,28 +1436,57 @@ pub(crate) fn confirmation_body(
                 ),
             ],
         ),
-        Confirmation::RestartContainer {
+        Confirmation::RestartAgent {
             session_id,
             interrupting,
         } => (
-            " Recreate container on Restart? ",
+            " Restart agent? ",
             vec![
                 session_line(session_id, session_name, width),
                 Line::raw(""),
-                Line::styled(
-                    "Restart will replace this container because its settings or its Mjolnir image changed, or are unknown.",
-                    Style::default().fg(theme::palette().warning),
-                ),
-                Line::raw("The conversation and workspace recovery copy will be restored."),
-                Line::styled(
-                    "Files outside the recovery copy may be lost, including temporary files and installed tools.",
-                    Style::default().fg(theme::palette().warning),
-                ),
+                Line::raw("Restart the worker and harness inside the existing container."),
+                Line::raw("The container filesystem, workspace, and caches are preserved."),
                 Line::raw(if *interrupting {
-                    "The current turn will also be interrupted."
+                    "Any running turn will be interrupted."
                 } else {
                     ""
                 }),
+            ],
+        ),
+        Confirmation::RestartContainer {
+            session_id,
+            preview,
+            upgrade_only,
+        } => (
+            if *upgrade_only {
+                " Upgrade container and restart? "
+            } else {
+                " Restart agent "
+            },
+            vec![
+                session_line(session_id, session_name, width),
+                Line::raw(""),
+                Line::raw(format!(
+                    "Current image: {} ({})",
+                    preview.current_image, preview.current_image_id
+                )),
+                Line::raw(format!(
+                    "Target image: {} ({})",
+                    preview.target_image,
+                    preview.target_image_id.as_deref().unwrap_or("not cached")
+                )),
+                Line::raw(
+                    "Restart agent keeps the current container and its filesystem; it interrupts any running turn.",
+                ),
+                Line::raw(
+                    "Container upgrade reattaches the existing workspace and build cache mounts.",
+                ),
+                Line::styled(
+                    "Writable-layer state, including manually installed packages, may be lost.",
+                    Style::default().fg(theme::palette().warning),
+                ),
+                Line::raw("A checkpoint does not preserve the whole environment."),
+                Line::raw("Upgrades wait for accepted work; pending upgrades can be cancelled."),
             ],
         ),
         Confirmation::InterruptWork {
@@ -1667,7 +1703,8 @@ pub(crate) fn render_confirmation(
         Confirmation::DiscardSinceCheckpoint { .. } => 12,
         Confirmation::SuspendSession { .. } => 10,
         Confirmation::InterruptWork { .. } => 10,
-        Confirmation::RestartContainer { .. } => 14,
+        Confirmation::RestartContainer { .. } => 15,
+        Confirmation::RestartAgent { .. } => 10,
         Confirmation::InterruptAll { .. } => 10,
         Confirmation::DestroyStopped { .. } => 10,
         Confirmation::RecoverFailed { .. } => 12,

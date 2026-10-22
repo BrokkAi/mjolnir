@@ -50,6 +50,7 @@ pub enum CommandId {
     NewSessionWizard,
     ChangeGoSetup,
     RestartSession,
+    UpgradeContainer,
     ResumeDialog,
     RenameSession,
     ChangedFiles,
@@ -826,8 +827,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: CommandId::RestartSession,
-        label: "Restart session",
-        description: "Restart with the same profile, target, and mounts, without confirmation.",
+        label: "Restart agent",
+        description: "Restart the worker and harness inside the existing environment.",
         scope: Scope::Session,
         // No pane key: a mis-hit must not restart a live session. Reachable
         // from the palette, the row menu, and an explicit `[keys]` binding.
@@ -837,6 +838,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Pane,
         footer_rank: 2,
         available: restart_session_available,
+    },
+    CommandSpec {
+        id: CommandId::UpgradeContainer,
+        label: "Upgrade container and restart…",
+        description: "Choose a new image while retaining workspace and build cache storage.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 2,
+        available: upgrade_container_available,
     },
     CommandSpec {
         id: CommandId::ResumeDialog,
@@ -1722,6 +1735,15 @@ impl DashboardState {
             CommandId::ResizePaneRight => self.resize_pane_command(NavDirection::Right),
             CommandId::NewSessionWizard => self.begin_new(),
             CommandId::ChangeGoSetup => self.change_go_setup(),
+            CommandId::UpgradeContainer => {
+                let Some(session) = self.selected_session() else {
+                    return DashboardAction::None;
+                };
+                DashboardAction::PreviewContainerUpgrade {
+                    session_id: session.id.clone(),
+                    upgrade_only: true,
+                }
+            }
             CommandId::RestartSession => {
                 let Some((session_id, name)) = self
                     .selected_session()
@@ -1729,16 +1751,11 @@ impl DashboardState {
                 else {
                     return DashboardAction::None;
                 };
-                if self.container_recreation_sessions.contains(&session_id) {
-                    self.mode = crate::Mode::Confirm(
-                        ConfirmDialog::new(Confirmation::RestartContainer {
-                            interrupting: self.attention_level(&session_id)
-                                == crate::AttentionLevel::Working,
-                            session_id,
-                        })
-                        .naming_session(&name),
-                    );
-                    return DashboardAction::None;
+                if self.container_upgrade_sessions.contains(&session_id) {
+                    return DashboardAction::PreviewContainerUpgrade {
+                        session_id,
+                        upgrade_only: false,
+                    };
                 }
                 // Mid-turn work is lost by a restart, so that case asks first;
                 // an idle session restarts at once.
@@ -2027,6 +2044,17 @@ impl DashboardState {
             consumed: true,
             action: (!matches!(&action, DashboardAction::None)).then_some(action),
         }
+    }
+}
+
+fn upgrade_container_available(dashboard: &DashboardState) -> Availability {
+    if dashboard
+        .command_session()
+        .is_some_and(|s| dashboard.container_upgrade_sessions.contains(&s.id))
+    {
+        restart_session_available(dashboard)
+    } else {
+        Availability::Hidden
     }
 }
 

@@ -1355,6 +1355,7 @@ fn an_automatic_pull_policy_never_pulls_during_a_launch() {
                 &[],
                 None,
                 "/workspace",
+                true,
             )
             .unwrap();
             let pull = args
@@ -1394,6 +1395,7 @@ fn an_explicit_newer_pull_policy_still_pulls_during_a_launch() {
             &[],
             None,
             "/workspace",
+            true,
         )
         .unwrap();
         assert!(
@@ -1425,6 +1427,7 @@ fn explicit_podman_pull_policy_overrides_image_tag_defaults() {
             &[],
             None,
             "/workspace",
+            true,
         )
         .unwrap();
         assert_eq!(
@@ -1459,6 +1462,7 @@ fn docker_pull_policy_uses_supported_digest_aware_run_modes() {
             &[],
             None,
             "/workspace",
+            true,
         )
         .unwrap();
         assert!(args.contains(&expected.to_owned()), "{args:?}");
@@ -1486,6 +1490,7 @@ fn podman_containers_use_root_in_the_default_namespace() {
         &[],
         None,
         "/workspace",
+        true,
     )
     .unwrap();
     assert!(podman.windows(2).any(|pair| pair == ["--user", "0:0"]));
@@ -1509,6 +1514,7 @@ fn podman_containers_use_root_in_the_default_namespace() {
             &[],
             None,
             "/workspace",
+            true,
         )
         .unwrap();
         assert!(

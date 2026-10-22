@@ -1283,11 +1283,8 @@ impl DashboardState {
     }
 
     /// Replace what new-session defaults are chosen from.
-    pub fn set_container_recreation_sessions(
-        &mut self,
-        sessions: std::collections::BTreeSet<String>,
-    ) {
-        self.container_recreation_sessions = sessions;
+    pub fn set_container_upgrade_sessions(&mut self, sessions: std::collections::BTreeSet<String>) {
+        self.container_upgrade_sessions = sessions;
     }
 
     pub fn set_launch_recency(&mut self, recency: Vec<mj_client::runtime_feed::LaunchRecency>) {

@@ -54,12 +54,11 @@ allocation. The directory has the usual `1777` permissions and works with
 nonroot image users. An explicitly attached directory at `/tmp` keeps its
 configured behavior.
 
-Temporary files are excluded from checkpoints. Mjolnir removes the temporary
-volume after removing the container; stopping or restarting the session loses
-its contents. After upgrading Mjolnir, **Restart session** applies this mount to
-an existing Podman or Docker session by checkpointing it and restoring it into
-a newly provisioned container. A daemon or worker process restart alone does
-not change an existing container's mounts.
+Temporary files are excluded from checkpoints. Suspending or destroying the
+session removes its container and temporary volume. Daemon upgrades, normal
+Restart agent and storage-preserving container upgrades retain existing temporary
+storage and files. Older containers keep their original mount layout; Restart
+never silently creates a new container to change that layout.
 
 For Podman sessions using a workspace volume or host-managed workspace storage,
 the mount covers `/workspace/<session id>`; the parent `/workspace` directory
@@ -119,16 +118,32 @@ from it, and copies nothing into the container. Any other image gets the worker
 installed from beside `mj` as before, and Mjolnir checks that it is the matching
 build either way. A development build prefers the worker it was built with.
 
-Upgrading `mj` moves container sessions onto the new release's image instead of
-patching anything inside their old containers. A stopped session has no
-container, so resuming it creates one from the new image. A running session
-keeps its container until it is idle; Mjolnir first makes sure the new image is
-on the host, then saves the session's recovery copy and recreates the container
-from the new image, the same recreation **Restart** offers. Files outside the
-recovery copy, such as temporary files and installed tools, do not carry over.
-It never interrupts a turn or background work. While the session has sub-agents
-in its container, or the new image cannot be pulled, the session keeps running
-where it is and the move is tried again later.
+Upgrading `mj` reconnects to compatible existing workers and preserves their
+containers. Supported worker-only upgrades happen inside the existing container
+under the worker's atomic idle reservation. New sessions use the new default
+image; existing sessions keep their image until an explicit user operation.
+**Restart agent** always retains the current container and its filesystem.
+
+**Upgrade container and restart…** is available from the session menu and as an
+alternative in the Restart dialog when a newer configured image is available.
+Review the current and target images before accepting. The upgrade reattaches the
+same workspace, temporary and build cache mounts. It transfers private worker
+journal and harness state separately, without reconstructing the workspace from
+a checkpoint. Files in the container writable layer, including manually installed
+packages, may be lost; a checkpoint does not preserve the whole environment.
+
+Busy workers finish accepted work first. Pending upgrades survive daemon
+replacement, do not delay daemon handoff and can be cancelled before replacement
+begins. A failed upgrade retains its storage and recovery intent. Owned local and
+SSH Podman/Docker containers with independently mounted writable workspaces are
+supported. Layer-only workspaces (including default Docker workspaces), transient
+copy-on-write mounts, borrowed child containers, Apple containers and unsupported
+engine overrides produce a preservation error before stopping the worker.
+
+Use `mj upgrade-container --session <id>` to preview, add
+`--acknowledge-writable-layer-loss` to queue, or use `--cancel` to cancel a pending
+request. The [HTTP API](/api-reference/#container-upgrades) exposes the same
+preview, acknowledgment and cancellation semantics.
 
 Building it yourself remains a supported alternative, for example to
 customize the image or to work offline. Build from a Git checkout with the

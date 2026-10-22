@@ -946,7 +946,8 @@ function sessionMenuActions(session) {
   if (can.change_workspace) actions.push(['Change workspace…', 'secondary', 'change-workspace']);
   if (can.container_settings) actions.push(['Container settings…', 'secondary', 'container-settings']);
   if (can.move_session) actions.push(['Move…', '', 'move']);
-  if (can.restart) actions.push(['Restart', 'secondary', 'restart']);
+  if (can.restart) actions.push(['Restart agent', 'secondary', 'restart']);
+  if (can.restart && session.container_upgrade_supported) actions.push(['Upgrade container and restart…', 'secondary', 'upgrade-container']);
   if (can.interrupt_all) actions.push(['Interrupt all', 'secondary', 'interrupt-all']);
   actions.push(['Copy session ID', 'secondary', 'copy-session-id']);
   if (can.cancel_operation) actions.push(['Cancel operation', 'danger', 'cancel']);
@@ -4906,6 +4907,29 @@ function reconcileLifecycleActions() {
   }
 }
 
+function confirmContainerUpgrade(preview, upgradeOnly) {
+  return new Promise(resolve => {
+    const dialog = openSessionDialog('container-upgrade-dialog', 'Upgrade container and restart');
+    dialog.append(el('h2', '', upgradeOnly ? 'Upgrade container and restart?' : 'Restart agent'));
+    dialog.append(el('p', '', `Current image: ${preview.current_image} (${preview.current_image_id})`), el('p', '', `Target image: ${preview.target_image} (${preview.target_image_id || 'not cached'})`));
+    dialog.append(el('p', '', 'Restart agent keeps the existing container and its filesystem; any running turn is interrupted. A container upgrade reattaches the existing workspace and build cache mounts.'));
+    dialog.append(el('p', 'warning', 'State in the writable layer, including manually installed packages, may be lost. A checkpoint does not preserve the whole environment.'));
+    dialog.append(el('p', '', 'Upgrades wait for accepted work to finish. A pending upgrade can be cancelled before replacement starts.'));
+    const controls = el('div', 'row');
+    const finish = choice => { dialog.close(); resolve(choice); };
+    const cancel = button('Cancel', 'secondary');
+    cancel.onclick = () => finish(null);
+    controls.append(cancel);
+    if (!upgradeOnly) { const restart = button('Restart agent', 'secondary'); restart.onclick = () => finish('restart'); controls.append(restart); }
+    const upgrade = button('Upgrade container and restart…');
+    upgrade.onclick = () => finish('upgrade');
+    controls.append(upgrade);
+    dialog.oncancel = event => { event.preventDefault(); finish(null); };
+    dialog.append(controls);
+    cancel.focus();
+  });
+}
+
 function confirmSessionDestruction(session) {
   if (!session) return Promise.resolve(null);
   return new Promise(resolve => {
@@ -5220,7 +5244,7 @@ function openContainerSettings(session) {
     memoryField,
     renderMountEditor(editor, 'container', session.target_id),
     error,
-    el('p', 'dim', 'Restart the session to apply changed settings to a newly created container.'),
+    el('p', 'dim', 'Saved settings apply when a new environment is explicitly created. Restart and container upgrade retain the existing mounts and limits.'),
     controls,
   );
   confirm.onclick = async () => {
@@ -7982,13 +8006,28 @@ async function runSessionAction(dataset, errorNode, extra) {
     copySessionId(dataset.id);
     return true;
   }
-  if (dataset.action === 'restart') {
-    const session = sessionById(dataset.id);
-    const question = session?.restart_recreates_container
-      ? 'Recreate container on Restart?\n\nRestart will replace this container because its settings or its Mjolnir image changed, or are unknown. The conversation and workspace recovery copy will be restored.\n\nFiles outside the recovery copy may be lost, including temporary files and installed tools.\n\nAny running turn will be interrupted.'
-      : 'Restart session?\n\nRestart the worker in the existing environment. Any running turn will be interrupted.';
-    if (!confirm(question)) return false;
-    if (session?.restart_recreates_container) extra = { ...extra, acknowledge_container_recreation: true };
+  if (dataset.action === 'restart' || dataset.action === 'upgrade-container') {
+    const upgradeOnly = dataset.action === 'upgrade-container';
+    let preview = null;
+    if (sessionById(dataset.id)?.container_upgrade_supported) {
+      try { preview = await request(`/api/sessions/${dataset.id}/container-upgrade`); }
+      catch (error) { if (upgradeOnly) { errorNode.textContent = error.message; return false; } }
+    }
+    if (preview?.available) {
+      const choice = await confirmContainerUpgrade(preview, upgradeOnly);
+      if (!choice) return false;
+      if (choice === 'upgrade') {
+        try {
+          await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'upgrade-container', request: { selection: preview, acknowledge_writable_layer_loss: true } }) });
+          errorNode.textContent = '';
+          await refresh();
+          return true;
+        } catch (error) { errorNode.textContent = error.message; return false; }
+      }
+    } else {
+      if (upgradeOnly) { errorNode.textContent = 'The container already uses the selected image.'; return false; }
+      if (!confirm('Restart agent?\n\nRestart the worker and harness inside the existing container, preserving its filesystem. Any running turn will be interrupted.')) return false;
+    }
   }
   if (dataset.action === 'interrupt-all') {
     if (!confirm('Interrupt all turns?\n\nInterrupt the running turns of this session and its sub-agents.')) return false;

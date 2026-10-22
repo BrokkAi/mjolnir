@@ -177,7 +177,10 @@ pub(crate) fn recover_worker_controlled(
                 crate::pollers::session_target_is_pollable(session)
                     && session.target.as_ref() == Some(&plan.source_target)
             });
-            if !eligible || crate::controller::move_session::move_owns_session(id) {
+            if !eligible
+                || crate::controller::move_session::move_owns_session(id)
+                || crate::database::container_upgrade_owns_target(id)?
+            {
                 return Ok(WorkerRecoveryOutcome::Suppressed);
             }
         }

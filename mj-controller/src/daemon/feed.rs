@@ -303,15 +303,13 @@ impl RuntimeState {
                 operations,
             )
         };
-        full.metadata.container_recreation_sessions =
-            history.full.metadata.container_recreation_sessions.clone();
+        full.metadata.container_upgrade_sessions =
+            history.full.metadata.container_upgrade_sessions.clone();
         for (id, record) in history.full.records.changes(&full.records) {
-            if record.is_some_and(mj_core::state::ContainerSettings::recreation_required) {
-                full.metadata
-                    .container_recreation_sessions
-                    .insert(id.clone());
+            if record.is_some_and(mj_core::state::ContainerSettings::upgrade_supported) {
+                full.metadata.container_upgrade_sessions.insert(id.clone());
             } else {
-                full.metadata.container_recreation_sessions.remove(id);
+                full.metadata.container_upgrade_sessions.remove(id);
             }
         }
         full.native_agents = history.full.native_agents.clone();

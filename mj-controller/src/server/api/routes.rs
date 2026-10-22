@@ -46,6 +46,13 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
         .route("/sessions/{session_id}/usage/tree", get(usage_tree))
         .route("/sessions/{session_id}/wait", post(wait))
         .route("/sessions/{session_id}/suspend", post(suspend))
+        .route("/sessions/{session_id}/restart", post(restart_agent))
+        .route(
+            "/sessions/{session_id}/container-upgrade",
+            get(container_upgrade_preview)
+                .post(upgrade_container)
+                .delete(cancel_container_upgrade),
+        )
         .route("/sessions/{session_id}/destroy", post(destroy))
         .route("/sessions/{session_id}/resume", post(resume))
         .route(

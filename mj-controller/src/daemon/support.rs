@@ -14,12 +14,7 @@ pub(super) async fn report_worker_upgrade(
         return;
     }
     match &result.outcome {
-        Ok(
-            WorkerUpgradeOutcome::Upgraded { build }
-            | WorkerUpgradeOutcome::ContainerMoveBlocked {
-                upgraded: Some(build),
-            },
-        ) => {
+        Ok(WorkerUpgradeOutcome::Upgraded { build }) => {
             tracing::info!(%session_id, %build, "replaced the session worker with the current build");
             let name = state
                 .owner()
@@ -39,12 +34,6 @@ pub(super) async fn report_worker_upgrade(
         Ok(WorkerUpgradeOutcome::Deferred) => {
             tracing::debug!(%session_id, "worker upgrade deferred: the session is working");
         }
-        Ok(WorkerUpgradeOutcome::ContainerMoveBlocked { upgraded: None }) => {
-            tracing::debug!(%session_id, "container move to the new image waits for sub-agents to leave it");
-        }
-        Ok(WorkerUpgradeOutcome::RecreateContainer { image }) => {
-            spawn_container_recreation(state.clone(), session_id.clone(), image.clone());
-        }
         Err(error) => {
             tracing::warn!(%session_id, %error, "could not upgrade the session worker");
             if let Some(failure) = &result.preparation_failure {
@@ -58,63 +47,6 @@ pub(super) async fn report_worker_upgrade(
             }
         }
     }
-}
-
-/// Recreate a session's container for an upgrade, off the serving loop, and
-/// hand the outcome back to the upgrade coordinator, which owns the retry
-/// policy. A panic is reported as a failure, never dropped.
-fn spawn_container_recreation(state: Arc<RuntimeState>, session_id: String, image: String) {
-    use crate::worker_upgrade::{ContainerRecreated, ContainerRecreationReport};
-
-    tokio::spawn(async move {
-        let recreation = tokio::spawn({
-            let state = state.clone();
-            let session_id = session_id.clone();
-            async move {
-                state
-                    .recreate_container_for_upgrade(session_id, image)
-                    .await
-            }
-        })
-        .await;
-        let outcome = match recreation {
-            Ok(Ok(super::restart::ContainerRecreationOutcome::Recreated)) => {
-                let name = state
-                    .owner()
-                    .controller()
-                    .state
-                    .sessions
-                    .get(&session_id)
-                    .map_or_else(
-                        || session_id.clone(),
-                        |session| session.display_title().to_owned(),
-                    );
-                tracing::info!(%session_id, image = mj_core::config::DEFAULT_CONTAINER_IMAGE, "recreated the session container from this Mjolnir's image");
-                state.push_notice(
-                    &session_id,
-                    format!("Moved {name} to a new container from this Mjolnir's image."),
-                );
-                Ok(ContainerRecreated::Recreated)
-            }
-            Ok(Ok(super::restart::ContainerRecreationOutcome::StoodDown)) => {
-                Ok(ContainerRecreated::StoodDown)
-            }
-            Ok(Err(error)) => Err(format!("{error:#}")),
-            Err(error) => Err(format!("container recreation task failed: {error}")),
-        };
-        if let Err(error) = &outcome {
-            state.push_notice(
-                &session_id,
-                format!("Could not move this session to the upgraded image yet: {error}"),
-            );
-        }
-        state
-            .worker_upgrade_observer
-            .report_recreation(ContainerRecreationReport {
-                session_id,
-                outcome,
-            });
-    });
 }
 
 /// Children of `parent_session_id` whose session is still active, in the
@@ -246,6 +178,17 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
             self.state
                 .change_lifecycle_stage(&self.session_id, id, stage, false);
         }
+    }
+
+    fn shutdown_interrupted(&self) -> bool {
+        self.state
+            .owner()
+            .lifecycle
+            .get(&self.session_id)
+            .is_some_and(|active| {
+                self.operation_id.as_ref() == Some(&active.operation_id)
+                    && active.control.stopped_for_shutdown()
+            })
     }
 
     fn begin_resumable_work(&self) -> Result<()> {

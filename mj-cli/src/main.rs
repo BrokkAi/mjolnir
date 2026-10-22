@@ -114,6 +114,18 @@ enum Command {
     Checkpoint(CheckpointArgs),
     /// Move a session to another configured profile and/or target.
     Move(MoveArgs),
+    /// Preview or explicitly queue a storage-preserving container upgrade.
+    UpgradeContainer {
+        /// Session whose existing container should be inspected or upgraded.
+        #[arg(long)]
+        session: String,
+        /// Accept loss of writable-layer state after reviewing the image preview.
+        #[arg(long, conflicts_with = "cancel")]
+        acknowledge_writable_layer_loss: bool,
+        /// Cancel a pending upgrade before replacement starts.
+        #[arg(long)]
+        cancel: bool,
+    },
     /// Inspect stopped sources retained by Move, or explicitly remove one.
     MoveSources {
         /// Session whose retained Move sources should be listed or cleaned up.
@@ -568,6 +580,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Recover(_)) => "recover",
         Some(Command::Checkpoint(_)) => "checkpoint",
         Some(Command::Move(_)) => "move",
+        Some(Command::UpgradeContainer { .. }) => "upgrade-container",
         Some(Command::MoveSources { .. }) => "move-sources",
         Some(Command::Login(_)) => "login",
         Some(Command::New(_)) => "new",
@@ -764,6 +777,41 @@ async fn run_command(
                 "saved recovery copy for {} at event {}",
                 args.session, checkpoint.event_frontier
             );
+            Ok(DashboardExit::Normal)
+        }
+        Some(Command::UpgradeContainer {
+            session,
+            acknowledge_writable_layer_loss,
+            cancel,
+        }) => {
+            let mut daemon = daemon::connect_or_start().await?;
+            if cancel {
+                daemon.cancel_container_upgrade(session).await?;
+                println!("cancelled pending container upgrade");
+            } else {
+                let preview = daemon.preview_container_upgrade(session).await?;
+                println!(
+                    "Current image: {} ({})\nTarget image: {} ({})\n{}",
+                    preview.current_image,
+                    preview.current_image_id,
+                    preview.target_image,
+                    preview.target_image_id.as_deref().unwrap_or("not cached"),
+                    mj_core::state::CONTAINER_UPGRADE_WARNING
+                );
+                if acknowledge_writable_layer_loss {
+                    daemon
+                        .upgrade_container(mj_core::state::ContainerUpgradeRequest {
+                            selection: preview,
+                            acknowledge_writable_layer_loss: true,
+                        })
+                        .await?;
+                    println!("container upgrade pending; accepted work will finish first");
+                } else {
+                    println!(
+                        "Review this preview, then pass --acknowledge-writable-layer-loss to queue the upgrade."
+                    );
+                }
+            }
             Ok(DashboardExit::Normal)
         }
         Some(Command::Move(args)) => move_session(args).await.map(|()| DashboardExit::Normal),

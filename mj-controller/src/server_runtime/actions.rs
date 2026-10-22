@@ -337,6 +337,12 @@ pub(super) async fn apply_phone_action(
             }
         }
         ControllerAction::Open { .. } => Ok(()),
+        ControllerAction::CancelContainerUpgrade { session_id } => {
+            services
+                .daemon_runtime
+                .cancel_container_upgrade(&session_id)
+                .await
+        }
         ControllerAction::Cancel { .. } => {
             bail!("cancel actions must be handled by the phone control loop")
         }
@@ -525,6 +531,9 @@ pub(super) async fn apply_phone_action(
                 executor,
             )?;
             Ok(())
+        }
+        ControllerAction::UpgradeContainer { request } => {
+            services.daemon_runtime.upgrade_container(request).await
         }
         ControllerAction::Restart {
             session_id,

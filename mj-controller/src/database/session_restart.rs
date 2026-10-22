@@ -42,6 +42,7 @@ impl SessionRestartPhase {
                     Self::Stopping,
                     Self::RestoringInPlace | Self::RecreatingContainer | Self::Fallback
                 ) | (Self::RestoringInPlace, Self::Fallback)
+                    | (Self::RecreatingContainer, Self::RestoringInPlace)
             )
     }
 }
@@ -54,10 +55,10 @@ pub(crate) struct SessionRestartIntent {
     pub checkpoint_sha256: Option<String>,
     pub checkpoint_started: bool,
     pub container_recreation_acknowledged: bool,
-    /// Started by an upgrade rather than by a person. An automatic Restart
-    /// recreates the container and never interrupts work: a session that is
-    /// working makes it stand down, including when a later daemon recovers it.
+    /// Historical automatic recreation intent. New daemons never create one;
+    /// recovery retains this marker to reconcile operations accepted by older builds.
     pub automatic: bool,
+    pub container_upgrade: Option<crate::targets::RetainedContainer>,
 }
 
 /// Create one intent, or return the unfinished intent the session already owns.
@@ -65,36 +66,25 @@ pub(crate) fn begin_session_restart(
     session_id: &str,
     operation_id: &str,
     cancelled: Arc<AtomicBool>,
-    container_recreation_acknowledged: bool,
+    _container_recreation_acknowledged: bool,
 ) -> Result<SessionRestartIntent> {
-    begin_session_restart_with(
-        session_id,
-        operation_id,
-        cancelled,
-        container_recreation_acknowledged,
-        false,
-    )
+    begin_session_restart_with(session_id, operation_id, cancelled, None)
 }
 
-/// Create the intent for a container recreation an upgrade starts on its own,
-/// or return the unfinished automatic intent the session already owns. `None`
-/// when the session owns a Restart a person asked for: that one keeps its own
-/// rules, and the automatic recreation does not run under them.
-pub(crate) fn begin_automatic_session_restart(
+pub(crate) fn begin_container_upgrade(
     session_id: &str,
     operation_id: &str,
     cancelled: Arc<AtomicBool>,
-) -> Result<Option<SessionRestartIntent>> {
-    let intent = begin_session_restart_with(session_id, operation_id, cancelled, true, true)?;
-    Ok(intent.automatic.then_some(intent))
+    plan: crate::targets::RetainedContainer,
+) -> Result<SessionRestartIntent> {
+    begin_session_restart_with(session_id, operation_id, cancelled, Some(plan))
 }
 
 fn begin_session_restart_with(
     session_id: &str,
     operation_id: &str,
     cancelled: Arc<AtomicBool>,
-    container_recreation_acknowledged: bool,
-    automatic: bool,
+    container_upgrade: Option<crate::targets::RetainedContainer>,
 ) -> Result<SessionRestartIntent> {
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();
@@ -106,26 +96,25 @@ fn begin_session_restart_with(
         let tx = connection.transaction()?;
         let existing = load_session_restart_with(&tx, &session_id)?;
         if let Some(intent) = existing {
+            ensure!(
+                intent.container_upgrade == container_upgrade,
+                "another Restart or container upgrade already owns this session"
+            );
             tx.commit()?;
             return Ok(intent);
         }
-        let session = state_io::load_session_with(&tx, &session_id)?
+        state_io::load_session_with(&tx, &session_id)?
             .with_context(|| format!("unknown session {session_id}"))?;
-        if mj_core::state::ContainerSettings::recreation_required(&session)
-            && !container_recreation_acknowledged
-        {
-            return Err(anyhow::Error::new(mj_core::refusal::Refusal::precondition(
-                "Restart must recreate this container. Files outside the recovery copy may be lost. Review the recreation warning and confirm Restart again.",
-            )));
-        }
+        // A Restart never acquires replacement authority from an image or
+        // settings mismatch, including an acknowledgment sent by an old client.
         ensure!(
             !cancelled.load(Ordering::Acquire),
             "Restart was cancelled before its durable intent was recorded"
         );
         tx.execute(
-            "INSERT INTO session_restart_intents(session_id, operation_id, phase, updated_at, container_recreation_acknowledged, automatic)
-             VALUES (?1, ?2, 'stopping', ?3, ?4, ?5)",
-            params![session_id, operation_id, Utc::now().to_rfc3339(), container_recreation_acknowledged, automatic],
+            "INSERT INTO session_restart_intents(session_id, operation_id, phase, updated_at, container_upgrade_json)
+             VALUES (?1, ?2, 'stopping', ?3, ?4)",
+            params![session_id, operation_id, Utc::now().to_rfc3339(), container_upgrade.as_ref().map(serde_json::to_string).transpose()?],
         )?;
         tx.commit()?;
         Ok(SessionRestartIntent {
@@ -134,8 +123,9 @@ fn begin_session_restart_with(
             phase: SessionRestartPhase::Stopping,
             checkpoint_sha256: None,
             checkpoint_started: false,
-            container_recreation_acknowledged,
-            automatic,
+            container_recreation_acknowledged: false,
+            automatic: false,
+            container_upgrade,
         })
     })
 }
@@ -143,7 +133,7 @@ fn begin_session_restart_with(
 pub(crate) fn load_session_restarts() -> Result<Vec<SessionRestartIntent>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(
-        "SELECT session_id, operation_id, phase, checkpoint_sha256, checkpoint_started, container_recreation_acknowledged, automatic
+        "SELECT session_id, operation_id, phase, checkpoint_sha256, checkpoint_started, container_recreation_acknowledged, automatic, container_upgrade_json
          FROM session_restart_intents ORDER BY session_id",
     )?;
     statement
@@ -156,6 +146,7 @@ pub(crate) fn load_session_restarts() -> Result<Vec<SessionRestartIntent>> {
                 row.get::<_, bool>(4)?,
                 row.get::<_, bool>(5)?,
                 row.get::<_, bool>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })?
         .map(|row| {
@@ -167,6 +158,7 @@ pub(crate) fn load_session_restarts() -> Result<Vec<SessionRestartIntent>> {
                 checkpoint_started,
                 container_recreation_acknowledged,
                 automatic,
+                container_upgrade_json,
             ) = row?;
             Ok(SessionRestartIntent {
                 session_id,
@@ -176,6 +168,9 @@ pub(crate) fn load_session_restarts() -> Result<Vec<SessionRestartIntent>> {
                 checkpoint_started,
                 container_recreation_acknowledged,
                 automatic,
+                container_upgrade: container_upgrade_json
+                    .map(|json| serde_json::from_str(&json))
+                    .transpose()?,
             })
         })
         .collect()
@@ -253,6 +248,10 @@ pub(crate) fn advance_session_restart(
             phase
         );
         if phase == SessionRestartPhase::RecreatingContainer {
+            ensure!(
+                current.container_upgrade.is_none(),
+                "explicit replacement requires atomic idle and child admission"
+            );
             let session = state_io::load_session_with(&tx, &session_id)?
                 .context("session disappeared before Restart recreation")?;
             ensure!(
@@ -299,6 +298,15 @@ pub(crate) fn request_session_restart_cancel(session_id: &str, operation_id: &st
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();
     submit_database_write("request_session_restart_cancel", move |connection| {
+        let current = load_session_restart_with(connection, &session_id)?;
+        ensure!(
+            !current
+                .as_ref()
+                .is_some_and(|intent| intent.operation_id == operation_id
+                    && intent.container_upgrade.is_some()
+                    && intent.phase == SessionRestartPhase::RecreatingContainer),
+            "container replacement already started and cannot be cancelled"
+        );
         connection.execute("UPDATE session_restart_intents SET phase='cancel_requested', updated_at=?3 WHERE session_id=?1 AND operation_id=?2",
             params![session_id, operation_id, Utc::now().to_rfc3339()])?;
         Ok(())
@@ -367,7 +375,7 @@ fn load_session_restart_with(
 ) -> Result<Option<SessionRestartIntent>> {
     let row = connection
         .query_row(
-            "SELECT operation_id, phase, checkpoint_sha256, checkpoint_started, container_recreation_acknowledged, automatic
+            "SELECT operation_id, phase, checkpoint_sha256, checkpoint_started, container_recreation_acknowledged, automatic, container_upgrade_json
          FROM session_restart_intents WHERE session_id=?1",
             [session_id],
             |row| {
@@ -378,6 +386,7 @@ fn load_session_restart_with(
                     row.get::<_, bool>(3)?,
                     row.get::<_, bool>(4)?,
                     row.get::<_, bool>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             },
         )
@@ -390,6 +399,7 @@ fn load_session_restart_with(
             checkpoint_started,
             container_recreation_acknowledged,
             automatic,
+            container_upgrade_json,
         )| {
             Ok(SessionRestartIntent {
                 session_id: session_id.to_owned(),
@@ -399,8 +409,89 @@ fn load_session_restart_with(
                 checkpoint_started,
                 container_recreation_acknowledged,
                 automatic,
+                container_upgrade: container_upgrade_json
+                    .map(|json| serde_json::from_str(&json))
+                    .transpose()?,
             })
         },
     )
     .transpose()
+}
+
+/// Persist the immutable prepared image before stopping the source.
+pub(crate) fn prepare_container_upgrade(
+    session_id: &str,
+    operation_id: &str,
+    plan: crate::targets::RetainedContainer,
+) -> Result<()> {
+    let session_id = session_id.to_owned();
+    let operation_id = operation_id.to_owned();
+    submit_database_write("prepare_container_upgrade", move |connection| {
+        let changed = connection.execute("UPDATE session_restart_intents SET container_upgrade_json=?3 WHERE session_id=?1 AND operation_id=?2 AND phase IN ('stopping','recreating_container') AND container_upgrade_json IS NOT NULL", params![session_id, operation_id, serde_json::to_string(&plan)?])?;
+        ensure!(
+            changed == 1,
+            "container upgrade ownership changed during preparation"
+        );
+        Ok(())
+    })
+}
+
+/// Child startup and replacement share the database writer's decision. A
+/// parked child's stale target cannot be woken after replacement commits.
+pub(super) fn ensure_container_parent_available(
+    connection: &Connection,
+    parent: &str,
+) -> Result<()> {
+    let replacing: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM session_restart_intents WHERE session_id=?1 AND phase='recreating_container' AND container_upgrade_json IS NOT NULL)", [parent], |row| row.get(0))?;
+    ensure!(
+        !replacing,
+        "the parent container is being upgraded; retry after it reconnects"
+    );
+    Ok(())
+}
+
+pub(crate) fn try_commit_container_upgrade(session_id: &str, operation_id: &str) -> Result<bool> {
+    let session_id = session_id.to_owned();
+    let operation_id = operation_id.to_owned();
+    submit_database_write("commit container upgrade", move |connection| {
+        let tx = connection.transaction()?;
+        let intent = load_session_restart_with(&tx, &session_id)?
+            .context("container upgrade intent disappeared")?;
+        ensure!(
+            intent.operation_id == operation_id
+                && intent.container_upgrade.is_some()
+                && matches!(
+                    intent.phase,
+                    SessionRestartPhase::Stopping | SessionRestartPhase::RecreatingContainer
+                ),
+            "container upgrade ownership changed or cancellation was accepted"
+        );
+        let children = tx.prepare("SELECT s.state,t.session_id IS NOT NULL FROM subagent_sessions c JOIN sessions s ON s.session_id=c.child_session_id LEFT JOIN session_targets t ON t.session_id=s.session_id WHERE c.parent_session_id=?1")?
+            .query_map([&session_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let occupied = children.into_iter().any(|(state, has_target)| {
+            let state = stored_session_state(&state);
+            state != SessionState::Parked && (state.has_live_worker() || has_target)
+        });
+        if occupied || super::delegation::has_pending_mutating_delegations_with(&tx, &session_id)? {
+            return Ok(false);
+        }
+        tx.execute("UPDATE session_restart_intents SET phase='recreating_container', updated_at=?3 WHERE session_id=?1 AND operation_id=?2", params![session_id, operation_id, Utc::now().to_rfc3339()])?;
+        tx.commit()?;
+        Ok(true)
+    })
+}
+
+/// The retained-container intent is the sole authority over its environment,
+/// including after an engine failure or daemon replacement.
+pub(crate) fn container_upgrade_owns_target(session_id: &str) -> Result<bool> {
+    let reader = open_reader(&database_path())?;
+    container_upgrade_owns_target_with(&reader, session_id)
+}
+
+pub(super) fn container_upgrade_owns_target_with(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<bool> {
+    Ok(connection.query_row("SELECT EXISTS(SELECT 1 FROM session_restart_intents WHERE session_id=?1 AND container_upgrade_json IS NOT NULL)", [session_id], |row| row.get(0))?)
 }

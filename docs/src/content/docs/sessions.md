@@ -317,17 +317,25 @@ blocks while the resume runs and reports the reason if it fails. Afterwards
 operation is `POST /api/v1/sessions/{id}/resume` in the
 [HTTP API](/api-reference/#resume-a-suspended-session).
 
-To test native recovery for one selected session, use **Restart session** in
+To test native recovery for one selected session, use **Restart agent** in
 the terminal command palette, or suspend and resume that session with the
 commands above. This stops its worker and starts a new one, which attempts to
-reload the recorded native session. For container sessions, Restart keeps an
-unchanged container, preserving its workspace and caches. Changed attachments or
-per-session resource settings require a new container; Restart creates one only
-after its fresh recovery copy has been verified and sealed. Containers created
-before applied settings were recorded are recreated once on their next Restart.
-Both interfaces warn before recreation: the conversation and workspace recovery
-copy are restored, but files outside that copy, including temporary files and
-installed tools, may be lost.
+reload the recorded native session. For container sessions, **Restart agent**
+always keeps the current container and
+its filesystem, including workspace files, caches and manually installed tools.
+Changed image defaults, attachments or sizing never turn Restart into container
+replacement. Saved attachments and sizing apply when a new environment is
+explicitly created.
+
+Choose **Upgrade container and restart…** from the session menu or the alternative
+in the Restart dialog to select a newer image. The confirmation shows both images
+and explains that workspace and cache mounts are reattached while writable-layer
+state, such as manually installed packages, may be lost. A checkpoint does not
+preserve the whole environment. A busy worker finishes accepted work before the
+upgrade starts. Pending upgrades survive daemon replacement and may be cancelled
+before replacement begins. Unsupported storage layouts fail before stopping the
+worker. See [Containers](/containers/) for the preservation boundary.
+
 Restarting only the Mjolnir daemon leaves
 detached workers running and does not exercise native reload. If Codex or
 Claude reports that a never-prompted native session is missing, Mjolnir warns

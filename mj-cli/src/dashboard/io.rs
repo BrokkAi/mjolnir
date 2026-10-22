@@ -353,6 +353,14 @@ pub(crate) enum DashboardIoUpdate {
         session_id: String,
         result: std::result::Result<(), String>,
     },
+    ContainerUpgradePreview {
+        session_id: String,
+        upgrade_only: bool,
+        result: std::result::Result<mj_core::state::ContainerUpgradePreview, String>,
+    },
+    ContainerUpgradeQueued {
+        result: std::result::Result<(), String>,
+    },
     MovePrepared {
         session_id: String,
         request_id: u64,
@@ -1499,6 +1507,17 @@ impl DashboardContext {
                     ));
                 }
             }
+            DashboardIoUpdate::ContainerUpgradePreview { session_id, upgrade_only, result } => match result {
+                Ok(preview) => self.dashboard.show_container_upgrade_preview(preview, upgrade_only),
+                Err(error) => {
+                    if upgrade_only { self.dashboard.set_failure_notice(format!("Container upgrade unavailable: {error}")); }
+                    else { self.dashboard.show_normal_restart(session_id); }
+                }
+            },
+            DashboardIoUpdate::ContainerUpgradeQueued { result } => match result {
+                Ok(()) => self.dashboard.set_notice("Container upgrade pending; waiting for accepted work. Cancel through the session operation."),
+                Err(error) => self.dashboard.set_failure_notice(format!("Container upgrade was not accepted: {error}")),
+            },
             DashboardIoUpdate::MovePrepared {
                 session_id,
                 request_id,

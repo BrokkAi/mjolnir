@@ -30,6 +30,8 @@ pub use session_configuration::SessionConfiguration;
 
 mod session_move;
 pub use session_move::*;
+mod container_upgrade;
+pub use container_upgrade::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1596,10 +1598,14 @@ pub const CLOSE_FAILURE_PREFIX: &str = "the suspension did not finish";
 
 pub const MOVE_FAILURE_PREFIX: &str = "the move did not finish";
 
+pub const CONTAINER_UPGRADE_FAILURE_PREFIX: &str =
+    "the container upgrade did not finish; its environment and recovery intent were retained";
+
 /// Recognize safe lifecycle outcomes, including records saved before the rename.
 pub fn is_public_lifecycle_error(error: &str) -> bool {
     error.starts_with(CLOSE_FAILURE_PREFIX)
         || error.starts_with(MOVE_FAILURE_PREFIX)
+        || error.starts_with(CONTAINER_UPGRADE_FAILURE_PREFIX)
         || error.starts_with(DESTRUCTION_FAILURE_PREFIX)
         || error.starts_with("the close did not finish")
 }

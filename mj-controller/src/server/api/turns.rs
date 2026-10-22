@@ -685,3 +685,51 @@ pub(super) async fn clear_queue(
         .await?;
     Ok((StatusCode::ACCEPTED, Json(PromptResponse { turn_id })))
 }
+
+pub(super) async fn container_upgrade_preview(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<mj_core::state::ContainerUpgradePreview>, ApiFailure> {
+    require_session_record(&state.snapshot_rx.borrow(), &session_id)?;
+    Ok(Json(
+        crate::server::handlers::ask_container_upgrade_preview(&state, session_id).await?,
+    ))
+}
+
+pub(super) async fn upgrade_container(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<mj_core::state::ContainerUpgradeRequest>,
+) -> Result<StatusCode, ApiFailure> {
+    if request.selection.session_id != session_id {
+        return Err(ApiFailure::bad_request(
+            "upgrade selection belongs to another session",
+        ));
+    }
+    send_action(&state, ControllerAction::UpgradeContainer { request }).await
+}
+
+pub(super) async fn cancel_container_upgrade(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Result<StatusCode, ApiFailure> {
+    send_action(
+        &state,
+        ControllerAction::CancelContainerUpgrade { session_id },
+    )
+    .await
+}
+
+pub(super) async fn restart_agent(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Result<StatusCode, ApiFailure> {
+    send_action(
+        &state,
+        ControllerAction::Restart {
+            session_id,
+            acknowledge_container_recreation: false,
+        },
+    )
+    .await
+}

@@ -362,9 +362,14 @@ pub(crate) enum Confirmation {
     /// stops without asking; this exists for the one case a mis-click costs
     /// work in progress.
     InterruptWork { session_id: String, restart: bool },
-    RestartContainer {
+    RestartAgent {
         session_id: String,
         interrupting: bool,
+    },
+    RestartContainer {
+        session_id: String,
+        preview: mj_core::state::ContainerUpgradePreview,
+        upgrade_only: bool,
     },
     /// Interrupt all, with what was running when it opened. The targets are
     /// found again on confirm, since turns end while the dialog is open.
@@ -573,6 +578,7 @@ impl Confirmation {
             | Self::DiscardSinceCheckpoint { session_id, .. }
             | Self::InterruptWork { session_id, .. }
             | Self::RestartContainer { session_id, .. }
+            | Self::RestartAgent { session_id, .. }
             | Self::InterruptAll { session_id, .. }
             | Self::ForceDestroy { session_id, .. }
             | Self::DestroyStopped { session_id, .. }
@@ -1860,12 +1866,40 @@ impl DashboardState {
                     acknowledge_unpublished_work: true,
                 }
             }
-            (Confirmation::RestartContainer { session_id, .. }, 1) => {
+            (Confirmation::RestartAgent { session_id, .. }, 1) => {
                 self.cancel_modal();
                 DashboardAction::RestartSession {
                     session_id,
-                    acknowledge_container_recreation: true,
+                    acknowledge_container_recreation: false,
                 }
+            }
+            (
+                Confirmation::RestartContainer {
+                    session_id,
+                    upgrade_only: false,
+                    ..
+                },
+                1,
+            ) => {
+                self.cancel_modal();
+                DashboardAction::RestartSession {
+                    session_id,
+                    acknowledge_container_recreation: false,
+                }
+            }
+            (
+                Confirmation::RestartContainer {
+                    preview,
+                    upgrade_only,
+                    ..
+                },
+                index,
+            ) if index == if upgrade_only { 1 } else { 2 } => {
+                self.cancel_modal();
+                DashboardAction::UpgradeContainer(mj_core::state::ContainerUpgradeRequest {
+                    selection: preview,
+                    acknowledge_writable_layer_loss: true,
+                })
             }
             (
                 Confirmation::InterruptWork {
@@ -2088,6 +2122,38 @@ fn select_session_cpu_report_row(
     let mut form = dialog.form.borrow_mut();
     form.set_selected(DialogControl::SessionCpuReportRows, index);
     form.focus(DialogControl::SessionCpuReportRows);
+}
+
+impl DashboardState {
+    pub fn show_container_upgrade_preview(
+        &mut self,
+        preview: mj_core::state::ContainerUpgradePreview,
+        upgrade_only: bool,
+    ) {
+        if !preview.available {
+            if upgrade_only {
+                self.set_notice("The container already uses the selected image.");
+            } else {
+                self.show_normal_restart(preview.session_id);
+            }
+            return;
+        }
+        self.mode = crate::Mode::Confirm(ConfirmDialog::new(Confirmation::RestartContainer {
+            session_id: preview.session_id.clone(),
+            preview,
+            upgrade_only,
+        }));
+    }
+}
+
+impl DashboardState {
+    pub fn show_normal_restart(&mut self, session_id: String) {
+        let interrupting = self.attention_level(&session_id) == crate::AttentionLevel::Working;
+        self.mode = crate::Mode::Confirm(ConfirmDialog::new(Confirmation::RestartAgent {
+            session_id,
+            interrupting,
+        }));
+    }
 }
 
 #[cfg(test)]

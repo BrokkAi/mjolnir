@@ -715,6 +715,14 @@ pub(crate) async fn run_server(
                             .map(|session| session.bundle_id.clone())
                     };
                     match stored {
+                        crate::server::ClientStateRequest::ContainerUpgradePreview { session_id, reply } => {
+                            let runtime = daemon_runtime.clone();
+                            move_preparation_jobs.spawn(async move {
+                                let result = runtime.preview_container_upgrade(session_id).await.map_err(|e| format!("{e:#}"));
+                                if reply.send(result).is_err() { tracing::debug!("container upgrade preview client disconnected"); }
+                            });
+                        }
+
                         crate::server::ClientStateRequest::Read { client_id, session_id, reply } => {
                             let workspace = workspace_of(&session_id);
                             let Ok(upgrade_task) = crate::upgrade::activity("viewer state read") else { continue };

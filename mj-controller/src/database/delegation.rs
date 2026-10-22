@@ -90,6 +90,13 @@ pub(crate) fn load_delegation(
 /// request before its durable effect is acknowledged.
 pub(crate) fn has_pending_mutating_delegations(parent: &str) -> Result<bool> {
     let connection = open_reader(&database_path())?;
+    has_pending_mutating_delegations_with(&connection, parent)
+}
+
+pub(super) fn has_pending_mutating_delegations_with(
+    connection: &Connection,
+    parent: &str,
+) -> Result<bool> {
     let mut statement = connection.prepare(
         "SELECT prepared_json FROM delegation_effects
          WHERE parent_session_id=?1 AND result_json IS NULL",
@@ -110,6 +117,9 @@ pub(crate) fn prepare_delegation(
 ) -> Result<PreparedDelegation> {
     submit_database_write("prepare delegation", move |connection| {
         let transaction = connection.transaction()?;
+        if prepared.request.action.mutates_child_state() {
+            super::session_restart::ensure_container_parent_available(&transaction, &parent)?;
+        }
         transaction.execute("INSERT INTO delegation_effects(parent_session_id,request_id,phase,prepared_json,result_json) VALUES (?1,?2,'prepared',?3,NULL) ON CONFLICT(parent_session_id,request_id) DO NOTHING", params![parent, prepared.request.request_id, serde_json::to_string(&prepared)?])?;
         let stored: String = transaction.query_row("SELECT prepared_json FROM delegation_effects WHERE parent_session_id=?1 AND request_id=?2", params![parent, prepared.request.request_id], |row| row.get(0))?;
         transaction.commit()?;

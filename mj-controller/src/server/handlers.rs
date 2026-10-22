@@ -1133,3 +1133,31 @@ async fn catalog_response(
             ApiError::controller_unavailable()
         })
 }
+
+/// Engine inspection runs in the controller's supervised background work.
+pub(super) async fn preview_container_upgrade(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<mj_core::state::ContainerUpgradePreview>, ApiError> {
+    validate_public_id(&session_id)?;
+    require_session_record(&state.snapshot_rx.borrow(), &session_id)?;
+    Ok(Json(
+        ask_container_upgrade_preview(&state, session_id).await?,
+    ))
+}
+
+pub(super) async fn ask_container_upgrade_preview(
+    state: &ServerState,
+    session_id: String,
+) -> Result<mj_core::state::ContainerUpgradePreview, ApiError> {
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    state
+        .client_state_tx
+        .send(ClientStateRequest::ContainerUpgradePreview { session_id, reply })
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?;
+    answer
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?
+        .map_err(|error| ApiError::new(StatusCode::CONFLICT, error))
+}
