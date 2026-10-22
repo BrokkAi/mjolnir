@@ -547,6 +547,7 @@ fn validate_action_against(
         | ControllerAction::Suspend { session_id, .. }
         | ControllerAction::Destroy { session_id, .. }
         | ControllerAction::Cancel { session_id }
+        | ControllerAction::CancelContainerUpgrade { session_id }
         | ControllerAction::StartReview { session_id } => {
             validate_public_id(session_id)?;
             require_session_record(snapshot, session_id)?;
@@ -670,6 +671,15 @@ fn validate_action_against(
             if !session.capabilities.container_settings {
                 return Err(ApiError::bad_request(
                     "this session cannot change container settings now",
+                ));
+            }
+        }
+        ControllerAction::UpgradeContainer { request } => {
+            validate_public_id(&request.selection.session_id)?;
+            let session = require_session_record(snapshot, &request.selection.session_id)?;
+            if !session.capabilities.restart || !request.acknowledge_writable_layer_loss {
+                return Err(ApiError::bad_request(
+                    "container upgrade is unavailable or writable-layer loss has not been acknowledged",
                 ));
             }
         }

@@ -1,5 +1,6 @@
 //! Persistent per-user controller daemon and its authenticated local protocol.
 
+mod container_upgrade;
 mod feed;
 mod owner;
 mod record_index;
@@ -304,6 +305,7 @@ enum LifecycleKind {
     Suspend,
     Resume,
     Restart,
+    UpgradeContainer,
     Move,
     ForceStop,
     DestroyStopped,
@@ -359,6 +361,7 @@ impl LifecycleKind {
             LifecycleKind::Suspend => "suspend",
             LifecycleKind::Resume => "resume",
             LifecycleKind::Restart => "restart",
+            LifecycleKind::UpgradeContainer => "container upgrade",
             LifecycleKind::Move => "move",
             LifecycleKind::ForceStop => "force stop",
             LifecycleKind::DestroyStopped => "destroy",
@@ -388,15 +391,17 @@ fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>
         LifecycleKind::Suspend => state == Some(SessionState::Destroying),
         LifecycleKind::Park => false,
         LifecycleKind::Unpark => state == Some(SessionState::Parked),
-        LifecycleKind::Move | LifecycleKind::Restart => !matches!(
-            state,
-            Some(
-                SessionState::Running
-                    | SessionState::Disconnected
-                    | SessionState::Checkpointing
-                    | SessionState::Closing
+        LifecycleKind::Move | LifecycleKind::Restart | LifecycleKind::UpgradeContainer => {
+            !matches!(
+                state,
+                Some(
+                    SessionState::Running
+                        | SessionState::Disconnected
+                        | SessionState::Checkpointing
+                        | SessionState::Closing
+                )
             )
-        ),
+        }
         _ => true,
     }
 }
@@ -410,8 +415,10 @@ fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>
 /// target is being removed, so stopping now only strands the target.
 fn lifecycle_starts_committed(kind: LifecycleKind, state: Option<SessionState>) -> bool {
     kind == LifecycleKind::StartupCleanup
-        || matches!(kind, LifecycleKind::Suspend | LifecycleKind::Restart)
-            && state == Some(SessionState::Destroying)
+        || matches!(
+            kind,
+            LifecycleKind::Suspend | LifecycleKind::Restart | LifecycleKind::UpgradeContainer
+        ) && state == Some(SessionState::Destroying)
 }
 
 /// How a stop request has to be carried out, given the durable record.
@@ -532,8 +539,16 @@ impl ActiveLifecycle {
         !matches!(self.phase, LifecyclePhase::Completed(_))
     }
 
+    fn pending_upgrade_failed(&self) -> bool {
+        self.kind == LifecycleKind::UpgradeContainer
+            && self.restart_intent.is_some()
+            && !self.control.is_committed()
+            && matches!(self.phase, LifecyclePhase::Completed(Err(_)))
+    }
+
     fn is_visible(&self) -> bool {
         self.is_running()
+            || self.pending_upgrade_failed()
             || matches!(
                 self.phase,
                 LifecyclePhase::Completed(Ok(DaemonLifecycleResult::DeferredCleanup))
@@ -545,10 +560,12 @@ impl ActiveLifecycle {
     }
 
     fn cancel_with(&mut self, cancel: fn(&LifecycleControl) -> bool) -> bool {
-        if !matches!(
-            self.phase,
-            LifecyclePhase::Executing | LifecyclePhase::MovingDestination
-        ) {
+        if !self.pending_upgrade_failed()
+            && !matches!(
+                self.phase,
+                LifecyclePhase::Executing | LifecyclePhase::MovingDestination
+            )
+        {
             return false;
         }
         let accepted = cancel(&self.control);
@@ -562,10 +579,12 @@ impl ActiveLifecycle {
     }
 
     fn is_cancellable(&self) -> bool {
-        matches!(
-            self.phase,
-            LifecyclePhase::Executing | LifecyclePhase::MovingDestination
-        ) && self.control.is_cancellable()
+        (self.pending_upgrade_failed()
+            || matches!(
+                self.phase,
+                LifecyclePhase::Executing | LifecyclePhase::MovingDestination
+            ))
+            && self.control.is_cancellable()
     }
 
     /// Whether a person may cancel this operation now. The dashboard offers a
@@ -588,6 +607,12 @@ impl ActiveLifecycle {
     /// next daemon finishes it from its record, except a committed create,
     /// whose caller now owns the new session and which no daemon resumes.
     fn interrupt_for_shutdown(&mut self) -> bool {
+        if self.kind == LifecycleKind::UpgradeContainer
+            && matches!(self.phase, LifecyclePhase::RetiringContainer)
+        {
+            self.control.interrupt();
+            return true;
+        }
         if self.cancel_with(LifecycleControl::cancel_for_shutdown) {
             return true;
         }
@@ -667,7 +692,7 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
             LifecycleKind::Create => Self::Create,
             LifecycleKind::Suspend => Self::Suspend,
             LifecycleKind::Resume => Self::Resume,
-            LifecycleKind::Restart => Self::Resume,
+            LifecycleKind::Restart | LifecycleKind::UpgradeContainer => Self::Resume,
             LifecycleKind::Move => Self::Move,
             LifecycleKind::ForceStop => Self::ForceStop,
             LifecycleKind::DestroyStopped | LifecycleKind::ArchiveStopped => Self::DestroyStopped,

@@ -3,6 +3,7 @@
 mod backend;
 mod cache_host;
 pub(crate) mod checkpoint;
+mod container_upgrade;
 mod git_cache;
 mod github_app;
 mod lifecycle;

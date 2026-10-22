@@ -64,3 +64,6 @@ mj-tui/src/setup/*
 
 # Worker file locking and descriptor inheritance also protect native macOS roots.
 mj-worker/src/worker_runtime/root_owner.rs
+
+# Container replacement preserves host paths and private CLI environment files.
+mj-controller/src/targets/container_upgrade.rs

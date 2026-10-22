@@ -1358,3 +1358,21 @@ mj respond --session SESSION --elicitation REQUEST --response-file answer.json
 positional JSON response or `-` for stdin. `mj prompt` also accepts
 `--return-on-input`. The CLI exits successfully on `input_required`
 results so an orchestrator can answer and resume waiting.
+
+### Container upgrades
+
+`GET /api/v1/sessions/{id}/container-upgrade` returns the inspected current image,
+selected target image, immutable identities when cached, retained mount paths and
+writable-layer warning. Unsupported preservation layouts return an error without
+stopping the worker.
+
+`POST /api/v1/sessions/{id}/container-upgrade` accepts
+`{"selection": <the preview>, "acknowledge_writable_layer_loss": true}`. The daemon
+rechecks the selection, persists the request and returns 202. A busy worker
+finishes its accepted work before replacement; waiting requests survive daemon
+replacement. `DELETE` at the same path cancels a pending request before
+replacement begins. Existing lifecycle status reports progress and cancellation.
+
+`POST /api/v1/sessions/{id}/restart` performs a normal agent restart inside the
+existing container, preserving its filesystem. Container replacement requires the
+separate upgrade operation and its acknowledgment.

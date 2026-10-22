@@ -55,13 +55,44 @@ Every session also mounts a private disk-backed Docker volume at `/tmp`, with
 mode 1777 so nonroot image users can create temporary files. Temporary writes
 go directly to the daemon host's filesystem rather than the container's
 writable overlay. This volume is excluded from checkpoints and removed after
-the container, so its contents are lost on stop or restart. An explicit
+the container, so its contents are lost when the session environment is destroyed. An explicit
 attachment at `/tmp` keeps its configured behavior.
 
-After upgrading Mjolnir, **Restart session** applies the temporary mount to an
-existing session: it checkpoints the session and restores it into a newly
-provisioned container. Restarting just the daemon or worker does not change an
-existing container's mounts.
+Daemon upgrades reconnect to compatible workers and leave existing containers,
+workspace storage, temporary files and build caches in place. **Restart agent**
+restarts the worker and harness inside the same container, preserving its
+filesystem even when the configured image or container settings have changed.
+New sessions use the configured image.
+
+Choose **Upgrade container and restart…** from the session menu, or the upgrade
+alternative in the Restart dialog, to explicitly replace a container. The
+confirmation shows the current and target images. Existing independent
+workspace and cache mounts are reattached; they are never reconstructed from a
+checkpoint. State in the container's writable layer, including manually
+installed packages, may be lost. A checkpoint does not preserve the whole
+environment. The private worker journal and harness state are transferred so
+accepted work and conversation state survive.
+
+Upgrades requested during work wait for the worker's atomic idle reservation.
+The pending request survives daemon replacement and can be cancelled before
+replacement starts. The stopped source is retained until the replacement worker
+is ready. A failed replacement retains its storage and durable recovery intent.
+
+The operation supports owned local and SSH Podman/Docker containers whose
+workspace is on a writable volume or bind mount. A workspace stored only in the
+container layer, transient copy-on-write mounts, borrowed child containers and
+unsupported engine settings produce a preservation refusal before the worker
+is stopped. In particular, a default Docker session with its workspace in the
+container layer cannot use this upgrade path. Apple containers are unsupported.
+There is no destructive fallback.
+
+Preview and queue through the CLI:
+
+```console
+mj upgrade-container --session <id>
+mj upgrade-container --session <id> --acknowledge-writable-layer-loss
+mj upgrade-container --session <id> --cancel
+```
 
 The default `pull_policy = "auto"` launches with `docker run --pull=missing`, so
 a session starts from the cached image. The daemon keeps remote `:latest` images

@@ -1292,7 +1292,7 @@ fn golden_tui_container_editor_details() {
     open_container_editor(&mut mounted);
     append_dialog_render(
         &mut output,
-        "mount change takes effect on recreation",
+        "mount change applies to a new environment",
         100,
         40,
         &drawn(&mut mounted, 100, 40),
@@ -1300,38 +1300,65 @@ fn golden_tui_container_editor_details() {
 
     mounted.cancel_modal();
     mounted.focus_sessions();
-    mounted.set_container_recreation_sessions(["session-1".into()].into());
+    mounted.set_container_upgrade_sessions(["session-1".into()].into());
+    let preview = mj_core::state::ContainerUpgradePreview {
+        session_id: "session-1".into(),
+        source_container_id: "existing-container".into(),
+        warning: mj_core::state::CONTAINER_UPGRADE_WARNING.into(),
+        current_image: "ghcr.io/brokkai/mjolnir/agent-dev:2.51.0".into(),
+        current_image_id: "sha256:previous".into(),
+        target_image_id: Some("sha256:selected".into()),
+        target_image: "ghcr.io/brokkai/mjolnir/agent-dev:2.52.0".into(),
+        available: true,
+        retained_mounts: vec!["/workspace".into(), "/cache".into(), "/tmp".into()],
+    };
     assert_eq!(
         mounted.dispatch_command(crate::actions::CommandId::RestartSession),
-        DashboardAction::None
+        DashboardAction::PreviewContainerUpgrade {
+            session_id: "session-1".into(),
+            upgrade_only: false
+        }
     );
+    mounted.show_container_upgrade_preview(preview.clone(), false);
     append_dialog_render(
         &mut output,
-        "restart warns before recreating an idle container",
-        100,
+        "Restart keeps its environment; container upgrade is a separate choice",
+        120,
         32,
-        &drawn(&mut mounted, 100, 32),
+        &drawn(&mut mounted, 120, 32),
     );
-    // Cancel is initially selected; Enter must not authorize replacement.
     assert_eq!(
         mounted.handle_key(key(KeyCode::Enter)),
         DashboardAction::None
     );
     assert!(matches!(mounted.mode, Mode::Dashboard));
-    assert_eq!(
-        mounted.dispatch_command(crate::actions::CommandId::RestartSession),
-        DashboardAction::None
-    );
-    drawn(&mut mounted, 100, 32);
+    mounted.show_container_upgrade_preview(preview.clone(), false);
+    drawn(&mut mounted, 120, 32);
     mounted.handle_key(key(KeyCode::Right));
     assert_eq!(
         mounted.handle_key(key(KeyCode::Enter)),
         DashboardAction::RestartSession {
             session_id: "session-1".into(),
-            acknowledge_container_recreation: true,
+            acknowledge_container_recreation: false
         }
     );
-    mounted.set_container_recreation_sessions(Default::default());
+    mounted.show_container_upgrade_preview(preview.clone(), true);
+    append_dialog_render(
+        &mut output,
+        "Explicit upgrade discloses image versions, retained storage, and writable-layer loss",
+        120,
+        32,
+        &drawn(&mut mounted, 120, 32),
+    );
+    mounted.handle_key(key(KeyCode::Right));
+    assert_eq!(
+        mounted.handle_key(key(KeyCode::Enter)),
+        DashboardAction::UpgradeContainer(mj_core::state::ContainerUpgradeRequest {
+            selection: preview,
+            acknowledge_writable_layer_loss: true
+        })
+    );
+    mounted.set_container_upgrade_sessions(Default::default());
     assert_eq!(
         mounted.dispatch_command(crate::actions::CommandId::RestartSession),
         DashboardAction::RestartSession {

@@ -54,7 +54,8 @@ pub(crate) enum ContainerEditFocus {
     Save,
 }
 
-pub(crate) const CONTAINER_EDIT_SCOPE: &str = "Applies when the container is next recreated.";
+pub(crate) const CONTAINER_EDIT_SCOPE: &str =
+    "Applies when a new environment is explicitly created; Restart keeps current settings.";
 
 enum Row<'a> {
     Text(Line<'a>),

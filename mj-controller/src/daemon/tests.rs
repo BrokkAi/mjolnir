@@ -116,6 +116,7 @@ fn restart_recovery_requires_the_checkpoint_bound_to_its_intent() {
         checkpoint_started: true,
         container_recreation_acknowledged: true,
         automatic: false,
+        container_upgrade: None,
     };
 
     assert!(!restart::restart_checkpoint_matches(&record, &intent));
@@ -3133,12 +3134,10 @@ fn startup_prompt_test_store(name: &str) -> Option<crate::database::DatabaseWrit
     Some(crate::database::install_isolated_test_writer())
 }
 
-// Hard-won: #1139 review: an automatic recreation that stood down on a container with an unrecorded image was reported as a completed move.
-// The target check runs through `sh`, which only Unix hosts provide.
-#[cfg(unix)]
+// Hard-won: #1326: image maintenance recreated an otherwise current session container.
 #[tokio::test]
-async fn an_automatic_recreation_that_stands_down_is_not_reported_as_a_move() {
-    const NAME: &str = "an_automatic_recreation_that_stands_down_is_not_reported_as_a_move";
+async fn a_current_worker_in_an_older_container_keeps_its_environment() {
+    const NAME: &str = "a_current_worker_in_an_older_container_keeps_its_environment";
     let Some(_writer) = startup_prompt_test_store(NAME) else {
         return;
     };
@@ -3147,8 +3146,6 @@ async fn an_automatic_recreation_that_stands_down_is_not_reported_as_a_move() {
         mj_core::workspace::DEFAULT_WORKSPACE_ID,
         SessionState::Running,
     );
-    // A container recorded before images were tracked, which no longer
-    // exists, so the recreation finds its target unavailable.
     session.target_template_id = "docker".into();
     session.target = Some(mj_core::state::TargetLocator::LocalDocker {
         borrowed_from: None,
@@ -3159,79 +3156,467 @@ async fn an_automatic_recreation_that_stands_down_is_not_reported_as_a_move() {
     };
     let mut runtime = mj_core::state::TargetRuntimeSettings::from(&template);
     let mut applied = mj_core::state::ContainerSettings::requested(&session);
-    applied.default_image = None;
+    applied.default_image = Some(Some("ghcr.io/brokkai/mjolnir/agent-dev:2.51.0".into()));
     runtime.container_settings = Some(applied);
     session.target_runtime = Some(runtime);
     crate::database::save_session(&session).unwrap();
     let state = test_runtime_state();
-
-    // The coordinator prepared another image than the target names now, and
-    // then the image it names: neither retires anything.
-    for prepared in [
-        "registry.example.test/not-the-target:1",
-        mj_core::config::DEFAULT_CONTAINER_IMAGE,
-    ] {
-        let outcome = state
-            .recreate_container_for_upgrade("session-1".into(), prepared.into())
-            .await
-            .unwrap();
-        assert_eq!(
-            outcome,
-            restart::ContainerRecreationOutcome::StoodDown,
-            "{prepared}"
-        );
-        assert!(crate::database::load_session_restarts().unwrap().is_empty());
-        let record = crate::database::load_session_record("session-1")
+    let controller = Controller {
+        config: Config::default(),
+        state: crate::database::load_state().unwrap(),
+    };
+    let outcome = controller
+        .upgrade_session_worker(
+            "session-1",
+            &crate::targets::ProcessExecutor,
+            &state.session_manager,
+            Some(mj_core::worker_build::WORKER_BUILD_ID),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        crate::controller::WorkerUpgradeOutcome::AlreadyCurrent { .. }
+    ));
+    assert_eq!(
+        crate::database::load_session_record("session-1")
             .unwrap()
-            .unwrap();
-        assert_eq!(record.state, SessionState::Running);
-        assert_eq!(record.last_error, None);
-    }
+            .unwrap(),
+        session
+    );
+    assert!(crate::database::load_session_restarts().unwrap().is_empty());
 }
 
-// Hard-won: #1139 review: a failed automatic recreation kept its Restart intent, so its stuck lifecycle stood down every retry and blocked continuation.
-// A local bare target exists only where the controller runs workers itself.
-#[cfg(unix)]
+// Hard-won: #1326: a persisted automatic intent recreated a session after a daemon handoff.
 #[tokio::test]
-async fn a_failed_automatic_recreation_gives_back_its_intent_and_records_no_failure() {
-    const NAME: &str = "a_failed_automatic_recreation_gives_back_its_intent_and_records_no_failure";
+async fn an_unstarted_automatic_recreation_is_cancelled_on_daemon_recovery() {
+    const NAME: &str = "an_unstarted_automatic_recreation_is_cancelled_on_daemon_recovery";
     let Some(_writer) = startup_prompt_test_store(NAME) else {
         return;
     };
-    let worker_root = tempfile::tempdir().unwrap();
-    let mut session = runtime_test_session(
+    let session = runtime_test_session(
         "session-1",
         mj_core::workspace::DEFAULT_WORKSPACE_ID,
         SessionState::Running,
     );
-    // A bare target needs no image, and the configuration has no profile for
-    // the session, so its checkpoint fails for an ordinary reason.
-    session.target_template_id = "localhost".into();
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
-        worker_root: worker_root.path().join("session-1"),
-    });
     crate::database::save_session(&session).unwrap();
-    let state = test_runtime_state();
-
-    // A bare target names no image, so nothing is compared with this one.
-    let error = state
-        .recreate_container_for_upgrade("session-1".into(), "unused".into())
-        .await
-        .expect_err("the checkpoint cannot succeed");
-    assert!(
-        format!("{error:#}").contains("stopped before changing anything"),
-        "{error:#}"
-    );
-    assert!(crate::database::load_session_restarts().unwrap().is_empty());
-    assert!(!state.owner().lifecycle.contains_key("session-1"));
-    let record = crate::database::load_session_record("session-1")
+    crate::database::begin_session_restart(
+        "session-1",
+        "legacy-automatic",
+        Arc::new(AtomicBool::new(false)),
+        true,
+    )
+    .unwrap();
+    rusqlite::Connection::open(crate::database::database_path())
         .unwrap()
+        .execute(
+            "UPDATE session_restart_intents SET automatic=1 WHERE session_id='session-1'",
+            [],
+        )
         .unwrap();
-    assert_eq!(record.state, SessionState::Running);
-    assert_eq!(record.last_error, None);
+    let state = test_runtime_state();
+    let owned = state
+        .recover_restarts(crate::database::load_session_restarts().unwrap())
+        .unwrap();
+    assert!(owned.is_empty());
+    assert!(crate::database::load_session_restarts().unwrap().is_empty());
+    assert_eq!(
+        crate::database::load_session_record("session-1")
+            .unwrap()
+            .unwrap(),
+        session
+    );
 }
 
-// Hard-won: 955f4204: Restart reused a container after its mount settings changed.
+// A completed preparation failure must retain a cancellable owner, rather than
+// leaving an invisible durable intent that prevents every later lifecycle.
+#[tokio::test]
+async fn failed_container_preparation_can_be_cancelled_after_result_publication() {
+    const NAME: &str = "failed_container_preparation_can_be_cancelled_after_result_publication";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let session = runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    crate::database::save_session(&session).unwrap();
+    let state = test_runtime_state();
+    let result = state
+        .start_or_join_lifecycle(
+            "session-1".into(),
+            LifecycleKind::UpgradeContainer,
+            |state, id, cancelled| async move {
+                let intent = crate::database::begin_container_upgrade(
+                    &id,
+                    "upgrade-test",
+                    cancelled,
+                    crate::targets::container_upgrade_test_plan(&id),
+                )?;
+                state.bind_restart_intent(&id, &intent.operation_id)?;
+                anyhow::bail!("fixture image preparation failure before stopping the worker")
+            },
+        )
+        .unwrap();
+    assert!(
+        RuntimeState::wait_lifecycle_result(result.clone())
+            .await
+            .is_err()
+    );
+    state.remove_completed_lifecycle(&result);
+    assert!(
+        state
+            .active_lifecycles()
+            .iter()
+            .any(|view| view.session_id == "session-1" && view.cancellable)
+    );
+    state.cancel_container_upgrade("session-1").await.unwrap();
+    assert!(crate::database::load_session_restarts().unwrap().is_empty());
+    assert!(state.active_lifecycles().is_empty());
+    let mut saved = crate::database::load_session_record("session-1")
+        .unwrap()
+        .unwrap();
+    assert!(
+        saved
+            .public_error()
+            .unwrap()
+            .starts_with(mj_core::state::CONTAINER_UPGRADE_FAILURE_PREFIX)
+    );
+    saved.last_error = None;
+    saved.updated_at = session.updated_at.clone();
+    assert_eq!(saved, session);
+
+    // A late upgrade Cancel must not cancel the next ordinary operation.
+    let release = Arc::new(tokio::sync::Notify::new());
+    let result = state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Suspend, {
+            let release = release.clone();
+            move |_, _, _| async move {
+                release.notified().await;
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    assert!(state.cancel_container_upgrade("session-1").await.is_err());
+    assert!(
+        !state.owner().lifecycle["session-1"]
+            .control
+            .cancel_accepted()
+    );
+    release.notify_one();
+    RuntimeState::wait_lifecycle_result(result).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_pending_container_upgrade_cancels_without_recording_a_session_failure() {
+    const NAME: &str = "a_pending_container_upgrade_cancels_without_recording_a_session_failure";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let record = runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    crate::database::save_session(&record).unwrap();
+    let state = test_runtime_state();
+    let ready = Arc::new(tokio::sync::Notify::new());
+    let result = state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::UpgradeContainer, {
+            let ready = ready.clone();
+            move |state, id, cancelled| async move {
+                crate::database::begin_container_upgrade(
+                    &id,
+                    "upgrade-test",
+                    cancelled.clone(),
+                    crate::targets::container_upgrade_test_plan(&id),
+                )?;
+                state.bind_restart_intent(&id, "upgrade-test")?;
+                ready.notify_one();
+                while !cancelled.load(Ordering::Acquire) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                anyhow::bail!("pending container upgrade cancelled; environment retained")
+            }
+        })
+        .unwrap();
+    ready.notified().await;
+    state.cancel_container_upgrade("session-1").await.unwrap();
+    RuntimeState::wait_lifecycle_result(result).await.unwrap();
+    assert!(crate::database::load_session_restarts().unwrap().is_empty());
+    assert_eq!(
+        crate::database::load_session_record("session-1")
+            .unwrap()
+            .unwrap(),
+        record
+    );
+}
+
+// A recovered committed request must keep the same cancellation boundary even
+// when inspection fails before the replacement helper can be entered again.
+#[tokio::test]
+async fn recovered_container_replacement_keeps_commit_authority_after_failure() {
+    const NAME: &str = "recovered_container_replacement_keeps_commit_authority_after_failure";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let mut record = runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    record.target_template_id = "podman".into();
+    record.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        container_id: mj_core::targets::resource_name("session-1").unwrap(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    });
+    crate::database::save_session(&record).unwrap();
+    crate::database::begin_container_upgrade(
+        "session-1",
+        "upgrade-test",
+        Arc::new(AtomicBool::new(false)),
+        crate::targets::container_upgrade_test_plan("session-1"),
+    )
+    .unwrap();
+    assert!(crate::database::try_commit_container_upgrade("session-1", "upgrade-test").unwrap());
+    let state = test_runtime_state();
+    let result = state
+        .admit_lifecycle(
+            "session-1".into(),
+            LifecycleKind::UpgradeContainer,
+            super::lifecycle::LifecycleStart {
+                resume_workspace_id: None,
+                request_key: Some("recovered".into()),
+                control: None,
+                phase: LifecyclePhase::RetiringContainer,
+                move_operation_id: None,
+                deferrable_admission: None,
+            },
+            |state, id, _| async move {
+                state.bind_restart_intent(&id, "upgrade-test")?;
+                anyhow::bail!("fixture engine unavailable before committed recovery")
+            },
+        )
+        .unwrap();
+    assert!(
+        RuntimeState::wait_lifecycle_result(result.clone())
+            .await
+            .is_err()
+    );
+    state.remove_completed_lifecycle(&result);
+    assert!(
+        state
+            .cancel_lifecycle_with_intent("session-1")
+            .await
+            .is_err()
+    );
+    assert!(
+        state
+            .start_or_join_lifecycle(
+                "session-1".into(),
+                LifecycleKind::Suspend,
+                |_, _, _| async { Ok(DaemonLifecycleResult::Done) }
+            )
+            .is_err()
+    );
+    assert_eq!(
+        crate::database::load_session_restarts().unwrap()[0].phase,
+        crate::database::SessionRestartPhase::RecreatingContainer
+    );
+    assert!(state.owner().lifecycle["session-1"].control.is_committed());
+    assert!(
+        !state.owner().lifecycle["session-1"]
+            .control
+            .cancel_accepted()
+    );
+
+    let missing = ManagedSessionView {
+        snapshot: None,
+        connected: false,
+        error: Some(ViewError::TargetMissing(
+            "retained source was renamed".into(),
+        )),
+    };
+    assert!(state.missing_target_record("session-1", &missing).is_none());
+    assert!(
+        crate::database::mark_session_target_missing(
+            "session-1",
+            "stale missing-target observation",
+            "later"
+        )
+        .unwrap()
+        .is_none()
+    );
+    let saved = crate::database::load_session_record("session-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.target, record.target);
+    assert_eq!(saved.state, SessionState::Running);
+    assert!(
+        crate::recovery_gate::current_background_session(&saved)
+            .unwrap()
+            .is_none()
+    );
+    struct NoEnvironmentMutation;
+    impl crate::targets::CommandExecutor for NoEnvironmentMutation {
+        fn execute(
+            &self,
+            _: &crate::targets::CommandSpec,
+        ) -> Result<crate::targets::CommandOutput> {
+            anyhow::bail!("background recovery accessed retained upgrade storage")
+        }
+    }
+    let recovery = crate::session_manager::WorkerRecoveryPlan {
+        source_target: saved.target.clone().unwrap(),
+        target: None,
+        workspace: None,
+        liveness_probe: crate::targets::CommandSpec::new(
+            "must-not-run",
+            std::iter::empty::<String>(),
+        ),
+        exit_record: None,
+        binary_refresh: None,
+        launch_refresh: None,
+        restart: crate::targets::CommandPlan {
+            description: "background recovery must stay suppressed".into(),
+            commands: Vec::new(),
+        },
+    };
+    assert_eq!(
+        crate::session_manager::recover_worker_controlled(
+            recovery,
+            true,
+            Some("session-1"),
+            &NoEnvironmentMutation
+        )
+        .unwrap(),
+        crate::session_manager::WorkerRecoveryOutcome::Suppressed
+    );
+    let controller = Controller {
+        config: Config::default(),
+        state: crate::database::load_state().unwrap(),
+    };
+    assert!(matches!(
+        controller
+            .upgrade_session_worker(
+                "session-1",
+                &NoEnvironmentMutation,
+                &state.session_manager,
+                Some("older-build")
+            )
+            .await
+            .unwrap(),
+        crate::controller::WorkerUpgradeOutcome::Deferred
+    ));
+}
+
+// Child wake/creation and container replacement must choose under the same
+// database writer, even if the parent's previous idle observation is stale.
+#[tokio::test]
+async fn container_replacement_serializes_with_child_wake_and_registration() {
+    const NAME: &str = "container_replacement_serializes_with_child_wake_and_registration";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let parent = runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    crate::database::save_session(&parent).unwrap();
+    let mut child = runtime_test_session(
+        "child-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Parked,
+    );
+    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/isolated/child-1".into(),
+    });
+    crate::database::save_subagent_session(&child, &runtime_test_subagent("child-1", "session-1"))
+        .unwrap();
+    let plan = crate::targets::container_upgrade_test_plan("session-1");
+    crate::database::begin_container_upgrade(
+        "session-1",
+        "upgrade-test",
+        Arc::new(AtomicBool::new(false)),
+        plan.clone(),
+    )
+    .unwrap();
+    let wake = crate::database::WorkerRestartIntent {
+        operation_id: "wake-1".into(),
+        target: child.target.clone().unwrap(),
+        desired_build: "fixture".into(),
+    };
+    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire("child-1", "test child wake")
+        .unwrap()
+        .unwrap();
+    owner
+        .scope(async {
+            crate::database::begin_subagent_unpark("child-1", &wake).unwrap();
+            assert!(
+                !crate::database::try_commit_container_upgrade("session-1", "upgrade-test")
+                    .unwrap()
+            );
+            crate::database::finish_worker_restart("child-1", "wake-1").unwrap();
+            child.state = SessionState::Parked;
+            crate::database::save_session(&child).unwrap();
+            let mut preparing = runtime_test_session(
+                "preparing-child",
+                mj_core::workspace::DEFAULT_WORKSPACE_ID,
+                SessionState::Provisioning,
+            );
+            crate::database::save_subagent_session(
+                &preparing,
+                &runtime_test_subagent("preparing-child", "session-1"),
+            )
+            .unwrap();
+            assert!(
+                !crate::database::try_commit_container_upgrade("session-1", "upgrade-test")
+                    .unwrap(),
+                "a registered child owns startup before its target is assigned"
+            );
+            preparing.state = SessionState::Stopped;
+            crate::database::save_session(&preparing).unwrap();
+            assert!(
+                crate::database::try_commit_container_upgrade("session-1", "upgrade-test").unwrap()
+            );
+            assert!(crate::database::begin_subagent_unpark("child-1", &wake).is_err());
+        })
+        .await;
+    let new_child = runtime_test_session(
+        "child-2",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Provisioning,
+    );
+    assert!(
+        crate::database::save_subagent_session(
+            &new_child,
+            &runtime_test_subagent("child-2", "session-1")
+        )
+        .is_err()
+    );
+    assert!(
+        crate::database::load_session_record("child-2")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        crate::database::load_worker_restart("child-1")
+            .unwrap()
+            .is_none()
+    );
+    assert!(crate::database::request_session_restart_cancel("session-1", "upgrade-test").is_err());
+    assert_eq!(
+        crate::database::load_session_restarts().unwrap()[0]
+            .container_upgrade
+            .as_ref(),
+        Some(&plan)
+    );
+}
+
+// Hard-won: 955f4204: Restart admission must serialize settings edits without granting replacement authority.
 #[tokio::test]
 async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits() {
     const NAME: &str = "restart_compares_persisted_applied_settings_and_serializes_mount_edits";
@@ -3264,95 +3649,20 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
     runtime.container_settings = Some(applied.clone());
     session.target_runtime = Some(runtime);
     crate::database::save_session(&session).unwrap();
-    let load = || Controller {
-        config: Config::default(),
-        state: crate::database::load_state().unwrap(),
-    };
-    assert!(!load().container_recreation_required("session-1").unwrap());
-    for change in ["source", "destination", "access", "remove", "size"] {
-        let mut mounts = session.additional_mounts.clone();
-        match change {
-            "source" => mounts[0].source = "/srv/other".into(),
-            "destination" => mounts[0].destination = "/other".into(),
-            "access" => mounts[0].access = mj_core::targets::MountAccess::Rw,
-            "remove" => mounts.clear(),
-            "size" => {}
-            _ => unreachable!(),
-        }
-        crate::database::set_session_container_settings(
-            "session-1",
-            (change == "size").then_some("4"),
-            None,
-            &mounts,
-            "now",
-        )
-        .unwrap();
-        let controller = load();
-        assert!(
-            controller
-                .container_recreation_required("session-1")
-                .unwrap(),
-            "{change}"
-        );
-        let snapshot = crate::server::ViewerSnapshot::from_config_state(
-            &controller.config,
-            &controller.state,
-            1,
-        );
-        assert!(snapshot.sessions[0].restart_recreates_container);
-        let state = test_runtime_state();
-        state.owner().edit_sessions(|records| {
-            records.insert(
-                "session-1".into(),
-                controller.state.sessions["session-1"].clone(),
-            );
-        });
-        assert!(
-            state
-                .runtime_publication()
-                .unwrap()
-                .metadata
-                .container_recreation_sessions
-                .contains("session-1")
-        );
-        assert_eq!(
-            restart::restart_container_recovery(&controller, "session-1").unwrap(),
-            restart::RestartContainerRecovery::RecreateSource
-        );
-        assert_eq!(
-            controller.state.sessions["session-1"]
-                .target_runtime
-                .as_ref()
-                .unwrap()
-                .container_settings
-                .as_ref(),
-            Some(&applied)
-        );
-    }
-    let refused = crate::database::begin_session_restart(
-        "session-1",
-        "restart-unwarned",
-        Arc::new(AtomicBool::new(false)),
-        false,
-    )
-    .unwrap_err();
-    assert!(mj_core::refusal::Refusal::of(&refused).is_some());
-    assert!(crate::database::load_session_restarts().unwrap().is_empty());
-    crate::database::begin_session_restart(
+    let intent = crate::database::begin_session_restart(
         "session-1",
         "restart-settings",
         Arc::new(AtomicBool::new(false)),
         true,
     )
     .unwrap();
+    assert!(!intent.container_recreation_acknowledged);
+    assert!(intent.container_upgrade.is_none());
     let refused =
         crate::database::set_session_container_settings("session-1", None, None, &[], "later")
             .unwrap_err();
     assert!(mj_core::refusal::Refusal::of(&refused).is_some());
-    assert_eq!(
-        load().state.sessions["session-1"].container_cpus.as_deref(),
-        Some("4")
-    );
+
     assert!(
         crate::database::advance_session_restart(
             "session-1",
@@ -3366,83 +3676,7 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
         crate::database::SessionRestartPhase::Stopping
     );
     crate::database::cancel_session_restart("session-1").unwrap();
-    crate::database::set_session_container_settings(
-        "session-1",
-        None,
-        None,
-        &session.additional_mounts,
-        "later",
-    )
-    .unwrap();
-    assert!(!load().container_recreation_required("session-1").unwrap());
-
-    // Unknown legacy creation settings are not evidence of an empty mount list.
-    session.additional_mounts.clear();
-    session.target_runtime.as_mut().unwrap().container_settings = None;
-    crate::database::save_session(&session).unwrap();
-    assert!(load().container_recreation_required("session-1").unwrap());
-    session.target_runtime.as_mut().unwrap().container_settings =
-        Some(mj_core::state::ContainerSettings::applied(
-            &session,
-            mj_core::config::DEFAULT_CONTAINER_IMAGE,
-        ));
-    crate::database::save_session(&session).unwrap();
-    assert!(!load().container_recreation_required("session-1").unwrap());
-
-    // A container created from an older Mjolnir's default image follows the
-    // default to this build's once an upgrade moved it; the stored record has
-    // to say so. A configured image is not the default and never moves. A
-    // container recorded before images were tracked is unknown: Restart
-    // offers to recreate it, and only the container can say whether it moved.
-    for (image, moved, unrecorded) in [
-        ("ghcr.io/brokkai/mjolnir/agent-dev:0.1.0", true, false),
-        (mj_core::config::DEFAULT_CONTAINER_IMAGE, false, false),
-        ("registry.example.test/custom:1", false, false),
-        ("written before images were tracked", false, true),
-    ] {
-        let mut applied = mj_core::state::ContainerSettings::applied(&session, image);
-        if moved {
-            // `applied` records only this build's default, as provisioning
-            // does; an older build recorded its own.
-            applied.default_image = Some(Some(image.to_owned()));
-        }
-        if unrecorded {
-            applied.default_image = None;
-        }
-        session.target_runtime.as_mut().unwrap().container_settings = Some(applied);
-        crate::database::save_session(&session).unwrap();
-        let controller = load();
-        let record = &controller.state.sessions["session-1"];
-        assert_eq!(
-            mj_core::state::ContainerSettings::default_image_moved(record),
-            moved,
-            "{image}"
-        );
-        assert_eq!(
-            mj_core::state::ContainerSettings::image_unrecorded(record),
-            unrecorded,
-            "{image}"
-        );
-        assert_eq!(
-            controller
-                .container_recreation_required("session-1")
-                .unwrap(),
-            moved || unrecorded,
-            "{image}"
-        );
-    }
-    session.target_runtime.as_mut().unwrap().container_settings =
-        Some(mj_core::state::ContainerSettings::applied(
-            &session,
-            mj_core::config::DEFAULT_CONTAINER_IMAGE,
-        ));
-    crate::database::save_session(&session).unwrap();
-    // A replacement may own a newly dispatched turn before Running is published.
-    // Its creation snapshot therefore forbids repeating source teardown.
-    assert_eq!(
-        restart::restart_container_recovery(&load(), "session-1").unwrap(),
-        restart::RestartContainerRecovery::ReconnectReplacement
-    );
+    crate::database::set_session_container_settings("session-1", None, None, &[], "later").unwrap();
 }
 
 #[tokio::test]
@@ -3530,7 +3764,7 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
         crate::database::advance_session_restart(
             "session-1",
             "restart-accepted",
-            crate::database::SessionRestartPhase::RecreatingContainer,
+            crate::database::SessionRestartPhase::RestoringInPlace,
         )
     })
     .await
@@ -3541,7 +3775,7 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
     assert!(saved[0].checkpoint_started);
     assert_eq!(
         saved[0].phase,
-        crate::database::SessionRestartPhase::RecreatingContainer
+        crate::database::SessionRestartPhase::RestoringInPlace
     );
     assert_eq!(
         saved[0].checkpoint_sha256.as_deref(),
@@ -7354,6 +7588,11 @@ async fn resumable_lifecycles_release_admission_and_reacquire_named_control() {
         return;
     }
     for (id, kind, label) in [
+        (
+            "container-upgrade-admission",
+            LifecycleKind::UpgradeContainer,
+            "container worker swap",
+        ),
         (
             "move-copy-admission",
             LifecycleKind::Move,

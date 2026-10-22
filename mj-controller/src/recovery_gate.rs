@@ -9,6 +9,9 @@ use tokio::sync::{Notify, mpsc, watch};
 pub(crate) fn current_background_session(
     observed: &mj_core::state::SessionRecord,
 ) -> anyhow::Result<Option<mj_core::state::SessionRecord>> {
+    if crate::database::container_upgrade_owns_target(&observed.id)? {
+        return Ok(None);
+    }
     let current = crate::database::read_durable_session_record(&observed.id)?;
     Ok(current.filter(|current| {
         current.state == mj_core::state::SessionState::Running

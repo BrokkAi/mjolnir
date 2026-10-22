@@ -702,6 +702,10 @@ pub enum DaemonAction {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         acknowledge_container_recreation: bool,
     },
+    PreviewContainerUpgrade {
+        session_id: String,
+    },
+    UpgradeContainer(mj_core::state::ContainerUpgradeRequest),
     StartCreateSession(CreateSessionRequest),
     WaitCreateSession {
         session_id: String,
@@ -730,6 +734,9 @@ pub enum DaemonAction {
         delete_branch: bool,
     },
     CancelLifecycle {
+        session_id: String,
+    },
+    CancelContainerUpgrade {
         session_id: String,
     },
     RecoverDraft {
@@ -807,6 +814,7 @@ pub enum DaemonReply {
         finished: bool,
     },
     RegisteredSession(Box<RegisteredSession>),
+    ContainerUpgradePreview(mj_core::state::ContainerUpgradePreview),
     MovePreparation(Box<MovePreparation>),
     MoveOutcome(MoveOutcome),
     MoveSources(Vec<mj_core::move_workspace::RetainedMoveSource>),
@@ -2341,6 +2349,16 @@ impl DaemonClient {
         }
     }
 
+    pub async fn cancel_container_upgrade(&mut self, session_id: String) -> Result<()> {
+        match self
+            .request(DaemonAction::CancelContainerUpgrade { session_id })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected container-upgrade cancellation reply {reply:?}"),
+        }
+    }
+
     pub async fn recover_draft(&mut self, draft_id: String) -> Result<()> {
         match self
             .request(DaemonAction::RecoverDraft { draft_id })
@@ -2444,7 +2462,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // session's tail from the daemon at its cursor instead of reading SQLite.
 // Lifecycle stages can name the harness preparation step a worker reports.
 // A pending form can say it is a tool permission and whether it offers Skip.
-pub const PROTOCOL_VERSION: u32 = 57;
+pub const PROTOCOL_VERSION: u32 = 58;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -2461,6 +2479,32 @@ pub const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 pub const STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(90);
 pub const RETRY_DELAY: Duration = Duration::from_millis(40);
 impl DaemonClient {
+    pub async fn preview_container_upgrade(
+        &mut self,
+        session_id: String,
+    ) -> Result<mj_core::state::ContainerUpgradePreview> {
+        match self
+            .request(DaemonAction::PreviewContainerUpgrade { session_id })
+            .await?
+        {
+            DaemonReply::ContainerUpgradePreview(preview) => Ok(preview),
+            reply => bail!("unexpected container upgrade preview reply: {reply:?}"),
+        }
+    }
+
+    pub async fn upgrade_container(
+        &mut self,
+        request: mj_core::state::ContainerUpgradeRequest,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::UpgradeContainer(request))
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected container upgrade reply: {reply:?}"),
+        }
+    }
+
     pub async fn prepare_move_session(
         &mut self,
         selection: MoveSelection,

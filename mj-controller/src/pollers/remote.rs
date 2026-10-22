@@ -77,7 +77,7 @@ pub fn spawn_remote_dashboard_worker_poller(
                                 moves: snapshot.moves,
                                 subagents: snapshot.subagents,
                                 launch_recency: metadata.launch_recency,
-                                container_recreation_sessions: metadata.container_recreation_sessions,
+                                container_upgrade_sessions: metadata.container_upgrade_sessions,
                                 storage: metadata.storage,
                             });
                             send_if_changed(&reviews_tx, metadata.reviews);

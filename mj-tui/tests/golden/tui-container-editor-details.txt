@@ -10,7 +10,7 @@
 │  │ No messages                                                                                                       │
 │  │              ╭ × Edit container size and mounts ────────────────────────────────────────────────╮                 │
 │                 │Session: ACP pretty name                                                          │                 │
-│                 │Applies when the container is next recreated.                                     │                 │
+│                 │Applies when a new environment is explicitly created; Restart keeps current settin│                 │
 │                 │                                                                                  │                 │
 │                 │CPUs:                                                                             │                 │
 │                 │Memory:                                                                           │                 │
@@ -52,7 +52,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  │ No messages                                                                                                       │
 │  │              ╭ × Edit container size and mounts ────────────────────────────────────────────────╮                 │
 │                 │Session: ACP pretty name                                                          │                 │
-│                 │Applies when the container is next recreated.                                     │                 │
+│                 │Applies when a new environment is explicitly created; Restart keeps current settin│                 │
 │                 │                                                                                  │                 │
 │                 │CPUs:                                                                             │                 │
 │                 │Memory:                                                                           │                 │
@@ -82,7 +82,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
 
-=== mount change takes effect on recreation (100x40) ===
+=== mount change applies to a new environment (100x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
@@ -93,7 +93,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle  podm                                                                                      │
 │  │ No messa  ╭ × Edit container size and mounts ──────────────────────────────────╮              │
 │  │           │Session: ACP pretty name                                            │              │
-│              │Applies when the container is next recreated.                       │              │
+│              │Applies when a new environment is explicitly created; Restart keeps │              │
 │              │                                                                    │              │
 │              │CPUs:                                                               │  ion.        │
 │              │Memory:                                                             │              │
@@ -124,36 +124,70 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
 
-=== restart warns before recreating an idle container (100x32) ===
-╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ≡ ││                                                          │
-╰──────────────────────────────────────╯│                                                          │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
-│ Create   Open   Filter: _____________││                                                          │
-│hel ───────                                                                                       │
-│› · ACP pre                                                                                       │
-│  Idle  pod  ╭ × Recreate container on Restart? ────────────────────────────────────╮             │
-│  │ No mess  │Session: ACP pretty name                                              │  on.        │
-│  │          │                                                                      │             │
-│             │Restart will replace this container because its settings or its       │             │
-│             │Mjolnir image changed, or are unknown.                                │             │
-│             │The conversation and workspace recovery copy will be restored.        │             │
-│             │Files outside the recovery copy may be lost, including temporary files│             │
-│             │and installed tools.                                                  │             │
-│             │                                                                      │             │
-│             │                                                                      │             │
-│             │c Cancel  ·  r Recreate and restart                                   │  ───────────╯
-│             │                                                                      │  ───────────╮
-│             │                                                                      │             │
-│             │                                                                      │  o open.    │
-│             │                                                                      │  ───────────╯
-│             │  Cancel     Recreate and restart                                     │  ──── ▁   ▄ ╮
-│             ╰──────────────────────────────────────────────────────────────────────╯             │
-│                                                                                       ───────────╯
-│                                                                                       ──── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets    │
-│                                      ││  claude-1  Claude Code  refreshing…                      │
-│                                      ││  codex-1   Codex        refreshing…                      │
-│                                      ││  codex-2   Codex        refreshing…                      │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
+=== Restart keeps its environment; container upgrade is a separate choice (120x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────                                                                                                        │
+│› · ACP pretty                                                                                                        │
+│  Idle  podman  ╭ × Restart agent ───────────────────────────────────────────────────────────────────╮                │
+│  │ No message  │Session: session-1                                                                  │                │
+│  │             │                                                                                    │                │
+│                │Current image: ghcr.io/brokkai/mjolnir/agent-dev:2.51.0 (sha256:previous)           │                │
+│                │Target image: ghcr.io/brokkai/mjolnir/agent-dev:2.52.0 (sha256:selected)            │                │
+│                │Restart agent keeps the current container and its filesystem; it interrupts any     │                │
+│                │running turn.                                                                       │                │
+│                │Container upgrade reattaches the existing workspace and build cache mounts.         │                │
+│                │Writable-layer state, including manually installed packages, may be lost.           │                │
+│                │A checkpoint does not preserve the whole environment.                               │                │
+│                │Upgrades wait for accepted work; pending upgrades can be cancelled.                 │  ──────────────╯
+│                │                                                                                    │  ──────────────╮
+│                │c Cancel  ·  r Restart agent  ·  u Upgrade container and restart…                   │                │
+│                │                                                                                    │                │
+│                │                                                                                    │  ──────────────╯
+│                │                                                                                    │  ─────── ▁   ▄ ╮
+│                │  Cancel     Restart agent     Upgrade container and restart…                       │                │
+│                ╰────────────────────────────────────────────────────────────────────────────────────╯  ──────────────╯
+│                                                                                                        ─────── ▁   ▄ ╮
+│                                                                                                                      │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+
+=== Explicit upgrade discloses image versions, retained storage, and writable-layer loss (120x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────                                                                                                        │
+│› · ACP pretty                                                                                                        │
+│  Idle  podman  ╭ × Upgrade container and restart? ──────────────────────────────────────────────────╮                │
+│  │ No message  │Session: session-1                                                                  │                │
+│  │             │                                                                                    │                │
+│                │Current image: ghcr.io/brokkai/mjolnir/agent-dev:2.51.0 (sha256:previous)           │                │
+│                │Target image: ghcr.io/brokkai/mjolnir/agent-dev:2.52.0 (sha256:selected)            │                │
+│                │Restart agent keeps the current container and its filesystem; it interrupts any     │                │
+│                │running turn.                                                                       │                │
+│                │Container upgrade reattaches the existing workspace and build cache mounts.         │                │
+│                │Writable-layer state, including manually installed packages, may be lost.           │                │
+│                │A checkpoint does not preserve the whole environment.                               │                │
+│                │Upgrades wait for accepted work; pending upgrades can be cancelled.                 │  ──────────────╯
+│                │                                                                                    │  ──────────────╮
+│                │c Cancel  ·  u Upgrade container and restart…                                       │                │
+│                │                                                                                    │                │
+│                │                                                                                    │  ──────────────╯
+│                │                                                                                    │  ─────── ▁   ▄ ╮
+│                │  Cancel     Upgrade container and restart…                                         │                │
+│                ╰────────────────────────────────────────────────────────────────────────────────────╯  ──────────────╯
+│                                                                                                        ─────── ▁   ▄ ╮
+│                                                                                                                      │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys

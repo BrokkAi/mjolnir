@@ -20,6 +20,7 @@ pub(super) fn controller_action_session_id(action: &ControllerAction) -> Option<
         | ControllerAction::Resume { session_id, .. }
         | ControllerAction::Open { session_id }
         | ControllerAction::Cancel { session_id }
+        | ControllerAction::CancelContainerUpgrade { session_id }
         | ControllerAction::RemoveQueuedPrompt { session_id, .. }
         | ControllerAction::RespondElicitation { session_id, .. }
         | ControllerAction::Rename { session_id, .. }
@@ -33,6 +34,9 @@ pub(super) fn controller_action_session_id(action: &ControllerAction) -> Option<
         | ControllerAction::InterruptAll { session_id }
         | ControllerAction::StartReview { session_id }
         | ControllerAction::ResolveReview { session_id, .. } => Some(session_id.clone()),
+        ControllerAction::UpgradeContainer { request } => {
+            Some(request.selection.session_id.clone())
+        }
         ControllerAction::Move { request } => {
             Some(request.preparation.selection.session_id.clone())
         }

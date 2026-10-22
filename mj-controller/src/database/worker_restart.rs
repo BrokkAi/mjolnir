@@ -43,6 +43,12 @@ fn begin_worker_restart_for(
             "another worker replacement already owns session {session_id}"
         );
         if unpark {
+            let parent: String = tx.query_row(
+                "SELECT parent_session_id FROM subagent_sessions WHERE child_session_id=?1",
+                [&session_id],
+                |row| row.get(0),
+            )?;
+            super::session_restart::ensure_container_parent_available(&tx, &parent)?;
             ensure!(
                 tx.execute(
                     "UPDATE sessions SET state='running', last_error=NULL, updated_at=?2

@@ -138,13 +138,30 @@ impl RuntimeState {
 
             let durable = durable_session_state(lifecycle_owner.controller(), &session_id);
             let lifecycle = &mut lifecycle_owner.lifecycle;
-            let completed_other_kind = lifecycle
-                .get(&session_id)
-                .is_some_and(|active| active.kind != kind && !active.is_running());
+            let completed_other_kind = lifecycle.get(&session_id).is_some_and(|active| {
+                (active.kind != kind || kind == LifecycleKind::UpgradeContainer)
+                    && !active.is_running()
+            });
             if completed_other_kind {
-                superseded_restart_intent = lifecycle
-                    .remove(&session_id)
-                    .and_then(|active| active.restart_intent);
+                ensure!(
+                    !lifecycle
+                        .get(&session_id)
+                        .is_some_and(|active| active.kind == LifecycleKind::UpgradeContainer
+                            && active.restart_intent.is_some()
+                            && active.control.is_committed())
+                        || matches!(
+                            kind,
+                            LifecycleKind::UpgradeContainer
+                                | LifecycleKind::ForceDestroy
+                                | LifecycleKind::DestroyStopped
+                        ),
+                    "an interrupted container upgrade retains its source and storage; retry that upgrade or explicitly destroy the session"
+                );
+                superseded_restart_intent = lifecycle.remove(&session_id).and_then(|active| {
+                    (kind != LifecycleKind::UpgradeContainer)
+                        .then_some(active.restart_intent)
+                        .flatten()
+                });
             }
             if let Some(active) = lifecycle.get(&session_id) {
                 ensure!(
@@ -179,7 +196,10 @@ impl RuntimeState {
                 let control = control.unwrap_or_default();
                 // Decided under the owner lock, before anyone else can see the
                 // control, so a cancel can never be accepted first.
-                if lifecycle_starts_committed(kind, durable) {
+                if lifecycle_starts_committed(kind, durable)
+                    || (kind == LifecycleKind::UpgradeContainer
+                        && matches!(phase, LifecyclePhase::RetiringContainer))
+                {
                     control.grant_commit();
                 }
                 let cancelled = control.cancelled.clone();
@@ -228,6 +248,19 @@ impl RuntimeState {
                     let cleanup_state = state.clone();
                     let mut result = match mj_core::runtime::spawn_off_async_workers(async move {
                         if let Some(intent_id) = superseded_restart_intent {
+                            if matches!(
+                                kind,
+                                LifecycleKind::ForceDestroy | LifecycleKind::DestroyStopped
+                            ) && let Some(plan) = crate::database::load_session_restarts()?
+                                .into_iter()
+                                .find(|intent| {
+                                    intent.session_id == operation_id
+                                        && intent.operation_id == intent_id
+                                })
+                                .and_then(|intent| intent.container_upgrade)
+                            {
+                                plan.retire_backup_for_destroy(&operation_id, &ProcessExecutor)?;
+                            }
                             cleanup_state
                                 .release_restart_intent(&operation_id, &intent_id)
                                 .await?;
@@ -244,7 +277,10 @@ impl RuntimeState {
                             "daemon lifecycle task failed: {error}"
                         ))),
                     };
-                    if kind == LifecycleKind::Restart {
+                    if matches!(
+                        kind,
+                        LifecycleKind::Restart | LifecycleKind::UpgradeContainer
+                    ) {
                         // End cancellation and decide durable release under the
                         // same owner lock, before another lifecycle can enter.
                         let release_intent = {
@@ -268,6 +304,28 @@ impl RuntimeState {
                             result = Err(LifecycleFailure::of(&error));
                         }
                     }
+                    // Cancelling a pending upgrade changes no environment.
+                    // Once its durable intent is released, cancellation is a
+                    // successful outcome rather than a session failure.
+                    if kind == LifecycleKind::UpgradeContainer
+                        && state
+                            .owner()
+                            .lifecycle
+                            .get(&operation_session_id)
+                            .is_some_and(|active| {
+                                active.control.cancel_accepted() && active.restart_intent.is_none()
+                            })
+                    {
+                        result = Ok(DaemonLifecycleResult::Done);
+                    }
+                    let handed_off_restart = matches!(
+                        kind,
+                        LifecycleKind::Restart | LifecycleKind::UpgradeContainer
+                    ) && state
+                        .owner()
+                        .lifecycle
+                        .get(&operation_session_id)
+                        .is_some_and(|active| active.control.stopped_for_shutdown());
                     if let Err(error) = state.reload_controller().await {
                         let reload_error = format!(
                             "reload daemon state after lifecycle operation for {operation_session_id}: {error:#}"
@@ -286,9 +344,13 @@ impl RuntimeState {
                     // not get as far as rolling that record back, the stored
                     // error is applied here, because nothing else will.
                     if let Err(failure) = &result
+                        && !handed_off_restart
                         && matches!(
                             kind,
-                            LifecycleKind::Create | LifecycleKind::Resume | LifecycleKind::Restart
+                            LifecycleKind::Create
+                                | LifecycleKind::Resume
+                                | LifecycleKind::Restart
+                                | LifecycleKind::UpgradeContainer
                         )
                     {
                         state
@@ -300,13 +362,24 @@ impl RuntimeState {
                     // and exited. A failure puts the record back in the state
                     // it had, so without this the person is never told (#1081).
                     if let Err(failure) = &result
-                        && matches!(kind, LifecycleKind::Suspend | LifecycleKind::Restart)
+                        && !handed_off_restart
+                        && matches!(
+                            kind,
+                            LifecycleKind::Suspend
+                                | LifecycleKind::Restart
+                                | LifecycleKind::UpgradeContainer
+                        )
                     {
                         state
-                            .record_failed_close(
+                            .record_lifecycle_failure(
                                 &operation_session_id,
                                 &operation_reference,
                                 failure,
+                                if kind == LifecycleKind::UpgradeContainer {
+                                    mj_core::state::CONTAINER_UPGRADE_FAILURE_PREFIX
+                                } else {
+                                    mj_core::state::CLOSE_FAILURE_PREFIX
+                                },
                             )
                             .await;
                     }

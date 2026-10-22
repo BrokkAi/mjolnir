@@ -300,18 +300,26 @@ read-write
 
 Add mount
 
-Restart the session to apply changed settings to a newly created container.
+Saved settings apply when a new environment is explicitly created. Restart and container upgrade retain the existing mounts and limits.
 
 Cancel
 Save
-=== Restart recreation warning ===
-Recreate container on Restart?
+=== Separate Restart and container upgrade choices ===
+Restart agent
 
-Restart will replace this container because its settings or its Mjolnir image changed, or are unknown. The conversation and workspace recovery copy will be restored.
+Current image: agent-dev:2.51.0 (sha256:previous)
 
-Files outside the recovery copy may be lost, including temporary files and installed tools.
+Target image: agent-dev:2.52.0 (sha256:selected)
 
-Any running turn will be interrupted.
+Restart agent keeps the existing container and its filesystem; any running turn is interrupted. A container upgrade reattaches the existing workspace and build cache mounts.
+
+State in the writable layer, including manually installed packages, may be lost. A checkpoint does not preserve the whole environment.
+
+Upgrades wait for accepted work to finish. A pending upgrade can be cancelled before replacement starts.
+
+Cancel
+Restart agent
+Upgrade container and restart…
 === existing container settings preserve mount access modes (390x844) ===
 Test
 Other
@@ -326,7 +334,7 @@ alpha
 Live
 controls: [{"tag":"select","id":"new-profile","label":"alphabetagamma","value":"alpha","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 0
-action: POST /api/actions [{"action":"set-container-settings","session_id":"mounted","cpus":"6","memory":"12g","mounts":[{"source":"/srv/reference","destination":"/reference","read_only":true},{"source":"/srv/cache","destination":"/cache","read_only":false},{"source":"/srv/work","destination":"/work","read_only":false,"access":"rw"}]},{"action":"restart","session_id":"mounted","acknowledge_container_recreation":true}]
+action: POST /api/actions [{"action":"set-container-settings","session_id":"mounted","cpus":"6","memory":"12g","mounts":[{"source":"/srv/reference","destination":"/reference","read_only":true},{"source":"/srv/cache","destination":"/cache","read_only":false},{"source":"/srv/work","destination":"/work","read_only":false,"access":"rw"}]},{"action":"restart","session_id":"mounted"},{"action":"upgrade-container","request":{"selection":{"session_id":"mounted","source_container_id":"old-container","current_image":"agent-dev:2.51.0","current_image_id":"sha256:previous","target_image":"agent-dev:2.52.0","target_image_id":"sha256:selected","available":true,"retained_mounts":["/workspace","/cache","/tmp"],"warning":"Writable-layer state, including manually installed packages, may be lost. A checkpoint does not preserve the whole environment."},"acknowledge_writable_layer_loss":true}}]
 project creation requests: 0
 === EC2 default resource option (390x844) ===
 New session

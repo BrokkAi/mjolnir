@@ -73,12 +73,11 @@ fn group(id: CommandId) -> &'static str {
         | SwitchWorkspace
         | RenameWorkspace
         | CloseWorkspace => GROUPS[1],
-        OpenSession | SuspendSession | RestartSession | RenameSession | ChangedFiles
-        | ContainerSettings | ChangeWorkspace | MoveSession | CopySessionId | DestroySession
-        | MarkAllRead | FilterSessions | NextAttention | PreviousAttention | CancelOperation
-        | ToggleProject | OpenSubagents | SessionActions | InterruptTurn | InterruptAll => {
-            GROUPS[2]
-        }
+        OpenSession | SuspendSession | RestartSession | UpgradeContainer | RenameSession
+        | ChangedFiles | ContainerSettings | ChangeWorkspace | MoveSession | CopySessionId
+        | DestroySession | MarkAllRead | FilterSessions | NextAttention | PreviousAttention
+        | CancelOperation | ToggleProject | OpenSubagents | SessionActions | InterruptTurn
+        | InterruptAll => GROUPS[2],
         PinSession
         | UnpinSession
         | OpenSessionSplitRight

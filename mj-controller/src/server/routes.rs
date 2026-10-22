@@ -145,6 +145,10 @@ pub(super) fn router(options: ServerOptions) -> Router {
         .route("/api/projects/discover", post(discover_projects))
         .route("/api/projects", get(read_projects).post(refresh_projects))
         .route("/api/moves/prepare", post(prepare_move))
+        .route(
+            "/api/sessions/{session_id}/container-upgrade",
+            get(preview_container_upgrade),
+        )
         .route("/api/sessions/{session_id}/client-state", get(client_state))
         .route(
             "/api/sessions/{session_id}/background-tasks/stop",

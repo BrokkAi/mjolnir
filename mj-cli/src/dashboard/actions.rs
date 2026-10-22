@@ -1184,6 +1184,50 @@ pub(crate) async fn apply_dashboard_action(
             }
         }
         action @ DashboardAction::CreateSession { .. } => start_session_launch(context, action),
+        DashboardAction::PreviewContainerUpgrade {
+            session_id,
+            upgrade_only,
+        } => {
+            context.dashboard.set_notice("Checking container upgrade…");
+            let updates = context.dashboard_io_tx.clone();
+            tokio::spawn(async move {
+                let result = async {
+                    daemon::connect_or_start()
+                        .await?
+                        .preview_container_upgrade(session_id.clone())
+                        .await
+                }
+                .await
+                .map_err(|e: anyhow::Error| format!("{e:#}"));
+                report(
+                    "checking container upgrade",
+                    &updates,
+                    DashboardIoUpdate::ContainerUpgradePreview {
+                        session_id,
+                        upgrade_only,
+                        result,
+                    },
+                );
+            });
+        }
+        DashboardAction::UpgradeContainer(request) => {
+            let updates = context.dashboard_io_tx.clone();
+            tokio::spawn(async move {
+                let result = async {
+                    daemon::connect_or_start()
+                        .await?
+                        .upgrade_container(request)
+                        .await
+                }
+                .await
+                .map_err(|e: anyhow::Error| format!("{e:#}"));
+                report(
+                    "queueing container upgrade",
+                    &updates,
+                    DashboardIoUpdate::ContainerUpgradeQueued { result },
+                );
+            });
+        }
         DashboardAction::RestartSession {
             session_id,
             acknowledge_container_recreation,

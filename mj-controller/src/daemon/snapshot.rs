@@ -91,7 +91,11 @@ impl RuntimeState {
         if controller_owner
             .lifecycle
             .get(session_id)
-            .is_some_and(|active| active.is_running())
+            .is_some_and(|active| {
+                active.is_running()
+                    || (active.kind == LifecycleKind::UpgradeContainer
+                        && active.restart_intent.is_some())
+            })
         {
             return None;
         }

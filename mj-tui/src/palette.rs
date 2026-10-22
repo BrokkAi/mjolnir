@@ -128,6 +128,7 @@ const SESSION_MENU_COMMANDS: &[CommandId] = &[
     CommandId::MoveSession,
     CommandId::SuspendSession,
     CommandId::RestartSession,
+    CommandId::UpgradeContainer,
     CommandId::InterruptAll,
     CommandId::CopySessionId,
     CommandId::DestroySession,
@@ -348,6 +349,7 @@ fn session_menu_label(id: CommandId) -> String {
         CommandId::MoveSession => "Move…",
         CommandId::SuspendSession => "Suspend…",
         CommandId::RestartSession => "Restart",
+        CommandId::UpgradeContainer => "Upgrade container and restart…",
         CommandId::InterruptAll => "Interrupt all (parent + sub-agents)…",
         CommandId::DestroySession => "Destroy…",
         _ => spec(id).label,
@@ -779,6 +781,7 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
                 | CommandId::MoveSession
                 | CommandId::SuspendSession
                 | CommandId::RestartSession
+                | CommandId::UpgradeContainer
                 | CommandId::InterruptAll => 2,
                 CommandId::CopySessionId | CommandId::DestroySession => 3,
                 _ => continue,

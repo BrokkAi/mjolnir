@@ -3637,6 +3637,149 @@ async fn an_automatic_restart_stands_down_instead_of_cancelling_a_running_turn()
     channels.shutdown.shutdown().await.unwrap();
 }
 
+// Hard-won: #1326: an image upgrade stopped accepted work and destroyed its environment.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupting_work() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    if !in_close_cut_child(
+        "a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupting_work",
+        LATE_HARNESS_NOTIFICATION,
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (mut controller, channels, handle) =
+        close_cut_controller_with(SessionState::Running, true).await;
+    wait_until_the_actor_serves_again(&handle).await;
+    let mut plan = targets::container_upgrade_test_plan(LATCH_RELAY_SESSION);
+    let name = targets::resource_name(LATCH_RELAY_SESSION).unwrap();
+    let record = controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap();
+    record.target = Some(TargetLocator::LocalPodman {
+        container_id: name.clone(),
+        workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume {
+            name: format!("{name}-workspace"),
+        },
+        borrowed_from: None,
+    });
+    record.target_runtime = Some(
+        (&TargetTemplate::LocalPodman {
+            container: serde_json::from_value(serde_json::json!({})).unwrap(),
+        })
+            .into(),
+    );
+    crate::database::save_session(record).unwrap();
+    let original = record.clone();
+    struct BusyEngine {
+        cancel: Arc<AtomicBool>,
+        admitted: AtomicBool,
+        commands: Mutex<Vec<String>>,
+        name: String,
+    }
+    impl CommandExecutor for BusyEngine {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.commands.lock().unwrap().push(command.purpose.clone());
+            let stdout = match command.purpose.as_str() {
+                "inspect retained session container" => serde_json::to_vec(&serde_json::json!([{
+                    "Id": "source-container", "Name": self.name, "Image": "sha256:source", "ImageName": "agent-dev:2.51.0",
+                    "Config": {"Image":"agent-dev:2.51.0", "Labels": {"dev.mj.managed":"true", "dev.mj.session":LATCH_RELAY_SESSION}},
+                    "HostConfig": {}, "Mounts": [], "State": {"Running":true}
+                }]))?,
+                "probe Mjolnir worker daemon liveness" => b"alive\n".to_vec(),
+                _ => anyhow::bail!(
+                    "a pending upgrade tried to mutate its busy environment: {}",
+                    command.purpose
+                ),
+            };
+            Ok(CommandOutput {
+                status: 0,
+                stdout,
+                stderr: Vec::new(),
+            })
+        }
+        fn cancellation_requested(&self) -> bool {
+            self.cancel.load(Ordering::Acquire)
+        }
+        fn begin_resumable_work(&self) -> Result<()> {
+            self.admitted.store(false, Ordering::Release);
+            Ok(())
+        }
+        fn end_resumable_work(&self, _: &'static str) -> Result<()> {
+            self.admitted.store(true, Ordering::Release);
+            Ok(())
+        }
+        fn stage_started(&self, stage: ProvisionStage) {
+            if stage == ProvisionStage::WaitingForContainerUpgrade {
+                assert!(
+                    !self.admitted.load(Ordering::Acquire),
+                    "waiting for idle held daemon handoff admission"
+                );
+                self.cancel.store(true, Ordering::Release);
+            }
+        }
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    let intent = crate::database::begin_container_upgrade(
+        LATCH_RELAY_SESSION,
+        "upgrade-test",
+        cancel.clone(),
+        plan.clone(),
+    )
+    .unwrap();
+    let engine = BusyEngine {
+        cancel,
+        admitted: AtomicBool::new(false),
+        commands: Mutex::new(Vec::new()),
+        name,
+    };
+    let error = controller
+        .upgrade_container_worker(
+            LATCH_RELAY_SESSION,
+            &mut plan,
+            false,
+            &engine,
+            &channels.control,
+            || panic!("a busy worker cannot commit container replacement"),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("cancelled"), "{error:#}");
+    handle.sync_now().await.unwrap();
+    let snapshot = handle.view().snapshot.unwrap();
+    assert_eq!(
+        snapshot
+            .operational
+            .active_prompt
+            .as_ref()
+            .map(|prompt| prompt.command_id.as_str()),
+        Some("seed-running-prompt")
+    );
+    assert!(snapshot.operational.checkpoint_barrier.is_none());
+    assert_eq!(
+        crate::database::load_session_record(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap(),
+        original
+    );
+    assert_eq!(crate::database::load_session_restarts().unwrap()[0], intent);
+    crate::database::request_session_restart_cancel(LATCH_RELAY_SESSION, "upgrade-test").unwrap();
+    crate::database::recover_cancelled_session_restart(LATCH_RELAY_SESSION, "upgrade-test")
+        .unwrap();
+    assert!(crate::database::load_session_restarts().unwrap().is_empty());
+    assert_eq!(
+        crate::database::load_session_record(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap(),
+        original
+    );
+    channels.shutdown.shutdown().await.unwrap();
+}
+
 /// A failed suspend can leave an `Error` record and no relay worker while its
 /// target is still present. Restart must attach to the durable relay again,
 /// export the target's current state, and seal it without cleaning the target.

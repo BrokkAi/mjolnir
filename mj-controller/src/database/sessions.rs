@@ -74,6 +74,10 @@ pub fn save_subagent_session(
     submit_database_write("save_subagent_session", move |_| {
         let mut connection = open(&database_path())?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        super::session_restart::ensure_container_parent_available(
+            &tx,
+            &subagent.parent_session_id,
+        )?;
         insert_session(&tx, &session)?;
         super::usage::record_child_accounting(&tx, &subagent)?;
         tx.execute(
@@ -726,6 +730,9 @@ pub(super) fn mark_session_target_missing_if_current_to(
 ) -> Result<Option<SessionState>> {
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if super::session_restart::container_upgrade_owns_target_with(&tx, session_id)? {
+        return Ok(None);
+    }
     let previous_error = super::events::previous_session_error(&tx, session_id)?;
     let changed = tx.execute(
         "UPDATE sessions

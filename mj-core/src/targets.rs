@@ -46,6 +46,7 @@ pub enum ProvisionStage {
     /// Waiting for a background download of this target's image to finish,
     /// rather than starting a second download of the same image.
     PullingImage,
+    WaitingForContainerUpgrade,
     Provisioning,
     Booting,
     Cloning,
@@ -72,6 +73,9 @@ impl ProvisionStage {
     pub fn label(&self) -> String {
         match self {
             Self::PullingImage => "Pull image".into(),
+            Self::WaitingForContainerUpgrade => {
+                "Container upgrade pending; waiting for accepted work".into()
+            }
             Self::Provisioning => "Provision".into(),
             Self::Booting => "Boot".into(),
             Self::Cloning => "Clone".into(),
@@ -618,6 +622,10 @@ pub trait CommandExecutor {
     /// Yield daemon admission for interruptible work recoverable after handoff.
     fn begin_resumable_work(&self) -> Result<()> {
         Ok(())
+    }
+    /// The daemon is yielding a durable operation to its replacement.
+    fn shutdown_interrupted(&self) -> bool {
+        false
     }
     /// Reacquire named control admission before leaving resumable work.
     fn end_resumable_work(&self, _label: &'static str) -> Result<()> {
@@ -1385,6 +1393,18 @@ pub struct CommandPlan {
     pub commands: Vec<CommandSpec>,
 }
 
+/// Environment inherited through a shell must be an assignment identifier.
+pub fn validate_inherited_environment_name(name: &str) -> Result<()> {
+    ensure!(
+        !name.is_empty()
+            && name.bytes().enumerate().all(|(index, byte)| byte == b'_'
+                || byte.is_ascii_alphabetic()
+                || (index > 0 && byte.is_ascii_digit())),
+        "invalid inherited environment variable name"
+    );
+    Ok(())
+}
+
 impl CommandPlan {
     /// Supply one container environment value without placing it in the
     /// Podman/SSH argument vector. The target launcher reads the value from
@@ -1395,13 +1415,7 @@ impl CommandPlan {
         name: &str,
         value: &str,
     ) -> Result<()> {
-        ensure!(
-            !name.is_empty()
-                && name.bytes().enumerate().all(|(index, byte)| byte == b'_'
-                    || byte.is_ascii_alphabetic()
-                    || (index > 0 && byte.is_ascii_digit())),
-            "invalid secret environment variable name"
-        );
+        validate_inherited_environment_name(name)?;
         ensure!(
             !value.as_bytes().contains(&b'\n') && !value.as_bytes().contains(&b'\r'),
             "secret environment value cannot contain a newline"

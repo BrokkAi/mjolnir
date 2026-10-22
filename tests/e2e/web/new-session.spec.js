@@ -77,6 +77,7 @@ async function mount(page, {
       state.streamInternedKeys = new Set(Object.keys(wire.interned));
       return json(wire);
     }
+    if (/^\/api\/sessions\/[^/]+\/container-upgrade$/.test(pathname)) return json(state.upgradePreview);
     if (pathname === '/api/events') return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });
     const resourceOptionsMatch = /^\/api\/targets\/([^/]+)\/resource-options$/.exec(pathname);
     if (resourceOptionsMatch) {
@@ -347,22 +348,28 @@ test('golden_viewer_new_session', async ({ context }) => {
       action: 'set-container-settings', session_id: 'mounted', cpus: '6', memory: '12g', mounts,
     });
     await expect(dialog).toHaveCount(0);
-    state.snapshot.sessions[0].restart_recreates_container = true;
+    state.snapshot.sessions[0].container_upgrade_supported = true;
+    state.upgradePreview = { session_id: 'mounted', source_container_id: 'old-container', current_image: 'agent-dev:2.51.0', current_image_id: 'sha256:previous', target_image: 'agent-dev:2.52.0', target_image_id: 'sha256:selected', available: true, retained_mounts: ['/workspace', '/cache', '/tmp'], warning: 'Writable-layer state, including manually installed packages, may be lost. A checkpoint does not preserve the whole environment.' };
     await refresh(page, state);
     await page.locator('.session-menu-trigger').click();
-    const cancelled = page.waitForEvent('dialog');
-    const clickRestart = page.getByRole('menuitem', { name: 'Restart', exact: true }).click();
-    const warning = await cancelled;
-    output.push('=== Restart recreation warning ===', warning.message());
-    expect(warning.message()).toContain('Files outside the recovery copy may be lost');
-    await warning.dismiss();
-    await clickRestart;
+    await page.getByRole('menuitem', { name: 'Restart agent', exact: true }).click();
+    const warning = page.getByRole('dialog', { name: 'Upgrade container and restart', exact: true });
+    await expect(warning).toBeVisible();
+    output.push('=== Separate Restart and container upgrade choices ===', (await warning.innerText()).trim());
+    await warning.getByRole('button', { name: 'Cancel', exact: true }).click();
     expect(state.actions).toHaveLength(1);
     await page.locator('.session-menu-trigger').click();
-    page.once('dialog', next => next.accept());
-    await page.getByRole('menuitem', { name: 'Restart', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Restart agent', exact: true }).click();
+    await warning.getByRole('button', { name: 'Restart agent', exact: true }).click();
     await expect.poll(() => state.actions.length).toBe(2);
-    expect(state.actions[1]).toEqual({ action: 'restart', session_id: 'mounted', acknowledge_container_recreation: true });
+    expect(state.actions[1]).toEqual({ action: 'restart', session_id: 'mounted' });
+    await page.locator('.session-menu-trigger').click();
+    await page.getByRole('menuitem', { name: 'Upgrade container and restart…', exact: true }).click();
+    await expect(warning).toBeVisible();
+    await warning.getByRole('button', { name: 'Upgrade container and restart…', exact: true }).click();
+    await expect.poll(() => state.actions.length).toBe(3);
+    expect(state.actions[2]).toEqual({ action: 'upgrade-container', request: { selection: state.upgradePreview, acknowledge_writable_layer_loss: true } });
+
   });
 
   const ec2Choices = [

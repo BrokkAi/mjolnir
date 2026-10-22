@@ -49,8 +49,14 @@ pub use cleanup::*;
 mod bootstrap;
 pub use bootstrap::*;
 mod container;
+mod container_upgrade;
 pub(crate) use container::has_managed_temporary_volume;
 use container::*;
+#[cfg(test)]
+pub(crate) use container_upgrade::container_upgrade_test_plan;
+pub(crate) use container_upgrade::{
+    RetainedContainer, inspect_retained_container, recover_removed_container,
+};
 mod process_limit;
 pub use process_limit::*;
 

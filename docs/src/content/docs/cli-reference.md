@@ -224,6 +224,23 @@ session ID, resolved profile and target, outcome, and any recovery guidance.
 Failures return a nonzero status. Ctrl-C requests cancellation from the daemon;
 disconnecting a client does not cancel a detached move.
 
+## Upgrade a session container
+
+```text
+mj upgrade-container --session <id>
+mj upgrade-container --session <id> --acknowledge-writable-layer-loss
+mj upgrade-container --session <id> --cancel
+```
+
+The first command previews the inspected current image, selected target and
+preservation warning. The acknowledgment queues a durable request; accepted work
+finishes before replacement starts. Workspace and build-cache mounts are retained.
+Writable-layer files, including manually installed packages, may be lost. A
+checkpoint does not preserve the whole environment. Pending requests survive daemon
+replacement and can be cancelled before replacement begins. Unsupported storage
+layouts fail before the worker is stopped. Normal **Restart agent** keeps the
+existing container and its filesystem.
+
 ## Recover untracked resources
 
 ```text

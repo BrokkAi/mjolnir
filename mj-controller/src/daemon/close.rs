@@ -698,7 +698,12 @@ impl RuntimeState {
                 .owner()
                 .lifecycle
                 .get(&session_id)
-                .is_some_and(|active| active.kind == LifecycleKind::Restart && active.is_running())
+                .is_some_and(|active| {
+                    matches!(
+                        active.kind,
+                        LifecycleKind::Restart | LifecycleKind::UpgradeContainer
+                    ) && active.is_running()
+                })
             {
                 continue;
             }

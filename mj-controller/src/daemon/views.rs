@@ -4,12 +4,17 @@ impl RuntimeState {
     fn request_lifecycle_cancel(
         &self,
         session_id: &str,
+        expected_kind: Option<LifecycleKind>,
     ) -> Result<Option<(bool, Option<String>, LifecycleWatch)>> {
         let mut controller_owner = self.owner();
         let durable = durable_session_state(controller_owner.controller(), session_id);
         let Some(active) = controller_owner.lifecycle.get_mut(session_id) else {
             return Ok(None);
         };
+        ensure!(
+            expected_kind.is_none_or(|kind| kind == active.kind),
+            "this session has no pending container upgrade; its other operation was left running"
+        );
         ensure!(
             active.person_may_cancel_kind(durable),
             "the {} of {session_id} cannot be cancelled on its own",
@@ -29,11 +34,17 @@ impl RuntimeState {
             );
             bail!("lifecycle operation is no longer cancellable");
         }
-        if active.kind == LifecycleKind::Restart {
+        if matches!(
+            active.kind,
+            LifecycleKind::Restart | LifecycleKind::UpgradeContainer
+        ) {
             active.phase = LifecyclePhase::CancellingRestart;
         }
         let accepted = (
-            active.kind == LifecycleKind::Restart,
+            matches!(
+                active.kind,
+                LifecycleKind::Restart | LifecycleKind::UpgradeContainer
+            ),
             active.restart_intent.clone(),
             active.result.clone(),
         );
@@ -51,9 +62,31 @@ impl RuntimeState {
         if let Some(intent_id) = intent_id {
             blocking({
                 let session_id = session_id.to_owned();
+                let intent_id = intent_id.clone();
                 move || crate::database::request_session_restart_cancel(&session_id, &intent_id)
             })
             .await?;
+            let already_finished = pending.borrow().is_some();
+            if already_finished {
+                blocking({
+                    let session_id = session_id.to_owned();
+                    let intent_id = intent_id.clone();
+                    move || {
+                        crate::database::recover_cancelled_session_restart(&session_id, &intent_id)
+                    }
+                })
+                .await?;
+                {
+                    let mut owner = self.owner();
+                    if owner.lifecycle.get(session_id).is_some_and(|active| {
+                        active.result.same_channel(&pending) && active.control.cancel_accepted()
+                    }) {
+                        owner.lifecycle.remove(session_id);
+                    }
+                }
+                self.reload_controller().await?;
+                self.publish_revision();
+            }
         } else {
             // Cancellation may precede durable admission. Wait for that owner
             // to reject admission or release its intent before acknowledging.
@@ -66,8 +99,21 @@ impl RuntimeState {
     }
 
     pub async fn cancel_lifecycle_with_intent(&self, session_id: &str) -> Result<()> {
+        self.cancel_selected_lifecycle(session_id, None).await
+    }
+
+    pub async fn cancel_container_upgrade(&self, session_id: &str) -> Result<()> {
+        self.cancel_selected_lifecycle(session_id, Some(LifecycleKind::UpgradeContainer))
+            .await
+    }
+
+    async fn cancel_selected_lifecycle(
+        &self,
+        session_id: &str,
+        expected_kind: Option<LifecycleKind>,
+    ) -> Result<()> {
         let (restart, intent_id, pending) = self
-            .request_lifecycle_cancel(session_id)?
+            .request_lifecycle_cancel(session_id, expected_kind)?
             .with_context(|| {
                 format!("no lifecycle operation is running for session {session_id}")
             })?;
@@ -79,7 +125,9 @@ impl RuntimeState {
     }
 
     pub async fn cancel_lifecycle_if_active(&self, session_id: &str) -> Result<bool> {
-        let Some((restart, intent_id, pending)) = self.request_lifecycle_cancel(session_id)? else {
+        let Some((restart, intent_id, pending)) =
+            self.request_lifecycle_cancel(session_id, None)?
+        else {
             return Ok(false);
         };
         if restart {
@@ -165,6 +213,8 @@ impl RuntimeState {
                     | LifecycleKind::StartupCleanup
             ) {
                 startup_cleanup_deadline
+            } else if kind == LifecycleKind::UpgradeContainer {
+                join_started + Duration::from_secs(2)
             } else {
                 join_deadline
             };

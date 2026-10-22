@@ -128,6 +128,9 @@ pub enum ControllerAction {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         acknowledge_container_recreation: bool,
     },
+    UpgradeContainer {
+        request: mj_core::state::ContainerUpgradeRequest,
+    },
     /// Stop the turn this session is working on and the turns of every
     /// sub-agent under it, leaving the sessions alive.
     InterruptAll {
@@ -202,6 +205,9 @@ pub enum ControllerAction {
         delete_branch: bool,
     },
     Cancel {
+        session_id: String,
+    },
+    CancelContainerUpgrade {
         session_id: String,
     },
     /// Review the turn this session just finished.
@@ -528,6 +534,11 @@ pub struct PreflightNew {
 /// and reload the controller on every keystroke.
 #[derive(Debug)]
 pub enum ClientStateRequest {
+    ContainerUpgradePreview {
+        session_id: String,
+        reply:
+            tokio::sync::oneshot::Sender<Result<mj_core::state::ContainerUpgradePreview, String>>,
+    },
     Read {
         client_id: String,
         session_id: String,

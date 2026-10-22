@@ -81,6 +81,10 @@ impl IdleWorkspaceLease {
         .context("idle worker reservation timed out; worker was left running")?
     }
 
+    pub(in crate::controller) fn protocol_version(&mut self) -> u32 {
+        self.lease.connection_mut().protocol_version()
+    }
+
     pub(in crate::controller) async fn verify_for_upgrade(&mut self) -> Result<bool> {
         let mut snapshot = self.lease.connection_mut().sync().await?;
         if !checkpoint_barrier_is_ready(&snapshot, &self.command_id) {
