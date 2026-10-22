@@ -79,6 +79,16 @@ impl ProfileQuota {
             .find(|window| is_short_quota_window(&window.label))
     }
 
+    /// The window that best represents this profile at a glance. Prefer a
+    /// long-running allowance, then the short rolling window, then any other
+    /// provider-defined window. Kimi plans without a weekly or monthly pool
+    /// still have a usable rolling limit and must not read as unavailable.
+    pub fn summary_window(&self) -> Option<&QuotaWindow> {
+        self.weekly_window()
+            .or_else(|| self.five_hour_window())
+            .or_else(|| self.windows.first())
+    }
+
     /// Whether the report says the profile is usage-priced: an API-billed
     /// harness has no subscription window to fill, so it reports the API label
     /// in place of one rather than inventing a percentage.
@@ -97,11 +107,16 @@ impl ProfileQuota {
             return quota_error_label(error);
         }
         let mut seen_resets = std::collections::BTreeSet::new();
+        let has_long_window = self
+            .windows
+            .iter()
+            .any(|window| !is_short_quota_window(&window.label));
         let mut parts = self
             .windows
             .iter()
             .filter(|window| {
                 !is_short_quota_window(&window.label)
+                    || !has_long_window
                     || projects_exhaustion_before_reset(window, self.refreshed_at_epoch_seconds)
             })
             .map(|window| {
