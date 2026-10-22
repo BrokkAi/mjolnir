@@ -2284,7 +2284,8 @@ mod tests {
         assert_eq!(available_bytes("Filesystem 1K-blocks\n"), None);
     }
 
-    #[cfg(target_os = "linux")]
+    // Runs on macOS too, where the probe must work without `readlink -f`.
+    #[cfg(unix)]
     #[test]
     fn native_probe_prefers_path_then_user_bins_and_canonicalizes_symlinks() {
         use std::os::unix::fs::{PermissionsExt, symlink};
@@ -2355,7 +2356,7 @@ mod tests {
         assert_eq!(output.status, 0);
         assert_eq!(
             parse_native_probe_output(&output.stdout).unwrap().program,
-            local_bin.join("mbx")
+            std::fs::canonicalize(local_bin.join("mbx")).unwrap()
         );
 
         std::fs::remove_file(local_bin.join("mbx")).unwrap();
@@ -2363,7 +2364,7 @@ mod tests {
         assert_eq!(output.status, 0);
         assert_eq!(
             parse_native_probe_output(&output.stdout).unwrap().program,
-            cargo_bin.join("mbx")
+            std::fs::canonicalize(cargo_bin.join("mbx")).unwrap()
         );
     }
 
