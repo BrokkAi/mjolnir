@@ -1499,8 +1499,7 @@ impl DashboardContext {
                 }
                 Err(error) => {
                     tracing::error!(%error, "Saving imported session failed");
-                    self.dashboard
-                        .set_failure_notice(format!("Import failed: {error}"));
+                    self.dashboard.show_import_failure(error);
                 }
             },
             DashboardIoUpdate::LifecycleReloaded(reloaded) => {

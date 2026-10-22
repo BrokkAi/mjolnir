@@ -323,6 +323,10 @@ pub(crate) enum Confirmation {
         retry: Option<Box<DashboardAction>>,
         previous: Box<Mode>,
     },
+    /// A session import that stopped with an error. The person was waiting
+    /// on the import dialog, so the reason stays on screen until dismissed
+    /// rather than going only to the footer.
+    ImportFailed { error: String, previous: Box<Mode> },
     /// A standard modal dismissal that may need to protect an in-memory draft
     /// or a running operation. The boxed mode is restored by the safe answer.
     Dismiss {
@@ -585,6 +589,7 @@ impl Confirmation {
             | Self::RecoverFailed { session_id, .. } => Some(session_id),
             Self::RepairRepositoryRemotes { .. }
             | Self::LaunchFailed { .. }
+            | Self::ImportFailed { .. }
             | Self::Dismiss { .. }
             | Self::ConvertRawCheckout { .. }
             | Self::RecoverMove { .. }
@@ -1095,6 +1100,17 @@ impl DashboardState {
         }));
     }
 
+    /// Reports a failed import in a dialog that stays until dismissed. The
+    /// footer gets only a short failure line; the details stay in the dialog.
+    pub fn show_import_failure(&mut self, error: impl Into<String>) {
+        self.set_failure_notice("The session import failed.");
+        let previous = Box::new(self.mode.clone());
+        self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::ImportFailed {
+            error: error.into(),
+            previous,
+        }));
+    }
+
     pub fn show_remote_repair_confirmation(
         &mut self,
         bundle_id: String,
@@ -1600,6 +1616,7 @@ impl DashboardState {
             dialog.confirmation,
             Confirmation::ConfigurationRepair { .. }
                 | Confirmation::LaunchFailed { .. }
+                | Confirmation::ImportFailed { .. }
                 | Confirmation::RepairRepositoryRemotes { .. }
                 | Confirmation::ConvertRawCheckout { .. }
         ) && let Event::Key(key) = &event
@@ -1637,6 +1654,7 @@ impl DashboardState {
                 | Confirmation::RepairRepositoryRemotes { previous: mode, .. }
                 | Confirmation::ConfigurationRepair { previous: mode, .. }
                 | Confirmation::LaunchFailed { previous: mode, .. }
+                | Confirmation::ImportFailed { previous: mode, .. }
                 | Confirmation::InstallMbx { previous: mode, .. }
                 | Confirmation::ConvertRawCheckout { previous: mode, .. } => {
                     self.restore_dismissed_mode(mode);
@@ -1692,6 +1710,10 @@ impl DashboardState {
                 } else {
                     DashboardAction::None
                 }
+            }
+            (Confirmation::ImportFailed { previous, .. }, _) => {
+                self.restore_dismissed_mode(previous);
+                DashboardAction::None
             }
             (
                 Confirmation::LaunchFailed {

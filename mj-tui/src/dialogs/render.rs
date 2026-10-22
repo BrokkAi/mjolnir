@@ -16,6 +16,7 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
             &["Dismiss", "Retry launch", "Settings"]
         }
         Confirmation::LaunchFailed { .. } => &["Dismiss", "Settings"],
+        Confirmation::ImportFailed { .. } => &["Dismiss"],
         Confirmation::Dismiss {
             intent: DismissalIntent::DiscardSetup,
             ..
@@ -139,6 +140,7 @@ pub(crate) fn initial_confirmation_button(confirmation: &Confirmation, labels: &
         Confirmation::Dismiss { .. }
             | Confirmation::ConfigurationRepair { .. }
             | Confirmation::LaunchFailed { .. }
+            | Confirmation::ImportFailed { .. }
             | Confirmation::ForceDestroy { .. }
             | Confirmation::DestroyStopped { .. }
             | Confirmation::CloseFailed { .. }
@@ -303,6 +305,9 @@ pub(crate) fn render_import_bundle_confirmation(
     }
     lines.push(Line::raw(""));
     if confirmation.has_untracked_files {
+        lines.push(Line::raw(
+            "Ignore untracked files leaves files Git does not track out of the import. Commits, staged changes and unstaged changes are still included. Files that .gitignore excludes are never included.",
+        ));
         lines.push(Line::raw("Space toggles the checkbox."));
     }
     lines.push(Line::raw(if confirmation.managed_worktree.available {
@@ -1341,6 +1346,16 @@ pub(crate) fn confirmation_body(
             lines.extend(error.lines().map(|line| Line::raw(line.to_owned())));
             (" Launch failed ", lines)
         }
+        Confirmation::ImportFailed { error, .. } => {
+            let mut lines = vec![
+                Line::raw("The session was not imported."),
+                Line::raw("Resolve the problem below, then import the session again."),
+                Line::raw("PgUp/PgDn scroll the full details. Esc dismisses."),
+                Line::raw(""),
+            ];
+            lines.extend(error.lines().map(|line| Line::raw(line.to_owned())));
+            (" Import failed ", lines)
+        }
         Confirmation::Dismiss {
             intent: DismissalIntent::DiscardSetup,
             ..
@@ -1695,6 +1710,7 @@ pub(crate) fn render_confirmation(
     let nominal: u16 = match confirmation {
         Confirmation::ConfigurationRepair { .. }
         | Confirmation::LaunchFailed { .. }
+        | Confirmation::ImportFailed { .. }
         | Confirmation::RepairRepositoryRemotes { .. } => 16,
         Confirmation::Dismiss { .. } => 8,
         Confirmation::InstallMbx { .. } => 12,

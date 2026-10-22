@@ -124,6 +124,38 @@ fn launch_failure_scrolls_long_details_and_restores_interrupted_dialog() {
     assert_eq!(dashboard.mode, previous);
 }
 
+/// A failed import used to report only on the footer, which cut the reason
+/// off and cleared on the next key press, so pressing Okay seemed to do
+/// nothing. The reason now stays in a dialog until dismissed.
+#[test]
+fn import_failure_shows_the_reason_until_dismissed() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let previous = dashboard.mode.clone();
+    dashboard.show_import_failure("the project's Git repository has no remote");
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("The session import failed.")
+    );
+    let mut terminal = Terminal::new(TestBackend::new(90, 20)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("Import failed"), "{text}");
+    assert!(text.contains("has no remote"), "{text}");
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert_eq!(dashboard.mode, previous);
+}
+
 fn draw_web_dialog(dialog: &WebDialog, width: u16, height: u16) -> Vec<String> {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
     terminal
