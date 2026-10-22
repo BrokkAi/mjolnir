@@ -1962,7 +1962,7 @@ fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
 #[test]
 fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     use mj_core::harness_runtime::{
-        CLAUDE_CLI_VERSION, MIMO_CLI_VERSION, MUSE_ACP_PACKAGE, MUSE_ACP_VERSION,
+        CLAUDE_CLI_VERSION, DSH_ACP_VERSION, MIMO_CLI_VERSION, MUSE_ACP_PACKAGE, MUSE_ACP_VERSION,
     };
 
     const CONTAINERFILE: &str = include_str!("../../../../containers/Containerfile.agent-dev");
@@ -2003,6 +2003,19 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
         "containers/Containerfile.agent-dev must install {mimo}"
     );
     assert!(CONTAINERFILE.contains("ENV MIMOCODE_DISABLE_AUTOUPDATE=1"));
+
+    // The image installs dsh-acp from the same pinned metadata as managed
+    // workers, so the two cannot run different releases.
+    let dsh: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../mj-worker/assets/dsh/runtime.json"
+    ))
+    .unwrap();
+    assert_eq!(dsh["version"], DSH_ACP_VERSION);
+    assert!(
+        CONTAINERFILE.contains("COPY mj-worker/assets/dsh/runtime.json")
+            && CONTAINERFILE.contains("install-dsh-acp.py"),
+        "containers/Containerfile.agent-dev must install dsh-acp from mj-worker/assets/dsh/runtime.json"
+    );
 
     let package: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../mj-worker/assets/harnesses/claude/package.json"
@@ -2075,6 +2088,67 @@ fn run_default_bridge_install(
         String::from_utf8(output.stdout).unwrap(),
         String::from_utf8(output.stderr).unwrap(),
     )
+}
+
+/// dsh-acp reads no instruction file, so its launch passes the staged one as
+/// the system prompt dsh-acp appends to its own, byte for byte. A value the
+/// target's login shell exports never reaches the session, and a launch
+/// without a staged home refuses rather than let dsh-acp keep its sessions in
+/// the repository it runs in.
+#[cfg(unix)]
+#[test]
+fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("fake-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let dsh = bin.join("dsh-acp");
+    std::fs::write(
+        &dsh,
+        "#!/bin/sh\nprintf '%s|%s' \"$*\" \"$DSH_ACP_SYSTEM_PROMPT\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&dsh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let staged = root.path().join("staged");
+    std::fs::create_dir_all(&staged).unwrap();
+    let instructions =
+        "Keep durable results in the repository.\n\nQuote \"this\", `not this`, $HOME and 'that'.";
+    std::fs::write(staged.join("AGENTS.md"), format!("{instructions}\n")).unwrap();
+    let launch = |data_dir: Option<&Path>| {
+        let (command, arguments) =
+            bridge_launch(HarnessKind::Dsh, ExecutionPolicy::ConfiguredApprovals);
+        let mut process = std::process::Command::new(command);
+        process
+            .args(arguments)
+            .env_clear()
+            .env("HOME", root.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("DSH_ACP_SYSTEM_PROMPT", "from the login shell");
+        if let Some(data_dir) = data_dir {
+            process.env(HarnessKind::Dsh.home_env(), data_dir);
+        }
+        mj_core::subprocess::run_with_input(&mut process, &[]).unwrap()
+    };
+
+    let output = launch(Some(&staged));
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("|{instructions}")
+    );
+
+    std::fs::remove_file(staged.join("AGENTS.md")).unwrap();
+    let output = launch(Some(&staged));
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "|");
+
+    let output = launch(None);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("DSH_ACP_DATA_DIR"),
+        "{output:?}"
+    );
 }
 
 /// A Kimi launcher's installer lines on stdout reached the ACP transport and
@@ -3034,7 +3108,8 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             | HarnessKind::Grok
             | HarnessKind::Muse
             | HarnessKind::OpenCode
-            | HarnessKind::Mimo => &[],
+            | HarnessKind::Mimo
+            | HarnessKind::Dsh => &[],
         };
         let home = tempfile::tempdir().unwrap();
         let skill = format!("{}/review/SKILL.md", kind.synced_skill_dirs()[0]);
@@ -4800,6 +4875,14 @@ fn fixture_home_entries(kind: HarnessKind) -> &'static [(&'static str, bool)] {
             ("state/model.json", false),
             ("cache/models", false),
         ],
+        // dsh-acp keeps only its sessions, written atomically through a
+        // temporary file beside each record.
+        HarnessKind::Dsh => &[
+            ("AGENTS.md", true),
+            ("skills/review/SKILL.md", true),
+            ("sessions/dsh-0123.json", false),
+            ("sessions/.dsh-0123.4567.tmp", false),
+        ],
     }
 }
 
@@ -4883,8 +4966,10 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             );
         }
         assert_eq!(files_under(staged.path()), expected, "{kind:?}");
-        assert!(
+        // A harness that reads an API key from its environment has no login.
+        assert_eq!(
             mj_core::config::harness_authentication_marker(kind, staged.path()).is_file(),
+            kind.api_key_variable().is_none(),
             "{kind:?} is signed in from its staged home"
         );
     }
@@ -4973,6 +5058,7 @@ fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
                 "expires": 1_790_000_000_000_i64 + generation * 1000,
             }
         }),
+        HarnessKind::Dsh => panic!("DSH keeps no login; its key comes from DEEPSEEK_API_KEY"),
     };
     serde_json::to_vec(&login).unwrap()
 }
@@ -5014,7 +5100,7 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
         let database = home.join(".data/opencode/opencode.db");
         if kind.keeps_logins_in_database() {
             write_opencode_database(&database, "sk-generation-1");
-        } else {
+        } else if kind.api_key_variable().is_none() {
             std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
             std::fs::write(&canonical, login_bytes(kind, 1)).unwrap();
         }
@@ -5068,8 +5154,9 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
         );
         // Muse's staged root lies under the data directory; the rest of the
         // exchange is the same for it, except that Muse stores no refresh
-        // time, so the sync never orders two different Muse copies.
-        if kind == HarnessKind::Muse {
+        // time, so the sync never orders two different Muse copies. DSH has
+        // no login to rotate: its key comes from its environment.
+        if kind == HarnessKind::Muse || kind.api_key_variable().is_some() {
             continue;
         }
         // OpenCode's logins live in its database: the sync pushes its export

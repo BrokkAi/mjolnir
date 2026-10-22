@@ -91,7 +91,7 @@ mj login --profile <profile-id>
 mj login --profile <claude-profile> --setup-token
 ```
 
-The profile may be omitted only when exactly one is configured. Mjolnir launches the appropriate authentication command for that profile. `--setup-token` is Claude-only: it mints and stores a long-lived subscription token so containers do not race the controller for a rotating OAuth refresh token.
+The profile may be omitted only when exactly one is configured. Mjolnir launches the appropriate authentication command for that profile. A profile that authenticates with an API key, such as a DSH profile or a Codex profile with a custom provider, has no login, and `mj login` refuses it. `--setup-token` is Claude-only: it mints and stores a long-lived subscription token so containers do not race the controller for a rotating OAuth refresh token.
 
 See [profiles and harnesses](/profiles/) for home directories, credential handling, and runtime limitations.
 
@@ -117,7 +117,8 @@ mj import <harness> (--session <uuid> | --latest) [options]
 ```
 
 `<harness>` is one of `claude`, `codex`, `kimi`, `grok`, or `muse`. OpenCode
-and MiMo Code keep their sessions in SQLite stores and are not importable yet.
+and MiMo Code keep their sessions in SQLite stores and are not importable yet;
+DSH sessions are not importable yet either.
 
 | Option | Meaning |
 | --- | --- |
@@ -636,6 +637,8 @@ Most behavior belongs in [configuration](/configuration/). These environment var
 | `KIMI_CODE_HOME` | Kimi Code home used by setup discovery and native import. |
 | `GROK_HOME` | Grok Build home used by setup discovery and native import. |
 | `MIMOCODE_HOME` | MiMo Code profile root used by setup discovery; contains `config/` and `data/`. A profile at the conventional `~/.mimocode` home uses the stock `~/.config/mimocode` and `~/.local/share/mimocode` trees instead. |
+| `DSH_ACP_DATA_DIR` | DSH home used by setup discovery. |
+| `DEEPSEEK_API_KEY` | DSH's API key, passed to DSH sessions when the profile's `environment` does not set it. |
 | `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | Muse configuration and external native session storage roots, respectively. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | GitHub token available for syncing into every live target except a bare runtime on this machine. |
 | `GIT_SSH_COMMAND` | SSH command used by checkpoint/archive Git operations. |

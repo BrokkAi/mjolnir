@@ -397,6 +397,21 @@ async fn refresh_profile_with_cache_root(
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    // A service that publishes no quota endpoint bills by usage, so there is
+    // no allowance to report. Saying "API" rather than raising an error keeps
+    // the dashboard from showing the profile as unavailable and lets the
+    // utility ranker treat it as healthy, which matches how it actually
+    // behaves.
+    let usage_priced = || ProfileQuota {
+        banked_resets: None,
+        profile_id: profile_id.clone(),
+        harness,
+        windows: Vec::new(),
+        extra: Some(API_LABEL.to_owned()),
+        error: None,
+        refreshed_at_epoch_seconds,
+        rate_limited_until_epoch_seconds: None,
+    };
     let result = match harness {
         // A Codex profile that authenticates with an API key against a custom
         // provider has no ChatGPT login to refresh and no ChatGPT rate-limit
@@ -428,21 +443,7 @@ async fn refresh_profile_with_cache_root(
                         rate_limited_until_epoch_seconds: None,
                     })
             } else {
-                // A provider that publishes no quota endpoint bills by usage,
-                // so there is no allowance to report. Saying "API" rather than
-                // raising an error keeps the dashboard from showing the profile
-                // as unavailable and lets the utility ranker treat it as
-                // healthy, which matches how it actually behaves.
-                Ok(ProfileQuota {
-                    banked_resets: None,
-                    profile_id: profile_id.clone(),
-                    harness,
-                    windows: Vec::new(),
-                    extra: Some(API_LABEL.to_owned()),
-                    error: None,
-                    refreshed_at_epoch_seconds,
-                    rate_limited_until_epoch_seconds: None,
-                })
+                Ok(usage_priced())
             }
         }
         HarnessKind::Codex => {
@@ -625,6 +626,8 @@ async fn refresh_profile_with_cache_root(
         HarnessKind::Mimo => Err(anyhow::anyhow!(
             "MiMo Code does not publish a quota endpoint"
         )),
+        // dsh-acp talks to DeepSeek's API, which bills by usage.
+        HarnessKind::Dsh => Ok(usage_priced()),
     };
     let report = result.unwrap_or_else(|error| ProfileQuota {
         banked_resets: None,

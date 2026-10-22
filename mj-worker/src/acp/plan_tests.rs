@@ -413,6 +413,17 @@ impl PlanProbe {
         } else {
             json!([])
         };
+        // dsh-acp 0.2.0 carries its permission policy on its own selector.
+        if harness == HarnessKind::Dsh {
+            options.as_array_mut().unwrap().push(json!(
+                {"id": "permission_mode", "name": "Tool permissions", "type": "select",
+                 "currentValue": "ask", "options": [
+                    {"value": "ask", "name": "Ask before sensitive tools"},
+                    {"value": "allow", "name": "Allow sensitive tools"},
+                    {"value": "deny", "name": "Deny sensitive tools"}
+                ]}
+            ));
+        }
         let new = probe.message().await;
         assert_eq!(new["method"], "session/new");
         probe
@@ -429,13 +440,13 @@ impl PlanProbe {
                 }}),
             )
             .await;
-        let Some(enforced) = enforcement.and_then(|mode| mode.acp_mode()) else {
-            return probe;
-        };
         // A harness that carries its approval policy on a config selector
         // (Muse on `approval_mode`) is driven through `set_config_option`
         // whatever the probe's `config` flag says; the rest use the flag.
-        if let Some(selector) = enforcement.and_then(|mode| mode.acp_mode_selector()) {
+        let enforced = enforcement.and_then(|mode| mode.acp_mode());
+        if let Some(enforced) = enforced
+            && let Some(selector) = enforcement.and_then(|mode| mode.acp_mode_selector())
+        {
             let mode = probe.message().await;
             assert_eq!(mode["method"], "session/set_config_option");
             assert_eq!(mode["params"]["configId"], selector);
@@ -447,21 +458,24 @@ impl PlanProbe {
             probe
                 .result(&mode, json!({"configOptions": options.clone()}))
                 .await;
-        } else if config {
+        } else if let Some(enforced) = enforced
+            && config
+        {
             let mode = probe.message().await;
             assert_eq!(mode["method"], "session/set_config_option");
             assert_eq!(mode["params"]["value"], enforced);
             probe
                 .result(&mode, json!({"configOptions": mode_config(enforced)}))
                 .await;
-        } else {
+        } else if let Some(enforced) = enforced {
             let mode = probe.message().await;
             assert_eq!(mode["method"], "session/set_mode");
             assert_eq!(mode["params"]["modeId"], enforced);
             probe.result(&mode, json!({})).await;
         }
-        // Muse's auto-review is off in every session the bridge opens, so
-        // the worker selects it on every open that enforces it.
+        // Muse's auto-review is off in every session the bridge opens, and
+        // dsh-acp keeps a session's permission policy in its record, so the
+        // worker selects each on every open that enforces it.
         if let Some((key, value)) = enforcement.and_then(|mode| mode.acp_setting()) {
             let setting = probe.message().await;
             assert_eq!(setting["method"], "session/set_config_option");

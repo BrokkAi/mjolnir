@@ -1,6 +1,6 @@
 ---
 title: Profiles and harnesses
-description: Configure Codex (including Amazon Bedrock and custom model providers), Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, and MiMo Code accounts, credentials, skills, runtimes, and quota reporting.
+description: Configure Codex (including Amazon Bedrock and custom model providers), Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, MiMo Code, and DSH accounts, credentials, skills, runtimes, and quota reporting.
 ---
 
 A profile connects Mjolnir to one installed coding-agent harness and one account.
@@ -58,8 +58,9 @@ marks models or counters that cannot be priced from the recorded information.
 | Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
 | OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db`, or a provider key in the environment | no |
 | MiMo Code | `mimo` | `MIMOCODE_HOME` | `~/.mimocode` (stock XDG config and login when unset) | `data/auth.json`, or `~/.local/share/mimocode/auth.json` for the stock install | no |
+| DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh-acp` | `DEEPSEEK_API_KEY` in the environment (no file) | no |
 
-There are seven harness kinds. Codex can use its built-in Amazon Bedrock
+There are eight harness kinds. Codex can use its built-in Amazon Bedrock
 providers; see [Codex on Amazon Bedrock](#codex-on-amazon-bedrock). It can also
 authenticate with an API key against a custom provider; see
 [Codex with a custom provider](#codex-with-a-custom-provider).
@@ -74,7 +75,8 @@ conventional location. A detected home becomes the explicit `home` path in
 `config.toml`; subsequent sessions use that configured path.
 
 Kimi Code does not expose a guardian approval mode. OpenCode and MiMo Code ask
-before tools according to their permission rules, but run commands on the host
+before tools according to their permission rules, and DSH asks before every
+write, command, and MCP tool call, but all three run commands on the host
 without a sandbox, so they have no guardian either. Mjolnir warns before using
 any of them on a raw target. Muse's guardian is muse-acp's auto-review; see
 [Harness limitations](#harness-limitations).
@@ -478,6 +480,45 @@ private root with those `config/` and `data/` trees, including on a bare
 runtime on this machine. Do not override `MIMOCODE_HOME` in the profile
 environment.
 
+For DSH, configure `kind = "dsh"`, for example with
+`home = "/home/me/.dsh-acp"`. DSH runs BrokkAi's
+[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.2.0, a DeepSeek coding agent
+that speaks ACP itself, so there is no separate bridge. It is not the DeepSeek
+harness earlier releases offered as `kind = "deepseek"`; that kind still fails
+to load. The home is a `DSH_ACP_DATA_DIR` root. It holds an optional
+`AGENTS.md` and dsh-acp's native session records, `sessions/<id>.json`; there
+is no configuration file, no login file, and no skills support. With no login
+to create it, create the home directory yourself; `mj doctor` reports it
+missing until you do. DSH reads no
+instruction file itself, so Mjolnir passes the staged `AGENTS.md`, including
+its own session guidance, as dsh-acp's system prompt through
+`DSH_ACP_SYSTEM_PROMPT` on every launch.
+
+DSH authenticates with an API key in `DEEPSEEK_API_KEY`. As with a
+[Codex custom provider](#codex-with-a-custom-provider), Mjolnir takes the key
+from the environment it started with unless the profile's `environment` sets
+it, for example from `secrets.toml`:
+
+```toml
+[profiles.dsh]
+kind = "dsh"
+home = "/home/me/.dsh-acp"
+
+[profiles.dsh.environment]
+DEEPSEEK_API_KEY = { from_secret = "DEEPSEEK_API_KEY" }
+```
+
+There is no interactive login, and `mj login` refuses the profile. A profile
+without the key cannot start; the refused session and `mj doctor` say how to
+supply it. Other dsh-acp settings can go in `environment`:
+`DEEPSEEK_BASE_URL` (default `https://api.deepseek.com`), `DEEPSEEK_MODEL`
+(default `deepseek-flash`), and `DSH_ACP_MODELS` (default
+`deepseek-flash,deepseek-v4-pro`). Mjolnir owns `DSH_ACP_DATA_DIR` (set `home`
+instead), `DSH_ACP_SYSTEM_PROMPT` (put instructions in `AGENTS.md` in the
+profile home instead), and `DSH_ACP_PERMISSION_MODE` (the target's permission
+mode decides it). A profile that sets any of them in `environment` fails to
+load.
+
 Run:
 
 ```console
@@ -497,6 +538,7 @@ environment before starting the harness's interactive login:
 | Muse Code | `muse login` |
 | OpenCode | `opencode auth login` |
 | MiMo Code | `mimo auth login` |
+| DSH | none; `mj login` refuses the profile, which authenticates with `DEEPSEEK_API_KEY` |
 
 The login command is always resolved from the controller's `PATH`. A profile
 selects credentials and environment, not another harness executable.
@@ -554,6 +596,7 @@ from the profile home:
 | Muse Code | `auth.json`, `settings.json`, `trust.json`, `AGENTS.md`, `skills/`, `rules/` |
 | OpenCode | `opencode.json`, `opencode.jsonc`, `AGENTS.md`, `skills/`, and the logins from `opencode.db`, as `.data/opencode/mjolnir-credentials.json` |
 | MiMo Code | `config/`, `data/auth.json` |
+| DSH | `AGENTS.md`, `skills/` (staged, but DSH does not read skills) |
 
 Staging follows symbolic links: a linked file or directory is copied with the
 contents of its target, even when the target is outside the harness home. A link
@@ -583,6 +626,9 @@ Mjolnir then adds its own files to the staged home:
   setting in `opencode.json`;
 - for MiMo Code under an unconstrained policy,
   `MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS=1` in the launch environment;
+- for DSH, the staged `AGENTS.md` as `DSH_ACP_SYSTEM_PROMPT` in the launch
+  environment, and dsh-acp's `permission_mode` on every session open: `ask`
+  under configured approvals, `allow` under an unconstrained policy;
 - in a container or on an EC2 instance, a note in the instruction file
   (`AGENTS.md` or `CLAUDE.md`) that the environment is disposable.
 
@@ -653,9 +699,10 @@ The GitHub token is also excluded from checkpoints and archives.
 
 ## Skills synchronization
 
-Every supported harness resolves user skills from `skills/` beneath its profile
-home. Mjolnir treats the controller copy as authoritative and pushes it to live
-sessions on the same reconciliation cycle. This direction is deliberate: a
+Every supported harness except DSH, which has no skills support, resolves user
+skills from `skills/` beneath its profile home. Mjolnir treats the controller
+copy as authoritative and pushes it to live sessions on the same reconciliation
+cycle. This direction is deliberate: a
 session cannot overwrite the canonical skills tree on your machine.
 
 Claude Code and Codex also keep skills of their own under `skills/`. Claude
@@ -776,6 +823,10 @@ self-update so a running session never replaces its own binary.
 MiMo Code installs from the pinned `@mimo-ai/cli` npm package. Its managed
 launch disables automatic updates so a running session never replaces its own
 binary.
+DSH requires curl and tar, and no Node.js; Mjolnir downloads the pinned
+dsh-acp 0.2.0 GitHub release archive for the platform and verifies its SHA-256
+checksum. Linux and macOS, on x86-64 and ARM64, are supported. Linux needs
+glibc 2.34 or newer, so musl distributions such as Alpine cannot run it.
 Mjolnir reports a missing prerequisite and leaves the existing worker alone;
 it does not invoke sudo or a system package manager.
 
@@ -805,10 +856,11 @@ while the pane has focus. **Refresh** runs the same refresh as
 | Muse Code | Native subscription usage windows and reset times, when reported. |
 | OpenCode | No published quota endpoint; the profile shows an unavailable reading. |
 | MiMo Code | No published quota endpoint; the profile shows an unavailable reading. |
+| DSH | No quota endpoint; DeepSeek bills by usage, so the profile shows `API`. |
 
-A Codex profile on a provider that publishes no quota endpoint shows `API`
-instead of a window, because it is usage-priced. An unavailable reading is
-displayed as an error for that profile; it does not make the profile
+A Codex profile on a provider that publishes no quota endpoint, and a DSH
+profile, show `API` instead of a window, because they are usage-priced. An
+unavailable reading is displayed as an error for that profile; it does not make the profile
 disappear. Quota is advisory rather than an admission-control scheduler. Session creation remains your decision.
 
 Mjolnir may use a currently available non-Claude profile for internal utility
@@ -855,8 +907,9 @@ without them. Muse Spark can also supply utility inference for cross-harness
 handoffs; see
 [Durability and recovery](/durability/).
 
-- Kimi Code, OpenCode, and MiMo Code have no guardian approval mode. Prefer an
-  isolated [container target](/containers/) or EC2 rather than raw execution.
+- Kimi Code, OpenCode, MiMo Code, and DSH have no guardian approval mode.
+  Prefer an isolated [container target](/containers/) or EC2 rather than raw
+  execution.
 - OpenCode talks to third-party providers through its own gateway, so it
   publishes no quota endpoint and its profile shows quota as unavailable. It
   reads permission rules from `opencode.json`. Its sessions live in a SQLite
@@ -866,6 +919,19 @@ handoffs; see
   keeps native sessions in a SQLite database. Native import and SessionWiki
   search do not list them yet, and it does not serve Mjolnir's delegation or
   utility inference.
+- DSH has no sandbox: commands run directly on the host, and only its file
+  tools are confined to the workspace roots. Under configured approvals
+  Mjolnir selects dsh-acp's `permission_mode` `ask` on every session open, so
+  every write, command, and MCP tool call asks for permission; an
+  unconstrained policy selects `allow`. The Plan toggle switches dsh-acp to its
+  `plan` mode and back to its `agent` mode. DSH accepts multiple workspace
+  roots and attached directories. Checkpoints keep the session's
+  `sessions/<id>.json`, and a restore at a different workspace path rewrites
+  the record's working directory so the session resumes. Native import and
+  SessionWiki search do not support DSH yet. It does not serve Mjolnir's
+  delegation, which needs a Claude or Codex profile. It serves DeepSeek-family
+  utility inference with its flash model only when its base URL is DeepSeek's
+  own `api.deepseek.com` and its key is set.
 - A custom bridge must speak the ACP version and features Mjolnir expects.
 - A profile home is account-scoped. Do not point two profiles at the same home
   and expect them to represent different accounts.

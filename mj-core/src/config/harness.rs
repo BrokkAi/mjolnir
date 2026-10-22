@@ -19,6 +19,7 @@ pub enum HarnessKind {
     Muse,
     OpenCode,
     Mimo,
+    Dsh,
 }
 
 /// The operating system of the machine a harness's own CLI runs on, as far as
@@ -471,7 +472,7 @@ impl HarnessKind {
         }
     }
 
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Codex,
         Self::Claude,
         Self::Kimi,
@@ -479,6 +480,7 @@ impl HarnessKind {
         Self::Muse,
         Self::OpenCode,
         Self::Mimo,
+        Self::Dsh,
     ];
 
     /// Environment variable used to isolate this harness's configuration.
@@ -491,6 +493,10 @@ impl HarnessKind {
             Self::Muse => "XDG_CONFIG_HOME",
             Self::OpenCode => "XDG_CONFIG_HOME",
             Self::Mimo => "MIMOCODE_HOME",
+            // dsh-acp has no home of its own; its data directory holds its
+            // sessions and would otherwise default to `.dsh-acp` inside the
+            // directory it runs in.
+            Self::Dsh => "DSH_ACP_DATA_DIR",
         }
     }
 
@@ -505,6 +511,7 @@ impl HarnessKind {
             Self::Muse => ".config/muse",
             Self::OpenCode => ".config/opencode",
             Self::Mimo => ".mimocode",
+            Self::Dsh => ".dsh-acp",
         }
     }
 
@@ -524,6 +531,11 @@ impl HarnessKind {
             Self::Muse => "auth.json",
             Self::OpenCode => ".data/opencode/mjolnir-credentials.json",
             Self::Mimo => "data/auth.json",
+            // dsh-acp keeps no login: it reads its key from its environment
+            // ([`HarnessKind::api_key_variable`]), so every DSH profile
+            // authenticates with an API key and nothing that decides a login
+            // reads this. No dsh-acp release writes the file.
+            Self::Dsh => "auth.json",
         }
     }
 
@@ -533,6 +545,47 @@ impl HarnessKind {
     /// sessions, and each launch imports it.
     pub const fn keeps_logins_in_database(self) -> bool {
         matches!(self, Self::OpenCode)
+    }
+
+    /// The variable this harness reads its API key from, for a harness that
+    /// has no login of its own. Every profile of such a harness authenticates
+    /// with [`AuthScheme::ApiKey`].
+    pub const fn api_key_variable(self) -> Option<&'static str> {
+        match self {
+            Self::Dsh => Some("DEEPSEEK_API_KEY"),
+            Self::Codex
+            | Self::Claude
+            | Self::Kimi
+            | Self::Grok
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Mimo => None,
+        }
+    }
+
+    /// Variables Mjolnir sets on every launch of this harness, each with
+    /// where its value comes from instead. A profile's `environment` cannot
+    /// set them, because the launch would silently replace the value.
+    pub const fn launch_owned_environment(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Dsh => &[
+                (
+                    "DSH_ACP_SYSTEM_PROMPT",
+                    "put DSH's instructions in AGENTS.md in the profile home",
+                ),
+                (
+                    "DSH_ACP_PERMISSION_MODE",
+                    "the target's permission mode decides it",
+                ),
+            ],
+            Self::Codex
+            | Self::Claude
+            | Self::Kimi
+            | Self::Grok
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Mimo => &[],
+        }
     }
 
     /// Whether sessions on this machine can share the profile's own login
@@ -558,6 +611,7 @@ impl HarnessKind {
             Self::Muse => "muse",
             Self::OpenCode => "opencode",
             Self::Mimo => "mimo",
+            Self::Dsh => "dsh-acp",
         }
     }
 
@@ -565,9 +619,16 @@ impl HarnessKind {
     pub const fn agent_instructions_file(self) -> &'static str {
         match self {
             Self::Claude => "CLAUDE.md",
-            Self::Codex | Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode | Self::Mimo => {
-                "AGENTS.md"
-            }
+            // dsh-acp reads no instruction file of its own; its launch passes
+            // the staged one as its system prompt
+            // ([`crate::harness_runtime::dsh_acp_script`]).
+            Self::Codex
+            | Self::Kimi
+            | Self::Grok
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Mimo
+            | Self::Dsh => "AGENTS.md",
         }
     }
 
@@ -577,9 +638,15 @@ impl HarnessKind {
     /// home, matching the provisioning allowlist the controller stages.
     pub const fn synced_skill_dirs(self) -> &'static [&'static str] {
         match self {
-            Self::Codex | Self::Claude | Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode => {
-                &["skills"]
-            }
+            // dsh-acp reads no skills; its tree is staged like every other
+            // harness's and stays inert.
+            Self::Codex
+            | Self::Claude
+            | Self::Kimi
+            | Self::Grok
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Dsh => &["skills"],
             Self::Mimo => &["config/skills"],
         }
     }
@@ -597,12 +664,12 @@ impl HarnessKind {
     /// registers its built-in skills in memory, Grok caches its bundled skills
     /// under `bundled/skills/`, Muse writes its own under its data directory
     /// (`.data/muse/skills/` in a Mjolnir home), and OpenCode embeds its
-    /// built-in skill.
+    /// built-in skill. DSH reads no skills at all.
     pub const fn harness_owned_skill_paths(self) -> &'static [&'static str] {
         match self {
             Self::Claude => &["skills/synced", "skills/.trash"],
             Self::Codex => &["skills/.system"],
-            Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode | Self::Mimo => &[],
+            Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode | Self::Mimo | Self::Dsh => &[],
         }
     }
 
@@ -616,6 +683,7 @@ impl HarnessKind {
             Self::Muse => "muse",
             Self::OpenCode => "opencode",
             Self::Mimo => "mimo",
+            Self::Dsh => "dsh",
         }
     }
 
@@ -629,6 +697,7 @@ impl HarnessKind {
             Self::Muse => "Muse Code",
             Self::OpenCode => "OpenCode",
             Self::Mimo => "MiMo Code",
+            Self::Dsh => "DSH",
         }
     }
 
@@ -645,6 +714,7 @@ impl HarnessKind {
             Self::Mimo => {
                 "Install it with `npm install -g @mimo-ai/cli` (Node.js 22 or newer)".to_owned()
             }
+            Self::Dsh => "Install it with `npm install -g @brokkai/dsh-acp` (Node.js 22 or newer), or from a release archive at https://github.com/BrokkAi/dsh-acp/releases".to_owned(),
             other => format!("Install the {} CLI", other.display_name()),
         }
     }
@@ -757,6 +827,22 @@ impl HarnessKind {
                 session_sandbox: None,
                 staged_setting: None,
             }),
+            // dsh-acp records each session's permission policy and keeps it
+            // across `session/load`, so the policy is selected on every open:
+            // a resumed session, or one moved from a container to a raw
+            // target, must not keep an earlier one. `ask` sends every write,
+            // command and MCP call to Hel as a permission request.
+            (Self::Dsh, ExecutionPolicy::ConfiguredApprovals) => Some(ExecutionEnforcement {
+                label: "permission-ask",
+                acp_mode: None,
+                acp_mode_selector: None,
+                acp_setting: Some(("permission_mode", "ask")),
+                launch_flag: None,
+                launch_environment: None,
+                launch_argument: None,
+                session_sandbox: None,
+                staged_setting: None,
+            }),
             // Every remaining harness keeps the configuration its user wrote.
             (_, ExecutionPolicy::ConfiguredApprovals) => None,
             (Self::Claude, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
@@ -820,6 +906,18 @@ impl HarnessKind {
                 acp_setting: None,
                 launch_flag: None,
                 launch_environment: Some(("MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS", "1")),
+                launch_argument: None,
+                session_sandbox: None,
+                staged_setting: None,
+            }),
+            // dsh-acp has no sandbox to disable; `allow` stops it asking.
+            (Self::Dsh, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
+                label: "permission-allow",
+                acp_mode: None,
+                acp_mode_selector: None,
+                acp_setting: Some(("permission_mode", "allow")),
+                launch_flag: None,
+                launch_environment: None,
                 launch_argument: None,
                 session_sandbox: None,
                 staged_setting: None,
@@ -911,7 +1009,7 @@ impl HarnessKind {
         match self {
             Self::Claude => Some(".claude.json"),
             Self::Kimi => Some("mcp.json"),
-            Self::Codex | Self::Grok | Self::Muse | Self::OpenCode | Self::Mimo => None,
+            Self::Codex | Self::Grok | Self::Muse | Self::OpenCode | Self::Mimo | Self::Dsh => None,
         }
     }
 
@@ -931,6 +1029,7 @@ impl HarnessKind {
             Self::Muse => &[".data/muse/sessions"],
             Self::OpenCode => &[".data/opencode"],
             Self::Mimo => &["data"],
+            Self::Dsh => &["sessions"],
         }
     }
 
@@ -948,7 +1047,7 @@ impl HarnessKind {
         match self {
             Self::Grok => Some("bin/agent"),
             Self::Claude => Some("node_modules/.bin/claude"),
-            Self::Codex | Self::Kimi | Self::Muse | Self::OpenCode | Self::Mimo => None,
+            Self::Codex | Self::Kimi | Self::Muse | Self::OpenCode | Self::Mimo | Self::Dsh => None,
         }
     }
 
@@ -956,7 +1055,8 @@ impl HarnessKind {
     pub fn bridge_args(self, policy: ExecutionPolicy) -> Vec<&'static str> {
         let flag = self.launch_flag_for(policy);
         match self {
-            Self::Codex | Self::Claude | Self::Muse => Vec::new(),
+            // dsh-acp is an ACP server and nothing else.
+            Self::Codex | Self::Claude | Self::Muse | Self::Dsh => Vec::new(),
             Self::Kimi => vec!["acp"],
             Self::Grok => ["agent"].into_iter().chain(flag).chain(["stdio"]).collect(),
             Self::OpenCode => vec!["acp"],
@@ -1147,6 +1247,11 @@ impl HarnessProfile {
         if self.kind.keeps_logins_in_database() {
             return AuthScheme::NativeLoginStore;
         }
+        if let Some(env_key) = self.kind.api_key_variable() {
+            return AuthScheme::ApiKey {
+                env_key: env_key.to_owned(),
+            };
+        }
         if self.kind == HarnessKind::Claude
             && self
                 .environment
@@ -1210,6 +1315,11 @@ impl HarnessProfile {
     /// it.
     pub fn authentication_marker(&self) -> PathBuf {
         match self.auth_scheme() {
+            // A harness that reads its key from its environment keeps no file
+            // that proves it; its kind's marker names where one would be.
+            AuthScheme::ApiKey { .. } if self.kind.api_key_variable().is_some() => {
+                harness_authentication_marker(self.kind, &self.home)
+            }
             AuthScheme::ApiKey { .. }
             | AuthScheme::InlineApiKey
             | AuthScheme::AwsCredentialChain
@@ -1284,6 +1394,11 @@ impl HarnessProfile {
                 self.kind.home_env()
             );
         }
+        for (name, source) in self.kind.launch_owned_environment() {
+            if environment.contains_key(*name) {
+                bail!("profile {id:?} must not set {name} in `environment`; {source}");
+            }
+        }
         if self
             .context_window_bytes
             .is_some_and(|bytes| bytes < 32 * 1024)
@@ -1325,14 +1440,20 @@ impl HarnessProfile {
     /// exported key never reaches the harness. Done once as the configuration
     /// is read, exactly when `{ from_env = ... }` entries resolve.
     ///
-    /// For Codex that is the variable its custom provider names (`env_key`);
-    /// [`Self::ensure_ready`] reports it when neither supplies it. For
-    /// OpenCode it is every provider key variable OpenCode reads and every
-    /// variable its configuration substitutes as `{env:NAME}`.
+    /// For Codex that is the variable its custom provider names (`env_key`),
+    /// and for a harness without a login its own key variable
+    /// ([`HarnessKind::api_key_variable`]); [`Self::ensure_ready`] reports
+    /// either when neither supplies it. For OpenCode it is every provider key
+    /// variable OpenCode reads and every variable its configuration
+    /// substitutes as `{env:NAME}`.
     pub fn inherit_provider_key(&mut self) {
         // A projection reads no files, and a malformed home is reported by
         // `ensure_ready`.
         if !super::secrets::resolves_values() {
+            return;
+        }
+        if let Some(env_key) = self.kind.api_key_variable() {
+            self.environment.inherit(env_key);
             return;
         }
         if self.kind == HarnessKind::OpenCode {
@@ -1371,6 +1492,14 @@ impl HarnessProfile {
             .collect()
     }
 
+    /// Whether this profile's environment gives the API key variable `env_key`
+    /// a value. A blank value is no key.
+    pub fn supplies_api_key(&self, env_key: &str) -> bool {
+        self.environment
+            .get(env_key)
+            .is_some_and(|value| !value.trim().is_empty())
+    }
+
     /// Whether a harness can start from this profile: every environment
     /// reference resolved, the harness home's own configuration readable, and
     /// the credential that configuration names supplied.
@@ -1387,18 +1516,19 @@ impl HarnessProfile {
         let ready = || -> Result<()> {
             self.environment.ensure_resolved()?;
             let provider = self.codex_provider()?;
-            if let Some(provider) = provider.as_ref()
-                && let Some(env_key) = provider
-                    .custom()
+            let api_key = match self.kind.api_key_variable() {
+                Some(env_key) => Some((self.kind.display_name().to_owned(), env_key)),
+                None => provider
+                    .as_ref()
+                    .and_then(|provider| provider.custom())
                     .and_then(|custom| custom.env_key.as_deref())
-                && self
-                    .environment
-                    .get(env_key)
-                    .is_none_or(|value| value.trim().is_empty())
+                    .map(|env_key| (self.describe_codex_config(), env_key)),
+            };
+            if let Some((source, env_key)) = api_key
+                && !self.supplies_api_key(env_key)
             {
                 bail!(
-                    "{} authenticates with {env_key}, which is set neither in the environment Mjolnir started with nor under [profiles.{id}.environment]; export {env_key} and run `mj daemon restart`, or put it in secrets.toml and add `{env_key} = {{ from_secret = \"{env_key}\" }}` under [profiles.{id}.environment]",
-                    self.describe_codex_config()
+                    "{source} authenticates with {env_key}, which is set neither in the environment Mjolnir started with nor under [profiles.{id}.environment]; export {env_key} and run `mj daemon restart`, or put it in secrets.toml and add `{env_key} = {{ from_secret = \"{env_key}\" }}` under [profiles.{id}.environment]"
                 );
             }
             if self.guardian_review_model.is_some()

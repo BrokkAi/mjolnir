@@ -497,11 +497,14 @@ pub fn error_reports_missing_native_session(
         HarnessKind::Claude => error.contains(&format!(
             "{CLAUDE_MISSING_SESSION_MESSAGE}{native_session_id}"
         )),
+        // dsh-acp writes a session's record at `session/new`, before its
+        // first prompt, so a missing one is a real failure.
         HarnessKind::Kimi
         | HarnessKind::Grok
         | HarnessKind::Muse
         | HarnessKind::OpenCode
-        | HarnessKind::Mimo => false,
+        | HarnessKind::Mimo
+        | HarnessKind::Dsh => false,
     }
 }
 

@@ -484,6 +484,7 @@ pub(super) fn collect_native_tree(
         HarnessKind::Muse => inside && name == "session.jsonl",
         HarnessKind::OpenCode => is_opencode_native_artifact(relative),
         HarnessKind::Mimo => is_mimo_native_artifact(relative),
+        HarnessKind::Dsh => is_dsh_session_record(relative, session_id),
     };
     if !selected || is_secret_like_path(relative) {
         return Ok(());
@@ -504,6 +505,13 @@ pub(super) fn collect_native_tree(
         mode: file_mode(&metadata),
     });
     Ok(())
+}
+
+/// dsh-acp writes each session to `sessions/<id>.json` by renaming a
+/// `.<id>.<suffix>.tmp` file over it, so the record itself is complete and an
+/// interrupted write's temporary file is never captured.
+pub(super) fn is_dsh_session_record(relative_path: &Path, session_id: &str) -> bool {
+    relative_path == Path::new("sessions").join(format!("{session_id}.json"))
 }
 
 /// OpenCode's database within a session home.

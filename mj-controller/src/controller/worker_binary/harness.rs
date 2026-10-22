@@ -1,5 +1,7 @@
 use super::*;
-use mj_core::harness_runtime::{GROK_VERSION, KIMI_VERSION, MIMO_CLI_VERSION, OPENCODE_VERSION};
+use mj_core::harness_runtime::{
+    DSH_ACP_VERSION, GROK_VERSION, KIMI_VERSION, MIMO_CLI_VERSION, OPENCODE_VERSION,
+};
 
 /// The repository paths a worker opens. `session_id` and `container_workspace`
 /// identify the session whose workspace is used, which for a sub-agent child is
@@ -110,6 +112,18 @@ pub(in crate::controller) fn bridge_launch(
                 "-c".into(),
                 format!(
                     "if command -v mimo >/dev/null 2>&1; then exec mimo acp; fi; if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v npx >/dev/null 2>&1; then echo 'Mjolnir needs MiMo Code or Node.js, npm, and npx on PATH; install Node in the target environment' >&2; exit 127; fi; exec npx -y @mimo-ai/cli@{MIMO_CLI_VERSION} acp"
+                ),
+            ],
+        ),
+        // The reference image carries dsh-acp; npm's package bundles the same
+        // release binaries for an image without it.
+        mj_core::config::HarnessKind::Dsh => (
+            "sh".into(),
+            vec![
+                "-c".into(),
+                format!(
+                    "if command -v dsh-acp >/dev/null 2>&1; then set -- dsh-acp; elif command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then set -- npx -y @brokkai/dsh-acp@{DSH_ACP_VERSION}; else echo 'Mjolnir needs dsh-acp or Node.js, npm, and npx on PATH; install one in the target environment' >&2; exit 127; fi; {}",
+                    mj_core::harness_runtime::dsh_acp_script()
                 ),
             ],
         ),
@@ -247,6 +261,9 @@ pub(super) fn stage_profile(
             // staged below.
             &[]
         }
+        // dsh-acp keeps no configuration or login of its own; only the
+        // instruction file and skills tree below are staged.
+        mj_core::config::HarnessKind::Dsh => &[],
     };
     let allowlist: Vec<&str> = harness_files
         .iter()

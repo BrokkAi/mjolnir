@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 91;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 92;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1655,6 +1655,14 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older daemons do not know the `dsh` harness. They skip such
+    // sessions when loading state, and a full state save would delete them, so
+    // the compatibility floor rises with the new harness kind.
+    if version < 92 {
+        admit_harness_kind(connection, "mimo", "dsh", 92)
+            .context("migrate DSH harness constraints")?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -1830,7 +1838,9 @@ fn migrate_mimo_harness_kind(connection: &Connection) -> Result<()> {
             let (_, definition) = sql
                 .split_once('(')
                 .context("missing harness table definition")?;
-            if definition.contains("'mimo')") {
+            // Later revisions append values after MiMo Code, so recognize the
+            // value rather than requiring it to remain the final CHECK member.
+            if definition.contains("'mimo'") {
                 continue;
             }
             ensure!(
@@ -1874,6 +1884,79 @@ fn migrate_mimo_harness_kind(connection: &Connection) -> Result<()> {
     let restored = connection.execute_batch("PRAGMA foreign_keys = ON;");
     migration.context("migrate MiMo Code harness constraints")?;
     restored.context("restore foreign key enforcement after MiMo Code migration")?;
+    Ok(())
+}
+
+/// Admit `added` in the harness-kind constraints of `sessions` and
+/// `hidden_native_sessions`, after `previous`, the value the constraint
+/// currently ends with, and record `revision` as a breaking migration.
+///
+/// SQLite cannot alter a CHECK constraint, so each table is rebuilt from its
+/// stored definition, keeping every shipped column, index and trigger. A
+/// table that already admits `added` is left alone.
+fn admit_harness_kind(
+    connection: &Connection,
+    previous: &str,
+    added: &str,
+    revision: i64,
+) -> Result<()> {
+    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let migration = (|| -> Result<()> {
+        let transaction = connection.unchecked_transaction()?;
+        for table in ["sessions", "hidden_native_sessions"] {
+            let sql: String = transaction.query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1",
+                [table],
+                |row| row.get(0),
+            )?;
+            let (_, definition) = sql
+                .split_once('(')
+                .context("missing harness table definition")?;
+            if definition.contains(&format!("'{added}'")) {
+                continue;
+            }
+            let last = format!("'{previous}')");
+            ensure!(
+                definition.matches(&last).count() == 1,
+                "unexpected {table} harness constraint"
+            );
+            let definition = definition.replace(&last, &format!("'{previous}','{added}')"));
+            let objects: Vec<String> = transaction
+                .prepare(
+                    "SELECT sql FROM sqlite_schema WHERE tbl_name=?1
+                     AND type IN ('index','trigger') AND sql IS NOT NULL",
+                )?
+                .query_map([table], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            transaction.execute_batch(&format!(
+                "CREATE TABLE {table}_{added}_v{revision} ({definition};
+                 INSERT INTO {table}_{added}_v{revision} SELECT * FROM {table};
+                 DROP TABLE {table};
+                 ALTER TABLE {table}_{added}_v{revision} RENAME TO {table};"
+            ))?;
+            for object in objects {
+                transaction.execute_batch(&object)?;
+            }
+        }
+        ensure!(
+            !transaction
+                .prepare("PRAGMA foreign_key_check")?
+                .exists([])?,
+            "foreign key violation while admitting harness {added}"
+        );
+        transaction.execute_batch(&format!(
+            "UPDATE schema_compatibility SET minimum_compatible_version = {revision}
+                 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES ({revision}, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = {revision};"
+        ))?;
+        transaction.commit()?;
+        Ok(())
+    })();
+    let restored = connection.execute_batch("PRAGMA foreign_keys = ON;");
+    migration?;
+    restored.context("restore foreign key enforcement after a harness-kind migration")?;
     Ok(())
 }
 

@@ -183,7 +183,7 @@ mj doctor
 
 ## First run
 
-Mjolnir runs a coding agent you already have (Claude Code, Codex, Kimi Code, Grok Build, Muse Code, OpenCode, or MiMo Code), so install and sign in to one first. Then go to a project directory and run `mj`:
+Mjolnir runs a coding agent you already have (Claude Code, Codex, Kimi Code, Grok Build, Muse Code, OpenCode, MiMo Code, or DSH), so install and sign in to one first. DSH has no sign-in; export `DEEPSEEK_API_KEY` before starting `mj` instead. Then go to a project directory and run `mj`:
 
 ```sh
 cd path/to/your/repository

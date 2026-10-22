@@ -834,14 +834,24 @@ fn harness_profile_check(
         );
     }
     if !profile.home.is_dir() {
+        // A harness without a login never creates its home itself.
+        let remediation = if profile.kind.api_key_variable().is_some() {
+            format!(
+                "Create {}. It needs no login; it holds the profile's optional {} and nothing else Mjolnir reads.",
+                profile.home.display(),
+                profile.kind.agent_instructions_file()
+            )
+        } else {
+            format!(
+                "{} If this profile should use an existing installation, select its home in Setup.",
+                harness_login_remediation(id, profile)
+            )
+        };
         return DoctorCheck::fixable(
             format!("harness.{id}"),
             title,
             format!("{} does not exist", profile.home.display()),
-            format!(
-                "{} If this profile should use an existing installation, select its home in Setup.",
-                harness_login_remediation(id, profile)
-            ),
+            remediation,
         );
     }
     if let Err(error) = profile.ensure_ready(id) {

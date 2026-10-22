@@ -42,7 +42,7 @@ deliver only part of an equivalent environment setting.
 ## ACP bridges
 
 For each harness, Mjolnir first looks for an image-baked bridge binary on
-`PATH`: `codex-acp`, `claude-agent-acp`, `kimi`, `grok`, `opencode`, or `mimo`. If it doesn't find
+`PATH`: `codex-acp`, `claude-agent-acp`, `kimi`, `grok`, `opencode`, `mimo`, or `dsh-acp`. If it doesn't find
 one, Codex and Claude Code install Mjolnir's pinned packages into a leased cache
 using `npm ci`. This requires Node.js 22+ and npm on the target PATH. Codex also
 uses this installation when the image's bridge version differs from Mjolnir's
@@ -59,6 +59,15 @@ starts.
 MiMo Code can fall back to `npx -y @mimo-ai/cli@0.1.15 acp`, so an unbaked
 image needs Node.js 22, npm, and npx. Bake `@mimo-ai/cli@0.1.15` and set
 `MIMOCODE_DISABLE_AUTOUPDATE=1` for a stable managed runtime.
+
+DSH speaks ACP itself, so `dsh-acp` is both its bridge and its agent. Without
+`dsh-acp` on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.2.0`,
+which needs Node.js 22 or newer, npm, and npx; the npm package bundles the
+release binaries. To bake it in, run `npm install -g @brokkai/dsh-acp@0.2.0`
+(Node.js 22 or newer), or put the `dsh-acp` binary from a release archive at
+<https://github.com/BrokkAi/dsh-acp/releases> on `PATH`, as the reference image
+does. The Linux binaries need glibc 2.34 or newer, so musl images such as
+Alpine cannot run DSH.
 
 Baking the bridges in, the way the reference image does, avoids that
 installation cost. Codex images should install the bridge version pinned by

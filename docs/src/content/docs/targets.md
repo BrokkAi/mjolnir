@@ -70,7 +70,8 @@ The unconstrained translation is Codex `agent-full-access`, Claude Code
 `bypassPermissions` with its sandbox disabled, Kimi Code `auto`, Grok Build
 always-approve with its sandbox disabled, and OpenCode
 `"permission": "allow"` in `opencode.json`. MiMo Code starts with
-`MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS=1`. Those all approve every action;
+`MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS=1`, and DSH selects dsh-acp's
+`permission_mode` `allow`. Those all approve every action;
 Kimi's mode happens to be named `auto` but is not a risk-selective guardian.
 Muse instead stages `:ask-me`, selects `promptUnmatched` approvals, turns
 muse-acp's auto-review on, and disables only the sandbox
@@ -80,9 +81,10 @@ the sandbox kept on.
 
 Codex, Claude Code, Grok Build, and Muse Code can preserve guardian approvals
 on raw targets. Kimi Code cannot. OpenCode and MiMo Code ask before tools
-according to their permission rules, but have no sandbox, so a prompt is the
-only thing between the agent and the host. Mjolnir displays a prominent
-warning when any of these is selected without an isolation boundary. Read [Security boundaries](/security/)
+according to their permission rules, and DSH, with dsh-acp's `permission_mode`
+`ask`, asks before every write, command, and MCP tool call. None of the three
+has a sandbox, so a prompt is the only thing between the agent and the host.
+Mjolnir displays a prominent warning when any of these is selected without an isolation boundary. Read [Security boundaries](/security/)
 before choosing a raw or `yolo` target.
 
 ## Bare runtimes
@@ -148,7 +150,7 @@ path, not the selected project or its linked-worktree location.
 The host does not need a preinstalled harness bridge. Its worker installs and
 reuses the exact harness version pinned by Mjolnir in the remote user's cache.
 It does require Node.js 22 and npm for Codex, Claude, and MiMo Code, or curl
-and Bash for Kimi and Grok, or curl and tar for Muse and OpenCode. Mjolnir never uses sudo to add these prerequisites and does not
+and Bash for Kimi and Grok, or curl and tar for Muse, OpenCode, and DSH. Mjolnir never uses sudo to add these prerequisites and does not
 fall back to another harness executable from the remote `PATH`.
 
 `permissions` accepts `guardian` or `yolo` and defaults to `guardian`. The

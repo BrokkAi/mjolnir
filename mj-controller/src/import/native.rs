@@ -223,6 +223,7 @@ pub fn locate_native_session(
         HarnessKind::Mimo => bail!(
             "MiMo Code keeps its sessions in a SQLite database; Mjolnir cannot import them yet"
         ),
+        HarnessKind::Dsh => bail!("Mjolnir cannot import DSH sessions yet"),
     };
     Ok(LocatedNativeSession {
         native_session_id,
@@ -247,8 +248,8 @@ pub fn native_session_id_from_path(harness: HarnessKind, path: &Path) -> Option<
         HarnessKind::Kimi | HarnessKind::Grok => path.file_name()?.to_str().map(str::to_owned),
         HarnessKind::Muse => path.parent()?.file_name()?.to_str().map(str::to_owned),
         // OpenCode sessions live in SQLite rows, not files, so no transcript
-        // path carries their id.
-        HarnessKind::OpenCode | HarnessKind::Mimo => None,
+        // path carries their id; DSH sessions are not imported.
+        HarnessKind::OpenCode | HarnessKind::Mimo | HarnessKind::Dsh => None,
     }
 }
 
@@ -298,6 +299,7 @@ pub fn list_native_session_sources(
         HarnessKind::Mimo => bail!(
             "MiMo Code keeps its sessions in a SQLite database; Mjolnir cannot enumerate them yet"
         ),
+        HarnessKind::Dsh => bail!("Mjolnir cannot enumerate DSH sessions yet"),
         other => bail!("{other:?} keeps one session per file; there is nothing to enumerate"),
     };
     Ok(sources)
@@ -333,6 +335,7 @@ pub fn read_native_transcript(
         HarnessKind::Mimo => bail!(
             "MiMo Code keeps its sessions in a SQLite database; Mjolnir cannot import them yet"
         ),
+        HarnessKind::Dsh => bail!("Mjolnir cannot import DSH sessions yet"),
     }
 }
 
@@ -415,5 +418,6 @@ pub fn scan_native_sessions(
         HarnessKind::Mimo => bail!(
             "MiMo Code keeps its sessions in a SQLite database; Mjolnir cannot enumerate them yet"
         ),
+        HarnessKind::Dsh => bail!("Mjolnir cannot enumerate DSH sessions yet"),
     }
 }

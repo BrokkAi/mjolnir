@@ -344,7 +344,7 @@ def main() -> None:
     parser.add_argument("--mj", type=Path, default=Path("target/debug/mj"))
     parser.add_argument("--worker", type=Path, required=True, help="Portable musl worker binary")
     parser.add_argument("--profile-home", type=Path, required=True, help="Signed-in harness home")
-    parser.add_argument("--harness", choices=("codex", "claude", "kimi", "grok", "muse", "opencode", "mimo"), default="codex")
+    parser.add_argument("--harness", choices=("codex", "claude", "kimi", "grok", "muse", "opencode", "mimo", "dsh"), default="codex")
     parser.add_argument("--engine", choices=("docker", "podman"), default="docker")
     parser.add_argument("--image", default="ghcr.io/brokkai/mjolnir/agent-dev:latest")
     parser.add_argument("--repository", default="octocat/Hello-World")

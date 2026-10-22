@@ -1134,8 +1134,10 @@ fn migrate_stopped_session_state(connection: &Connection) -> Result<()> {
 /// Preserve existing data and dependent indexes while admitting Muse sessions.
 ///
 /// The widened constraint this builds still lists `'deepseek'`, carried over
-/// from migration 11. The DSH harness has since been removed; the value is
-/// retained only so session rows written by earlier releases stay readable.
+/// from migration 11. That harness, DeepSeek's own DSH, has since been
+/// removed; the value is retained only so session rows written by earlier
+/// releases stay readable. The later dsh-acp harness is `'dsh'`, so such a row
+/// is never read as one of its sessions.
 /// No code accepts it, `HarnessKind::from_str` rejects it, and `load_state_from`
 /// skips such a row with a warning. Dropping the value would need another
 /// breaking migration that rewrote or deleted those rows.

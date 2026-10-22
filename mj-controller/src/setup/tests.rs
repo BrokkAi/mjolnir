@@ -190,7 +190,7 @@ fn an_installed_mimo_is_offered_before_its_first_login() {
     let directory = tempfile::tempdir().unwrap();
     let executor = FakeExecutor {
         commands: RefCell::new(Vec::new()),
-        statuses: vec![1, 1, 1, 1, 1, 1, 0],
+        statuses: vec![1, 1, 1, 1, 1, 1, 0, 1],
     };
     let mut homes = Vec::new();
 
@@ -210,7 +210,13 @@ fn an_installed_mimo_is_offered_before_its_first_login() {
             authenticated: false,
         }]
     );
-    assert_eq!(executor.commands.borrow().last().unwrap().program, "mimo");
+    assert!(
+        executor
+            .commands
+            .borrow()
+            .iter()
+            .any(|command| command.program == "mimo")
+    );
 }
 
 #[cfg(target_os = "macos")]

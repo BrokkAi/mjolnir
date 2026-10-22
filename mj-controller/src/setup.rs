@@ -278,7 +278,8 @@ pub(crate) fn harness_is_authenticated_with_executor(
 /// An API-key profile is proven by its harness configuration file, because its
 /// key lives in the profile's `environment` rather than in a credential file;
 /// [`HarnessProfile::authentication_marker`] already names the right file for
-/// either case.
+/// either case. A harness without a login or a configuration file, such as
+/// DSH, is proven by its key alone.
 fn harness_is_authenticated_with(
     profile: &HarnessProfile,
     is_default_home: bool,
@@ -297,6 +298,11 @@ fn harness_is_authenticated_with(
         return crate::opencode_logins::profile_logins(profile)
             .is_ok_and(|logins| logins.is_some())
             || !profile.opencode_environment_logins().is_empty();
+    }
+    // A harness without a login reads its key from its environment, so no
+    // file can prove it; the key itself does.
+    if let Some(env_key) = kind.api_key_variable() {
+        return profile.supplies_api_key(env_key);
     }
     if profile.authentication_marker().is_file()
         || (kind == HarnessKind::Kimi && home.join("credentials").is_file())

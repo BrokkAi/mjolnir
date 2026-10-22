@@ -173,6 +173,13 @@ fn every_harness_reports_expiry_only_where_hel_can_refresh_ahead_of_it() {
             None,
         ),
         (HarnessKind::Muse, b"{}".to_vec(), None, None),
+        // DSH has no login; a file in its place orders nothing.
+        (
+            HarnessKind::Dsh,
+            claude_credentials(1_755_000_000_000),
+            None,
+            None,
+        ),
     ];
     for kind in HarnessKind::ALL {
         let (_, bytes, expected_freshness, expected_expiry) = fixtures

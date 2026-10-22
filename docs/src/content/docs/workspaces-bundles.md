@@ -260,7 +260,8 @@ archive material.
 
 Muse Code and MiMo Code ACP support one workspace root only. Pair either with a
 single-repository bundle or one bare project directory, and do not add attached
-directories. The other five supported harnesses accept multi-root bundles.
+directories. The other six supported harnesses, DSH included, accept
+multi-root bundles.
 
 Attached directories are not bundle members. They are per-session supplemental
 resources selected in the creation or resume wizard, do not acquire Git origins,

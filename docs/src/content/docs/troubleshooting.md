@@ -96,6 +96,12 @@ authentication:
 - check that the profile kind matches the files in the home; and
 - resolve any executable or `PATH` failure before repeating login.
 
+A DSH profile has no login, and `mj login` refuses it. It authenticates with
+`DEEPSEEK_API_KEY`, taken from the environment Mjolnir started with unless the
+profile's `environment` sets it; `mj doctor` and the refused session say how to
+supply it. Export the key before running `mj`, or run `mj daemon restart` after
+exporting it in a new shell.
+
 For unattended or concurrent Claude Code sessions, prefer a long-lived setup
 token:
 
@@ -161,7 +167,7 @@ startup files. Bare sessions on this machine, SSH, and EC2 do not launch an ambi
 this path: they use the exact Mjolnir-managed version, while `PATH` supplies its
 installer prerequisites. These targets require Node.js 22 and npm for Codex,
 Claude, and MiMo Code, curl and Bash for Kimi and Grok, or curl and tar for
-Muse and OpenCode. Install prerequisites
+Muse, OpenCode, and DSH. Install prerequisites
 on the host yourself; Mjolnir never invokes sudo for harness setup.
 
 Container images must expose required tools on their ordinary image `PATH`.

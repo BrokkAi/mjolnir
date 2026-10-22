@@ -609,7 +609,24 @@ fn utility_family(profile: &HarnessProfile) -> Option<UtilityFamily> {
         // OpenCode is a multi-provider aggregator with no inference client of
         // its own; it never serves Mjolnir's utility work.
         HarnessKind::OpenCode | HarnessKind::Mimo => None,
+        HarnessKind::Dsh => dsh_deepseek_base_url(profile).map(|_| UtilityFamily::DeepSeek),
     }
+}
+
+/// The base URL dsh-acp uses when `DEEPSEEK_BASE_URL` is unset.
+const DSH_DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
+
+/// The DeepSeek API a DSH profile's sessions talk to, when it is DeepSeek's
+/// own service. dsh-acp appends `/chat/completions` to its base URL while the
+/// shared OpenAI client appends `/v1/chat/completions`; DeepSeek's own host
+/// serves both, and no other host is known to.
+fn dsh_deepseek_base_url(profile: &HarnessProfile) -> Option<String> {
+    let base = profile
+        .environment
+        .get("DEEPSEEK_BASE_URL")
+        .map_or(DSH_DEFAULT_BASE_URL, String::as_str);
+    let host = url::Url::parse(base).ok()?.host_str()?.to_ascii_lowercase();
+    (CodexProviderKind::from_host(&host) == CodexProviderKind::DeepSeek).then(|| base.to_owned())
 }
 
 /// Whether this profile may be ranked as a utility model, the backend Mjolnir
@@ -708,6 +725,25 @@ fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBac
         // coding-agent session.
         HarnessKind::Claude => Ok(None),
         HarnessKind::OpenCode | HarnessKind::Mimo => Ok(None),
+        // DSH reaches the same chat-completions endpoint with the key its
+        // sessions read, when the profile has one.
+        HarnessKind::Dsh => {
+            let key = profile
+                .kind
+                .api_key_variable()
+                .filter(|env_key| profile.supplies_api_key(env_key))
+                .and_then(|env_key| profile.environment.get(env_key))
+                .map(|key| key.trim().to_owned());
+            Ok(dsh_deepseek_base_url(profile)
+                .zip(key)
+                .map(|(base_url, key)| {
+                    Arc::new(OpenAiClient::with_deepseek_reasoning_support(
+                        base_url,
+                        Some(key),
+                        reqwest::header::HeaderMap::new(),
+                    )) as Arc<dyn LlmBackend>
+                }))
+        }
     }
 }
 

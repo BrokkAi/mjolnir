@@ -132,8 +132,9 @@ pub(crate) fn recent_project_directories(
         }
         HarnessKind::Muse => return muse::recent_directories(home, limit, executor),
         // OpenCode sessions live in a SQLite database that Mjolnir cannot read
-        // yet, so the catalog has no histories to seed from this home.
-        HarnessKind::OpenCode | HarnessKind::Mimo => {
+        // yet, and no reader of dsh-acp's session records exists yet, so the
+        // catalog has no histories to seed from this home.
+        HarnessKind::OpenCode | HarnessKind::Mimo | HarnessKind::Dsh => {
             return Ok(NativeProjectSeed {
                 directories: Vec::new(),
                 errors: Vec::new(),

@@ -113,6 +113,81 @@ fn mimo_checkpoint_keeps_the_database_and_wal_without_runtime_state() {
     );
 }
 
+/// dsh-acp writes `sessions/<id>.json` atomically through a `.<id>.*.tmp` file
+/// and refuses `session/load` from any directory but the one the record names.
+/// A checkpoint keeps the record alone, and a restore at another workspace
+/// path names that path while keeping the rest of the record as it was.
+#[test]
+fn dsh_checkpoint_keeps_the_session_record_and_restores_it_at_the_new_workspace() {
+    const DSH_NATIVE: &str = "dsh-a17182fbf3f34a218842f9d5abb0702f";
+    // A record as dsh-acp 0.2.0 wrote it, with its system prompt shortened.
+    let record = serde_json::json!({
+        "id": DSH_NATIVE,
+        "cwd": "/old/workspace/project",
+        "additional_directories": ["/old/workspace/library"],
+        "title": "hi",
+        "created_at": "2026-10-22T15:28:27.177270667Z",
+        "updated_at": "2026-10-22T15:28:27.177860889Z",
+        "config": {"model": "deepseek-flash", "mode": "agent", "permission_mode": "ask", "network": true},
+        "system_prompt": null,
+        "messages": [
+            {"role": "system", "content": "You are DeepSeek Harness"},
+            {"role": "user", "content": "hi"}
+        ],
+        "prompt_blocks": {"1": [{"type": "text", "text": "hi"}]},
+        "message_ids": {"1": "history-message-1"},
+        "pending_steering": [],
+        "tool_outcomes": {},
+        "compactions": [],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                  "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0},
+        "context_used": 0,
+        "parent_session_id": null
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join(format!("{DSH_NATIVE}.json")),
+        serde_json::to_vec_pretty(&record).unwrap(),
+    )
+    .unwrap();
+    fs::write(sessions.join(format!(".{DSH_NATIVE}.0f3c.tmp")), b"{\"id\"").unwrap();
+    fs::write(sessions.join("dsh-another.json"), b"{}").unwrap();
+    fs::write(temp.path().join("AGENTS.md"), b"instructions").unwrap();
+
+    let artifacts =
+        collect_native_artifacts(HarnessKind::Dsh, temp.path(), DSH_NATIVE, false).unwrap();
+    let relative = Path::new("sessions").join(format!("{DSH_NATIVE}.json"));
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.relative_path.as_path())
+            .collect::<Vec<_>>(),
+        [relative.as_path()]
+    );
+
+    let moved = temp.path().join("moved");
+    assert_eq!(
+        restored_native_relative_path(HarnessKind::Dsh, &relative, Some(&moved)).unwrap(),
+        relative
+    );
+    let restored: serde_json::Value = serde_json::from_slice(
+        &restored_native_artifact_bytes(
+            HarnessKind::Dsh,
+            &relative,
+            &artifacts[0].data,
+            Some(&moved),
+            temp.path(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut expected = record;
+    expected["cwd"] = moved.to_str().unwrap().into();
+    assert_eq!(restored, expected);
+}
+
 /// OpenCode 2 keeps its logins in the same database as its sessions. A
 /// checkpoint taken while OpenCode runs carries the sessions, including the
 /// pages still only in the write-ahead log, and no byte of any login. Resuming

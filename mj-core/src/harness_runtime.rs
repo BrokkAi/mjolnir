@@ -107,6 +107,7 @@ pub const MUSE_ACP_VERSION: &str = "0.15.0";
 pub const MUSE_VERSION: &str = "1.4.11-R6667.1";
 pub const OPENCODE_VERSION: &str = "2.1.2";
 pub const MIMO_CLI_VERSION: &str = "0.1.15";
+pub const DSH_ACP_VERSION: &str = "0.2.0";
 
 /// The shell commands that start OpenCode's ACP server with the executable
 /// named by `$opencode`, for the managed install and the container fallback
@@ -130,6 +131,26 @@ pub fn opencode_acp_script() -> String {
         acp = kind
             .bridge_args(crate::config::ExecutionPolicy::ConfiguredApprovals)
             .join(" "),
+    )
+}
+
+/// The shell commands that start dsh-acp, which the positional arguments
+/// name (`"$@"`), for the managed install and the container fallback alike.
+///
+/// dsh-acp reads no instruction file. It appends `DSH_ACP_SYSTEM_PROMPT` to
+/// its own system prompt, and rebuilds that prompt on every `session/load`,
+/// so the commands pass it the instruction file staged into the session
+/// home ([`HarnessKind::agent_instructions_file`]) on every launch. The
+/// variable is always set, empty without the file, so a value from the
+/// target's login shell never reaches the session. Without
+/// `DSH_ACP_DATA_DIR` dsh-acp would keep its sessions in a `.dsh-acp`
+/// directory inside the repository, so the commands refuse to start.
+pub fn dsh_acp_script() -> String {
+    let kind = HarnessKind::Dsh;
+    format!(
+        "instructions=\"${{{data}:?}}/{instructions}\"; DSH_ACP_SYSTEM_PROMPT=; if [ -f \"$instructions\" ]; then DSH_ACP_SYSTEM_PROMPT=\"$(cat \"$instructions\")\" || exit; fi; export DSH_ACP_SYSTEM_PROMPT; exec \"$@\"",
+        data = kind.home_env(),
+        instructions = kind.agent_instructions_file(),
     )
 }
 
@@ -264,6 +285,11 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             install_id: "mimo-cli-0.1.15",
             display_version: "MiMo Code 0.1.15",
             entrypoint: "node_modules/.bin/mimo",
+        },
+        HarnessKind::Dsh => HarnessPin {
+            install_id: "dsh-acp-0.2.0",
+            display_version: "dsh-acp 0.2.0",
+            entrypoint: "dsh-acp",
         },
     }
 }

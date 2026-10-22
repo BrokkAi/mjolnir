@@ -265,9 +265,10 @@ impl HarnessKind {
                 .filter_map(|grant| grant.get("expires")?.as_i64())
                 .filter(|expires| *expires > 0)
                 .max(),
-            // Muse stores no timestamp Hel can order two copies by, and
-            // OpenCode's logins live in its database, which no copy orders.
-            Self::Muse | Self::OpenCode => None,
+            // Muse stores no timestamp Hel can order two copies by,
+            // OpenCode's logins live in its database, which no copy orders,
+            // and DSH has no login.
+            Self::Muse | Self::OpenCode | Self::Dsh => None,
         }
     }
 
@@ -282,7 +283,7 @@ impl HarnessKind {
                 .and_then(|seconds| seconds.checked_mul(1000)),
             // None of these has a proactive-refresh path, so none reports an
             // expiry Hel would act on: each refreshes its own tokens on demand.
-            Self::Grok | Self::Muse | Self::OpenCode | Self::Mimo => None,
+            Self::Grok | Self::Muse | Self::OpenCode | Self::Mimo | Self::Dsh => None,
         }
     }
 
@@ -297,6 +298,9 @@ impl HarnessKind {
             Self::OpenCode => vec!["auth".to_owned(), "login".to_owned()],
             Self::Mimo => vec!["auth".to_owned(), "login".to_owned()],
             Self::Codex | Self::Kimi | Self::Grok | Self::Muse => vec!["login".to_owned()],
+            // dsh-acp has no login; its profiles authenticate with an API
+            // key, so `login_command` refuses before this is reached.
+            Self::Dsh => Vec::new(),
         };
         (self.cli_binary_name().to_owned(), arguments)
     }

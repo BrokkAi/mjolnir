@@ -6,7 +6,7 @@ description: Understand Mjolnir's purpose, boundaries, supported coding harnesse
 Mjolnir (`mj`) is a session manager for coding agents that provisions their
 execution environments and lets you continue work across harnesses, accounts,
 and machines. It supports Codex, Claude Code, Kimi Code, Grok Build, Muse
-Code, OpenCode, and MiMo Code through the Agent Client Protocol (ACP), with a terminal dashboard,
+Code, OpenCode, MiMo Code, and DSH through the Agent Client Protocol (ACP), with a terminal dashboard,
 personal web viewer, and desktop app.
 
 Choose a harness account independently from the target where it runs. Mjolnir
@@ -98,15 +98,16 @@ These are the integrations shipped with Mjolnir 2.x today:
 | Muse Code | `muse` | Yes | Yes | Yes | No |
 | OpenCode | `opencode` | Yes | No | Yes | No |
 | MiMo Code | `mimo` | Yes | No | Yes | No |
+| DSH | `dsh` | API key | No (usage-priced, shows `API`) | Yes | No |
 
 “Native state” means Mjolnir can resume the harness's own session when the
 same harness is selected again. A cross-harness resume instead restores the
 workspace and supplies a size-bounded handoff derived from the canonical
 transcript. See [Durability and recovery](/durability/).
 
-Kimi Code does not provide a guardian approval mode, and OpenCode and MiMo Code
-run commands on the host without a sandbox. None of them should be used on a
-bare, unsandboxed runtime. Muse Code and MiMo Code currently accept one
+Kimi Code does not provide a guardian approval mode, and OpenCode, MiMo Code,
+and DSH run commands on the host without a sandbox. None of them should be used
+on a bare, unsandboxed runtime. Muse Code and MiMo Code currently accept one
 workspace root, so use either a one-repository bundle or one bare project
 directory, without attached directories.
 

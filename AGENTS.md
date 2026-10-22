@@ -247,6 +247,9 @@ container sessions run the same harness versions as managed bare workers:
   Containerfile and the pins disagree.
 - Muse: update `mj-worker/assets/muse/runtime.json`. The image installs Muse
   from that file.
+- dsh-acp: update `DSH_ACP_VERSION` and `mj-worker/assets/dsh/runtime.json`,
+  taking each platform's SHA-256 from the release's `.sha256` files. The image
+  installs dsh-acp from that file.
 - OpenCode: regenerate `mj-core/assets/opencode-provider-environment.txt`
   with `scripts/generate-opencode-provider-environment.py` from a checkout of
   the new tag. The test

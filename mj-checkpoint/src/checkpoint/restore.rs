@@ -421,11 +421,14 @@ pub(super) fn restored_native_relative_path(
             rewritten.extend(components);
             Ok(rewritten)
         }
-        // OpenCode's database records session directories itself; it has no
-        // per-workspace path key to rewrite.
-        HarnessKind::Codex | HarnessKind::Muse | HarnessKind::OpenCode | HarnessKind::Mimo => {
-            Ok(relative_path.to_path_buf())
-        }
+        // OpenCode's database records session directories itself, and
+        // dsh-acp records its directory inside the session file; neither has
+        // a per-workspace path key to rewrite.
+        HarnessKind::Codex
+        | HarnessKind::Muse
+        | HarnessKind::OpenCode
+        | HarnessKind::Mimo
+        | HarnessKind::Dsh => Ok(relative_path.to_path_buf()),
     }
 }
 
@@ -457,6 +460,9 @@ pub(super) fn restored_native_artifact_bytes(
             .is_some_and(|name| name == "session.jsonl")
     {
         return crate::native::muse::relocate(data, target_cwd);
+    }
+    if harness == HarnessKind::Dsh && relative_path.starts_with("sessions") {
+        return rewrite_dsh_session_cwd(data, target_cwd);
     }
     if !matches!(harness, HarnessKind::Kimi | HarnessKind::Grok) {
         return Ok(data.to_vec());
@@ -491,6 +497,31 @@ pub(super) fn restored_native_artifact_bytes(
         }
     }
     Ok(serde_json::to_vec(&state)?)
+}
+
+/// A dsh-acp session record names the directory it was created in, and
+/// `session/load` refuses any other, so a restore at a new workspace path
+/// records the target's. Additional directories need no rewrite: every load
+/// replaces them with the ones it is given.
+fn rewrite_dsh_session_cwd(data: &[u8], target_cwd: &Path) -> Result<Vec<u8>> {
+    let mut record: Value = serde_json::from_slice(data).context("parse dsh-acp session record")?;
+    let object = record
+        .as_object_mut()
+        .context("dsh-acp session record is not a JSON object")?;
+    ensure!(
+        object.contains_key("cwd"),
+        "dsh-acp session record names no cwd"
+    );
+    object.insert(
+        "cwd".into(),
+        Value::String(
+            target_cwd
+                .to_str()
+                .context("dsh-acp target cwd is not valid UTF-8")?
+                .to_owned(),
+        ),
+    );
+    Ok(serde_json::to_vec(&record)?)
 }
 
 /// Write `relative` under `root` with owner-only permissions, refusing to

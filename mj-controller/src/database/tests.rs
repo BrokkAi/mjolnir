@@ -1895,9 +1895,9 @@ fn a_fresh_database_accepts_a_session_for_every_harness_kind() {
     );
 }
 
-/// The ZCode and DSH harnesses are gone but their rows remain readable, so a
-/// store that still holds one must list every other session instead of failing
-/// outright.
+/// The ZCode and DeepSeek (`deepseek`) harnesses are gone but their rows
+/// remain readable, so a store that still holds one must list every other
+/// session instead of failing outright.
 #[test]
 fn a_session_for_a_removed_harness_is_skipped_without_hiding_the_others() {
     let directory = tempfile::tempdir().unwrap();

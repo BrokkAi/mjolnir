@@ -207,17 +207,14 @@ impl AcpSessionSurface {
         }
     }
 
-    /// The mode a harness returns to when Plan mode ends. OpenCode names its
-    /// normal mode `build`; every other harness Hel drives with a plan pair
-    /// names it `default`.
+    /// The mode a harness returns to when Plan mode ends. OpenCode and MiMo
+    /// Code name their normal mode `build` and dsh-acp names it `agent`;
+    /// every other harness Hel drives with a plan pair names it `default`.
     fn execution_mode_id(&self) -> &'static str {
-        if matches!(
-            self.harness_kind,
-            Some(HarnessKind::OpenCode | HarnessKind::Mimo)
-        ) {
-            "build"
-        } else {
-            "default"
+        match self.harness_kind {
+            Some(HarnessKind::OpenCode | HarnessKind::Mimo) => "build",
+            Some(HarnessKind::Dsh) => "agent",
+            _ => "default",
         }
     }
 
@@ -247,20 +244,18 @@ impl AcpSessionSurface {
                     value: value.into(),
                 })
                 .ok_or(PlanControlError::Incompatible),
-            // OpenCode advertises its agent modes as a `mode` select whose
-            // normal value is `build`, so Hel's plan toggle maps onto it
-            // without the `default` value the other harnesses use.
-            Some(HarnessKind::OpenCode | HarnessKind::Mimo) => self
-                .exact_config_has_pair("mode", "build")
-                .then(|| PlanControl::SetConfig {
-                    key: "mode".into(),
-                    value: if active {
-                        "plan".into()
-                    } else {
-                        "build".into()
-                    },
-                })
-                .ok_or(PlanControlError::Incompatible),
+            // OpenCode, MiMo Code and dsh-acp advertise their modes as a
+            // `mode` select whose normal value is not `default`, so Hel's
+            // plan toggle maps onto that value instead.
+            Some(HarnessKind::OpenCode | HarnessKind::Mimo | HarnessKind::Dsh) => {
+                let execution = self.execution_mode_id();
+                self.exact_config_has_pair("mode", execution)
+                    .then(|| PlanControl::SetConfig {
+                        key: "mode".into(),
+                        value: if active { "plan" } else { execution }.into(),
+                    })
+                    .ok_or(PlanControlError::Incompatible)
+            }
             Some(HarnessKind::Codex) => self
                 .exact_config_has_plan_pair("collaboration_mode")
                 .then(|| PlanControl::SetConfig {
@@ -487,28 +482,35 @@ mod tests {
         assert_eq!(surface.current_mode(), Some("plan"));
     }
 
+    /// Leaving Plan selects the normal mode each harness's `mode` select
+    /// offers: MiMo Code's `build` and dsh-acp 0.2.0's `agent`.
     #[test]
-    fn mimo_plan_exit_selects_its_build_mode() {
-        let mut surface = AcpSessionSurface::default();
-        surface.set_harness_kind(HarnessKind::Mimo);
-        surface.set_config_options(&[SessionConfigOption::new(
-            SessionConfigId::new("mode"),
-            "Mode",
-            SessionConfigKind::Select(SessionConfigSelect::new(
-                SessionConfigValueId::new("build"),
-                SessionConfigSelectOptions::Ungrouped(vec![
-                    SessionConfigSelectOption::new("build", "Build"),
-                    SessionConfigSelectOption::new("plan", "Plan"),
-                ]),
-            )),
-        )]);
+    fn plan_exit_selects_each_harness_own_normal_mode() {
+        for (harness, normal) in [(HarnessKind::Mimo, "build"), (HarnessKind::Dsh, "agent")] {
+            let mut surface = AcpSessionSurface::default();
+            surface.set_harness_kind(harness);
+            surface.set_config_options(&[SessionConfigOption::new(
+                SessionConfigId::new("mode"),
+                "Mode",
+                SessionConfigKind::Select(SessionConfigSelect::new(
+                    SessionConfigValueId::new(normal),
+                    SessionConfigSelectOptions::Ungrouped(vec![
+                        SessionConfigSelectOption::new(normal, "Normal"),
+                        SessionConfigSelectOption::new("plan", "Plan"),
+                    ]),
+                )),
+            )]);
 
-        assert_eq!(
-            surface.plan_control(false),
-            Ok(PlanControl::SetConfig {
-                key: "mode".into(),
-                value: "build".into(),
-            })
-        );
+            for (active, value) in [(true, "plan"), (false, normal)] {
+                assert_eq!(
+                    surface.plan_control(active),
+                    Ok(PlanControl::SetConfig {
+                        key: "mode".into(),
+                        value: value.into(),
+                    }),
+                    "{harness:?} active={active}"
+                );
+            }
+        }
     }
 }

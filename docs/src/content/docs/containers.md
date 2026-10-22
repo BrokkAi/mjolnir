@@ -15,9 +15,9 @@ selects Mjolnir's `unconstrained` execution policy. The `permissions` setting is
 only available for a bare runtime on an SSH machine. Mjolnir translates the policy into the
 selected harness's own control: Codex `agent-full-access`, Claude Code
 `bypassPermissions`, Kimi Code `auto`, Grok Build's `--always-approve` launch
-flag, OpenCode's `"permission": "allow"` config setting, or MiMo Code's
-dangerously-skip-permissions startup mode. Muse stages
-`:ask-me`, selects `promptUnmatched` approvals, turns muse-acp's auto-review
+flag, OpenCode's `"permission": "allow"` config setting, MiMo Code's
+dangerously-skip-permissions startup mode, or DSH's `permission_mode` `allow`.
+Muse stages `:ask-me`, selects `promptUnmatched` approvals, turns muse-acp's auto-review
 on, and disables only the sandbox (`--disable-sandbox`): the reviewer answers
 each approval without prompting you, so critical actions can still be denied.
 Every other harness's control approves every call. Note that Kimi Code's
@@ -26,10 +26,10 @@ calls.
 
 Bare localhost sessions preserve configured approvals for supported harnesses.
 Codex, Claude Code, Grok Build, and Muse Code expose guardian modes. Kimi Code
-does not, and neither do OpenCode and MiMo Code: they ask before tools
-according to their permission rules, but run every command directly on the
-host without a sandbox. Mjolnir warns against running any of these on a raw,
-unsandboxed target.
+does not, and neither do OpenCode, MiMo Code, and DSH: they ask before tools
+(DSH before every write, command, and MCP tool call), but run every command
+directly on the host without a sandbox. Mjolnir warns against running any of
+these on a raw, unsandboxed target.
 
 A container session's repository content always comes from a network clone. A
 local session that runs the agent in a directory on this machine can still move
@@ -92,10 +92,10 @@ a native `mj-worker` for local bare sessions.
 Mjolnir ships a reference container image with everything a session needs
 pre-installed: Rust, cargo-nextest, Node 24, OpenJDK 25, Python 3 with its
 native development headers and library, uv, Git, GitHub CLI, the Codex and
-Claude ACP bridges, Muse Code with `muse-acp`, and MiMo Code. Kimi, Grok, and
-OpenCode install on demand. It also carries Playwright's Chromium system
-libraries and the pre-installed Chromium headless shell in
-`PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`, so headless browser tests need no
+Claude ACP bridges, Muse Code with `muse-acp`, MiMo Code, and dsh-acp 0.2.0
+for DSH. Kimi, Grok, and OpenCode install on demand. It also carries
+Playwright's Chromium system libraries and the pre-installed Chromium headless
+shell in `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`, so headless browser tests need no
 privileged install and no run-time browser download, and the profiling tools
 `perf`, `cargo-flamegraph`, `samply`, and `heaptrack`. Mjolnir adds
 `--cap-add=PERFMON` to local and SSH Podman containers, including replacements

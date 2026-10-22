@@ -193,7 +193,9 @@ you choose to retain is replayed into the new relay.
 The handoff is direct, tool-free inference. Mjolnir selects a configured profile
 with a usable utility model and considers its quota before provider preference.
 Within the same quota class, the preference is Codex GPT Luna, Muse Spark, Grok,
-Kimi, then a DeepSeek-on-Codex profile running its newest DeepSeek Flash model.
+Kimi, then a DeepSeek profile running its newest DeepSeek Flash model: a
+DeepSeek-on-Codex profile, or a DSH profile whose base URL is DeepSeek's own
+`api.deepseek.com` and whose `DEEPSEEK_API_KEY` is set.
 A Z.ai (GLM) Codex profile is not a utility model. Model versions are resolved
 from live provider catalogs. Claude profiles are not utility models: a Claude-only configuration
 needs another supported profile before cross-harness handoff can work.
