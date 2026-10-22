@@ -105,6 +105,7 @@ pub fn apply_instance_flag(value: Option<&str>) -> Result<()> {
     if let Some(directory) = session_index_dir_for(
         std::env::var_os(SESSION_INDEX_ENV).as_deref(),
         env_override_os("DATA_DIR").as_deref(),
+        &with_instance_dir(default_data_dir(), instance_name().as_deref()),
     ) {
         // SAFETY: as above. This is the same single-threaded startup step.
         unsafe {
@@ -129,16 +130,21 @@ static SESSION_INDEX_RESOLVED: std::sync::atomic::AtomicBool =
 /// data directory — every end-to-end test daemon — must not walk the user's
 /// real session stores or write the user's real index. Such a process gets its
 /// own index beside its own data. A named instance without a data-directory
-/// override keeps sharing the user's one index, and an explicit
+/// override keeps sharing the user's one index, and so does an override that
+/// names the directory this process would use anyway. An explicit
 /// `SESSIONWIKI_DATA` is always obeyed.
 pub(crate) fn session_index_dir_for(
     existing: Option<&std::ffi::OsStr>,
     data_dir_override: Option<&std::ffi::OsStr>,
+    default_data_dir: &std::path::Path,
 ) -> Option<PathBuf> {
     if existing.is_some() {
         return None;
     }
-    data_dir_override.map(|data| PathBuf::from(data).join("sessionwiki"))
+    data_dir_override
+        .map(PathBuf::from)
+        .filter(|data| data != default_data_dir)
+        .map(|data| data.join("sessionwiki"))
 }
 
 /// Whether process startup has chosen where the session index lives.

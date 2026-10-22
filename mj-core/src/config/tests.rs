@@ -2226,20 +2226,41 @@ fn apply_instance_flag_rejects_bad_names_without_touching_the_environment() {
 // Hard-won: 4ce2f9a7: test data directory overrides could read or write the user session index
 #[test]
 fn an_overridden_data_directory_gets_its_own_session_index() {
+    let default = PathBuf::from("/home/user/.local/share/mjolnir");
     // Without the override the user's own index is the right one.
-    assert_eq!(session_index_dir_for(None, None), None);
+    assert_eq!(session_index_dir_for(None, None, &default), None);
     let overridden = std::ffi::OsString::from("/tmp/lab/data");
     assert_eq!(
-        session_index_dir_for(None, Some(overridden.as_os_str())),
+        session_index_dir_for(None, Some(overridden.as_os_str()), &default),
         Some(PathBuf::from("/tmp/lab/data/sessionwiki")),
         "a daemon with its own data directory indexes into its own directory"
     );
     let chosen = std::ffi::OsString::from("/tmp/elsewhere");
     assert_eq!(
-        session_index_dir_for(Some(chosen.as_os_str()), Some(overridden.as_os_str())),
+        session_index_dir_for(
+            Some(chosen.as_os_str()),
+            Some(overridden.as_os_str()),
+            &default
+        ),
         None,
         "an explicit choice is never overridden"
     );
+}
+
+// Hard-won: a daemon started with MJ_DATA_DIR set to the default directory used a stale private index
+#[test]
+fn an_override_naming_the_default_data_directory_shares_the_user_index() {
+    let default = PathBuf::from("/home/user/.local/share/mjolnir");
+    for same in [
+        "/home/user/.local/share/mjolnir",
+        "/home/user/.local/share/mjolnir/",
+    ] {
+        assert_eq!(
+            session_index_dir_for(None, Some(std::ffi::OsStr::new(same)), &default),
+            None,
+            "{same} is the default data directory, not an isolated one"
+        );
+    }
 }
 
 // Hard-won: 18de1bb4: recovery could act on workers belonging to another instance
