@@ -77,8 +77,8 @@ conventional location. A detected home becomes the explicit `home` path in
 Kimi Code does not expose a guardian approval mode. OpenCode and MiMo Code ask
 before tools according to their permission rules, and DSH asks before every
 write, command, and MCP tool call, but all three run commands on the host
-without a sandbox, so they have no guardian either. Mjolnir warns before using
-any of them on a raw target. Muse's guardian is muse-acp's auto-review; see
+without a sandbox, so they have no guardian either. The dashboard's
+new-session and resume wizards warn before using any of them on a raw target. Muse's guardian is muse-acp's auto-review; see
 [Harness limitations](#harness-limitations).
 Container runtimes and EC2
 machines instead run every harness unconstrained inside the isolation
@@ -487,7 +487,9 @@ that speaks ACP itself, so there is no separate bridge. It is not the DeepSeek
 harness earlier releases offered as `kind = "deepseek"`; that kind still fails
 to load. The home is a `DSH_ACP_DATA_DIR` root. It holds an optional
 `AGENTS.md` and dsh-acp's native session records, `sessions/<id>.json`; there
-is no configuration file, no login file, and no skills support. With no login
+is no configuration file, no login file, and no skills support. dsh-acp
+receives `AGENTS.md` in one environment variable, so it can be at most 131049
+bytes; a session with a larger one refuses to start and says so. With no login
 to create it, create the home directory yourself; `mj doctor` reports it
 missing until you do. DSH reads no
 instruction file itself, so Mjolnir passes the staged `AGENTS.md`, including

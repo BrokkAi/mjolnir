@@ -28,8 +28,8 @@ Bare localhost sessions preserve configured approvals for supported harnesses.
 Codex, Claude Code, Grok Build, and Muse Code expose guardian modes. Kimi Code
 does not, and neither do OpenCode, MiMo Code, and DSH: they ask before tools
 (DSH before every write, command, and MCP tool call), but run every command
-directly on the host without a sandbox. Mjolnir warns against running any of
-these on a raw, unsandboxed target.
+directly on the host without a sandbox. The dashboard warns against running
+any of these on a raw, unsandboxed target.
 
 A container session's repository content always comes from a network clone. A
 local session that runs the agent in a directory on this machine can still move

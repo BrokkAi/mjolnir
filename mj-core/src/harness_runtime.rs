@@ -134,6 +134,15 @@ pub fn opencode_acp_script() -> String {
     )
 }
 
+/// The most bytes of staged instructions dsh-acp can be given. They travel
+/// in one environment variable, and Linux refuses to start a program with an
+/// environment string longer than 32 pages (131072 bytes), counting the
+/// `DSH_ACP_SYSTEM_PROMPT=` prefix and the terminating NUL. dsh-acp 0.2.0
+/// reads instructions from no file, and Mjolnir's ACP schema has no session
+/// system-prompt field, so there is no other channel. The ceiling applies on
+/// every target, so a session behaves the same wherever it runs.
+pub const DSH_ACP_INSTRUCTIONS_LIMIT: usize = 131_072 - "DSH_ACP_SYSTEM_PROMPT=".len() - 1;
+
 /// The shell commands that start dsh-acp, which the positional arguments
 /// name (`"$@"`), for the managed install and the container fallback alike.
 ///
@@ -142,15 +151,18 @@ pub fn opencode_acp_script() -> String {
 /// so the commands pass it the instruction file staged into the session
 /// home ([`HarnessKind::agent_instructions_file`]) on every launch. The
 /// variable is always set, empty without the file, so a value from the
-/// target's login shell never reaches the session. Without
-/// `DSH_ACP_DATA_DIR` dsh-acp would keep its sessions in a `.dsh-acp`
-/// directory inside the repository, so the commands refuse to start.
+/// target's login shell never reaches the session. A file over
+/// [`DSH_ACP_INSTRUCTIONS_LIMIT`] is refused by name rather than dropped or
+/// left to fail as "Argument list too long". Without `DSH_ACP_DATA_DIR`
+/// dsh-acp would keep its sessions in a `.dsh-acp` directory inside the
+/// repository, so the commands refuse to start.
 pub fn dsh_acp_script() -> String {
     let kind = HarnessKind::Dsh;
     format!(
-        "instructions=\"${{{data}:?}}/{instructions}\"; DSH_ACP_SYSTEM_PROMPT=; if [ -f \"$instructions\" ]; then DSH_ACP_SYSTEM_PROMPT=\"$(cat \"$instructions\")\" || exit; fi; export DSH_ACP_SYSTEM_PROMPT; exec \"$@\"",
+        "instructions=\"${{{data}:?}}/{instructions}\"; DSH_ACP_SYSTEM_PROMPT=; if [ -f \"$instructions\" ]; then size=$(($(wc -c < \"$instructions\"))) || exit; if [ \"$size\" -gt {limit} ]; then echo \"$instructions is $size bytes; dsh-acp receives its instructions in one environment variable, which holds at most {limit} bytes. Shorten {instructions} in the DSH profile home.\" >&2; exit 1; fi; DSH_ACP_SYSTEM_PROMPT=\"$(cat \"$instructions\")\" || exit; fi; export DSH_ACP_SYSTEM_PROMPT; exec \"$@\"",
         data = kind.home_env(),
         instructions = kind.agent_instructions_file(),
+        limit = DSH_ACP_INSTRUCTIONS_LIMIT,
     )
 }
 

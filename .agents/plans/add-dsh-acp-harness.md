@@ -98,6 +98,14 @@ The source project is https://github.com/BrokkAi/dsh-acp. Version 0.2.0 is the f
   Rationale: with no login, nothing ever creates the directory, and Move refuses a profile whose home is missing.
   Date/Author: 2026-10-22 / Claude
 
+- Decision (review follow-up): refuse a staged `AGENTS.md` over `DSH_ACP_INSTRUCTIONS_LIMIT` (131049 bytes) by name before starting dsh-acp.
+  Rationale: Linux refuses an environment string over 131072 bytes, so a larger file made every launch fail with "Argument list too long" (exit 126, reproduced at 150,000 bytes). dsh-acp 0.2.0 offers no file channel, its `--system-prompt` argument has the same per-string limit, and Mjolnir's ACP schema (1.5.0) has no session `systemPrompt` field, so no other transport exists without an ACP upgrade or a dsh-acp change. Dropping the instructions silently would hide the failure.
+  Date/Author: 2026-10-22 / Claude
+
+- Decision (review follow-up): the raw-target warning stays a dashboard feature for now, and the docs say so.
+  Rationale: only `mj-tui` shows it (true for Kimi Code before this change); `mj new`, `/api/preflight/new` and the web viewer have no warning. Showing or requiring acknowledgement on every client is a cross-client product change proposed to the user rather than folded into this harness.
+  Date/Author: 2026-10-22 / Claude
+
 ## Outcomes & Retrospective
 
 The harness is implemented and was exercised live in an isolated instance (`--instance dsh-live`) with a local bare target and a scripted DeepSeek-compatible server reached through `DEEPSEEK_BASE_URL`. Model discovery installed the pinned binary from the verified GitHub archive into the managed cache and listed `deepseek-flash` and `deepseek-v4-pro`. A session streamed a reply; the upstream request carried the profile key as a bearer token and a system prompt holding the profile's staged `AGENTS.md`, and Mjolnir's `mj-agents` and `mj-memory` MCP servers appeared as dsh-acp tools. A command under configured approvals stopped at "DSH requests permission: Run touch dsh-proof.txt" and ran in the session clone only after approval. The native record lived in the staged home, never in the repository. After setting `permission_mode` to `allow` by hand, suspending, restarting the daemon and resuming, the same native session came back from the checkpoint with all of its messages and the history reached the model, and `permission_mode` was `ask` again.

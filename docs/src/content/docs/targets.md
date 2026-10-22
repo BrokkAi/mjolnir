@@ -84,7 +84,9 @@ on raw targets. Kimi Code cannot. OpenCode and MiMo Code ask before tools
 according to their permission rules, and DSH, with dsh-acp's `permission_mode`
 `ask`, asks before every write, command, and MCP tool call. None of the three
 has a sandbox, so a prompt is the only thing between the agent and the host.
-Mjolnir displays a prominent warning when any of these is selected without an isolation boundary. Read [Security boundaries](/security/)
+The dashboard's new-session and resume wizards display a prominent warning
+when any of these is selected without an isolation boundary; `mj new`, the
+API, and the web viewer do not warn. Read [Security boundaries](/security/)
 before choosing a raw or `yolo` target.
 
 ## Bare runtimes

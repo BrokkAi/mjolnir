@@ -2091,10 +2091,11 @@ fn run_default_bridge_install(
 }
 
 /// dsh-acp reads no instruction file, so its launch passes the staged one as
-/// the system prompt dsh-acp appends to its own, byte for byte. A value the
-/// target's login shell exports never reaches the session, and a launch
-/// without a staged home refuses rather than let dsh-acp keep its sessions in
-/// the repository it runs in.
+/// the system prompt dsh-acp appends to its own, byte for byte, up to the one
+/// environment string the operating system allows. A value the target's login
+/// shell exports never reaches the session, and a launch without a staged home
+/// refuses rather than let dsh-acp keep its sessions in the repository it runs
+/// in.
 #[cfg(unix)]
 #[test]
 fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
@@ -2135,6 +2136,28 @@ fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         format!("|{instructions}")
+    );
+
+    // The variable holds at most one environment string: the largest file
+    // starts, and one byte more is refused by name before dsh-acp starts.
+    let limit = mj_core::harness_runtime::DSH_ACP_INSTRUCTIONS_LIMIT;
+    let largest = "x".repeat(limit);
+    std::fs::write(staged.join("AGENTS.md"), &largest).unwrap();
+    let output = launch(Some(&staged));
+    assert!(output.status.success(), "{:?}", output.status);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("|{largest}")
+    );
+    std::fs::write(staged.join("AGENTS.md"), format!("{largest}x")).unwrap();
+    let output = launch(Some(&staged));
+    assert!(!output.status.success(), "{:?}", output.status);
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!("is {} bytes", limit + 1))
+            && stderr.contains(&format!("at most {limit} bytes")),
+        "{stderr}"
     );
 
     std::fs::remove_file(staged.join("AGENTS.md")).unwrap();

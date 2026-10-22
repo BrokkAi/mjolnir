@@ -81,9 +81,10 @@ under configured approvals selects dsh-acp's `permission_mode` `ask`, so every
 write, command, and MCP tool call asks first, but it has no sandbox either:
 commands run directly on the host, and only its file tools are confined to the
 workspace roots.
-Mjolnir warns when a harness without guardian support is paired with a raw
-target, but a warning is not a
-sandbox—choose a container or instance instead.
+The dashboard's new-session and resume wizards warn when a harness without
+guardian support is paired with a raw target; `mj new`, the API, and the web
+viewer do not. A warning is not a sandbox either way—choose a container or
+instance instead.
 
 Mjolnir does not expose arbitrary extra container-runtime arguments. Container
 names, ownership labels, capabilities, and generated mount modes come from
