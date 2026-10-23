@@ -255,9 +255,7 @@ fn an_installed_dsh_is_offered_before_its_first_login() {
         .count();
     assert_eq!(dsh_probes, 1, "the probe keys off DeepSeek's own CLI");
     assert!(
-        commands
-            .iter()
-            .all(|command| command.program != "dsh-acp"),
+        commands.iter().all(|command| command.program != "dsh-acp"),
         "the dsh-acp bridge is installed on demand and is not a detection signal"
     );
 }

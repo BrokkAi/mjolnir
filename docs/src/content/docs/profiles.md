@@ -816,7 +816,7 @@ Local-bare, raw SSH, and EC2 workers instead install the exact versions pinned b
 Mjolnir release into `$XDG_CACHE_HOME/mjolnir/harnesses`, or
 `$HOME/.cache/mjolnir/harnesses` when `XDG_CACHE_HOME` is unset. They launch
 only the resulting absolute path—never an arbitrary compatible executable from
-`PATH`. Codex, Claude, and MiMo Code require Node.js 22 or newer plus npm on
+`PATH`. DSH is the exception and is never installed; see below. Codex, Claude, and MiMo Code require Node.js 22 or newer plus npm on
 the host.
 Kimi and Grok require curl and Bash for their official installers.
 Muse requires Node.js 22 or newer, npm, and curl; Mjolnir launches the pinned
@@ -831,10 +831,12 @@ self-update so a running session never replaces its own binary.
 MiMo Code installs from the pinned `@mimo-ai/cli` npm package. Its managed
 launch disables automatic updates so a running session never replaces its own
 binary.
-DSH requires curl and tar, and no Node.js; Mjolnir downloads the pinned
-dsh-acp 0.2.0 GitHub release archive for the platform and verifies its SHA-256
-checksum. Linux and macOS, on x86-64 and ARM64, are supported. Linux needs
-glibc 2.34 or newer, so musl distributions such as Alpine cannot run it.
+DSH is never installed. A launch resolves the target's own `dsh-acp` on
+`PATH`, or fetches the pinned `@brokkai/dsh-acp@0.2.0` package through `npx`,
+so a bare target needs Node.js 22 or newer with npm and npx; the npm package
+bundles the release binaries. Linux and macOS, on x86-64 and ARM64, are
+supported. Linux needs glibc 2.34 or newer, so musl distributions such as
+Alpine cannot run it.
 Mjolnir reports a missing prerequisite and leaves the existing worker alone;
 it does not invoke sudo or a system package manager.
 

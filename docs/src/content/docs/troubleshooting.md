@@ -164,10 +164,14 @@ PATH = "/opt/my-tools/bin:/usr/local/bin:/usr/bin:/bin"
 After changing a profile's environment, restart the worker or stop and resume
 the session; an already running worker does not continuously reread shell
 startup files. Bare sessions on this machine, SSH, and EC2 do not launch an ambient harness from
-this path: they use the exact Mjolnir-managed version, while `PATH` supplies its
+this path: they use the exact Mjolnir-managed version (DSH excepted: it has no
+managed version, and launches the target's own `dsh-acp` or the pinned npm
+package), while `PATH` supplies its
 installer prerequisites. These targets require Node.js 22 and npm for Codex,
 Claude, and MiMo Code, curl and Bash for Kimi and Grok, or curl and tar for
-Muse, OpenCode, and DSH. Install prerequisites
+Muse and OpenCode. DSH is never installed: its launch needs `dsh-acp` on
+`PATH` or Node.js 22 with npm and npx to fetch the pinned npm package. Install
+prerequisites
 on the host yourself; Mjolnir never invokes sudo for harness setup.
 
 Container images must expose required tools on their ordinary image `PATH`.
