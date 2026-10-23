@@ -1,27 +1,8 @@
 use super::*;
 
 impl ReviewSlot {
-    /// The forms each role's harness is waiting on, read from that role's
-    /// journal. A reviewer's own plan decision is not a question for the
-    /// person: the review pane declines it for them.
-    pub(super) fn questions(&self) -> impl Iterator<Item = ReviewerQuestion> + '_ {
-        self.roles
-            .iter()
-            .filter_map(|(role, transcript)| Some((role, transcript.session.as_ref()?)))
-            .flat_map(|(role, session)| {
-                session
-                    .pending_elicitations
-                    .iter()
-                    .filter(|request| !mj_core::acp::is_plan_review_id(&request.id))
-                    .map(|request| ReviewerQuestion {
-                        role: role.clone(),
-                        request: request.clone(),
-                    })
-            })
-    }
-
     pub(super) fn view(&self, session_id: &str) -> RuntimeReviewView {
-        let verdict = match self.driver.phase() {
+        let mut verdict = match self.driver.phase() {
             TurnReviewPhase::Forwarding { synthesis, .. } => Some(VerdictView {
                 kind: VerdictKind::Findings,
                 text: synthesis.clone(),
@@ -59,9 +40,19 @@ impl ReviewSlot {
                 },
             }),
         };
+        if self.push.is_some()
+            && let Some(verdict) = verdict.as_mut()
+        {
+            verdict.allowed = if self.push.as_ref().is_some_and(|push| push.finishing) {
+                Vec::new()
+            } else {
+                vec![Resolution::Cancelled]
+            };
+        }
         RuntimeReviewView {
             session_id: session_id.to_owned(),
-            questions: self.questions().collect(),
+            questions: Vec::new(),
+            child_session_id: self.state.child_session_id.clone(),
             phase: self.driver.phase().clone(),
             roles: self.driver.roles(),
             // A review that needed no reviewer (nothing changed, or only a

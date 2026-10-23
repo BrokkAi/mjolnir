@@ -179,14 +179,6 @@ pub(super) async fn handle_action(
             .await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::SaveActiveReview { session_id, review } => {
-            blocking(move || crate::database::save_active_review(&session_id, &review)).await?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::ClearActiveReview { session_id } => {
-            blocking(move || crate::database::clear_active_review(&session_id)).await?;
-            Ok(DaemonReply::Done)
-        }
         DaemonAction::RecordAbandonedPrompt {
             session_id,
             bundle_id,
@@ -548,16 +540,6 @@ pub(super) async fn handle_action(
         DaemonAction::WithdrawStartupPrompt { session_id, text } => Ok(
             DaemonReply::PromptWithdrawn(state.withdraw_startup_prompt(&session_id, &text).await?),
         ),
-        DaemonAction::ReviewerAction {
-            session_id,
-            role,
-            action,
-        } => {
-            let session = state.session_manager.session(session_id).await?;
-            Ok(DaemonReply::Reviewer(Box::new(
-                session.reviewer_as(role, action).await?,
-            )))
-        }
         DaemonAction::StartTurnReview { session_id } => {
             state
                 .review_host()
@@ -593,6 +575,10 @@ pub(super) async fn handle_action(
             elicitation_id,
             response,
         } => {
+            let (session_id, elicitation_id) = state
+                .review_host()
+                .question_target(&session_id, &elicitation_id)
+                .unwrap_or((session_id, elicitation_id));
             state
                 .session_manager
                 .session(session_id)

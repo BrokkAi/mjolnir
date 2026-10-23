@@ -1540,6 +1540,11 @@ fn review_leftovers_are_reported_and_left_alone() {
         format!("{} refs/hel/review-baseline\n", "b".repeat(40)),
     )
     .unwrap();
+    std::fs::create_dir_all(git_dir.join("refs/mj")).unwrap();
+    std::fs::write(git_dir.join("refs/mj/review-baseline"), "d".repeat(41)).unwrap();
+    let mut packed = std::fs::read_to_string(git_dir.join("packed-refs")).unwrap();
+    packed.push_str(&format!("{} refs/mj/reviewed/tree\n", "e".repeat(40)));
+    std::fs::write(git_dir.join("packed-refs"), packed).unwrap();
     let scratch = git_dir.join("hel-review-index-AbCdEf");
     std::fs::write(&scratch, b"scratch").unwrap();
 
@@ -1550,7 +1555,9 @@ fn review_leftovers_are_reported_and_left_alone() {
         [
             "refs/hel/review-baseline",
             "refs/hel/review-capture",
-            "refs/hel/worktrees/gone/review-baseline"
+            "refs/hel/worktrees/gone/review-baseline",
+            "refs/mj/review-baseline",
+            "refs/mj/reviewed/tree"
         ]
     );
     assert_eq!(residue.scratch_indexes, std::slice::from_ref(&scratch));

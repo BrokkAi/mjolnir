@@ -330,6 +330,8 @@ pub(crate) struct DashboardContext {
     /// What the daemon says about quota. The daemon is the only prober; this
     /// process never asks a provider.
     quota: Feed<watch::Receiver<mj_client::quota::QuotaSnapshot>>,
+    review_capabilities:
+        watch::Receiver<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>,
     profile_capabilities:
         Feed<watch::Receiver<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>>,
     /// The daemon's finished-cycle count when the person last pressed
@@ -924,7 +926,6 @@ pub(crate) async fn run_dashboard_for_workspace(
             // feed message is applied; the next wakeup drains them. Only the
             // bookkeeping that input itself can invalidate runs now.
             context.cancel_stale_path_input();
-            context.refresh_open_review();
         } else if context.drain_feeds() {
             // A background message can be queued behind a timer that won the
             // select, and the drain applies it here. Its result has to reach
@@ -965,6 +966,16 @@ pub(crate) async fn run_dashboard_for_workspace(
             // save or another client's edit, is probed for its runtimes.
             if let Some(check) = context.dashboard.take_machine_runtime_check() {
                 actions::apply_dashboard_action(&mut context, check).await?;
+            }
+            // Settings shows whether each saved profile has a login. Reading
+            // those files belongs off the loop; this is the one place that
+            // starts it so every surface that opens Settings is covered.
+            if let Some(generation) = context.dashboard.take_profile_login_refresh() {
+                io::spawn_profile_login_statuses(
+                    generation,
+                    context.dashboard.config().clone(),
+                    context.dashboard_io_tx.clone(),
+                );
             }
             // The Sessions pane is a list of conversations, not a list of
             // things to go and open, so the transcript follows its selection.
@@ -1720,6 +1731,7 @@ impl DashboardContext {
             reported_notice_id,
             runtime_review_views,
             runtime_config: Feed::new(runtime_config_rx),
+            review_capabilities: capabilities_rx.clone(),
             profile_capabilities: Feed::new(capabilities_rx),
             pending_runtime_updates: Vec::new(),
             remote_lifecycle_sessions: BTreeSet::new(),

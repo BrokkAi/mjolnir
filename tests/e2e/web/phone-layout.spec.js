@@ -134,7 +134,7 @@ function fixture(taskCount = 1, options = {}) {
       profiles: [],
       targets: [],
       bundles: [],
-      review_config: { enabled: false, profile: null },
+      review_config: { trigger: "off", profile: null },
     },
     actions: [],
     snapshots: 0,

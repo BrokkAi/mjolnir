@@ -679,6 +679,7 @@ dependencies = [
  "sha2 0.11.0",
  "tar",
  "tempfile",
+ "tracing",
  "url",
  "zip",
 ]

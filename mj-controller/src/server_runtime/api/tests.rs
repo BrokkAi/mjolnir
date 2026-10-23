@@ -513,11 +513,6 @@ impl SessionHandleBackend for FakeSession {
     ) -> mj_client::session::BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
-    fn review_state(
-        &self,
-    ) -> mj_client::session::BoxFuture<'_, Result<mj_client::session::ReviewState>> {
-        Box::pin(async { Ok(Default::default()) })
-    }
 
     fn config_result(&self, _command_id: String) -> BoxFuture<'_, Result<Option<Option<String>>>> {
         Box::pin(async { Ok(Some(None)) })
@@ -868,9 +863,7 @@ impl SessionHandleBackend for ConfigSession {
     ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
         self.inner.search_prompts(bundle, scope, query)
     }
-    fn review_state(&self) -> BoxFuture<'_, Result<mj_client::session::ReviewState>> {
-        self.inner.review_state()
-    }
+
     fn config_result(&self, id: String) -> BoxFuture<'_, Result<Option<Option<String>>>> {
         self.inner.config_result(id)
     }
@@ -1496,6 +1489,7 @@ async fn a_child_that_owes_its_report_is_reminded_once() {
 /// A child hands back one report per turn. The report is recorded against the
 /// turn that is running, a repeat in the same turn is refused without being an
 /// error, and a session that is not such a child cannot hand anything back.
+// Hard-won: cba38b09c: ordinary report limits rejected complete reviewer JSON.
 #[tokio::test]
 async fn a_child_hands_back_one_report_per_turn() {
     if std::env::var_os(HANDBACK_TEST_CHILD).is_none() {
@@ -1518,6 +1512,8 @@ async fn a_child_hands_back_one_report_per_turn() {
     crate::database::save_subagent_session(
         &child,
         &mj_core::subagent::SubagentRecord {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             child_session_id: "child-1".into(),
             parent_session_id: "parent-1".into(),
             task_name: "audit deps".into(),
@@ -1548,7 +1544,7 @@ async fn a_child_hands_back_one_report_per_turn() {
             session_id: "child-1".into(),
             accepted_ordinal: 1,
             submitted: mpsc::unbounded_channel().0,
-            view: Some(view),
+            view: Some(view.clone()),
         })),
         running_states(),
         Arc::new(NoExports),
@@ -1604,11 +1600,7 @@ async fn a_child_hands_back_one_report_per_turn() {
 
     // A report past the cap is refused, and the refusal says where the
     // details go, so the child can retry with a short report.
-    let long = hand_back(
-        "child-1",
-        &"x".repeat(mj_core::subagent::MAX_HANDBACK_CHARS + 1),
-    )
-    .await;
+    let long = hand_back("child-1", &"x".repeat(20_000)).await;
     assert!(long.is_error, "{}", long.message);
     assert!(
         long.message.contains("report directory") && long.message.contains("4000"),
@@ -1623,6 +1615,52 @@ async fn a_child_hands_back_one_report_per_turn() {
         "{}",
         stranger.message
     );
+
+    let mut reviewer = parent_record("reviewer-1", "helper");
+    reviewer.title = "review".into();
+    let mut relation = crate::database::load_subagent("child-1").unwrap().unwrap();
+    relation.kind = mj_core::subagent::SubagentKind::Reviewer;
+    relation.child_session_id = reviewer.id.clone();
+    relation.request_key = "reviewer-request".into();
+    crate::database::save_subagent_session(&reviewer, &relation).unwrap();
+    let backend = Arc::new(ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: reviewer.id.clone(),
+            accepted_ordinal: 1,
+            submitted: mpsc::unbounded_channel().0,
+            view: Some(view),
+        })),
+        running_states(),
+        Arc::new(NoExports),
+    ));
+    let mut output = serde_json::json!({"findings": [{"title": "[P1] Preserve the complete finding", "body": ""}]});
+    let padding = 20_000 - output.to_string().chars().count();
+    output["findings"][0]["body"] = "é".repeat(padding).into();
+    let message = output.to_string();
+    assert_eq!(message.chars().count(), 20_000);
+    let accepted = backend
+        .execute_subagent_tool(
+            reviewer.id.clone(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "reviewer-report".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::Handback {
+                    message: message.clone(),
+                },
+            },
+        )
+        .await;
+    assert!(!accepted.is_error, "{}", accepted.message);
+    let report = crate::database::load_subagent_report(&reviewer.id)
+        .unwrap()
+        .handback
+        .unwrap();
+    assert_eq!(report.message, message);
+    assert!(matches!(
+        mj_review::verdict::review_output_verdict(&report.message),
+        mj_core::review::verdict::ReviewVerdict::Findings { .. }
+    ));
 }
 
 /// Found in a live run: a parent waited right after spawning, the store had
@@ -2005,9 +2043,7 @@ impl SessionHandleBackend for ScriptedSession {
     ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
         self.inner.search_prompts(bundle_id, scope, query)
     }
-    fn review_state(&self) -> BoxFuture<'_, Result<mj_client::session::ReviewState>> {
-        self.inner.review_state()
-    }
+
     fn config_result(&self, command_id: String) -> BoxFuture<'_, Result<Option<Option<String>>>> {
         self.inner.config_result(command_id)
     }
@@ -2103,6 +2139,8 @@ fn store_parent_and_child(child_id: &str) {
     crate::database::save_subagent_session(
         &parent_record(child_id, "helper"),
         &mj_core::subagent::SubagentRecord {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             child_session_id: child_id.into(),
             parent_session_id: "parent-1".into(),
             task_name: "audit deps".into(),
@@ -2549,6 +2587,8 @@ async fn send_message_resolves_only_authorized_hex_session_prefixes() {
         crate::database::save_subagent_session(
             &record,
             &mj_core::subagent::SubagentRecord {
+                kind: mj_core::subagent::SubagentKind::Worker,
+                reviewer_launch: None,
                 child_session_id: id.into(),
                 parent_session_id: parent_id.into(),
                 task_name: "message routing".into(),
@@ -4246,4 +4286,39 @@ async fn report_reconcile_recovers_unreported_finishes_and_ignores_parent_opt_ou
             crate::mailbox_outbox::MailboxEventDelivery::Accepted(40)
         );
     }
+}
+
+#[tokio::test]
+async fn reviewer_children_are_private_to_the_review_host() {
+    if !isolated_parked_test("reviewer_children_are_private_to_the_review_host") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut state = crate::database::load_state().unwrap();
+    state.subagents.get_mut("child-1").unwrap().kind = mj_core::subagent::SubagentKind::Reviewer;
+    crate::database::save_state(&state).unwrap();
+    record_finished_child("child-1", "review", "private JSON result", 3, 9, 7);
+    let (backend, _) = report_backend(active_parent_view("working"));
+    let result = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "list-workers".into(),
+                created_at_ms: 1,
+                action: mj_core::subagent::SubagentToolAction::ListAgents,
+            },
+        )
+        .await;
+    assert!(!result.is_error, "{}", result.message);
+    let body: serde_json::Value = serde_json::from_str(&result.message).unwrap();
+    assert_eq!(body["agents"], serde_json::json!([]));
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty(),
+        "reviewers never notify their parent through SubagentFinished"
+    );
 }

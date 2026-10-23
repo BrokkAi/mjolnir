@@ -163,7 +163,7 @@ pub(super) async fn forward_in_process_session_request(
         }
         RemoteSessionRequest::Reviewer {
             session_id,
-            role,
+            role: _,
             action,
             mut reply,
         } => {
@@ -173,7 +173,7 @@ pub(super) async fn forward_in_process_session_request(
                     manager
                         .session(session_id)
                         .await?
-                        .reviewer_as(role, action)
+                        .reviewer(action)
                         .await
                 } => result,
             }
@@ -241,38 +241,15 @@ pub(super) async fn serve_client(
             // stop should not be refused.
             Err("daemon is shutting down; retry to reach a fresh daemon".to_owned())
         } else {
-            let reviewer = matches!(&request.action, DaemonAction::ReviewerAction { .. });
             // Lifecycle actions contain large checkpoint/restore futures. Keep
             // them off the connection task's stack, including in debug builds.
-            let mut action = Box::pin(handle_action(
+            let action = Box::pin(handle_action(
                 request.action,
                 &metadata,
                 &state,
                 &cancellation,
             ));
-            if reviewer {
-                // A reviewer action is a long-lived sidecar operation. If its
-                // client goes away, drop the future so the session actor sees
-                // its reply receiver close and tears down the reviewer. A
-                // one-byte peek observes EOF without consuming a pipelined
-                // frame; buffered work therefore remains for the next loop.
-                let mut peer_probe = [0_u8; 1];
-                tokio::select! {
-                    result = &mut action => result.map_err(|error| format!("{error:#}")),
-                    peer = stream.peek(&mut peer_probe) => {
-                        match peer {
-                            Ok(0) => return Ok(()),
-                            Ok(_) => action.await.map_err(|error| format!("{error:#}")),
-                            Err(error) => {
-                                tracing::debug!(%error, "reviewer client connection became unreadable");
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
-            } else {
-                action.await.map_err(|error| format!("{error:#}"))
-            }
+            action.await.map_err(|error| format!("{error:#}"))
         };
         // Echo the caller's protocol version: replies must stay readable in the
         // client's own dialect, and the shapes it can receive here are frozen.

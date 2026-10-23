@@ -30,6 +30,8 @@ const bootStatus = document.querySelector('#boot-status'),
   menuVersion = document.querySelector('#menu-version'),
   announcer = document.querySelector('#announcer'),
   workspaceStrip = document.querySelector('#workspaces'),
+  workspaceSelect = document.querySelector('#workspace-select'),
+  subagentWorkspace = document.querySelector('#subagent-workspace'),
   sessions = document.querySelector('#sessions'),
   resumable = document.querySelector('#resumable'),
   resumeListView = document.querySelector('#resume-list-view'),
@@ -473,37 +475,33 @@ function renderLaunchFailures() {
 }
 
 function renderWorkspaces() {
-  const selected = selectedWorkspaceId();
-  if (route.subagentParentId) {
-    const parent = sessionById(route.subagentParentId);
-    const tab = el('div', 'tab virtual-workspace');
-    tab.setAttribute('role', 'tab');
-    tab.setAttribute('aria-selected', 'true');
-    tab.setAttribute('aria-current', 'page');
-    tab.append(el('span', '', parent?.title || route.subagentParentId));
+  const parentId = route.subagentParentId;
+  const workspaces = snapshot.workspaces || [];
+  workspaceSelect.classList.toggle('hidden', Boolean(parentId) || !workspaces.length);
+  subagentWorkspace.classList.toggle('hidden', !parentId);
+  if (parentId) {
+    const parent = sessionById(parentId);
     const close = el('button', 'virtual-workspace-close', '×');
     close.type = 'button';
     close.setAttribute('aria-label', `Close ${parent?.title || 'session'} sub-agent workspace`);
-    close.onclick = event => {
-      event.stopPropagation();
-      navigate({ name: 'conversation', sessionId: route.subagentParentId });
-    };
-    tab.append(close);
-    workspaceStrip.replaceChildren(tab);
+    close.onclick = () => navigate({ name: 'conversation', sessionId: parentId });
+    subagentWorkspace.replaceChildren(el('span', '', parent?.title || parentId), close);
     return;
   }
-  workspaceStrip.replaceChildren(
-    ...(snapshot.workspaces || []).map(workspace => {
-      const tab = el('button', 'tab', workspace.name);
-      tab.setAttribute('role', 'tab');
-      tab.setAttribute('aria-selected', String(workspace.id === selected));
-      // Selection is a word to a screen reader and a border to everyone else,
-      // never colour alone.
-      if (workspace.id === selected) tab.setAttribute('aria-current', 'page');
-      tab.dataset.workspaceId = workspace.id;
-      return tab;
-    }),
-  );
+  // Every snapshot re-renders the route. Rebuilding the options only when the
+  // list itself changes keeps a refresh from closing the picker mid-choice.
+  const options = JSON.stringify(workspaces.map(workspace => [workspace.id, workspace.name]));
+  if (workspaceSelect.dataset.options !== options) {
+    workspaceSelect.dataset.options = options;
+    workspaceSelect.replaceChildren(
+      ...workspaces.map(workspace => {
+        const option = el('option', '', workspace.name);
+        option.value = workspace.id;
+        return option;
+      }),
+    );
+  }
+  workspaceSelect.value = selectedWorkspaceId() || '';
 }
 
 // ---------------------------------------------------------------------------
@@ -1736,9 +1734,10 @@ function freshDraft() {
 }
 
 
+// Mirrors HarnessKind::supports_delegation_tools.
 function subagentChoiceApplies(draft = newDraft) {
   const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
-  return kind === 'claude' || kind === 'codex';
+  return kind === 'claude' || kind === 'codex' || kind === 'dsh';
 }
 
 const SUBAGENT_MODES = [['native', 'Native'], ['mjolnir', 'Mjolnir'], ['none', 'None']];
@@ -6078,6 +6077,15 @@ function renderTurnReview(session) {
   }
   const card = el('section', 'card turn-review');
   card.append(el('strong', '', 'Reviewing this turn'));
+  if (review.child_session_id) {
+    const transcript = el('a', '', 'Reviewer conversation');
+    transcript.href = routeHash({
+      name: 'conversation',
+      sessionId: review.child_session_id,
+      subagentParentId: session.id,
+    });
+    card.append(transcript);
+  }
   const roles = review.roles || [];
   if (roles.length) {
     const strip = el('p', 'dim turn-review-roles');
@@ -6826,10 +6834,12 @@ function showHelp() {
 /// Keep this byte-for-byte aligned with `hel_chat::review_status_line`: the
 /// same configuration should answer the same way on the terminal and phone.
 function reviewStatusLine(review, open) {
-  const enabled = review?.enabled === true;
+  const enabled = review?.trigger === "turn";
   const profile = review?.profile;
   let armed;
-  if (enabled && profile) {
+  if (review?.trigger === "push") {
+    armed = "Review trigger is before push";
+  } else if (enabled && profile) {
     armed = `Reviewing every completed turn with [review] profile ${JSON.stringify(profile)}`;
   } else if (enabled) {
     armed = 'Reviewing every completed turn with Auto';
@@ -6908,7 +6918,7 @@ async function runLocalCommand(text) {
       const scope = argument.trim().toLowerCase();
       if (scope === 'status') {
         error.textContent = reviewStatusLine(
-          snapshot?.review_config,
+          { ...snapshot?.review_config, trigger: session?.review_trigger ?? snapshot?.review_config?.trigger },
           Boolean(session?.turn_review),
         );
         setComposerText('');
@@ -6917,7 +6927,7 @@ async function runLocalCommand(text) {
       if (scope === 'on' || scope === 'off') {
         // Arming review is configuration, not a session gesture.
         error.textContent =
-          'automatic review is configured in config.toml: [review] enabled';
+          'automatic review is configured in config.toml: [review] trigger';
         setComposerText('');
         return true;
       }
@@ -7882,10 +7892,8 @@ resumeSearch.oninput = () => {
   renderResumable();
 };
 
-workspaceStrip.onclick = event => {
-  const tab = event.target.closest('button[data-workspace-id]');
-  if (!tab) return;
-  navigate({ name: 'dashboard', workspaceId: tab.dataset.workspaceId });
+workspaceSelect.onchange = () => {
+  navigate({ name: 'dashboard', workspaceId: workspaceSelect.value });
 };
 
 for (const node of document.querySelectorAll(

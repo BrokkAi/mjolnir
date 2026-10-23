@@ -89,13 +89,12 @@ pub(crate) struct NativeImportArgs {
     /// Review every turn of the imported session at this reasoning effort.
     #[arg(long)]
     review_effort: Option<String>,
-    /// Deprecated compatibility option. Either accepted value enables review;
-    /// the value is ignored.
+    /// Deprecated compatibility option; the value is ignored.
     #[arg(long, hide = true, value_parser = ["quick", "extended"])]
     review_tier: Option<String>,
-    /// Do not review the imported session's turns automatically.
-    #[arg(long, conflicts_with_all = ["review_model", "review_effort", "review_tier"])]
-    no_review: bool,
+    /// Review trigger for the imported session, overriding `[review]`.
+    #[arg(long, value_parser = ["off", "turn", "push"])]
+    review: Option<String>,
     #[command(flatten)]
     pub(crate) workspace: crate::WorkspaceName,
 }
@@ -225,7 +224,7 @@ pub(crate) fn import_named_native_session(
             review_model: None,
             review_effort: None,
             review_tier: None,
-            no_review: false,
+            review: None,
             workspace: crate::WorkspaceName::default(),
         },
         &source,
@@ -317,7 +316,7 @@ fn import_native(
         .context("import did not add its session to controller state")?;
     session.workspace_id = workspace_id.to_owned();
     session.review = crate::api_commands::session_review(
-        args.no_review,
+        args.review.as_deref(),
         args.review_model.as_deref(),
         args.review_effort.as_deref(),
         args.review_tier.as_deref(),
@@ -1036,21 +1035,36 @@ mod tests {
         ]);
         assert_eq!(
             crate::api_commands::session_review(
-                args.no_review,
+                args.review.as_deref(),
                 args.review_model.as_deref(),
                 args.review_effort.as_deref(),
                 args.review_tier.as_deref(),
             ),
-            Some(mj_core::config::SessionReview::On {
+            Some(mj_core::config::SessionReview::Turn {
                 model: Some("gpt-6-luna".into()),
                 effort: Some("max".into()),
                 tier: None,
             })
         );
+        for trigger in ["off", "turn", "push"] {
+            let (_, args) = parse_import(&[
+                "mj",
+                "import",
+                "codex",
+                "--session",
+                "native-1",
+                "--review",
+                trigger,
+            ]);
+            let choice =
+                crate::api_commands::session_review(args.review.as_deref(), None, None, None)
+                    .unwrap();
+            assert_eq!(choice.trigger().to_string(), trigger);
+        }
         let (_, plain) = parse_import(&["mj", "import", "codex", "--session", "native-1"]);
         assert_eq!(
             crate::api_commands::session_review(
-                plain.no_review,
+                plain.review.as_deref(),
                 plain.review_model.as_deref(),
                 plain.review_effort.as_deref(),
                 plain.review_tier.as_deref(),
@@ -1069,16 +1083,17 @@ mod tests {
         ]);
         assert_eq!(
             crate::api_commands::session_review(
-                tier_only.no_review,
+                tier_only.review.as_deref(),
                 tier_only.review_model.as_deref(),
                 tier_only.review_effort.as_deref(),
                 tier_only.review_tier.as_deref(),
             ),
-            Some(mj_core::config::SessionReview::On {
+            Some(mj_core::config::SessionReview::Turn {
                 model: None,
                 effort: None,
                 tier: None,
-            })
+            }),
+            "the deprecated tier still turns on turn review"
         );
         assert!(
             crate::Cli::try_parse_from([

@@ -7,6 +7,7 @@ pub(super) enum ManagerCommand {
     },
 }
 
+#[allow(clippy::large_enum_variant)] // Submit owns its relay command; the other requests are small.
 pub(super) enum ActorCommand {
     Submit {
         queued_at: Instant,

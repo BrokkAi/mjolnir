@@ -261,13 +261,13 @@ Profiles Settings… action: None
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
 │ Create   Open   Fi  │ Settings › Agent Profiles                                                                    │                     │
-│hel ───────────────  │ Add a profile for each agent you want to run, or use Detect profiles to find installed       │                     │
-│› · ACP pretty name  │ agents.                                                                                      │                     │
+│hel ───────────────  │ Add a profile, then choose Sign in. Detect profiles finds installed agents.                  │                     │
+│› · ACP pretty name  │                                                                                              │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
 │  │ No messages yet  │   claude-1                                               7 settings  ›     Add               │                     │
 │  │                  │   codex-1                                                7 settings  ›     Remove            │                     │
 │                     │   codex-2                                                7 settings  ›     Detect profiles   │                     │
-│                     │                                                                                              │                     │
+│                     │                                                                            Sign in           │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -640,13 +640,13 @@ Profiles number 2 action: None
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
 │ Create   Open   Fi  │ Settings › Agent Profiles                                                                    │                     │
-│hel ───────────────  │ Add a profile for each agent you want to run, or use Detect profiles to find installed       │                     │
-│› · ACP pretty name  │ agents.                                                                                      │                     │
+│hel ───────────────  │ Add a profile, then choose Sign in. Detect profiles finds installed agents.                  │                     │
+│› · ACP pretty name  │                                                                                              │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
 │  │ No messages yet  │   claude-1                                               7 settings  ›     Add               │                     │
 │  │                  │   codex-1                                                7 settings  ›     Remove            │                     │
 │                     │   codex-2                                                7 settings  ›     Detect profiles   │                     │
-│                     │                                                                                              │                     │
+│                     │                                                                            Sign in           │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -809,13 +809,13 @@ Profiles Enter setup action: None
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
 │ Create   Open   Fi  │ Settings › Agent Profiles                                                                    │                     │
-│hel ───────────────  │ Add a profile for each agent you want to run, or use Detect profiles to find installed       │                     │
-│› · ACP pretty name  │ agents.                                                                                      │                     │
+│hel ───────────────  │ Add a profile, then choose Sign in. Detect profiles finds installed agents.                  │                     │
+│› · ACP pretty name  │                                                                                              │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
 │  │ No messages yet  │   claude-1                                               7 settings  ›     Add               │                     │
 │  │                  │   codex-1                                                7 settings  ›     Remove            │                     │
 │                     │   codex-2                                                7 settings  ›     Detect profiles   │                     │
-│                     │                                                                                              │                     │
+│                     │                                                                            Sign in           │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │

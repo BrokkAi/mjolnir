@@ -21,6 +21,15 @@ impl HostState {
                 materialized: snapshot,
             },
         );
+        let parents: Vec<_> = self
+            .reviews
+            .iter()
+            .filter(|(_, slot)| slot.state.child_session_id.as_deref() == Some(&session_id))
+            .map(|(parent, _)| parent.clone())
+            .collect();
+        for parent in parents {
+            self.publish(&parent);
+        }
         if self.recovery_candidates.contains(&session_id)
             && matches!(execution, MaterializedExecutionState::Idle)
         {
@@ -34,7 +43,7 @@ impl HostState {
             watch.prompt_driven
                 && matches!(watch.execution, MaterializedExecutionState::Running { .. })
         }) && matches!(execution, MaterializedExecutionState::Idle);
-        if !finished_turn || !(self.config)(&session_id).enabled {
+        if !finished_turn || !(self.config)(&session_id).arms_turn_review() {
             return;
         }
         self.begin(session_id, false, None);
@@ -89,6 +98,86 @@ impl HostState {
                 reply,
                 prepared,
             });
+        });
+    }
+
+    pub(super) fn begin_push(
+        &mut self,
+        session_id: String,
+        reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
+    ) {
+        let refusal = if !(self.config)(&session_id).is_push() {
+            Some("this session's review trigger is not push")
+        } else if crate::controller::move_session::move_owns_session(&session_id) {
+            Some("session is moving")
+        } else if self.reviews.contains_key(&session_id)
+            || self.preparing.contains(&session_id)
+            || self.recovery_candidates.contains(&session_id)
+            || self.recovery_in_flight.contains(&session_id)
+        {
+            Some("a review is already open")
+        } else {
+            None
+        };
+        if let Some(reason) = refusal {
+            let _ = reply.send(Err(StartRefusal(reason.into())));
+            return;
+        }
+        let config = (self.config)(&session_id);
+        let control = self.control.clone();
+        let environment = self.environment.clone();
+        let events = self.events.clone();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.preparation_cancellation
+            .insert(session_id.clone(), cancelled.clone());
+        self.preparing.insert(session_id.clone());
+        self.publish(&session_id);
+        tokio::spawn(async move {
+            let prepared = tokio::time::timeout(
+                std::time::Duration::from_secs(90),
+                prepare_scoped(
+                    &control,
+                    &environment,
+                    &session_id,
+                    config,
+                    cancelled.clone(),
+                    mj_core::relay::CaptureScope::PushableCommits,
+                ),
+            )
+            .await;
+            let prepared = match prepared {
+                Ok(prepared) => prepared,
+                Err(_) => {
+                    cancelled.store(true, std::sync::atomic::Ordering::Release);
+                    Err(StartRefusal(
+                        "review preparation exceeded 90 seconds; call request_review again".into(),
+                    ))
+                }
+            };
+            let accepted = prepared.as_ref().ok().map(|prepared| {
+                let repositories: Vec<_> = prepared.captured.as_deref().unwrap_or_default().iter().map(|delta| serde_json::json!({
+                    "repository": delta.root, "base_commit": delta.base_commit, "base_kind": delta.base_kind,
+                    "head_commit": delta.head_commit, "changed_file_count": delta.files.len()
+                })).collect();
+                serde_json::json!({"accepted": true, "repositories": repositories})
+            });
+            let (opened, result) = oneshot::channel();
+            if events
+                .send(HostEvent::Prepared {
+                    session_id,
+                    manual: true,
+                    reply: Some(opened),
+                    prepared,
+                })
+                .is_err()
+            {
+                let _ = reply.send(Err(StartRefusal("the review host stopped".into())));
+                return;
+            }
+            let outcome = result
+                .await
+                .unwrap_or_else(|_| Err(StartRefusal("the review host stopped".into())));
+            let _ = reply.send(outcome.map(|()| accepted.expect("accepted review has a capture")));
         });
     }
 
@@ -163,11 +252,18 @@ impl HostState {
         if let Some(slot) = self.reviews.get(session_id) {
             // Name what the open review waits for when it waits on a person,
             // since that is what lets the next one start.
-            return Some(StartRefusal(match slot.questions().next() {
+            let question = slot
+                .state
+                .child_session_id
+                .as_ref()
+                .and_then(|child| self.sessions.get(child))
+                .and_then(|watch| watch.materialized.as_ref())
+                .and_then(|session| session.pending_elicitations.first());
+            return Some(StartRefusal(match question {
                 Some(question) => format!(
                     "the previous review is waiting for your answer to a question ({}); \
                      answer or dismiss it",
-                    quoted_question(&question.request.message)
+                    quoted_question(&question.message)
                 ),
                 None => "a review is already open".to_owned(),
             }));

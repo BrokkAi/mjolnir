@@ -110,7 +110,11 @@ pub fn restore_checkpoint_with_native_state(
     }
     seed.validate()?;
     if spec.restore_repositories {
-        restore_repositories_from_archive(&archive, &spec.workspace_root, git)?;
+        restore_repositories_from_archive(&archive, &spec.workspace_root, git, true)?;
+    } else {
+        // Move has already transported workspace files. Review refs still
+        // need their destination checkout names without changing its index.
+        restore_repositories_from_archive(&archive, &spec.workspace_root, git, false)?;
     }
 
     // Attachment data belongs to the relay, even when native harness history
@@ -233,15 +237,25 @@ pub fn restore_repositories(
 ) -> Result<()> {
     ensure!(workspace_root.is_dir(), "restore workspace is missing");
     let archive = read_archive_verified(archive_path)?;
-    restore_repositories_from_archive(&archive, workspace_root, git)
+    restore_repositories_from_archive(&archive, workspace_root, git, true)
 }
 
 pub(super) fn restore_repositories_from_archive(
     archive: &crate::archive::VerifiedArchive,
     workspace_root: &Path,
     git: &dyn GitCommandRunner,
+    restore_contents: bool,
 ) -> Result<()> {
     for repository in &archive.manifest.repositories {
+        if !restore_contents
+            && !repository
+                .metadata
+                .saved_refs
+                .keys()
+                .any(|name| name.starts_with("refs/mj/"))
+        {
+            continue;
+        }
         let id = &repository.metadata.id;
         let snapshot = archived_repository_snapshot(archive, repository)?;
         let path = checkout_top_level(
@@ -249,8 +263,14 @@ pub(super) fn restore_repositories_from_archive(
             &repository.metadata,
         )
         .with_context(|| format!("restore repository {id:?}"))?;
-        restore_git_snapshot(git, &path, &snapshot)
-            .with_context(|| format!("restore repository {id:?}"))?;
+        crate::archive::restore_git_snapshot_for_session(
+            git,
+            &path,
+            &snapshot,
+            Some(&archive.manifest.session.id),
+            restore_contents,
+        )
+        .with_context(|| format!("restore repository {id:?}"))?;
     }
     Ok(())
 }
@@ -352,8 +372,14 @@ pub fn restore_single_repository_onto_branch(
     // configuration is shared with the user's main checkout; keep managed
     // network configuration out of that shared config.
     snapshot.metadata.remote_workspace = false;
-    restore_git_snapshot(git, repository_path, &snapshot)
-        .with_context(|| format!("restore repository {:?}", repository.metadata.id))?;
+    crate::archive::restore_git_snapshot_for_session(
+        git,
+        repository_path,
+        &snapshot,
+        Some(&archive.manifest.session.id),
+        true,
+    )
+    .with_context(|| format!("restore repository {:?}", repository.metadata.id))?;
     Ok(archived_branch)
 }
 
@@ -370,8 +396,14 @@ pub fn restore_single_repository_into_checkout(
     };
     let mut snapshot = archived_repository_snapshot(&archive, repository)?;
     snapshot.metadata.remote_workspace = false;
-    restore_git_snapshot(git, repository_path, &snapshot)
-        .context("restore independent checkout before moving it into a target")
+    crate::archive::restore_git_snapshot_for_session(
+        git,
+        repository_path,
+        &snapshot,
+        Some(&archive.manifest.session.id),
+        true,
+    )
+    .context("restore independent checkout before moving it into a target")
 }
 
 /// Native session files use harness-specific working-directory keys. Rewrite

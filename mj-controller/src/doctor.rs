@@ -470,7 +470,7 @@ fn harness_discovery_check_from(
                     HarnessKind::every_display_name_or()
                 ),
                 format!(
-                    "Install and sign in to a supported harness, then open Mjolnir, press {settings_key} for Settings, and choose Agent Profiles."
+                    "Add a profile in Settings → Agent Profiles and choose Sign in, or install and sign in to a supported harness and choose Detect profiles. Open Mjolnir, press {settings_key} for Settings."
                 ),
             )
         };
@@ -563,7 +563,8 @@ prerequisites.\n\n\
         InstructionsPlatform::Macos => format!(
             "# Mjolnir setup instructions for macOS\n\n\
 Run these commands as the user who will run `mj`:\n\n\
-1. Install and sign in to a supported coding agent, then run `mj setup`.\n\
+1. Install and sign in to a supported coding agent, then run `mj setup`; or\n\
+   add a profile in Settings → Agent Profiles and choose Sign in.\n\
    Setup discovers agent homes and local runtimes, offers AWS when the AWS CLI\n\
    has credentials, and offers SSH hosts from `~/.ssh/config`. Review its\n\
    proposed configuration and confirm writing `config.toml`. It runs smoke\n\
@@ -1167,7 +1168,7 @@ fn subagent_policy_check(config: &Config) -> DoctorCheck {
         eligible.join(", ")
     };
     let detail = format!(
-        "Claude and Codex sessions may opt in, up to {} sub-agents at once per session. A session's sub-agents may use its own profile and: {others}.",
+        "Claude, Codex, and DSH sessions may opt in, up to {} sub-agents at once per session. A session's sub-agents may use its own profile and: {others}.",
         subagents.max_concurrent
     );
     DoctorCheck::ready("subagents.policy", "Sub-agent policy", detail)
@@ -1176,9 +1177,9 @@ fn subagent_policy_check(config: &Config) -> DoctorCheck {
 /// Point an unauthenticated profile at `mj login`, which already knows how to
 /// sign each harness in.
 ///
-/// The underlying command is named only for the reader's benefit; it comes from
-/// [`login_command`], the one place that tracks what each harness CLI actually
-/// accepts, so this text cannot drift away from what `mj login` runs.
+/// The program and arguments below are named only for the reader's benefit;
+/// the actual `mj login` path prefers ACP and uses this CLI command as its
+/// fallback, so this text should mention both rather than claim only one.
 fn harness_login_remediation(id: &str, profile: &HarnessProfile) -> String {
     let (program, arguments) = match login_command(profile) {
         Ok(command) => command,
@@ -1188,7 +1189,7 @@ fn harness_login_remediation(id: &str, profile: &HarnessProfile) -> String {
         Err(error) => return format!("{error} Check {}.", profile.home.display()),
     };
     let login = format!(
-        "Run `mj login --profile {id}`; it runs `{program} {}` against {}.",
+        "Run `mj login --profile {id}`; it signs in through the harness's ACP flow or its CLI (`{program} {}` against {}).",
         arguments.join(" "),
         profile.home.display()
     );
@@ -3302,7 +3303,7 @@ mod tests;
 /// What one repository still holds from a Mjolnir review capture.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReviewResidue {
-    /// `refs/hel/*` refs in the repository.
+    /// Durable `refs/mj/*` refs and legacy `refs/hel/*` refs in the repository.
     pub refs: Vec<String>,
     /// Scratch index files left in the Git directory by an interrupted capture.
     pub scratch_indexes: Vec<PathBuf>,
@@ -3319,7 +3320,7 @@ impl ReviewResidue {
 /// Releases before this one staged the whole working tree into the user's own
 /// object store and pinned it with two refs, and a capture that was killed
 /// partway left its scratch index behind. Linked worktrees pin their baselines
-/// under `refs/hel/worktrees/`. All of it is the user's to remove, so this
+/// under `refs/mj/worktrees/` (formerly `refs/hel/worktrees/`). All of it is the user's to remove, so this
 /// only reads.
 pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
     let mut residue = ReviewResidue::default();
@@ -3328,11 +3329,12 @@ pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
         return residue;
     }
     loose_refs(&git_dir.join("refs/hel"), "refs/hel", &mut residue.refs);
+    loose_refs(&git_dir.join("refs/mj"), "refs/mj", &mut residue.refs);
     // A packed ref survives `git pack-refs`, which a `git gc` runs.
     if let Ok(packed) = std::fs::read_to_string(git_dir.join("packed-refs")) {
         for line in packed.lines() {
             if let Some((_, reference)) = line.split_once(' ')
-                && reference.starts_with("refs/hel/")
+                && (reference.starts_with("refs/hel/") || reference.starts_with("refs/mj/"))
                 && !residue.refs.iter().any(|known| known == reference)
             {
                 residue.refs.push(reference.to_owned());

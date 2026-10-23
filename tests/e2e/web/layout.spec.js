@@ -123,10 +123,9 @@ for (const viewport of VIEWPORTS) {
         expect(tiny, `${hash || '(root)'} has form text below 16px`).toEqual([]);
       }
 
-      // Selection is said, not only coloured: the chosen workspace carries
-      // aria-current, so a reader who cannot see the border still learns which
-      // one is open.
-      await expect(page.locator('#workspaces [aria-current="page"]')).toHaveCount(1);
+      // The open workspace is the select's value, which a screen reader
+      // announces with the control's name.
+      await expect(page.getByRole('combobox', { name: 'Workspace' })).not.toHaveValue('');
 
       // The menu is a menu, and Escape closes it.
       await page.locator('#menu-button').click();

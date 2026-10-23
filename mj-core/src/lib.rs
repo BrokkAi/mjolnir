@@ -22,6 +22,8 @@ pub mod go;
 pub mod goal;
 #[cfg(feature = "golden")]
 pub mod golden;
+#[cfg(unix)]
+pub mod harness_install;
 pub mod harness_runtime;
 pub mod help_search;
 pub mod hex;
@@ -47,7 +49,6 @@ pub mod remote_git;
 pub mod repository;
 pub mod review;
 pub mod runtime;
-pub mod second_opinion;
 pub mod skills;
 pub mod snapshot_map;
 pub mod state;

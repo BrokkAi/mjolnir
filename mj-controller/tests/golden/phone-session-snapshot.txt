@@ -66,6 +66,7 @@
 ]
 === live container session with a second workspace (1 session card) ===
 {
+  "review_trigger": "off",
   "subagents": {
     "mode": "native"
   },
@@ -165,6 +166,7 @@
 === wire detail row for a live session (1 session row and intern table) ===
 {
   "row": {
+    "review_trigger": "off",
     "subagents": {
       "mode": "native"
     },
@@ -268,6 +270,7 @@
 }
 === only workspace (1 session card) ===
 {
+  "review_trigger": "off",
   "subagents": {
     "mode": "native"
   },
@@ -354,6 +357,7 @@
   "activity": "Checking response",
   "session": {
     "row": {
+      "review_trigger": "off",
       "subagents": {
         "mode": "native"
       },
@@ -449,6 +453,7 @@
   "activity": "[idle]",
   "session": {
     "row": {
+      "review_trigger": "off",
       "subagents": {
         "mode": "native"
       },
@@ -541,6 +546,7 @@
 === turn running in child session (2 session cards) ===
 {
   "parent": {
+    "review_trigger": "off",
     "subagents": {
       "mode": "native"
     },
@@ -622,6 +628,7 @@
     }
   },
   "child": {
+    "review_trigger": "off",
     "subagents": {
       "mode": "native"
     },
@@ -707,6 +714,7 @@
 }
 === bare target (1 session card) ===
 {
+  "review_trigger": "off",
   "subagents": {
     "mode": "native"
   },
@@ -789,6 +797,7 @@
 }
 === stopped session without recovery copy (1 session card) ===
 {
+  "review_trigger": "off",
   "subagents": {
     "mode": "native"
   },
@@ -935,6 +944,7 @@
 }
 === last top-level message time (1 session card) ===
 {
+  "review_trigger": "off",
   "subagents": {
     "mode": "native"
   },
@@ -1011,6 +1021,7 @@
 }
 === messages without recorded times (1 session card) ===
 {
+  "review_trigger": "off",
   "subagents": {
     "mode": "native"
   },
@@ -1085,6 +1096,7 @@
 }
 === conversation not available (1 session card) ===
 {
+  "review_trigger": "off",
   "subagents": {
     "mode": "native"
   },
@@ -1156,6 +1168,7 @@
 === phone launch before provisioning completes (1 session card and action) ===
 {
   "session": {
+    "review_trigger": "off",
     "subagents": {
       "mode": "native"
     },

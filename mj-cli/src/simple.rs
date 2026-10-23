@@ -40,7 +40,7 @@ pub(crate) fn prepare(args: SimpleArgs) -> Result<mj_tui::GoMode> {
         .map(|recipe| recipe.profile_id.as_str())
         .filter(|profile_id| config.enabled_profile(profile_id).is_some())
         .or_else(|| config.enabled_profiles().next().map(|(id, _)| id))
-        .context("mj simple needs an enabled agent profile; run `mj setup` and enable one first")?
+        .context("mj simple needs an enabled agent profile; add one in Settings → Agent Profiles, or run `mj setup` and enable one first")?
         .to_owned();
     let target = config.targets.get(SIMPLE_TARGET_ID).with_context(|| {
         format!(

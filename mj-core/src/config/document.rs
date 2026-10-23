@@ -66,6 +66,11 @@ pub(super) fn edit_in_place(existing: &str, loaded: &str, updated: &str) -> Opti
             }
         }
     }
+    // Compare review against the file so saving replaces the legacy boolean
+    // and writes the trigger even when its effective value has not changed.
+    if let Some(review) = raw.get("review") {
+        loaded.insert("review".into(), review.clone());
+    }
     let updated_table = updated.parse::<toml::Table>().ok()?;
     let source = updated.parse::<Document>().ok()?;
     let mut next_position = usize::MAX / 2;

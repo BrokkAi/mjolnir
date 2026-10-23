@@ -151,6 +151,16 @@ impl Controller {
         // deliver too long, so the staged file is checked before it travels.
         profile.ensure_staged_instructions_deliverable(&session.last_profile, &profile_stage)?;
         apply_staged_execution_setting(profile.kind, launch.execution_policy, &profile_stage)?;
+        if let Some(reviewer) = &launch.reviewer_launch
+            && mj_core::worker_launch::ReviewMcpDelivery::for_harness(profile.kind)
+                == mj_core::worker_launch::ReviewMcpDelivery::HarnessProfile
+        {
+            super::super::reviewer::configure_staged_review_mcp(
+                profile.kind,
+                &profile_stage,
+                &reviewer.mcp_servers,
+            )?;
+        }
         // The `mj-agents` registration is not staged here: the worker writes
         // it on every start, because an upgrade or recovery replaces the
         // launch configuration without restaging this profile.
@@ -428,6 +438,16 @@ impl Controller {
             },
             &target,
         )?;
+        launch.reviewer_launch = subagent
+            .as_ref()
+            .and_then(|child| child.reviewer_launch.clone());
+        if let Some(reviewer) = &launch.reviewer_launch {
+            launch.bridge_command = reviewer.bridge_command.clone();
+            launch.bridge_args = reviewer.bridge_args.clone();
+            launch.execution_policy = reviewer.execution_policy;
+            launch.environment.extend(reviewer.environment.clone());
+            launch.excluded_environment = reviewer.excluded_environment.clone();
+        }
         // Read by the target-side MCP server from launch.json beside its socket,
         // independently of how each harness starts or registers that server.
         for name in [
@@ -489,8 +509,18 @@ impl Controller {
         // configuration has an eligible reviewer, and that is not a child. A child
         // works in its parent's tree, and reviewing it would report the
         // parent's work as the child's.
-        launch.review_capture =
-            mj_core::review::settings::can_review(&self.config) && subagent.is_none();
+        launch.review_trigger = if subagent.is_none() {
+            self.config
+                .review
+                .for_session(session.review.as_ref())
+                .trigger
+        } else {
+            Default::default()
+        };
+        launch.review_capture = mj_core::review::settings::can_review(&self.config)
+            && subagent.is_none()
+            && (launch.review_trigger != mj_core::config::ReviewTrigger::Push
+                || launch.review_gate());
         if let Some(subagent) = &subagent {
             let parent = self
                 .state
@@ -671,8 +701,8 @@ pub(super) fn apply_continuation_switch(launch: &mut WorkerLaunchConfig, enabled
 /// harness's own. The session's stored choice governs; `None` means native
 /// sub-agents, so a session created before the per-session choice existed (or
 /// through `mj new` with neither flag given) gets its harness's own
-/// sub-agents. A child never gets them, and only Claude and Codex can receive
-/// them at all.
+/// sub-agents. A child never gets them, and only a harness whose
+/// `HarnessKind::supports_delegation_tools` holds can receive them at all.
 #[cfg(test)]
 pub(super) fn subagent_tools_enabled(
     session: &mj_core::state::SessionRecord,
@@ -947,6 +977,7 @@ pub(super) fn worker_launch_config_with_checkout(
     }
     Ok((
         WorkerLaunchConfig {
+            reviewer_launch: None,
             goal_resume_request: None,
             target_environment,
             seed_image_environment: backend.container_engine().is_some(),
@@ -958,6 +989,7 @@ pub(super) fn worker_launch_config_with_checkout(
             subtle_subagents: true,
             initial_model: None,
             review_capture: false,
+            review_trigger: Default::default(),
             harness: profile.kind,
             harness_home: PathBuf::from(&target_profile_home),
             // The staged home mirrors the profile home, so the marker's path

@@ -72,7 +72,7 @@ Other project
 codex
 
 Idle
-layout: {"appWidth":370,"first":{"x":10,"y":183,"width":370,"height":99},"second":{"x":10,"y":294},"documentWidth":390}
+layout: {"appWidth":370,"first":{"x":10,"y":181,"width":370,"height":99},"second":{"x":10,"y":292},"documentWidth":390}
 === dashboard responsive 900 (900x900) ===
 Browser tests
 Other workspace
@@ -147,7 +147,7 @@ Other project
 codex
 
 Idle
-layout: {"appWidth":760,"first":{"x":70,"y":196,"width":760,"height":99},"second":{"x":70,"y":307},"documentWidth":900}
+layout: {"appWidth":760,"first":{"x":70,"y":194,"width":760,"height":99},"second":{"x":70,"y":305},"documentWidth":900}
 === dashboard responsive 1024 (1024x900) ===
 Browser tests
 Other workspace
@@ -222,7 +222,7 @@ Other project
 codex
 
 Idle
-layout: {"appWidth":960,"first":{"x":32,"y":196,"width":474,"height":99},"second":{"x":518,"y":196},"documentWidth":1024}
+layout: {"appWidth":960,"first":{"x":32,"y":194,"width":474,"height":99},"second":{"x":518,"y":194},"documentWidth":1024}
 === dashboard desktop actions open (1440x900) ===
 Browser tests
 Other workspace
@@ -300,7 +300,7 @@ Other project
 codex
 
 Idle
-layout: {"appWidth":1376,"first":{"x":32,"y":196,"width":451,"height":99},"second":{"x":495,"y":196},"documentWidth":1440}
+layout: {"appWidth":1376,"first":{"x":32,"y":194,"width":451,"height":99},"second":{"x":495,"y":194},"documentWidth":1440}
 === dashboard responsive 1920 (1920x900) ===
 Browser tests
 Other workspace
@@ -375,7 +375,7 @@ Other project
 codex
 
 Idle
-layout: {"appWidth":1600,"first":{"x":160,"y":196,"width":391,"height":99},"second":{"x":563,"y":196},"documentWidth":1920}
+layout: {"appWidth":1600,"first":{"x":160,"y":194,"width":391,"height":99},"second":{"x":563,"y":194},"documentWidth":1920}
 === dashboard responsive 2560 (2560x900) ===
 Browser tests
 Other workspace
@@ -450,7 +450,7 @@ Other project
 codex
 
 Idle
-layout: {"appWidth":1600,"first":{"x":480,"y":196,"width":391,"height":99},"second":{"x":883,"y":196},"documentWidth":2560}
+layout: {"appWidth":1600,"first":{"x":480,"y":194,"width":391,"height":99},"second":{"x":883,"y":194},"documentWidth":2560}
 === dashboard responsive 390 (390x900) ===
 Browser tests
 Other workspace
@@ -525,7 +525,7 @@ Other project
 codex
 
 Idle
-layout: {"appWidth":370,"first":{"x":10,"y":183,"width":370,"height":99},"second":{"x":10,"y":294},"documentWidth":390}
+layout: {"appWidth":370,"first":{"x":10,"y":181,"width":370,"height":99},"second":{"x":10,"y":292},"documentWidth":390}
 === compact cards with attention and activity clocks (390x844) ===
 Browser tests
 Other workspace

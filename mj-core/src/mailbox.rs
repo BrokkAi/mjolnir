@@ -195,6 +195,14 @@ pub struct SubagentFinishedReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MailboxEventBody {
+    ReviewVerdict {
+        review_id: String,
+        repository: std::path::PathBuf,
+        base_commit: String,
+        head_commit: String,
+        tree: String,
+        verdict: crate::review::verdict::ReviewVerdict,
+    },
     SubagentFinished {
         report: Box<SubagentFinishedReport>,
     },
@@ -260,6 +268,7 @@ impl MailboxEventBody {
     /// legacy text, but it cannot preserve peer sender identity.
     pub const fn minimum_relay_protocol(&self) -> u32 {
         match self {
+            Self::ReviewVerdict { .. } => crate::relay::RELAY_PUSH_REVIEW_PROTOCOL,
             Self::SubagentFinished { .. } => crate::relay::RELAY_SUBAGENT_FINISHED_PROTOCOL,
             Self::SessionMessage { .. } => crate::relay::RELAY_SESSION_MESSAGE_PROTOCOL,
             Self::ParentMessage { .. } => crate::relay::RELAY_STRUCTURED_MAILBOX_PROTOCOL,
@@ -362,6 +371,35 @@ pub fn render_mailbox_events(events: &[MailboxEvent]) -> String {
 /// the same event type, title, actor, and item reference.
 pub fn describe_mailbox_event(event: &MailboxEvent) -> MailboxEventDescription {
     let (header, body, context, transcript_line) = match &event.body {
+        MailboxEventBody::ReviewVerdict {
+            repository,
+            base_commit,
+            head_commit,
+            tree,
+            verdict,
+            ..
+        } => {
+            let short = |value: &str| value.chars().take(7).collect::<String>();
+            let range = format!(
+                "{}..{} in {}",
+                short(base_commit),
+                short(head_commit),
+                repository.display()
+            );
+            let text = match verdict {
+                crate::review::verdict::ReviewVerdict::Clean => format!(
+                    "Review clean for commits {range}. Tree {} is recorded as reviewed; you may push.",
+                    short(tree)
+                ),
+                crate::review::verdict::ReviewVerdict::Findings { synthesis, .. } => format!(
+                    "Review of commits {range} found:\n{synthesis}\nFix these, commit, and call request_review again before pushing."
+                ),
+                crate::review::verdict::ReviewVerdict::Failed { reason } => format!(
+                    "Review of commits {range} failed: {reason}. Call request_review again; the push stays blocked until a review is clean."
+                ),
+            };
+            (text.clone(), None, None, text)
+        }
         MailboxEventBody::SubagentFinished { report } => {
             let header = format!(
                 "Mjolnir: child task {} finished ({}).",
@@ -603,6 +641,7 @@ fn is_session_message(body: &MailboxEventBody) -> bool {
         MailboxEventBody::ParentMessage { .. }
             | MailboxEventBody::SessionMessage { .. }
             | MailboxEventBody::SubagentFinished { .. }
+            | MailboxEventBody::ReviewVerdict { .. }
     )
 }
 
@@ -682,6 +721,9 @@ mod tests {
     #[test]
     fn golden_mailbox_agent_context() {
         let events = vec![
+            event(MailboxEventBody::ReviewVerdict { review_id: "clean-review".into(), repository: "/workspace/app".into(), base_commit: "aaaaaaa123".into(), head_commit: "bbbbbbb456".into(), tree: "ccccccc789".into(), verdict: crate::review::verdict::ReviewVerdict::Clean }),
+            event(MailboxEventBody::ReviewVerdict { review_id: "findings-review".into(), repository: "/workspace/app".into(), base_commit: "aaaaaaa123".into(), head_commit: "bbbbbbb456".into(), tree: "ccccccc789".into(), verdict: crate::review::verdict::ReviewVerdict::Findings { synthesis: "Fix the parser race.".into(), evidence: Default::default() } }),
+            event(MailboxEventBody::ReviewVerdict { review_id: "failed-review".into(), repository: "/workspace/app".into(), base_commit: "aaaaaaa123".into(), head_commit: "bbbbbbb456".into(), tree: "ccccccc789".into(), verdict: crate::review::verdict::ReviewVerdict::Failed { reason: "reviewer disconnected".into() } }),
             event(MailboxEventBody::SubagentFinished { report: Box::new(serde_json::from_value(serde_json::json!({
                 "child_session_id":"child-1", "task_name":"Check parser", "state":"completed", "finished":true,
                 "parked":true, "output":"Fixed <parser>.\nTests passed: \"parser\".", "report_dir":"/reports/child-1", "report_source":"handback",

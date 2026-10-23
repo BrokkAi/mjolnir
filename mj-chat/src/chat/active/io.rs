@@ -53,7 +53,6 @@ impl ActiveChat {
             let view = self.session.changed().await;
             self.apply_session_view(view);
         }
-        self.advance_review();
         self.publish_conversation_notices();
     }
 
@@ -79,57 +78,13 @@ impl ActiveChat {
         }
     }
 
-    /// Moves a review on when the planner has answered the context request.
-    ///
-    /// The answer is the planner's next agent message after the request went
-    /// out, so a message already in the transcript can never be mistaken for
-    /// it, and a reconnect that replays the same completion starts no second
-    /// reviewer turn.
-    pub(crate) fn advance_review(&mut self) {
-        let Some(SecondOpinion::Review(review)) = self.state.second_opinion() else {
-            return;
-        };
-        let context_baseline = review.context_baseline;
-        let mj_core::second_opinion::ReviewStage::GatheringContext { command_id } =
-            review.workflow.stage()
-        else {
-            return;
-        };
-        if self.state.phase != WorkerPhase::Idle {
-            return;
-        }
-        let command_id = command_id.clone();
-        let Some(summary) = self.state.latest_agent_text_after(context_baseline) else {
-            return;
-        };
-        let reviewer_command_id = self.state.next_second_opinion_command_id("review");
-        let Some(SecondOpinion::Review(review)) = self.state.second_opinion_mut() else {
-            return;
-        };
-        let Some(request) =
-            review
-                .workflow
-                .primary_context_completed(&command_id, summary, reviewer_command_id)
-        else {
-            return;
-        };
-        if let Some(view) = self.state.second_opinion_mut() {
-            view.set_status("the reviewer is reading the plan…");
-        }
-        self.persist_review();
-        self.run_workflow_request(request);
-    }
-
     /// Shows the review the daemon is running for this session.
     ///
     /// The terminal hosts no part of a review: it renders this view, reads the
     /// reviewer's journal to show its transcript, and sends resolutions back.
     /// A review therefore survives this view closing.
     pub fn apply_review_view(&mut self, view: Option<mj_client::review::RuntimeReviewView>) {
-        let role = view
-            .as_ref()
-            .and_then(|view| view.roles.first())
-            .map(|role| role.role.clone());
+        let role = view.as_ref().and_then(|view| view.child_session_id.clone());
         self.state.set_turn_review(view);
         if self.state.turn_review().is_none() {
             self.reviewed_role = None;
@@ -144,7 +99,7 @@ impl ActiveChat {
             && self
                 .state
                 .turn_review()
-                .is_some_and(|review| review.role_is_active(&role))
+                .is_some_and(|review| review.view.is_working() || !review.view.questions.is_empty())
             && self.reviewed_role.as_deref() != Some(role.as_str())
         {
             self.reviewed_role = Some(role.clone());
@@ -235,31 +190,14 @@ impl ActiveChat {
                 self.finish_session_reconnect(result);
                 return;
             }
-            ChatIoUpdate::ReviewerPrepared {
-                generation,
-                result,
-                acknowledged,
-            } => {
-                self.apply_reviewer_prepared(generation, result);
-                let _ = acknowledged.send(());
-                return;
-            }
             ChatIoUpdate::ReviewerNotice(notice) => {
                 self.state.conversation_notice(notice);
                 return;
             }
             ChatIoUpdate::ReviewerStarted(result) => {
                 if let Err(error) = result {
-                    if let Some(view) = self.state.second_opinion_mut() {
-                        view.report_failure(error);
-                    } else {
-                        self.report_review_refusal(error);
-                    }
+                    self.report_review_refusal(error);
                 }
-                return;
-            }
-            ChatIoUpdate::ReviewerEvents { result } => {
-                self.apply_reviewer_events(result);
                 return;
             }
             ChatIoUpdate::TurnReviewEvents { role, result } => {

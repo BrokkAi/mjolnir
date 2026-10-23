@@ -1334,11 +1334,10 @@ mod tests {
         git(path, &["commit", "-q", "-m", "base"]);
         git(path, &["mv", "before.txt", "after 名前.txt"]);
         fs::write(path.join("my notes 日本.txt"), "hello\n").unwrap();
-        // Windows forbids `"` in file names; elsewhere git quotes it.
-        let quoted_name = cfg!(not(windows)).then_some("quo\"te.txt");
-        if let Some(name) = quoted_name {
-            fs::write(path.join(name), "q\n").unwrap();
-        }
+        // Windows forbids `"` in a file name; the other names still exercise
+        // spaces, non-ASCII text, and a rename there.
+        #[cfg(not(windows))]
+        fs::write(path.join("quo\"te.txt"), "q\n").unwrap();
         fs::write(path.join("tracked 日本.txt"), "x\ny\n").unwrap();
         let read = |args: &[&str]| {
             let output = Command::new("git")
@@ -1362,12 +1361,13 @@ mod tests {
             .map(|file| (file.path.as_str(), file.kind()))
             .collect();
         files.sort();
-        let mut expected = vec![
+        let mut expected: Vec<(&str, &str)> = vec![
             ("after 名前.txt", "renamed"),
             ("my notes 日本.txt", "new"),
             ("tracked 日本.txt", "modified"),
         ];
-        expected.extend(quoted_name.map(|name| (name, "new")));
+        #[cfg(not(windows))]
+        expected.push(("quo\"te.txt", "new"));
         expected.sort();
         assert_eq!(files, expected);
         let tracked = status

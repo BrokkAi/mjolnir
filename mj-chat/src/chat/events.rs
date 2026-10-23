@@ -29,7 +29,6 @@ impl ChatState {
                     || self.task_dialog_open
                     || self.task_control_focused
                     || self.history_search.is_some()
-                    || self.second_opinion_active()
                     || self.turn_review_active()
                 {
                     return true;

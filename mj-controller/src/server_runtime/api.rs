@@ -47,6 +47,10 @@ pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + 
 /// built in a test without one. Startup admission and status also go through
 /// this runtime, keeping their durable owner shared by every control surface.
 pub trait ExportRuntime: Send + Sync {
+    fn request_review(&self, _session_id: String) -> BoxFuture<'_, Result<serde_json::Value>> {
+        Box::pin(async { bail!("push review is unavailable") })
+    }
+
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         Default::default()
     }
@@ -199,6 +203,15 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
+    fn request_review(&self, session_id: String) -> BoxFuture<'_, Result<serde_json::Value>> {
+        Box::pin(async move {
+            self.review_host()
+                .begin_push(&session_id)
+                .await
+                .map_err(|error| anyhow!("request_review refused: {}", error.0))
+        })
+    }
+
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         self.with_config(|config| config.subagents.clone())
     }
@@ -759,6 +772,11 @@ impl ApiBackend {
         use mj_core::subagent::SubagentToolAction;
         let request_created_at_ms = request.created_at_ms;
         match &request.action {
+            SubagentToolAction::RequestReview {} => {
+                self.exports
+                    .request_review(parent_session_id.to_owned())
+                    .await
+            }
             SubagentToolAction::ListProfiles => {
                 anyhow::bail!("list_profiles is no longer available")
             }
@@ -831,6 +849,8 @@ impl ApiBackend {
                 };
                 let relation = self
                     .start_subagent(crate::controller::RegisterSubagentRequest {
+                        kind: mj_core::subagent::SubagentKind::Worker,
+                        reviewer_launch: None,
                         parent_session_id: parent_session_id.to_owned(),
                         task_name: task_name.clone(),
                         profile_id: selection.profile_id,
@@ -872,7 +892,12 @@ impl ApiBackend {
             }
             SubagentToolAction::ListAgents => {
                 let inputs = self.subagent_input_progress(parent_session_id).await?;
-                let relations = self.list_subagents(parent_session_id.to_owned()).await?;
+                let relations = self
+                    .list_subagents(parent_session_id.to_owned())
+                    .await?
+                    .into_iter()
+                    .filter(|relation| relation.kind != mj_core::subagent::SubagentKind::Reviewer)
+                    .collect::<Vec<_>>();
                 let child_ids = relations
                     .iter()
                     .map(|relation| relation.child_session_id.clone())
@@ -1030,22 +1055,29 @@ impl ApiBackend {
                     !message.trim().is_empty(),
                     "a report cannot be empty; call handback with your full report"
                 );
-                ensure!(
-                    message.chars().count() <= mj_core::subagent::MAX_HANDBACK_CHARS,
-                    "a report can be at most {} characters and this one has {}. Write the details \
-                     to files in the report directory named in your first prompt, then call \
-                     handback again with a short report that lists their paths",
-                    mj_core::subagent::MAX_HANDBACK_CHARS,
-                    message.chars().count()
-                );
                 let record = blocking("load sub-agent record", {
                     let child_id = child_id.clone();
                     move || crate::database::load_subagent(&child_id)
                 })
-                .await?;
+                .await?
+                .filter(|record| record.handback_tool)
+                .context("handback is only for a Mjolnir sub-agent that was given the tool")?;
+                let maximum = match record.kind {
+                    mj_core::subagent::SubagentKind::Worker => {
+                        mj_core::subagent::MAX_HANDBACK_CHARS
+                    }
+                    mj_core::subagent::SubagentKind::Reviewer => {
+                        mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS
+                    }
+                };
+                let characters = message.chars().count();
                 ensure!(
-                    record.is_some_and(|record| record.handback_tool),
-                    "handback is only for a Mjolnir sub-agent that was given the tool"
+                    characters <= maximum,
+                    "a report can be at most {} characters and this one has {}. Write the details \
+                     to files in the report directory named in your first prompt, then call \
+                     handback again with a short report that lists their paths",
+                    maximum,
+                    characters
                 );
                 let command_id = if let Some(prepared) = prepared {
                     prepared
@@ -1291,9 +1323,10 @@ impl ApiBackend {
         let ready = children
             .into_iter()
             .filter(|child| {
-                !self
-                    .exports
-                    .close_is_requested(&child.relation.child_session_id)
+                child.relation.kind != mj_core::subagent::SubagentKind::Reviewer
+                    && !self
+                        .exports
+                        .close_is_requested(&child.relation.child_session_id)
                     && !matches!(child.state.as_str(), "stopping" | "stopped")
                     && child.identity.as_ref().is_some_and(|identity| {
                         child.relation.reported_finish.as_ref() != Some(identity)

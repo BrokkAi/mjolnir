@@ -186,6 +186,9 @@ pub(crate) fn enqueue_subagent_reports(
                 params![child_id, parent], |row| row.get(0),
             )?;
             let mut relation: mj_core::subagent::SubagentRecord = serde_json::from_str(&stored)?;
+            if relation.kind == mj_core::subagent::SubagentKind::Reviewer {
+                continue;
+            }
             if relation.reported_finish.as_ref() == Some(&identity) {
                 continue;
             }

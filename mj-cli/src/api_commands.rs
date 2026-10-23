@@ -173,14 +173,12 @@ pub(crate) struct NewArgs {
     /// `[review]` is off.
     #[arg(long)]
     review_effort: Option<String>,
-    /// Deprecated compatibility option. Either accepted value enables review;
-    /// the value is ignored.
+    /// Deprecated compatibility option; the value is ignored.
     #[arg(long, hide = true, value_parser = ["quick", "extended"])]
     review_tier: Option<String>,
-    /// Do not review this session's turns automatically, even when `[review]`
-    /// is on. `/review` still reviews on request.
-    #[arg(long, conflicts_with_all = ["review_model", "review_effort", "review_tier"])]
-    no_review: bool,
+    /// Review trigger for this session, overriding `[review]`.
+    #[arg(long, value_parser = ["off", "turn", "push"])]
+    review: Option<String>,
     /// Start this session with no project memory: nothing from the
     /// workspace's project memory is loaded into the harness, and the harness
     /// is offered no memory directory to write to. Sub-agents of the session
@@ -1117,31 +1115,40 @@ pub(crate) fn subagent_policy(
 /// The session's own turn-review choice, or `None` to follow `[review]`.
 fn new_session_review(args: &NewArgs) -> Option<mj_core::config::SessionReview> {
     session_review(
-        args.no_review,
+        args.review.as_deref(),
         args.review_model.as_deref(),
         args.review_effort.as_deref(),
         args.review_tier.as_deref(),
     )
 }
 
-/// A session's own turn-review choice from the `--review-*` flags `mj new`
-/// and `mj import` share: off, on with what was named, or `None` to follow
-/// `[review]` when nothing was named. Clap accepts the deprecated tier value
-/// for compatibility; naming it still opts the session into automatic review.
+/// The review flags shared by `mj new` and `mj import`.
 pub(crate) fn session_review(
-    off: bool,
+    trigger: Option<&str>,
     model: Option<&str>,
     effort: Option<&str>,
     tier: Option<&str>,
 ) -> Option<mj_core::config::SessionReview> {
     use mj_core::config::SessionReview;
-    if off {
-        return Some(SessionReview::Off);
-    }
-    (model.is_some() || effort.is_some() || tier.is_some()).then(|| SessionReview::On {
-        model: model.map(str::to_owned),
-        effort: effort.map(str::to_owned),
-        tier: None,
+    // A model, an effort or the deprecated tier without a trigger has always
+    // meant "review every turn"; the tier's value itself is ignored.
+    let trigger = trigger
+        .or_else(|| (model.is_some() || effort.is_some() || tier.is_some()).then_some("turn"))?;
+    let model = model.map(str::to_owned);
+    let effort = effort.map(str::to_owned);
+    Some(match trigger {
+        "off" => SessionReview::Off,
+        "push" => SessionReview::Push {
+            model,
+            effort,
+            tier: None,
+        },
+        "turn" => SessionReview::Turn {
+            model,
+            effort,
+            tier: None,
+        },
+        _ => unreachable!("clap validates the review trigger"),
     })
 }
 
@@ -2211,6 +2218,7 @@ pub(crate) async fn review(args: ReviewArgs) -> Result<()> {
             if args.json {
                 return print_json(&status);
             }
+            println!("Review trigger: {}", status.trigger);
             for line in review_lines(status.review.as_ref()) {
                 println!("{line}");
             }
@@ -3027,10 +3035,22 @@ mod tests {
             })
         };
         assert_eq!(parse(&[]).unwrap(), None);
-        assert_eq!(parse(&["--no-review"]).unwrap(), Some(SessionReview::Off));
+        assert_eq!(
+            parse(&["--review", "off"]).unwrap(),
+            Some(SessionReview::Off)
+        );
+        assert_eq!(
+            parse(&["--review", "push"]).unwrap().unwrap().trigger(),
+            mj_core::config::ReviewTrigger::Push
+        );
+        assert_eq!(
+            parse(&["--review", "turn"]).unwrap().unwrap().trigger(),
+            mj_core::config::ReviewTrigger::Turn
+        );
+        assert!(parse(&["--review", "on"]).is_err());
         assert_eq!(
             parse(&["--review-model", "gpt-6-astra"]).unwrap(),
-            Some(SessionReview::On {
+            Some(SessionReview::Turn {
                 model: Some("gpt-6-astra".into()),
                 effort: None,
                 tier: None,
@@ -3038,7 +3058,7 @@ mod tests {
         );
         assert_eq!(
             parse(&["--review-effort", "high"]).unwrap(),
-            Some(SessionReview::On {
+            Some(SessionReview::Turn {
                 model: None,
                 effort: Some("high".into()),
                 tier: None,
@@ -3046,19 +3066,18 @@ mod tests {
         );
         assert_eq!(
             parse(&["--review-tier", "extended", "--review-model", "gpt-6-luna"]).unwrap(),
-            Some(SessionReview::On {
+            Some(SessionReview::Turn {
                 model: Some("gpt-6-luna".into()),
                 effort: None,
                 tier: None,
             })
         );
         assert_eq!(
-            parse(&["--review-tier", "quick"]).unwrap(),
-            Some(SessionReview::On {
-                model: None,
-                effort: None,
-                tier: None,
-            })
+            parse(&["--review-tier", "quick"])
+                .unwrap()
+                .unwrap()
+                .trigger(),
+            mj_core::config::ReviewTrigger::Turn
         );
         let help = Cli::try_parse_from(["mj", "new", "--help"])
             .expect_err("help exits parsing")
@@ -3071,10 +3090,7 @@ mod tests {
             parse(&["--review-tier", "thorough"]).is_err(),
             "the deprecated flag still accepts only quick and extended"
         );
-        assert!(parse(&["--no-review", "--review-tier", "quick"]).is_err());
-        let error = parse(&["--no-review", "--review-model", "gpt-6-astra"])
-            .expect_err("off and a reviewer model contradict each other");
-        assert!(error.to_string().contains("--review-model"), "{error}");
+        assert!(parse(&["--no-review"]).is_err());
     }
 
     #[test]

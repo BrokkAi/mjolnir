@@ -48,9 +48,9 @@ async function mount(page, data) {
     document.querySelector('#quota-page').classList.remove('hidden');
     document.querySelector('#menu-button').classList.remove('hidden');
     document.querySelector('#shell-title').textContent = 'Quota';
-    const workspace = document.createElement('button');
+    const workspace = document.createElement('option');
     workspace.textContent = 'Workspace';
-    document.querySelector('#workspaces').append(workspace);
+    document.querySelector('#workspace-select').append(workspace);
   });
   await page.addScriptTag({ content: `const quotaPanel = document.querySelector('#quota'); function serverClockMs() { return Date.now(); } let snapshot = ${JSON.stringify({ profiles: data })};\n${renderSource}\nrenderQuota();` });
 }

@@ -151,7 +151,7 @@ function fixtureSnapshot(configOptions = [], sessionOverrides = {}) {
     profiles: [{ id: 'codex', harness_kind: 'codex' }],
     targets: [{ id: 'local', kind: 'local', requires_project_directory: false }],
     bundles: [{ id: 'bundle-1', primary_repository: null, repositories: [] }],
-    review_config: { enabled: false, profile: null },
+    review_config: { trigger: "off", profile: null },
   };
 }
 
@@ -435,7 +435,7 @@ test('golden_viewer_conversation', async ({ context }) => {
   await expect(page.locator('#conversation-feed')).toContainText('Available commands:');
   await captureConversationState(output, page, 'help lists Mjolnir and harness commands', state);
 
-  state.snapshot.review_config = { enabled: true, profile: 'reviewer' };
+  state.snapshot.review_config = { trigger: "turn", profile: 'reviewer' };
   state.snapshot.sessions[0].turn_review = null;
   await publishSnapshotDelta(page, state);
   await page.locator('#prompt-text').fill('/review status');
@@ -444,6 +444,12 @@ test('golden_viewer_conversation', async ({ context }) => {
     'Reviewing every completed turn with [review] profile "reviewer"',
   );
   await captureConversationState(output, page, 'review status describes automatic review', state);
+  state.snapshot.sessions[0].review_trigger = 'push';
+  await publishSnapshotDelta(page, state);
+  await page.locator('#prompt-text').fill('/review status');
+  await page.locator('#send-button').click();
+  await expect(page.locator('#conversation-error')).toHaveText('Review trigger is before push');
+
   await page.close();
 
   const mailboxPage = await context.newPage();

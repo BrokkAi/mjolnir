@@ -428,16 +428,7 @@ pub(crate) async fn deliver_mailbox_event(
         }
         Some(_) => {}
     }
-    if matches!(
-        event.body,
-        mj_core::mailbox::MailboxEventBody::SubagentFinished { .. }
-    ) && protocol
-        .is_some_and(|version| version < mj_core::relay::RELAY_SUBAGENT_FINISHED_PROTOCOL)
-    {
-        event.body = mj_core::mailbox::MailboxEventBody::PlainText {
-            text: mj_core::mailbox::render_mailbox_event(&event),
-        };
-    }
+    downgrade_review_or_report(&mut event, protocol.expect("worker protocol was checked"));
     match tokio::time::timeout(DELIVERY_TIMEOUT, handle.deliver_mailbox_event(event)).await {
         Ok(result) => result,
         Err(_) => anyhow::bail!("mailbox command acknowledgement timed out"),
@@ -457,4 +448,61 @@ pub(crate) fn mailbox_command_id(event_key: &str) -> String {
         write!(command_id, "{byte:02x}").expect("writing to String cannot fail");
     }
     command_id
+}
+
+fn downgrade_review_or_report(event: &mut mj_core::mailbox::MailboxEvent, protocol: u32) {
+    if matches!(
+        event.body,
+        mj_core::mailbox::MailboxEventBody::SubagentFinished { .. }
+            | mj_core::mailbox::MailboxEventBody::ReviewVerdict { .. }
+    ) && protocol < event.body.minimum_relay_protocol()
+    {
+        event.body = mj_core::mailbox::MailboxEventBody::PlainText {
+            text: mj_core::mailbox::render_mailbox_event(event),
+        };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn review_verdict_wire_body_downgrades_for_protocol_42() {
+        let event = mj_core::mailbox::MailboxEvent {
+            key: "review-1".into(),
+            source: "review".into(),
+            wake: true,
+            created_at_ms: 1,
+            body: mj_core::mailbox::MailboxEventBody::ReviewVerdict {
+                review_id: "review-1".into(),
+                repository: "/repo".into(),
+                base_commit: "aaaaaaa1".into(),
+                head_commit: "bbbbbbb2".into(),
+                tree: "ccccccc3".into(),
+                verdict: mj_core::review::verdict::ReviewVerdict::Clean,
+            },
+        };
+        for protocol in [33, 42, 43] {
+            let mut delivered = event.clone();
+            super::downgrade_review_or_report(&mut delivered, protocol);
+            let wire = serde_json::to_value(&delivered).unwrap();
+            assert_eq!(
+                wire["body"]["type"],
+                if protocol < 43 {
+                    "plain_text"
+                } else {
+                    "review_verdict"
+                }
+            );
+            if protocol < 43 {
+                assert_eq!(
+                    wire["body"]["text"],
+                    "Review clean for commits aaaaaaa..bbbbbbb in /repo. Tree ccccccc is recorded as reviewed; you may push."
+                );
+            }
+            assert_eq!(
+                serde_json::from_value::<mj_core::mailbox::MailboxEvent>(wire).unwrap(),
+                delivered
+            );
+        }
+    }
 }

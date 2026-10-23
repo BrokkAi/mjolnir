@@ -34,20 +34,6 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
             .context("history search task")?
         })
     }
-    fn review_state(
-        &self,
-    ) -> mj_client::session::BoxFuture<'_, Result<mj_client::session::ReviewState>> {
-        let session_id = self.0.session_id().to_owned();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                Ok(mj_client::session::ReviewState {
-                    review: crate::database::active_review(&session_id)?,
-                })
-            })
-            .await
-            .context("review restoration task")?
-        })
-    }
 
     fn resolve_review_settings(
         &self,
@@ -145,10 +131,10 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
 
     fn reviewer(
         &self,
-        role: Option<String>,
+        _role: Option<String>,
         action: ReviewerAction,
     ) -> mj_client::session::BoxFuture<'_, Result<ReviewerOutcome>> {
-        Box::pin(self.0.reviewer_as(role, action))
+        Box::pin(self.0.reviewer(action))
     }
 }
 
@@ -156,6 +142,27 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
 pub(super) struct ClientSessionControl(pub(super) SessionManagerControl);
 
 impl mj_client::session::SessionControlBackend for ClientSessionControl {
+    fn snapshot(
+        &self,
+        session_id: String,
+    ) -> mj_client::session::BoxFuture<'_, Result<MaterializedSession>> {
+        Box::pin(async move {
+            if let Some(handle) = self.0.find_session(session_id.clone()).await? {
+                handle.sync_now().await?;
+                return handle
+                    .view()
+                    .snapshot
+                    .map(|snapshot| snapshot.materialized)
+                    .context("session has no transcript yet");
+            }
+            tokio::task::spawn_blocking(move || {
+                crate::database::load_materialized_session(&session_id)
+            })
+            .await
+            .context("load reviewer transcript")??
+            .context("session transcript is unavailable")
+        })
+    }
     fn session(
         &self,
         session_id: String,

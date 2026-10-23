@@ -183,7 +183,11 @@ mj doctor
 
 ## First run
 
-Mjolnir runs a coding agent you already have (Claude Code, Codex, Kimi Code, Grok Build, Muse Code, OpenCode, MiMo Code, or DSH), so install and sign in to one first. DSH has no sign-in; export `DEEPSEEK_API_KEY` before starting `mj` instead, and discovery offers it. Then go to a project directory and run `mj`:
+Mjolnir runs a coding agent and can install its own pinned copy when you sign
+in. Add a profile in Settings → Agent Profiles and choose **Sign in**; if you
+already have an agent installed and signed in, **Detect profiles** finds it.
+DSH has no sign-in; export `DEEPSEEK_API_KEY` before starting `mj` instead, and
+discovery offers it. Then go to a project directory and run `mj`:
 
 ```sh
 cd path/to/your/repository

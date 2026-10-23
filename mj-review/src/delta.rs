@@ -89,7 +89,8 @@ impl RawDiffSummary {
 /// Whether any repository has something to review.
 #[must_use]
 pub fn has_changes(deltas: &[RepoDelta]) -> bool {
-    deltas.iter().any(|delta| !delta.patch.trim().is_empty())
+    deltas.iter().any(|delta| !delta.patch.trim().is_empty()
+        || matches!((&delta.base_commit, &delta.head_commit), (Some(base), Some(head)) if base != head))
 }
 
 /// Every changed file with its added and removed line counts, one section per
@@ -183,6 +184,9 @@ mod tests {
     fn delta(root: &str, patch: &str) -> RepoDelta {
         let summary = RawDiffSummary::from_patch(patch);
         RepoDelta {
+            base_commit: None,
+            head_commit: None,
+            base_kind: None,
             root: PathBuf::from(root),
             baseline_tree: None,
             current_tree: "tree".into(),

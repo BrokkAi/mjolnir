@@ -1008,27 +1008,16 @@ details.mailbox-event[open] > summary::before {
   font-size: 0.8rem;
 }
 
-/* ---- workspace tabs ---- */
+/* ---- workspace picker ---- */
 
-.tabstrip {
-  display: flex;
-  gap: 6px;
+.workspace-bar {
   padding: 4px 0 10px;
   border-bottom: 1px solid var(--border);
 }
 
-.tab {
-  background: none;
-  color: var(--dim);
-  font-weight: 400;
-  border: 1px solid var(--border);
-  white-space: nowrap;
-}
-
-/* Selection is a border and a word, never colour alone. */
-.tab[aria-current='page'] {
-  color: var(--text);
-  border-color: var(--focus);
+/* The select shortens a long workspace name itself; it never widens the page. */
+#workspace-select {
+  max-width: 100%;
 }
 
 /* ---- pages ---- */
@@ -1617,6 +1606,18 @@ article > h3 {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 4px 4px 4px 12px;
+  border: 1px solid var(--focus);
+  border-radius: var(--radius);
+}
+
+.virtual-workspace > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .virtual-workspace-close {

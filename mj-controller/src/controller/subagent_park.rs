@@ -401,6 +401,8 @@ mod tests {
         crate::database::save_subagent_session(
             &child,
             &mj_core::subagent::SubagentRecord {
+                kind: mj_core::subagent::SubagentKind::Worker,
+                reviewer_launch: None,
                 child_session_id: LATCH_RELAY_SESSION.into(),
                 parent_session_id: "parent-1".into(),
                 task_name: "map the parser".into(),

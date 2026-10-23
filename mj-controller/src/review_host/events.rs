@@ -15,6 +15,10 @@ pub(super) enum HostEvent {
     Retain {
         live: std::collections::BTreeSet<String>,
     },
+    StartPush {
+        session_id: String,
+        reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
+    },
     Start {
         session_id: String,
         manual: bool,
@@ -48,6 +52,17 @@ pub(super) enum HostEvent {
         epoch: u64,
         step: ReviewStep,
     },
+    ReviewerFinished {
+        session_id: String,
+        child_session_id: String,
+        answer: Option<String>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    ChildRegistered {
+        session_id: String,
+        epoch: u64,
+        result: Result<String, String>,
+    },
     Resolve {
         session_id: String,
         resolution: Resolution,
@@ -66,10 +81,20 @@ pub(super) enum PersistenceCompletion {
     Open,
     Forward,
     Close,
+    LaunchChild,
 }
 
 pub(super) enum PersistenceRequest {
     SweepInterrupted,
+    FinishPush(Box<PushCompletion>),
+    CloseFailedChild {
+        session_id: String,
+        child: String,
+    },
+    AcknowledgeReviewer {
+        session_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     Save {
         session_id: String,
         state: Box<TurnReviewState>,
@@ -85,24 +110,15 @@ pub(super) enum PersistenceRequest {
 
 /// One asynchronous step's result, belonging to exactly one review.
 pub(super) enum ReviewStep {
+    Failed(String),
     Delta(Result<Vec<mj_core::relay::RepoDelta>, String>),
-    RoleStarted {
-        role: String,
-        result: Result<(), String>,
-    },
-    RolePrompted {
-        role: String,
-        result: Result<(), String>,
-    },
     PrimaryPrompted(Result<(), String>),
-    RoleEvents {
-        role: String,
-        result: Result<Vec<RelayEvent>, String>,
-    },
+    PushDelivered(Result<Box<TurnReviewState>, String>),
 }
 
 /// Everything one blocking preparation gathered before a review can start.
 pub(super) struct Prepared {
+    pub(super) scope: mj_core::relay::CaptureScope,
     pub(super) state: TurnReviewState,
     pub(super) reviewer: ReviewerIdentity,
     /// Read from the live actor after the admission hold is installed and a
@@ -135,68 +151,13 @@ pub(super) struct ReviewSlot {
     /// name another are dropped.
     pub(super) epoch: u64,
     pub(super) driver: TurnReviewDriver,
-    /// One transcript projection per reviewing role, which is how the host
-    /// reads a role's answer out of its own relay journal.
-    pub(super) roles: BTreeMap<String, RoleTranscript>,
     pub(super) reviewer: ReviewerIdentity,
     pub(super) state: TurnReviewState,
     /// Released when the slot is removed, which is how every review ends.
     pub(super) _background: Option<BackgroundHold>,
-    /// The sidecar reads a new generation as "this is a different reviewer".
-    /// Fresh role launches receive a random nonce, so a later review cannot
-    /// reuse the native conversation left by an earlier one.
-    pub(super) generation: u64,
-}
-
-/// One role's journal, folded far enough to read its final answer.
-#[derive(Default)]
-pub(super) struct RoleTranscript {
-    pub(super) session: Option<MaterializedSession>,
-    pub(super) cursor_ordinal: u64,
-    pub(super) cursor_digest: String,
-}
-
-impl RoleTranscript {
-    pub(super) fn apply(&mut self, session_id: &str, events: &[RelayEvent]) {
-        let session = self
-            .session
-            .get_or_insert_with(|| MaterializedSession::empty(session_id));
-        for event in events {
-            let Ok(projected) = mj_transcript::projection::project_relay_event(session, event)
-            else {
-                continue;
-            };
-            if mj_transcript::projection::apply_committed_projection_event(
-                session,
-                event,
-                projected.mutation,
-            )
-            .is_err()
-            {
-                continue;
-            }
-            self.cursor_ordinal = event.ordinal;
-            self.cursor_digest.clone_from(&event.digest);
-        }
-    }
-
-    /// The role's latest complete answer, which is what the driver reads. Tool
-    /// logs and reasoning are deliberately not part of it.
-    pub(super) fn latest_answer(&self) -> Option<String> {
-        let session = self.session.as_ref()?;
-        session
-            .transcript
-            .iter()
-            .rev()
-            .find(|item| item.is_nonempty_agent_message())
-            .and_then(|item| {
-                let mj_core::state::TranscriptBody::Agent { chunks, .. } = &item.body else {
-                    return None;
-                };
-                Some(mj_core::transcript::materialized_chunks_text(chunks))
-            })
-            .filter(|text| !text.trim().is_empty())
-    }
+    pub(super) command_id: Option<String>,
+    pub(super) push: Option<PushReview>,
+    pub(super) start_reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
 }
 
 pub(super) struct HostState {
@@ -262,20 +223,103 @@ pub(super) async fn persistence_loop(
     events: mpsc::UnboundedSender<HostEvent>,
     mut requests: mpsc::UnboundedReceiver<PersistenceRequest>,
 ) {
-    while let Some(request) = requests.recv().await {
-        match request {
-            PersistenceRequest::SweepInterrupted => {
-                let environment = environment.clone();
-                match tokio::task::spawn_blocking(move || environment.clear_interrupted()).await {
-                    Ok(Ok(interrupted)) if !interrupted.is_empty() => {
-                        let _ = events.send(HostEvent::Interrupted { interrupted });
-                    }
-                    Ok(Ok(_)) => {}
-                    Ok(Err(error)) => {
-                        tracing::warn!(%error, "could not clear interrupted reviews");
+    let mut failed_writes = BTreeMap::<String, String>::new();
+    type Delivery = (String, u64, Result<Box<TurnReviewState>, String>);
+    let mut deliveries = tokio::task::JoinSet::<Delivery>::new();
+    let mut delivery_owners = std::collections::HashMap::<tokio::task::Id, (String, u64)>::new();
+    let mut in_flight = BTreeMap::<String, Vec<oneshot::Sender<Result<(), String>>>>::new();
+    let mut accepting = true;
+    while accepting || !deliveries.is_empty() {
+        let request = tokio::select! {
+            request = requests.recv(), if accepting => match request {
+                Some(request) => request,
+                None => { accepting = false; continue; }
+            },
+            completed = deliveries.join_next_with_id(), if !deliveries.is_empty() => {
+                match completed.expect("a delivery was in flight") {
+                    Ok((task, (session_id, epoch, result))) => {
+                        delivery_owners.remove(&task);
+                        let acknowledged = match &result { Ok(_) => Ok(()), Err(error) => Err(error.clone()) };
+                        if let Err(error) = &result { failed_writes.insert(session_id.clone(), error.clone()); }
+                        for reply in in_flight.remove(&session_id).unwrap_or_default() { let _ = reply.send(acknowledged.clone()); }
+                        let _ = events.send(HostEvent::Step { session_id, epoch, step: ReviewStep::PushDelivered(result) });
                     }
                     Err(error) => {
-                        tracing::warn!(%error, "the interrupted-review sweep did not run");
+                        tracing::error!(%error, "push review verdict task stopped");
+                        if let Some((session_id, epoch)) = delivery_owners.remove(&error.id()) {
+                            let reason = format!("push review verdict task stopped: {error}");
+                            failed_writes.insert(session_id.clone(), reason.clone());
+                            for reply in in_flight.remove(&session_id).unwrap_or_default() { let _ = reply.send(Err(reason.clone())); }
+                            let _ = events.send(HostEvent::Step { session_id, epoch, step: ReviewStep::PushDelivered(Err(reason)) });
+                        }
+                    }
+                }
+                continue;
+            }
+        };
+        match request {
+            PersistenceRequest::FinishPush(completion) => {
+                let environment = environment.clone();
+                in_flight.insert(completion.session_id.clone(), Vec::new());
+                let owner = (completion.session_id.clone(), completion.epoch);
+                let task = deliveries.spawn(async move {
+                    let session_id = completion.session_id.clone();
+                    let epoch = completion.epoch;
+                    let result =
+                        super::resolve::finish_push_delivery(environment, *completion).await;
+                    (session_id, epoch, result)
+                });
+                delivery_owners.insert(task.id(), owner);
+            }
+            PersistenceRequest::CloseFailedChild { session_id, child } => {
+                if let Some(error) = failed_writes.get(&session_id) {
+                    tracing::warn!(%session_id, %child, %error, "the reviewer failure could not be persisted before cleanup");
+                }
+                let environment = environment.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = environment.close_child(&child).await {
+                        tracing::warn!(%child, %error, "could not close failed reviewer child");
+                    }
+                });
+            }
+            PersistenceRequest::AcknowledgeReviewer { session_id, reply } => {
+                if let Some(waiting) = in_flight.get_mut(&session_id) {
+                    waiting.push(reply);
+                    continue;
+                }
+                let result = failed_writes.get(&session_id).cloned().map_or(Ok(()), Err);
+                let _ = reply.send(result);
+            }
+            PersistenceRequest::SweepInterrupted => {
+                let sweep = environment.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let children = sweep.orphaned_children()?;
+                    sweep
+                        .clear_interrupted()
+                        .map(|interrupted| (interrupted, children))
+                })
+                .await;
+                match result {
+                    Ok(Ok((interrupted, children))) => {
+                        let mut closes = tokio::task::JoinSet::new();
+                        for child in children {
+                            let environment = environment.clone();
+                            closes.spawn(async move {
+                                if let Err(error) = environment.close_child(&child).await { tracing::warn!(child, %error, "could not close orphaned reviewer child"); }
+                            });
+                        }
+                        while let Some(result) = closes.join_next().await {
+                            if let Err(error) = result {
+                                tracing::warn!(%error, "orphaned reviewer cleanup stopped");
+                            }
+                        }
+                        if !interrupted.is_empty() {
+                            let _ = events.send(HostEvent::Interrupted { interrupted });
+                        }
+                    }
+                    Ok(Err(error)) => tracing::warn!(%error, "could not clear interrupted reviews"),
+                    Err(error) => {
+                        tracing::warn!(%error, "the interrupted-review sweep did not run")
                     }
                 }
             }
@@ -312,6 +356,14 @@ pub(super) async fn persistence_loop(
                         .await
                         .map_err(|error| format!("review state persistence task stopped: {error}"))
                         .and_then(|result| result);
+                match &result {
+                    Ok(()) => {
+                        failed_writes.remove(&session_id);
+                    }
+                    Err(error) => {
+                        failed_writes.insert(session_id.clone(), error.clone());
+                    }
+                }
                 if let Some(completion) = completion {
                     let _ = events.send(HostEvent::StateSaved {
                         session_id,
@@ -328,4 +380,21 @@ pub(super) async fn persistence_loop(
             }
         }
     }
+}
+
+pub(super) struct PushReview {
+    pub(super) deltas: Vec<mj_core::relay::RepoDelta>,
+    pub(super) finishing: bool,
+}
+
+pub(super) struct PushCompletion {
+    pub(super) session_id: String,
+    pub(super) epoch: u64,
+    pub(super) review_id: String,
+    pub(super) control: SessionManagerControl,
+    pub(super) state: TurnReviewState,
+    pub(super) deltas: Vec<mj_core::relay::RepoDelta>,
+    pub(super) verdict: ReviewVerdict,
+    pub(super) _admission: crate::upgrade::Work,
+    pub(super) reviewed_through_ordinal: Option<u64>,
 }

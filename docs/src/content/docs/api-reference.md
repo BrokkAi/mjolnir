@@ -459,7 +459,7 @@ ancestors. Directories you attach with `additional_mounts` are not checked.
 ```
 
 Choose `native` for harness delegation or `mjolnir` for Mjolnir-managed children.
-Omitted policy defaults to Native. Mjolnir requires a Claude or Codex parent and
+Omitted policy defaults to Native. Mjolnir requires a Claude, Codex, or DSH parent and
 a straightforward choice, either global or a session override. A subtle choice
 is optional:
 
@@ -489,12 +489,14 @@ with a message naming the missing configuration section and matching CLI flag.
 session only:
 
 ```json
-{"review": {"mode": "on", "model": "<model-id>", "effort": "high"}}
+{"review": {"mode": "turn", "model": "<model-id>", "effort": "high"}}
+{"review": {"mode": "push"}}
 {"review": {"mode": "off"}}
 ```
 
-`on` turns on automatic review for the session, with optional `model` and
-`effort` replacing those in `[review]`. `off` turns off automatic review; a
+`review.mode` accepts `off`, `turn`, or `push`; `on` is rejected. `turn` reviews
+completed turns, and `push` reviews commits before push. Optional `model` and
+`effort` replace those in `[review]`. `off` turns off automatic review; a
 manual review still runs. A blank or overlong `model` or `effort` answers `400`.
 When `review` is omitted, the session follows `[review]`. See
 [per-session settings](/turn-review/#per-session-settings).
@@ -889,6 +891,7 @@ it, or `"review": null` when none is open:
 
 ```json
 {
+  "trigger": "turn",
   "session_id": "0123abcd…",
   "review": {
     "status": "sending findings to the primary agent…",
