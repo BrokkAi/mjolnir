@@ -65,9 +65,8 @@ DSH speaks ACP itself, so `dsh-acp` is both its bridge and its agent. Without
 which needs Node.js 22 or newer, npm, and npx; the npm package bundles the
 release binaries. To bake it in, run `npm install -g @brokkai/dsh-acp@0.2.1`
 (Node.js 22 or newer), or put the `dsh-acp` binary from a release archive at
-<https://github.com/BrokkAi/dsh-acp/releases> on `PATH`, as the reference image
-does. The Linux binaries need glibc 2.34 or newer, so musl images such as
-Alpine cannot run DSH.
+<https://github.com/BrokkAi/dsh-acp/releases> on `PATH`. The Linux binaries
+need glibc 2.34 or newer, so musl images such as Alpine cannot run DSH.
 
 Baking the bridges in, the way the reference image does, avoids that
 installation cost. Codex images should install the bridge version pinned by

@@ -1962,7 +1962,8 @@ fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
 #[test]
 fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     use mj_core::harness_runtime::{
-        CLAUDE_CLI_VERSION, DSH_ACP_VERSION, MIMO_CLI_VERSION, MUSE_ACP_PACKAGE, MUSE_ACP_VERSION,
+        CLAUDE_CLI_VERSION, DSH_ACP_PACKAGE, DSH_ACP_VERSION, MIMO_CLI_VERSION, MUSE_ACP_PACKAGE,
+        MUSE_ACP_VERSION,
     };
 
     const CONTAINERFILE: &str = include_str!("../../../../containers/Containerfile.agent-dev");
@@ -2004,17 +2005,16 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     );
     assert!(CONTAINERFILE.contains("ENV MIMOCODE_DISABLE_AUTOUPDATE=1"));
 
-    // The image installs dsh-acp from the same pinned metadata as managed
-    // workers, so the two cannot run different releases.
-    let dsh: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../mj-worker/assets/dsh/runtime.json"
-    ))
-    .unwrap();
-    assert_eq!(dsh["version"], DSH_ACP_VERSION);
+    // DSH has no managed installation or image layer; its only launch path is
+    // the npm bootstrap, which must name the pinned package version.
+    let (command, arguments) =
+        bridge_launch(HarnessKind::Dsh, ExecutionPolicy::ConfiguredApprovals);
+    assert_eq!(command, "sh");
     assert!(
-        CONTAINERFILE.contains("COPY mj-worker/assets/dsh/runtime.json")
-            && CONTAINERFILE.contains("install-dsh-acp.py"),
-        "containers/Containerfile.agent-dev must install dsh-acp from mj-worker/assets/dsh/runtime.json"
+        arguments.iter().any(|argument| {
+            argument.contains(&format!("npx -y {DSH_ACP_PACKAGE}@{DSH_ACP_VERSION}"))
+        }),
+        "the DSH launch must fetch the pinned {DSH_ACP_PACKAGE}@{DSH_ACP_VERSION}"
     );
 
     let package: serde_json::Value = serde_json::from_str(include_str!(

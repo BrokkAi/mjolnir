@@ -64,7 +64,7 @@ marks models or counters that cannot be priced from the recorded information.
 | Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
 | OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db`, or a provider key in the environment | no |
 | MiMo Code | `mimo` | `MIMOCODE_HOME` | `~/.mimocode` (stock XDG config and login when unset) | `data/auth.json`, or `~/.local/share/mimocode/auth.json` for the stock install | no |
-| DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh-acp` | `DEEPSEEK_API_KEY` in the environment (no file) | no |
+| DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh` | `DEEPSEEK_API_KEY` in the environment (no file) | no |
 
 There are eight harness kinds. Codex can use its built-in Amazon Bedrock
 providers; see [Codex on Amazon Bedrock](#codex-on-amazon-bedrock). It can also
@@ -77,8 +77,11 @@ home that belongs to the session, and the harness's home variable points at
 that copy. See [What a session's staged home holds](#what-a-sessions-staged-home-holds).
 
 `mj setup` checks the home variable first and otherwise looks in the
-conventional location. A detected home becomes the explicit `home` path in
-`config.toml`; subsequent sessions use that configured path.
+conventional location. It also treats an API key in the environment Mjolnir
+started with as an installation signal for a harness that authenticates with
+no login, such as `DEEPSEEK_API_KEY` for DSH. A detected home becomes the
+explicit `home` path in `config.toml`; subsequent sessions use that configured
+path.
 
 Kimi Code does not expose a guardian approval mode. OpenCode and MiMo Code ask
 before tools according to their permission rules, and DSH asks before every
@@ -487,7 +490,9 @@ runtime on this machine. Do not override `MIMOCODE_HOME` in the profile
 environment.
 
 For DSH, configure `kind = "dsh"`, for example with
-`home = "/home/me/.dsh-acp"`. DSH runs BrokkAi's
+`home = "/home/me/.dsh"`. Detection accepts DeepSeek's own `dsh` CLI, its
+`~/.dsh` home, or `DEEPSEEK_API_KEY` in the environment Mjolnir started with,
+so a key alone is enough to be offered a profile. DSH runs BrokkAi's
 [dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.2.1, a DeepSeek coding agent
 that speaks ACP itself, so there is no separate bridge. It is not the DeepSeek
 harness earlier releases offered as `kind = "deepseek"`; that kind still fails
@@ -498,9 +503,11 @@ receives `AGENTS.md` in one environment variable, so the file must be UTF-8
 text of at most 131049 bytes, including the notes Mjolnir adds to describe a
 container or EC2 session's environment. Mjolnir refuses to start a session whose
 file breaks either rule and says which rule and by how much, and `mj doctor`
-reports the profile's own file the same way. With no login
-to create it, create the home directory yourself; `mj doctor` reports it
-missing until you do. DSH reads no
+reports the profile's own file the same way. Nothing creates the home
+automatically, and it is optional: a session stages its own home, which simply
+starts without an `AGENTS.md`. Create `~/.dsh` when you want to keep
+instructions there or move the profile; `mj doctor` reports it missing until
+you do. DSH reads no
 instruction file itself, so Mjolnir passes the staged `AGENTS.md` as dsh-acp's
 system prompt through `DSH_ACP_SYSTEM_PROMPT` on every launch. The staged file
 is the profile's own `AGENTS.md` plus any guidance Mjolnir adds for the
@@ -517,7 +524,7 @@ it, for example from `secrets.toml`:
 ```toml
 [profiles.dsh]
 kind = "dsh"
-home = "/home/me/.dsh-acp"
+home = "/home/me/.dsh"
 
 [profiles.dsh.environment]
 DEEPSEEK_API_KEY = { from_secret = "DEEPSEEK_API_KEY" }
@@ -823,7 +830,7 @@ Local-bare, raw SSH, and EC2 workers instead install the exact versions pinned b
 Mjolnir release into `$XDG_CACHE_HOME/mjolnir/harnesses`, or
 `$HOME/.cache/mjolnir/harnesses` when `XDG_CACHE_HOME` is unset. They launch
 only the resulting absolute path—never an arbitrary compatible executable from
-`PATH`. Codex, Claude, and MiMo Code require Node.js 22 or newer plus npm on
+`PATH`. DSH is the exception and is never installed; see below. Codex, Claude, and MiMo Code require Node.js 22 or newer plus npm on
 the host.
 Kimi and Grok require curl and Bash for their official installers.
 Muse requires Node.js 22 or newer, npm, and curl; Mjolnir launches the pinned
@@ -838,10 +845,12 @@ self-update so a running session never replaces its own binary.
 MiMo Code installs from the pinned `@mimo-ai/cli` npm package. Its managed
 launch disables automatic updates so a running session never replaces its own
 binary.
-DSH requires curl and tar, and no Node.js; Mjolnir downloads the pinned
-dsh-acp 0.2.1 GitHub release archive for the platform and verifies its SHA-256
-checksum. Linux and macOS, on x86-64 and ARM64, are supported. Linux needs
-glibc 2.34 or newer, so musl distributions such as Alpine cannot run it.
+DSH is never installed. A launch resolves the target's own `dsh-acp` on
+`PATH`, or fetches the pinned `@brokkai/dsh-acp@0.2.1` package through `npx`,
+so a bare target needs Node.js 22 or newer with npm and npx; the npm package
+bundles the release binaries. Linux and macOS, on x86-64 and ARM64, are
+supported. Linux needs glibc 2.34 or newer, so musl distributions such as
+Alpine cannot run it.
 Mjolnir reports a missing prerequisite and leaves the existing worker alone;
 it does not invoke sudo or a system package manager.
 

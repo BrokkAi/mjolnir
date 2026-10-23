@@ -23,9 +23,23 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
         policy,
         &environment,
     )
-    .await?
-    .context("managed discovery installation is missing")?;
-    environment.extend(managed.environment.clone());
+    .await?;
+    // Harnesses without a managed installation (DSH) probe through the same
+    // npm bootstrap launch a session uses; there is no install to lease.
+    let (command, args, managed_environment, lease_path) = match &managed {
+        Some(managed) => (
+            managed.command.clone(),
+            managed.args.clone(),
+            managed.environment.clone(),
+            Some(managed.lease_path.clone()),
+        ),
+        None => {
+            let (command, args) = super::harness::unmanaged_launch(spec.harness)
+                .context("managed discovery installation is missing")?;
+            (command, args, Default::default(), None)
+        }
+    };
+    environment.extend(managed_environment);
     let mut session_environment = mj_core::login_environment::with_overrides(&environment).await?;
     super::exclude_from_harness_environment(
         spec.harness,
@@ -38,12 +52,12 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
     }
     let supervisor = spec.cwd.join("acp-supervisor.json");
     AcpSupervisorSpec {
-        command: managed.command.clone(),
-        args: managed.args.clone(),
+        command,
+        args,
         environment,
         excluded_environment: spec.excluded_environment.clone(),
         cwd: spec.cwd.clone(),
-        harness_lease: Some(managed.lease_path.clone()),
+        harness_lease: lease_path,
     }
     .write_spec(&supervisor)?;
     let launch = LaunchSpec {

@@ -79,6 +79,13 @@ pub(crate) async fn resolve(
     if runtime == HarnessRuntimePolicy::Ambient {
         return Ok(None);
     }
+    // DSH has no managed installation: the npm package bundles the same
+    // release binaries, so the launch description the controller already
+    // provides resolves the target's own `dsh-acp` or fetches the pinned
+    // package through npx.
+    if harness == HarnessKind::Dsh {
+        return Ok(None);
+    }
     let environment = mj_core::login_environment::with_overrides(environment).await?;
     let root = managed_harness_cache_root(
         environment.get("XDG_CACHE_HOME").map(OsStr::new),
@@ -87,6 +94,24 @@ pub(crate) async fn resolve(
     resolve_at_async(&root, harness, execution_policy, &environment)
         .await
         .map(Some)
+}
+
+/// Launch description for a harness [`resolve`] does not manage, for call
+/// sites the controller's bridge launch does not reach (the model discovery
+/// probe). Only DSH: [`mj_core::harness_runtime::dsh_acp_launch_script`]
+/// resolves the target's own `dsh-acp` or the pinned npm package, so there is
+/// no install to lease and nothing to cache.
+pub(crate) fn unmanaged_launch(harness: HarnessKind) -> Option<(PathBuf, Vec<String>)> {
+    match harness {
+        HarnessKind::Dsh => Some((
+            PathBuf::from("sh"),
+            vec![
+                "-c".to_owned(),
+                mj_core::harness_runtime::dsh_acp_launch_script(),
+            ],
+        )),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -192,21 +217,6 @@ async fn resolve_at_async(
         (
             PathBuf::from("sh"),
             vec!["-c".to_owned(), bridge.bootstrap_script()],
-        )
-    } else if harness == HarnessKind::Dsh {
-        // dsh-acp takes the session's staged instructions as its system
-        // prompt; the script replaces itself with the pinned executable.
-        (
-            PathBuf::from("sh"),
-            vec![
-                "-c".to_owned(),
-                mj_core::harness_runtime::dsh_acp_script(),
-                "mj-dsh".to_owned(),
-                install
-                    .join(selected.entrypoint)
-                    .to_string_lossy()
-                    .into_owned(),
-            ],
         )
     } else if harness == HarnessKind::OpenCode {
         // OpenCode imports the session's staged logins before its ACP server
@@ -338,7 +348,9 @@ async fn install_into(
             )
             .await?
         }
-        HarnessKind::Dsh => install_dsh(staging.path(), environment).await?,
+        HarnessKind::Dsh => {
+            unreachable!("DSH has no managed installation; resolve returns before installing")
+        }
     }
     relativize_internal_links(staging.path(), staging.path())?;
     validate_entrypoint(staging.path(), selected, harness)?;
@@ -583,66 +595,6 @@ async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&entrypoint, std::fs::Permissions::from_mode(0o755))?;
     Ok(())
-}
-
-/// Install the pinned dsh-acp release binary. Each GitHub release archive
-/// holds the executable at `dsh-acp-v<version>-<target>/dsh-acp`.
-async fn install_dsh(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
-    use mj_core::harness_runtime::DSH_ACP_VERSION;
-    let metadata: serde_json::Value =
-        serde_json::from_str(include_str!("../../assets/dsh/runtime.json"))?;
-    anyhow::ensure!(
-        metadata["version"] == DSH_ACP_VERSION,
-        "dsh-acp download metadata does not match the managed runtime pin"
-    );
-    let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-    let platform = metadata["platforms"]
-        .get(&key)
-        .with_context(|| format!("dsh-acp does not have a managed runtime for {key}"))?;
-    let field = |name: &str| {
-        platform[name]
-            .as_str()
-            .with_context(|| format!("missing dsh-acp artifact field {name}"))
-    };
-    let directory = format!("dsh-acp-v{DSH_ACP_VERSION}-{}", field("target")?);
-    let file = format!("{directory}.tar.gz");
-    let url =
-        format!("https://github.com/BrokkAi/dsh-acp/releases/download/v{DSH_ACP_VERSION}/{file}");
-    let archive = staging.join(&file);
-    download_verified_async(&url, &archive, field("sha256")?, environment).await?;
-    let packaged = format!("{directory}/dsh-acp");
-    let mut tar = tokio::process::Command::new("tar");
-    tar.arg("-xzf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(staging)
-        .arg(&packaged)
-        .env_clear()
-        .envs(environment);
-    run_bounded_checked(
-        &mut tar,
-        "extract verified dsh-acp archive",
-        HARNESS_COMMAND_TIMEOUT,
-    )
-    .await?;
-    std::fs::remove_file(&archive)?;
-    let entrypoint = staging.join("dsh-acp");
-    std::fs::rename(staging.join(&packaged), &entrypoint)
-        .context("move the dsh-acp executable out of its release archive")?;
-    std::fs::remove_dir_all(staging.join(&directory))?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&entrypoint, std::fs::Permissions::from_mode(0o755))?;
-    // The Linux binaries need glibc 2.34 or newer. Running the binary here
-    // fails the install with the loader's reason on a target that cannot run
-    // it, rather than leaving the bridge to exit at launch.
-    let mut version = tokio::process::Command::new(&entrypoint);
-    version.arg("--version").env_clear().envs(environment);
-    run_bounded_checked(
-        &mut version,
-        "run the installed dsh-acp, whose Linux build needs glibc 2.34 or newer,",
-        HARNESS_COMMAND_TIMEOUT,
-    )
-    .await
 }
 
 async fn download_verified_async(

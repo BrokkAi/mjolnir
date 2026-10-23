@@ -606,9 +606,10 @@ that sets either fails to load. Other dsh-acp settings may go in
 
 Profiles do not select target-side executables. All bare workers, including
 localhost, SSH, and EC2, resolve an exact pinned runtime from their managed
-cache. Containers use their image-provided runtime or the documented installer
-fallback. `mj login` invokes the harness's canonical
-controller-side command from `PATH`.
+cache, except DSH, which has no managed runtime and runs the target's own
+`dsh-acp` or the pinned npm package. Containers use their image-provided
+runtime or the documented installer fallback. `mj login` invokes the harness's
+canonical controller-side command from `PATH`.
 
 Profiles do not accept `model` or `reasoning_effort`. Use `/model` and `/effort`
 inside a session, or configure the harness's own defaults in its home. For
@@ -1172,7 +1173,7 @@ Harness-home variables influence automatic first-run discovery and explicit
 | Muse Code | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` |
 | OpenCode | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` |
 | MiMo Code | `MIMOCODE_HOME` | `~/.mimocode` (the stock install keeps `config/` and `data/` in XDG) |
-| DSH | `DSH_ACP_DATA_DIR` | `~/.dsh-acp` |
+| DSH | `DSH_ACP_DATA_DIR` | `~/.dsh` |
 
 The release installer separately accepts `MJOLNIR_INSTALL_DIR` (preferred over
 `INSTALL_DIR`), `MJOLNIR_GITHUB_OWNER`, `MJOLNIR_VERSION`, `GITHUB_TOKEN`, and
