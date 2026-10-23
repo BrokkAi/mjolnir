@@ -1177,7 +1177,7 @@ impl SetupDialog {
         let mut cleared = Vec::new();
         if self.draft["review"]["profile"].as_str() == Some(profile_id) {
             self.draft["review"]["profile"] = Value::Null;
-            self.draft["review"]["enabled"] = Value::Bool(false);
+            self.draft["review"]["trigger"] = Value::String("off".into());
             cleared.push("Code Review and turned off automatic review");
         }
         self.notice = Some(if cleared.is_empty() {

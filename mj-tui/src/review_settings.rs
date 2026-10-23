@@ -10,11 +10,11 @@ use std::time::Instant;
 
 use crossterm::event::Event;
 use mj_chat::components::{
-    Checkbox, ComboBox, ComboBoxState, ControlKind, Dialog, FormViewport, Interaction, PopupSide,
+    ComboBox, ComboBoxState, ControlKind, Dialog, FormViewport, Interaction, PopupSide,
 };
 use mj_chat::theme;
 use mj_core::acp::SessionConfigChoice;
-use mj_core::config::{Config, ReviewConfig, SpinnerStyle};
+use mj_core::config::{Config, ReviewConfig, ReviewTrigger, SpinnerStyle};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -233,6 +233,16 @@ impl ReviewSettingsDialog {
         );
         vec![
             (
+                Enabled,
+                "Trigger",
+                vec!["Off".into(), "End of turn".into(), "Before push".into()],
+                match self.review.trigger {
+                    ReviewTrigger::Off => 0,
+                    ReviewTrigger::Turn => 1,
+                    ReviewTrigger::Push => 2,
+                },
+            ),
+            (
                 Profile,
                 "Profile",
                 self.profiles
@@ -268,7 +278,6 @@ impl ReviewSettingsDialog {
         use ReviewSettingsFocus::*;
         let mut form = self.form.borrow_mut();
         form.begin_update();
-        form.declare_with_enabled(Enabled, ControlKind::Checkbox, !self.saving);
         for (id, _, labels, selected) in self.selectors() {
             form.declare_with_enabled(
                 id,
@@ -294,7 +303,7 @@ impl ReviewSettingsDialog {
         // A disabled review remains a useful draft even while discovery is
         // unavailable. Local config validation still runs when the controller
         // saves it.
-        if !self.review.enabled {
+        if self.review.trigger == ReviewTrigger::Off {
             return true;
         }
         let Some(profile) = self.review.profile.as_deref() else {
@@ -346,7 +355,7 @@ impl ReviewSettingsDialog {
         snapshot: &ReviewSettingsValidation,
         review: &ReviewConfig,
     ) -> Option<String> {
-        if !review.enabled
+        if review.trigger == ReviewTrigger::Off
             || snapshot.profile != review.profile
             || snapshot.model != review.model
             || snapshot.effort != review.effort
@@ -576,8 +585,9 @@ impl ReviewSettingsDialog {
             Some(Interaction::Cancel | Interaction::Activate(Back | Cancel)) => {
                 DashboardAction::CancelReviewSettingsDiscovery
             }
-            Some(Interaction::Toggle(Enabled)) => {
-                self.review.enabled = !self.review.enabled;
+            Some(Interaction::ComboBoxCommit(Enabled, index)) => {
+                self.review.trigger =
+                    [ReviewTrigger::Off, ReviewTrigger::Turn, ReviewTrigger::Push][index];
                 DashboardAction::None
             }
             Some(Interaction::ComboBoxCommit(Profile, index)) => {
@@ -614,7 +624,7 @@ impl ReviewSettingsDialog {
                 }
                 DashboardAction::None
             }
-            Some(Interaction::Activate(id @ (Profile | Model | Effort))) => {
+            Some(Interaction::Activate(id @ (Enabled | Profile | Model | Effort))) => {
                 if let Some((_, _, _, selected)) = self
                     .selectors()
                     .into_iter()
@@ -624,7 +634,9 @@ impl ReviewSettingsDialog {
                 }
                 DashboardAction::None
             }
-            Some(Interaction::ComboBoxDismiss(Profile | Model | Effort)) => DashboardAction::None,
+            Some(Interaction::ComboBoxDismiss(Enabled | Profile | Model | Effort)) => {
+                DashboardAction::None
+            }
             Some(Interaction::Activate(Refresh)) => {
                 if let Some(profile) = self.review.profile.as_deref() {
                     dashboard.clear_review_settings_choices(profile);
@@ -831,7 +843,7 @@ pub(crate) fn render_review_settings(
         ] {
             notes.push(Line::raw(line));
         }
-    } else if dialog.review.enabled {
+    } else if dialog.review.trigger != ReviewTrigger::Off {
         if dialog.model_choices_discovered
             && dialog.review.model.as_deref().is_some_and(|model| {
                 !dialog
@@ -889,18 +901,9 @@ pub(crate) fn render_review_settings(
     );
     dialog.scroll.set(viewport.offset());
     let row = |index: u16| viewport.row(index, 1);
-    Checkbox::render(
-        frame,
-        row(0),
-        "Automatic review",
-        dialog.review.enabled,
-        !dialog.saving,
-        &mut form,
-        Enabled,
-    );
     let mut expanded_combo = None;
     for (index, (id, label, values, selected)) in dialog.selectors().iter().enumerate() {
-        let area = row(index as u16 + 1);
+        let area = row(index as u16);
         let label_width = 10.min(area.width);
         let loading = dialog.probing && dialog.choices_loading && (*id == Model || *id == Effort);
         frame.render_widget(
@@ -950,7 +953,7 @@ pub(crate) fn render_review_settings(
     if inner.height > 1 {
         frame.render_widget(
             Line::styled(
-                "Tab moves · Enter opens choices · Space toggles · Esc goes back",
+                "Tab moves · Enter opens choices · Esc goes back",
                 Style::default().fg(theme::palette().muted),
             ),
             Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),

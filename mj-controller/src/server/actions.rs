@@ -43,6 +43,7 @@ pub enum ControllerAction {
         subagents: Option<mj_core::subagent::SubagentPolicy>,
         /// Turn review for this session. Omitted follows `[review]`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(deserialize_with = "deserialize_session_review")]
         review: Option<mj_core::config::SessionReview>,
         /// Start the session with no project memory.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -608,6 +609,25 @@ pub enum BackgroundTaskStopFailure {
     Provider,
     /// The stop task itself failed before reaching the provider.
     Internal,
+}
+
+pub(super) fn deserialize_session_review<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<mj_core::config::SessionReview>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    value
+        .map(|value| {
+            if !matches!(
+                value.get("mode").and_then(serde_json::Value::as_str),
+                Some("off" | "turn" | "push")
+            ) {
+                return Err(serde::de::Error::custom(
+                    "review.mode must be off, turn, or push",
+                ));
+            }
+            serde_json::from_value(value).map_err(serde::de::Error::custom)
+        })
+        .transpose()
 }
 
 #[cfg(test)]

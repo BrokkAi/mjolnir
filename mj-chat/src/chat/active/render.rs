@@ -820,7 +820,7 @@ pub(crate) fn prompt_title_parts(chat: &ChatState) -> Vec<String> {
     // Auto-review changes what happens when this turn ends, so the composer
     // says it is armed rather than surprising the user with a pane.
     let review = chat.review_config();
-    if review.enabled {
+    if review.arms_turn_review() {
         parts.push("review".to_owned());
     }
     parts

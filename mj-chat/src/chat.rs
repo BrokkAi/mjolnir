@@ -129,15 +129,20 @@ pub use attachments::{CHAT_DRAFT_PREFIX, PromptImage, PromptPayload};
 /// and is one being reviewed right now.
 #[must_use]
 pub fn review_status_line(review: &mj_core::config::ReviewConfig, open: bool) -> String {
-    let armed = match (review.enabled, review.reviewer_profile()) {
-        (true, Some(profile)) => {
+    let armed = match (review.trigger, review.reviewer_profile()) {
+        (mj_core::config::ReviewTrigger::Push, _) => "Review trigger is before push".to_owned(),
+        (mj_core::config::ReviewTrigger::Turn, Some(profile)) => {
             format!("Reviewing every completed turn with [review] profile {profile:?}")
         }
-        (true, None) => "Reviewing every completed turn with Auto".to_owned(),
-        (false, Some(profile)) => {
+        (mj_core::config::ReviewTrigger::Turn, None) => {
+            "Reviewing every completed turn with Auto".to_owned()
+        }
+        (mj_core::config::ReviewTrigger::Off, Some(profile)) => {
             format!("Automatic review is off; /review reviews one turn with {profile:?}")
         }
-        (false, None) => "Automatic review is off; /review uses Auto".to_owned(),
+        (mj_core::config::ReviewTrigger::Off, None) => {
+            "Automatic review is off; /review uses Auto".to_owned()
+        }
     };
     let armed = match &review.model {
         Some(model) => format!("{armed}, model {model:?}"),

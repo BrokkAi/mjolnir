@@ -198,7 +198,30 @@ fn golden_review_settings() {
     writeln!(output, "profile: Auto; model enabled: {model_enabled}; effort enabled: {effort_enabled}; save enabled: {save_enabled}")
         .expect("write Auto form state");
 
-    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "review-settings", &output);
+    auto.handle_key(key(KeyCode::Enter));
+    append_golden_state(
+        &mut output,
+        "review trigger choices",
+        100,
+        30,
+        &rendered(&mut auto, 100, 30),
+    );
+    auto.handle_key(key(KeyCode::End));
+    auto.handle_key(key(KeyCode::Enter));
+    assert!(dialog(&auto).review.is_push());
+    append_golden_state(
+        &mut output,
+        "before-push review selected",
+        100,
+        30,
+        &rendered(&mut auto, 100, 30),
+    );
+
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "review-settings",
+        output.trim_end(),
+    );
 }
 
 #[test]
@@ -241,7 +264,7 @@ fn review_selectors_render_as_comboboxes_and_escape_closes_only_the_popup() {
 fn progress_choices_are_cached_before_cleanup_and_stale_replies_are_ignored() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.config.review.profile = Some("codex-1".into());
-    dashboard.config.review.enabled = true;
+    dashboard.config.review.trigger = mj_core::config::ReviewTrigger::Turn;
     let DashboardAction::DiscoverReviewSettings {
         generation,
         profile_id,
@@ -280,7 +303,7 @@ fn progress_choices_are_cached_before_cleanup_and_stale_replies_are_ignored() {
 fn clearing_the_profile_cancels_discovery_without_closing_the_draft() {
     let mut dashboard = dashboard_with_session(running_session());
     open(&mut dashboard);
-    dashboard.handle_key(key(KeyCode::Char(' ')));
+    choose_next(&mut dashboard);
     dashboard.handle_key(key(KeyCode::Tab));
     assert!(matches!(
         choose_next(&mut dashboard),
@@ -291,7 +314,7 @@ fn clearing_the_profile_cancels_discovery_without_closing_the_draft() {
         DashboardAction::CancelReviewSettingsDiscovery
     ));
     assert!(dialog(&dashboard).review.profile.is_none());
-    assert!(dialog(&dashboard).review.enabled);
+    assert!(dialog(&dashboard).review.arms_turn_review());
     assert!(dialog(&dashboard).can_save());
     // Esc returns to Settings with the change still in its draft.
     dashboard.handle_key(key(KeyCode::Esc));
@@ -586,7 +609,7 @@ fn profile_definition_changes_invalidate_cache_but_review_edits_do_not() {
         .review_settings_choices
         .insert(key.clone(), ReviewSettingsChoices::default());
     let mut review_edit = dashboard.config.clone();
-    review_edit.review.enabled = true;
+    review_edit.review.trigger = mj_core::config::ReviewTrigger::Turn;
     dashboard.set_config(review_edit);
     assert!(dashboard.review_settings_choices.contains_key(&key));
 
@@ -678,7 +701,7 @@ fn final_cleanup_warning_keeps_choices_and_zero_effort_is_known() {
 fn known_unsupported_values_disable_save_but_unknown_discovery_does_not() {
     let mut config = config();
     config.review.profile = Some("codex-1".into());
-    config.review.enabled = true;
+    config.review.trigger = mj_core::config::ReviewTrigger::Turn;
     config.review.model = Some("missing".into());
     config.review.effort = Some("missing".into());
     let mut dashboard =
@@ -734,7 +757,7 @@ fn known_unsupported_values_disable_save_but_unknown_discovery_does_not() {
 fn save_is_local_while_loading_unavailable_or_failed() {
     let mut config = config();
     config.review.profile = Some("codex-1".into());
-    config.review.enabled = true;
+    config.review.trigger = mj_core::config::ReviewTrigger::Turn;
     let mut dashboard =
         DashboardState::new(config, mj_core::state::State::default(), Default::default());
     assert!(matches!(

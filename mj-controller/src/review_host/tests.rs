@@ -717,7 +717,7 @@ async fn a_review_refused_for_another_reason_does_not_wait() {
 fn armed(profile: Option<&str>) -> ReviewConfigSource {
     let profile = profile.map(str::to_owned);
     Arc::new(move |_| ReviewConfig {
-        enabled: true,
+        trigger: mj_core::config::ReviewTrigger::Turn,
         tier: None,
         profile: profile.clone(),
         model: None,
@@ -1133,7 +1133,7 @@ async fn observation_bursts_do_not_drop_the_final_idle_edge() {
     let mut manager = FakeManager::new(session).await;
     let environment = FakeEnvironment::new();
     let config: ReviewConfigSource = Arc::new(|_| ReviewConfig {
-        enabled: false,
+        trigger: mj_core::config::ReviewTrigger::Off,
         tier: None,
         profile: Some("reviewer".to_owned()),
         model: None,
@@ -2646,5 +2646,25 @@ async fn a_reviewer_launch_refused_by_a_checkpoint_is_retried() {
         "the refused launch did not end the review: {:?}",
         host.view(session)
     );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn push_trigger_does_not_arm_review_at_the_end_of_a_turn() {
+    let session = session_id("pushtrigger");
+    let mut manager = FakeManager::new(&session).await;
+    let config: ReviewConfigSource = Arc::new(|_| ReviewConfig {
+        trigger: mj_core::config::ReviewTrigger::Push,
+        ..Default::default()
+    });
+    let host = TurnReviewHost::spawn_in(manager.control.clone(), config, FakeEnvironment::new());
+    finish_a_turn(&manager, &host).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err()
+    );
+    assert!(host.view(&session).is_none());
+    assert!(!host.refuses_prompt(&session));
     host.shutdown().await.unwrap();
 }

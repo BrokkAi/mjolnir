@@ -937,7 +937,7 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
     let fixture = mj_client::session::replacement_session_test_fixture("session-review", 88);
     let mut context = chat_context("session-review", &[]);
     context.config.review = mj_core::config::ReviewConfig {
-        enabled: true,
+        trigger: mj_core::config::ReviewTrigger::Turn,
         tier: Some("extended".into()),
         profile: Some("reviewer-a".into()),
         model: None,
@@ -956,7 +956,7 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
     assert_eq!(
         chat.state.review_config(),
         mj_core::config::ReviewConfig {
-            enabled: true,
+            trigger: mj_core::config::ReviewTrigger::Turn,
             tier: Some("extended".into()),
             profile: Some("reviewer-a".into()),
             model: None,

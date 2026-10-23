@@ -1273,7 +1273,7 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
-    record.review = Some(mj_core::config::SessionReview::On {
+    record.review = Some(mj_core::config::SessionReview::Turn {
         model: Some("gpt-6-astra".into()),
         effort: Some("high".into()),
         tier: Some("extended".into()),
@@ -1285,7 +1285,7 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     let loaded = load_state_from(&database).unwrap();
     assert_eq!(
         loaded.sessions["session-1"].review,
-        Some(mj_core::config::SessionReview::On {
+        Some(mj_core::config::SessionReview::Turn {
             model: Some("gpt-6-astra".into()),
             effort: Some("high".into()),
             tier: None,

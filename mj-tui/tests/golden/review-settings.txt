@@ -2,7 +2,7 @@
 
 
   ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
-  │☐ Automatic review                                                                            │
+  │Trigger   Off ▾                                                                               │
   │Profile   Auto ▾                                                                              │
   │Model     Auto policy ▾                                                                       │
   │Effort    Auto policy ▾                                                                       │
@@ -24,7 +24,7 @@
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
-  │Tab moves · Enter opens choices · Space toggles · Esc goes back                               │
+  │Tab moves · Enter opens choices · Esc goes back                                               │
   │  Cancel     Back     Refresh choices     Save Settings                                       │
   ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
@@ -69,7 +69,7 @@ Setup command available: true
 
 
   ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
-  │☐ Automatic review                                                                            │
+  │Trigger   Off ▾                                                                               │
   │Profile   Auto ▾                                                                              │
   │Model     Auto policy ▾                                                                       │
   │Effort    Auto policy ▾                                                                       │
@@ -91,7 +91,7 @@ Setup command available: true
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
-  │Tab moves · Enter opens choices · Space toggles · Esc goes back                               │
+  │Tab moves · Enter opens choices · Esc goes back                                               │
   │  Cancel     Back     Refresh choices     Save Settings                                       │
   ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
@@ -130,13 +130,13 @@ action: None
 
 
 discovery action: DiscoverReviewSettings { generation: 1, profile_id: "claude-1", model: None }
-saved global review: {"profile":"claude-1"}
+saved global review: {"trigger":"off","profile":"claude-1"}
 
 === Auto profile leaves manual overrides disabled (100x30) ===
 
 
   ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
-  │☐ Automatic review                                                                            │
+  │Trigger   Off ▾                                                                               │
   │Profile   Auto ▾                                                                              │
   │Model     Auto policy ▾                                                                       │
   │Effort    Auto policy ▾                                                                       │
@@ -158,9 +158,71 @@ saved global review: {"profile":"claude-1"}
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
-  │Tab moves · Enter opens choices · Space toggles · Esc goes back                               │
+  │Tab moves · Enter opens choices · Esc goes back                                               │
   │  Cancel     Back     Refresh choices     Save Settings                                       │
   ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 profile: Auto; model enabled: false; effort enabled: false; save enabled: true
+
+=== review trigger choices (100x30) ===
+
+
+  ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
+  │Trigger   Off ▾                                                                               │
+  │Profile   ╭ values · ↑/↓ select · Tab/Enter accept ╮                                          │
+  │Model     │Off                                     │                                          │
+  │Effort    │End of turn                             │                                          │
+  │          │Before push                             │                                          │
+  │          ╰────────────────────────────────────────╯                                          │
+  │Changes stay in the Settings draft until you save Settings.                                   │
+  │Auto resolves a reviewer when review starts                                                   │
+  │Auto prefers another provider, then another profile, then the primary.                        │
+  │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
+  │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
+  │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
+  │These settings also choose the plan second-opinion reviewer.                                  │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │Tab moves · Enter opens choices · Esc goes back                                               │
+  │  Cancel     Back     Refresh choices     Save Settings                                       │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+=== before-push review selected (100x30) ===
+
+
+  ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
+  │Trigger   Before push ▾                                                                       │
+  │Profile   Auto ▾                                                                              │
+  │Model     Auto policy ▾                                                                       │
+  │Effort    Auto policy ▾                                                                       │
+  │                                                                                              │
+  │                                                                                              │
+  │Changes stay in the Settings draft until you save Settings.                                   │
+  │Auto resolves a reviewer when review starts                                                   │
+  │Auto prefers another provider, then another profile, then the primary.                        │
+  │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
+  │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
+  │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
+  │These settings also choose the plan second-opinion reviewer.                                  │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │Tab moves · Enter opens choices · Esc goes back                                               │
+  │  Cancel     Back     Refresh choices     Save Settings                                       │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯

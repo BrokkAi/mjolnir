@@ -250,6 +250,7 @@ impl ViewerSnapshot {
                     .then(|| session.last_error.clone())
                     .flatten()
                     .or_else(|| session.public_error().map(str::to_owned)),
+                    review_trigger: config.review.for_session(session.review.as_ref()).trigger,
                     storage_problem: None,
                     preview: Vec::new(),
                     queued_prompts: Vec::new(),
@@ -402,7 +403,7 @@ impl ViewerSnapshot {
             targets,
             bundles,
             review_config: ViewerReviewConfig {
-                enabled: config.review.enabled,
+                trigger: config.review.trigger,
                 profile: config.review.profile.clone(),
             },
             capacity: Vec::new(),
@@ -439,6 +440,8 @@ impl ViewerSession {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSession {
+    #[serde(default)]
+    pub review_trigger: mj_core::config::ReviewTrigger,
     /// The daemon's creation-settings comparison, also used by Restart itself.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub container_upgrade_supported: bool,
@@ -777,7 +780,7 @@ pub enum ViewerCommandSource {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerReviewConfig {
-    pub enabled: bool,
+    pub trigger: mj_core::config::ReviewTrigger,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
 }

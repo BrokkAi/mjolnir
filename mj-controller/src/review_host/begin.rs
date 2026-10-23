@@ -34,7 +34,7 @@ impl HostState {
             watch.prompt_driven
                 && matches!(watch.execution, MaterializedExecutionState::Running { .. })
         }) && matches!(execution, MaterializedExecutionState::Idle);
-        if !finished_turn || !(self.config)(&session_id).enabled {
+        if !finished_turn || !(self.config)(&session_id).arms_turn_review() {
             return;
         }
         self.begin(session_id, false, None);
