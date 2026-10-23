@@ -18,7 +18,10 @@ To see it working: set `[review] trigger = "push"`, start a Claude or Codex sess
 - [x] (2026-10-23 23:40Z) Git-side building blocks of Milestones 4 and 5 committed and merged: `capture_pushable_commits`, `PushBase`, `ensure_session_start_head`, `record_reviewed_tree`, `install_pre_push_hook` (refuses a hooks directory inside the work tree that git does not ignore). Nothing calls them yet.
 - [x] (2026-10-23 23:45Z) Milestone 1: three-state review trigger in configuration, per-session override, CLI, API, TUI settings and web viewer. `enabled = true` still loads as `turn`; the deprecated `--review-tier` alone still means `turn`.
 - [x] (2026-10-23 23:55Z) Milestone 3, first half: second opinion removed (migration 93 drops its tables and raises the compatibility floor to 93; daemon protocol 59); Settings discovery reads the profile capability catalog, which covers all eight harnesses.
-- [ ] Live e2e script `tests/e2e/review_before_push.py` (being written; run after Milestone 5).
+- [x] (2026-10-24 01:30Z) Milestone 2: turn review runs its reviewer as a hidden `SubagentKind::Reviewer` child session (migration 94, compatibility floor 94). Reviewer handbacks may be up to 128 K characters; ordinary children keep 4,000.
+- [ ] (started 2026-10-24 01:35Z) Milestone 3, second half: delete the sidecar (`rbp/delete-sidecar`).
+- [ ] (started 2026-10-24 01:35Z) Milestones 4 and 5 wiring: `request_review`, push review in the review host, relay protocol 43, mailbox verdict, hook and gate at worker start (`rbp/push-wiring`).
+- [ ] Live e2e script `tests/e2e/review_before_push.py` written (untracked); run after the wiring merges.
 - [ ] Milestone 2: turn review runs its reviewer as a child session. The sidecar is no longer used for turn review.
 - [ ] Milestone 3: remove the plan second opinion and the reviewer sidecar. Settings model/effort discovery moves to the profile capability catalog.
 - [ ] Milestone 4: push review. `request_review` tool in `mj-agents`, review host entry that runs during a turn, "pushable commits" capture scope with the base rule from the Decision Log, verdict by mailbox message, reviewed-tree record on a clean verdict.
