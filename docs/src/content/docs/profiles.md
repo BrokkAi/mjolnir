@@ -21,7 +21,8 @@ Straightforward, parents delegate straightforward work and do work that
 needs judgment themselves.
 
 **Create** and **Move…** offer **Native** or **Mjolnir** delegation. Mjolnir
-requires a Claude or Codex profile and a configured Straightforward task.
+requires a Claude, Codex, or DSH profile and a configured Straightforward task.
+DSH has no sub-agents of its own, so Native gives a DSH session no delegation.
 Existing sessions keep their recorded policy; leaving Move's choice unchanged
 retains it.
 
@@ -85,7 +86,7 @@ path.
 
 Kimi Code does not expose a guardian approval mode. OpenCode and MiMo Code ask
 before tools according to their permission rules, and DSH asks before every
-write, command, and MCP tool call, but all three run commands on the host
+write, command, and MCP tool call other than Mjolnir's own, but all three run commands on the host
 without a sandbox, so they have no guardian either. The dashboard's
 new-session and resume wizards warn before using any of them on a raw target. Muse's guardian is muse-acp's auto-review; see
 [Harness limitations](#harness-limitations).
@@ -946,14 +947,19 @@ handoffs; see
 - DSH has no sandbox: commands run directly on the host, and only its file
   tools are confined to the workspace roots. Under configured approvals
   Mjolnir selects dsh-acp's `permission_mode` `ask` on every session open, so
-  every write, command, and MCP tool call asks for permission; an
-  unconstrained policy selects `allow`. The Plan toggle switches dsh-acp to its
+  every write, command, and MCP tool call asks for permission, except calls to
+  Mjolnir's own `mj-agents` and `mj-memory` tools, which the worker approves
+  without asking, as Claude and Codex sessions do; an unconstrained policy
+  selects `allow`. The Plan toggle switches dsh-acp to its
   `plan` mode and back to its `agent` mode. DSH accepts multiple workspace
   roots and attached directories. Checkpoints keep the session's
   `sessions/<id>.json`, and a restore at a different workspace path rewrites
   the record's working directory so the session resumes. Native import and
-  SessionWiki search do not support DSH yet. It does not serve Mjolnir's
-  delegation, which needs a Claude or Codex profile. It serves DeepSeek-family
+  SessionWiki search do not support DSH yet. A DSH session can use Mjolnir's
+  sub-agents, and a DSH profile can run them: it reads the delegation policy
+  from its staged `AGENTS.md` and receives the `mj-agents` tools over ACP.
+  dsh-acp has no sub-agents of its own, so Native gives a DSH session no
+  delegation, the same as None. It serves DeepSeek-family
   utility inference with its flash model only when its base URL is DeepSeek's
   own `api.deepseek.com` and its key is set.
 - A custom bridge must speak the ACP version and features Mjolnir expects.

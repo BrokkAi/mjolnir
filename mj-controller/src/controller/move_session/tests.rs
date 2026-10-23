@@ -501,7 +501,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
                 additional_mounts: None,
                 resource_allocation: None,
             },
-            "supported only by Claude and Codex",
+            "need a Claude, Codex, or DSH profile",
         ),
         (
             "unconfigured Mjolnir delegation",

@@ -1167,7 +1167,7 @@ fn subagent_policy_check(config: &Config) -> DoctorCheck {
         eligible.join(", ")
     };
     let detail = format!(
-        "Claude and Codex sessions may opt in, up to {} sub-agents at once per session. A session's sub-agents may use its own profile and: {others}.",
+        "Claude, Codex, and DSH sessions may opt in, up to {} sub-agents at once per session. A session's sub-agents may use its own profile and: {others}.",
         subagents.max_concurrent
     );
     DoctorCheck::ready("subagents.policy", "Sub-agent policy", detail)

@@ -254,6 +254,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         (HarnessKind::Codex, false),
         (HarnessKind::Codex, true),
         (HarnessKind::Claude, true),
+        (HarnessKind::Dsh, false),
         (HarnessKind::Grok, false),
     ] {
         spec.harness = harness;
@@ -282,8 +283,29 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
 
 #[test]
 fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
+    use agent_client_protocol::schema::v1::{PermissionOption, ToolCallUpdateFields};
     use mj_core::worker_launch::ReviewMcpServer;
-    for harness in [HarnessKind::Codex, HarnessKind::Claude] {
+    // A DSH permission request, titled and offering options as dsh-acp 0.2.0
+    // does, and the option the worker selects for it without asking.
+    let dsh_answer = |approvals: &OwnedMcpApprovals, title: &str| {
+        let request = RequestPermissionRequest::new(
+            "native",
+            ToolCallUpdate::new("call", ToolCallUpdateFields::new().title(title)),
+            vec![
+                PermissionOption::new("allow_once", "Allow once", PermissionOptionKind::AllowOnce),
+                PermissionOption::new(
+                    "allow_always",
+                    "Allow for this session",
+                    PermissionOptionKind::AllowAlways,
+                ),
+                PermissionOption::new("reject_once", "Deny", PermissionOptionKind::RejectOnce),
+            ],
+        );
+        approvals
+            .response(&request)
+            .map(|response| serde_json::to_value(response).unwrap()["outcome"]["optionId"].clone())
+    };
+    for harness in [HarnessKind::Codex, HarnessKind::Claude, HarnessKind::Dsh] {
         for policy in [
             ExecutionPolicy::ConfiguredApprovals,
             ExecutionPolicy::Unconstrained,
@@ -331,7 +353,16 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
                         .unwrap(),
                 ] {
                     let servers = request["mcpServers"].as_array().unwrap();
-                    if harness == HarnessKind::Codex {
+                    if harness == HarnessKind::Dsh {
+                        // DSH has no approval setting to send; the worker
+                        // answers its permission requests instead (below).
+                        assert_eq!(servers.len(), 4);
+                        assert!(
+                            servers.iter().all(|server| server.get("_meta").is_none()),
+                            "{request}"
+                        );
+                        assert!(request.get("_meta").is_none(), "{request}");
+                    } else if harness == HarnessKind::Codex {
                         assert_eq!(servers.len(), 4);
                         for server in servers {
                             let expected = (guardian
@@ -369,7 +400,41 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
                         }
                     }
                 }
+                if harness == HarnessKind::Dsh {
+                    let approvals = OwnedMcpApprovals::for_launch(&spec);
+                    for (title, owned) in [
+                        ("mcp  mj-agents  spawn", true),
+                        ("mcp  mj-agents  list agents", true),
+                        ("mcp  mj-agents  handback", true),
+                        ("mcp  mj-memory  trace file src/lib.rs", true),
+                        // A configured reviewer server is not Mjolnir's,
+                        // whatever its name.
+                        ("mcp  mj-tools  run", false),
+                        ("mcp  mj-third-party  scan", false),
+                        // `mj-agents_` only begins with an owned name.
+                        ("mcp  mj-agents   spawn", false),
+                        ("mcp  mj-agents  ", false),
+                        ("Run rm -rf build", false),
+                        ("write file mcp  mj-agents  spawn", false),
+                    ] {
+                        assert_eq!(
+                            dsh_answer(&approvals, title),
+                            (guardian && owned).then(|| serde_json::json!("allow_once")),
+                            "{policy:?} {role}: {title}"
+                        );
+                    }
+                }
                 spec.subagent_mcp_socket = None;
+                if harness == HarnessKind::Dsh {
+                    // Without the socket this launch registers no delegation
+                    // server, so nothing named after it is approved.
+                    let approvals = OwnedMcpApprovals::for_launch(&spec);
+                    assert_eq!(dsh_answer(&approvals, "mcp  mj-agents  spawn"), None);
+                    assert_eq!(
+                        dsh_answer(&approvals, "mcp  mj-memory  search sessions").is_some(),
+                        guardian
+                    );
+                }
                 spec.extra_mcp_servers.clear();
                 let without_memory =
                     serde_json::to_value(new_session_request(&spec, false)).unwrap();
@@ -1151,7 +1216,7 @@ fn unconstrained_permission_prefers_a_one_time_allow_and_never_cancels() {
         ],
     );
 
-    let response = unconstrained_permission_response(&request).unwrap();
+    let response = allow_permission_response(&request).unwrap();
     assert_eq!(
         serde_json::to_value(response).unwrap()["outcome"]["optionId"],
         "allow_once"
@@ -1166,7 +1231,7 @@ fn unconstrained_permission_prefers_a_one_time_allow_and_never_cancels() {
             PermissionOptionKind::RejectOnce,
         )],
     );
-    assert!(unconstrained_permission_response(&rejected_only).is_none());
+    assert!(allow_permission_response(&rejected_only).is_none());
 }
 
 #[tokio::test]
