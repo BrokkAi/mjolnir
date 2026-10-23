@@ -1469,7 +1469,7 @@ controls: [{"tag":"button","id":"new-project-github","label":"GitHub","value":""
 subagent selector count: 0
 request: POST /api/projects/discover [{"kind":"directory","path":""}]
 project creation requests: 0
-layout: {"header":{"x":10,"y":8,"width":370,"height":44},"sourceButtons":[{"text":"GitHub","x":10,"y":221,"width":118,"height":44},{"text":"Folders","x":136,"y":221,"width":118,"height":44},{"text":"URL","x":262,"y":221,"width":118,"height":44}],"result":null,"documentWidth":390}
+layout: {"header":{"x":10,"y":8,"width":370,"height":44},"sourceButtons":[{"text":"GitHub","x":10,"y":219,"width":118,"height":44},{"text":"Folders","x":136,"y":219,"width":118,"height":44},{"text":"URL","x":262,"y":219,"width":118,"height":44}],"result":null,"documentWidth":390}
 === opened folder remains visible on phone (390x844) ===
 New session
 
@@ -1503,7 +1503,7 @@ controls: [{"tag":"button","id":"new-project-github","label":"GitHub","value":""
 subagent selector count: 0
 request: POST /api/projects/discover [{"kind":"directory","path":""},{"kind":"directory","path":"/home/controller/code"}]
 project creation requests: 0
-layout: {"header":{"x":10,"y":8,"width":370,"height":44},"sourceButtons":[{"text":"GitHub","x":10,"y":221,"width":118,"height":44},{"text":"Folders","x":136,"y":221,"width":118,"height":44},{"text":"URL","x":262,"y":221,"width":118,"height":44}],"result":{"text":"Use code\nRepository in this folder\nUse repository →","x":23,"y":721,"height":113.95,"fitsViewport":true},"documentWidth":390}
+layout: {"header":{"x":10,"y":8,"width":370,"height":44},"sourceButtons":[{"text":"GitHub","x":10,"y":219,"width":118,"height":44},{"text":"Folders","x":136,"y":219,"width":118,"height":44},{"text":"URL","x":262,"y":219,"width":118,"height":44}],"result":{"text":"Use code\nRepository in this folder\nUse repository →","x":23,"y":719,"height":113.95,"fitsViewport":true},"documentWidth":390}
 === phone URL source choice (390x844) ===
 New session
 
@@ -1575,7 +1575,7 @@ controls: [{"tag":"button","id":"new-project-github","label":"GitHub\nYour repos
 subagent selector count: 0
 request: POST /api/projects/discover [{"kind":"directory","path":""},{"kind":"directory","path":"/home/controller/code"}]
 project creation requests: 0
-layout: {"x":199,"y":289,"width":181,"height":89.96875}
+layout: {"x":199,"y":287,"width":181,"height":89.96875}
 === review shows unavailable subagent policy (390x844) ===
 New session
 

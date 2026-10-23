@@ -30,6 +30,8 @@ const bootStatus = document.querySelector('#boot-status'),
   menuVersion = document.querySelector('#menu-version'),
   announcer = document.querySelector('#announcer'),
   workspaceStrip = document.querySelector('#workspaces'),
+  workspaceSelect = document.querySelector('#workspace-select'),
+  subagentWorkspace = document.querySelector('#subagent-workspace'),
   sessions = document.querySelector('#sessions'),
   resumable = document.querySelector('#resumable'),
   resumeListView = document.querySelector('#resume-list-view'),
@@ -473,37 +475,33 @@ function renderLaunchFailures() {
 }
 
 function renderWorkspaces() {
-  const selected = selectedWorkspaceId();
-  if (route.subagentParentId) {
-    const parent = sessionById(route.subagentParentId);
-    const tab = el('div', 'tab virtual-workspace');
-    tab.setAttribute('role', 'tab');
-    tab.setAttribute('aria-selected', 'true');
-    tab.setAttribute('aria-current', 'page');
-    tab.append(el('span', '', parent?.title || route.subagentParentId));
+  const parentId = route.subagentParentId;
+  const workspaces = snapshot.workspaces || [];
+  workspaceSelect.classList.toggle('hidden', Boolean(parentId) || !workspaces.length);
+  subagentWorkspace.classList.toggle('hidden', !parentId);
+  if (parentId) {
+    const parent = sessionById(parentId);
     const close = el('button', 'virtual-workspace-close', '×');
     close.type = 'button';
     close.setAttribute('aria-label', `Close ${parent?.title || 'session'} sub-agent workspace`);
-    close.onclick = event => {
-      event.stopPropagation();
-      navigate({ name: 'conversation', sessionId: route.subagentParentId });
-    };
-    tab.append(close);
-    workspaceStrip.replaceChildren(tab);
+    close.onclick = () => navigate({ name: 'conversation', sessionId: parentId });
+    subagentWorkspace.replaceChildren(el('span', '', parent?.title || parentId), close);
     return;
   }
-  workspaceStrip.replaceChildren(
-    ...(snapshot.workspaces || []).map(workspace => {
-      const tab = el('button', 'tab', workspace.name);
-      tab.setAttribute('role', 'tab');
-      tab.setAttribute('aria-selected', String(workspace.id === selected));
-      // Selection is a word to a screen reader and a border to everyone else,
-      // never colour alone.
-      if (workspace.id === selected) tab.setAttribute('aria-current', 'page');
-      tab.dataset.workspaceId = workspace.id;
-      return tab;
-    }),
-  );
+  // Every snapshot re-renders the route. Rebuilding the options only when the
+  // list itself changes keeps a refresh from closing the picker mid-choice.
+  const options = JSON.stringify(workspaces.map(workspace => [workspace.id, workspace.name]));
+  if (workspaceSelect.dataset.options !== options) {
+    workspaceSelect.dataset.options = options;
+    workspaceSelect.replaceChildren(
+      ...workspaces.map(workspace => {
+        const option = el('option', '', workspace.name);
+        option.value = workspace.id;
+        return option;
+      }),
+    );
+  }
+  workspaceSelect.value = selectedWorkspaceId() || '';
 }
 
 // ---------------------------------------------------------------------------
@@ -7882,10 +7880,8 @@ resumeSearch.oninput = () => {
   renderResumable();
 };
 
-workspaceStrip.onclick = event => {
-  const tab = event.target.closest('button[data-workspace-id]');
-  if (!tab) return;
-  navigate({ name: 'dashboard', workspaceId: tab.dataset.workspaceId });
+workspaceSelect.onchange = () => {
+  navigate({ name: 'dashboard', workspaceId: workspaceSelect.value });
 };
 
 for (const node of document.querySelectorAll(

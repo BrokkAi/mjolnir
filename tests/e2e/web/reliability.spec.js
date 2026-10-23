@@ -70,7 +70,7 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
 
     stage('snapshot-rendered');
     // The dashboard opens on a workspace, and the workspace is in the URL.
-    await expect(page.locator('#workspaces .tab')).toHaveCount(1);
+    await expect(page.locator('#workspace-select option')).toHaveCount(1);
     await expect(page).toHaveURL(/#workspace\//);
     const workspaceHash = new URL(page.url()).hash;
 

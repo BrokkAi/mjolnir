@@ -762,10 +762,10 @@ test('refresh, workspace navigation, and reconnect preserve card identity, focus
   // pointer can still open the menu after the original 500ms threshold.
   await page.mouse.up();
 
-  await page.getByRole('tab', { name: 'Other workspace' }).click();
+  await page.getByRole('combobox', { name: 'Workspace' }).selectOption({ label: 'Other workspace' });
   await expect(page).toHaveURL(/#workspace\/workspace-2$/);
   await expect(card(page, 'other')).toBeVisible();
-  await page.getByRole('tab', { name: 'Browser tests' }).click();
+  await page.getByRole('combobox', { name: 'Workspace' }).selectOption({ label: 'Browser tests' });
   await expect(page).toHaveURL(/#workspace\/workspace-1$/);
   await expect(alphaCard).toBeVisible();
   expect(await original.evaluate(node => node.isConnected)).toBe(true);
