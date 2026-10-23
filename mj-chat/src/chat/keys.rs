@@ -166,13 +166,6 @@ impl ChatState {
             }
         }
 
-        if code == KeyCode::Char('r')
-            && modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        {
-            self.restore_latest_unsent_prompt();
-            return ChatAction::None;
-        }
-
         if code == KeyCode::Char('v')
             && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
         {

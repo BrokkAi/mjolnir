@@ -112,21 +112,20 @@ fn background_task(id: &str, command: &str, can_stop: bool) -> mj_core::relay::B
     }
 }
 
+/// Older builds saved refused and unanswered prompts with the draft. Those
+/// fields are no longer read, and the composer still comes back.
 #[test]
-fn legacy_failed_image_submission_remains_recoverable() {
-    let image = test_image();
+fn a_draft_saved_with_unsent_records_still_restores_the_composer() {
     let saved = serde_json::json!({
-        "text": "", "image": null,
-        "unsent": [{"kind": "Prompt", "text": "inspect ", "image": image,
-            "error": "offline", "recorded_at_ms": 42}]
+        "text": "next step", "image": null,
+        "unsent": [{"kind": "Unanswered", "text": "inspect ", "image": test_image(),
+            "error": "offline", "recorded_at_ms": 42}],
+        "unanswered": {"turn": "prompt-1", "told": true}
     });
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.restore_draft(format!("{CHAT_DRAFT_PREFIX}{saved}"));
-    chat.restore_latest_unsent_prompt();
-    assert_eq!(
-        chat.draft_payload(),
-        PromptPayload::with_image("inspect ", image)
-    );
+    assert_eq!(chat.draft_payload(), PromptPayload::text("next step"));
+    assert!(chat.notice().is_none());
 }
 
 #[test]
@@ -170,24 +169,6 @@ fn failed_image_submission_preserves_newer_images_and_survives_reopening() {
     reopened.set_prompt_images_supported(true);
     reopened.restore_draft(chat.encoded_draft());
     assert_eq!(reopened.draft_payload(), saved);
-    let retry = KeyEvent::new(
-        KeyCode::Char('r'),
-        KeyModifiers::CONTROL | KeyModifiers::ALT,
-    );
-    reopened.handle_key(retry);
-    assert_eq!(
-        reopened.draft_payload(),
-        saved,
-        "retry must not overwrite a newer draft"
-    );
-    reopened.clear_input();
-    reopened.handle_key(retry);
-    assert_eq!(reopened.draft_payload(), original);
-    assert_eq!(
-        reopened.handle_key(key(KeyCode::Enter)),
-        ChatAction::Prompt(original.text)
-    );
-    assert_eq!(reopened.take_submitting_images(), original.images);
 }
 
 #[test]
@@ -1238,87 +1219,6 @@ fn materialized_diff_counts_arrive_after_the_path_and_ignore_stale_revisions() {
         chat.entries[0].tool_diffstats,
         ["/workspace/src/lib.rs  +1 −0"]
     );
-}
-
-fn unanswered_session(
-    command_id: &str,
-    position: u64,
-    text: &str,
-    stop: &str,
-) -> MaterializedSession {
-    let mut session = MaterializedSession::empty("1234567890");
-    session.applied_event_ordinal = 9;
-    session.transcript.push(
-        TranscriptItem {
-            stable_id: format!("user:{position}"),
-            position,
-            latest_content_event_ordinal: None,
-            created_at_ms: 10,
-            last_changed_at_ms: 10,
-            body: TranscriptBody::User {
-                content: vec![serde_json::json!({"type": "text", "text": text})],
-            },
-        }
-        .into(),
-    );
-    let mut outcome = unanswered_outcome(stop);
-    outcome.command_id = command_id.into();
-    outcome.turn_start_position = Some(position);
-    session.last_turn_outcome = Some(outcome);
-    session
-}
-
-/// The notice helps once: later unanswered prompts in the same run add no
-/// row, an answered prompt starts a new run, and a reattach (which re-reads
-/// the last outcome and restores the saved draft) does not bring it back.
-// Hard-won: c1169958: Reattach re-recorded an unanswered prompt after the person dismissed it.
-#[test]
-fn unanswered_prompts_are_reported_once_until_one_is_answered() {
-    let unanswered = mj_core::acp::PROMPT_UNANSWERED_STOP_REASON;
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.apply_materialized(&unanswered_session("p1", 4, "first", unanswered), &[], &[]);
-    chat.apply_materialized(&unanswered_session("p2", 6, "second", unanswered), &[], &[]);
-    assert_eq!(chat.unsent_prompts.len(), 1);
-    assert_eq!(chat.unsent_prompts[0].payload.text, "first");
-
-    // Reattach: a new chat restores the saved draft, then sees the same outcome.
-    let mut reattached = ChatState::new(&snapshot(), &[]);
-    reattached.restore_draft(chat.encoded_draft());
-    reattached.apply_materialized(&unanswered_session("p2", 6, "second", unanswered), &[], &[]);
-    reattached.apply_materialized(&unanswered_session("p3", 8, "third", unanswered), &[], &[]);
-    assert_eq!(reattached.unsent_prompts.len(), 1);
-
-    // Once the person has dismissed the row, a reload does not restore it.
-    reattached.unsent_prompts.clear();
-    let mut later = ChatState::new(&snapshot(), &[]);
-    later.restore_draft(reattached.encoded_draft());
-    later.apply_materialized(&unanswered_session("p3", 8, "third", unanswered), &[], &[]);
-    assert!(later.unsent_prompts.is_empty());
-
-    // An answered prompt resets it, so a later failure is reported again.
-    later.apply_materialized(
-        &unanswered_session("p4", 10, "fourth", "end_turn"),
-        &[],
-        &[],
-    );
-    later.apply_materialized(&unanswered_session("p5", 12, "fifth", unanswered), &[], &[]);
-    assert_eq!(later.unsent_prompts.len(), 1);
-    assert_eq!(later.unsent_prompts[0].payload.text, "fifth");
-}
-
-fn unanswered_outcome(stop_reason: &str) -> mj_core::state::MaterializedTurnOutcome {
-    mj_core::state::MaterializedTurnOutcome {
-        diagnostic: None,
-        usage: None,
-        command_id: "prompt-1".into(),
-        accepted_ordinal: Some(3),
-        turn_start_position: Some(4),
-        completed_ordinal: 8,
-        completed_at_ms: 20,
-        outcome: TurnOutcomeKind::Completed {
-            stop_reason: stop_reason.into(),
-        },
-    }
 }
 
 #[test]
@@ -3135,68 +3035,5 @@ mod golden_cases {
         }
 
         save("chat-transcript-rendering", &output);
-    }
-
-    #[test]
-    fn golden_chat_unanswered_prompt_recovery() {
-        let mut output = String::new();
-        let unanswered = mj_core::acp::PROMPT_UNANSWERED_STOP_REASON;
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        let mut session = unanswered_session("prompt-1", 4, "rename the module", unanswered);
-        let transcript_item = std::sync::Arc::make_mut(&mut session.transcript[0]);
-        transcript_item.created_at_ms = i64::MIN;
-        transcript_item.last_changed_at_ms = i64::MIN;
-        chat.apply_materialized(&session, &[], &[]);
-        chat.apply_materialized(&session, &[], &[]);
-        chat.unsent_prompts[0].recorded_at_ms = i64::MIN;
-        state(
-            &mut output,
-            "unanswered prompt appears once and can be restored",
-            &mut chat,
-            WIDTH,
-            HEIGHT,
-            None,
-            |chat| {
-                details(&[
-                    &format!("unsent prompt count: {}", chat.unsent_prompts.len()),
-                    &format!("headline: {}", chat.unsent_prompts[0].kind.headline()),
-                ])
-            },
-        );
-        let action = chat.handle_key(KeyEvent::new(
-            KeyCode::Char('r'),
-            KeyModifiers::CONTROL | KeyModifiers::ALT,
-        ));
-        state(
-            &mut output,
-            "Ctrl-Alt-R restores unanswered prompt to composer",
-            &mut chat,
-            WIDTH,
-            HEIGHT,
-            Some(action),
-            |chat| details(&[&format!("restored draft: {:?}", chat.draft_payload().text)]),
-        );
-
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        let mut finished = MaterializedSession::empty("1234567890");
-        finished.applied_event_ordinal = 9;
-        finished.last_turn_outcome = Some(unanswered_outcome("EndTurn"));
-        chat.apply_materialized(&finished, &[], &[]);
-        state(
-            &mut output,
-            "normally completed turn has no restore row",
-            &mut chat,
-            WIDTH,
-            HEIGHT,
-            None,
-            |chat| {
-                details(&[&format!(
-                    "unsent prompt count: {}",
-                    chat.unsent_prompts.len()
-                )])
-            },
-        );
-
-        save("chat-unanswered-prompt-recovery", &output);
     }
 }

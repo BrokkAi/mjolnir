@@ -1221,11 +1221,6 @@ impl ChatState {
     /// of the authoritative projection and yield when their durable rows arrive.
     fn trailing_entries(&self) -> Vec<ChatEntry> {
         let mut rows = Vec::from_iter(self.active_terminal_fallback());
-        rows.extend(
-            self.unsent_prompts
-                .iter()
-                .map(|unsent| unsent.entry(self.latest_seq)),
-        );
         rows.extend(self.submission_entries());
         rows.extend(self.notice_entries());
         rows

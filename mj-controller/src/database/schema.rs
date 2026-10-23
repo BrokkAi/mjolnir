@@ -1663,6 +1663,49 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             .context("migrate DSH harness constraints")?;
     }
 
+    // Compatible: each turn's selection now records the profile that ran it,
+    // so usage reports can filter by profile across sub-agent trees and after
+    // a child is destroyed. Older daemons name their columns when recording a
+    // selection and never read this one; turns they record leave it NULL,
+    // which the report treats as an unknown profile. Existing rows take their
+    // session's current profile, the only record that survives for them.
+    if version < 93 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE session_turn_selections ADD COLUMN profile TEXT;
+             UPDATE session_turn_selections SET profile = (
+                 SELECT last_profile FROM sessions s
+                 WHERE s.session_id = session_turn_selections.session_id);
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (93, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 93;
+             COMMIT;",
+        )?;
+    }
+
+    // Compatible: the new frontier is projection bookkeeping. Older readers
+    // ignore it and older named-column upserts preserve it; the read/write
+    // floor stays at 92. Rebuilds must not publish old questions as new mail.
+    if version < 94 {
+        let add_column = if super::legacy_schema::table_has_column(
+            connection,
+            "materialized_sessions",
+            "input_required_event_frontier",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE materialized_sessions ADD COLUMN input_required_event_frontier INTEGER NOT NULL DEFAULT 0 CHECK(input_required_event_frontier >= 0);"
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_column}
+             UPDATE materialized_sessions SET input_required_event_frontier = max(input_required_event_frontier, applied_event_ordinal);
+             INSERT INTO schema_migrations(version, applied_at) VALUES (94, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 94;
+             COMMIT;"
+        ))?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2270,7 +2313,7 @@ mod reader_tests {
         // Rebuilding sessions must retain discovery triggers and admit the new state.
         writer.execute_batch(
             "UPDATE sessions SET state='startup-cleanup',project_directory=X'2F6E6577' WHERE session_id='kept';
-             INSERT INTO session_turn_selections VALUES ('kept','turn','model','high');"
+             INSERT INTO session_turn_selections(session_id,command_id,model,effort) VALUES ('kept','turn','model','high');"
         ).unwrap();
         let changed: Vec<u8> = writer
             .query_row(
@@ -2723,6 +2766,7 @@ mod reader_tests {
                      ON prompt_history(session_id, history_id DESC);
                  CREATE INDEX prompt_history_recent ON prompt_history(history_id DESC);
                  ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE session_restart_intents DROP COLUMN container_upgrade_json;
+                 ALTER TABLE session_turn_selections DROP COLUMN profile;
                  DELETE FROM schema_migrations WHERE version >= 77;
                  UPDATE schema_compatibility SET minimum_compatible_version = 74;
                  PRAGMA user_version = 76;",
@@ -2837,6 +2881,20 @@ mod reader_tests {
             restore_github_v84_schema(&connection);
         }
         // Historical fixtures must remove columns introduced by later revisions.
+        if version < 94
+            && legacy_schema::table_has_column(
+                &connection,
+                "materialized_sessions",
+                "input_required_event_frontier",
+            )
+            .unwrap()
+        {
+            connection
+                .execute_batch(
+                    "ALTER TABLE materialized_sessions DROP COLUMN input_required_event_frontier;",
+                )
+                .unwrap();
+        }
         if version < 89
             && legacy_schema::table_has_column(&connection, "session_restart_intents", "automatic")
                 .unwrap()
@@ -2876,6 +2934,14 @@ mod reader_tests {
         {
             connection
                 .execute_batch("ALTER TABLE mailbox_outbox DROP COLUMN failure;")
+                .unwrap();
+        }
+        if version < 93
+            && legacy_schema::table_has_column(&connection, "session_turn_selections", "profile")
+                .unwrap()
+        {
+            connection
+                .execute_batch("ALTER TABLE session_turn_selections DROP COLUMN profile;")
                 .unwrap();
         }
         connection
@@ -3152,6 +3218,54 @@ mod reader_tests {
     }
 
     #[test]
+    fn turn_profile_migration_backfills_live_sessions_and_stays_compatible() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        for (id, profile) in [("kept", "codex2"), ("destroyed", "codex")] {
+            let mut record = super::super::tests::session(id, "project");
+            record.last_profile = profile.into();
+            save_session_to(&path, &record).unwrap();
+        }
+        stamp_schema_version(&path, 92);
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(
+            "INSERT INTO session_turn_selections(session_id,command_id,model,effort)
+                 VALUES ('kept','one','sol','high'),('destroyed','one','luna','low');
+             DELETE FROM sessions WHERE session_id='destroyed';",
+        )
+        .unwrap();
+        drop(old);
+        let upgraded = open_writer(&path).unwrap();
+        let state = read_schema_state(&upgraded).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        state.ensure_supported_by(92).unwrap();
+        // A revision-92 daemon names its columns and leaves the profile unknown.
+        upgraded
+            .execute_batch(
+                "INSERT INTO session_turn_selections(session_id,command_id,model,effort)
+                 VALUES ('kept','two','sol','high');",
+            )
+            .unwrap();
+        let profiles = upgraded
+            .prepare(
+                "SELECT session_id, command_id, profile FROM session_turn_selections ORDER BY 1, 2",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<(String, String, Option<String>)>>>()
+            .unwrap();
+        assert_eq!(
+            profiles,
+            [
+                ("destroyed".into(), "one".into(), None),
+                ("kept".into(), "one".into(), Some("codex2".into())),
+                ("kept".into(), "two".into(), None),
+            ]
+        );
+    }
+
+    #[test]
     fn invalid_compatibility_metadata_refuses_readers_and_writers() {
         for alteration in [
             "DROP TABLE schema_compatibility",
@@ -3238,6 +3352,46 @@ mod reader_tests {
     /// A store ahead of this build cannot be fixed by starting a daemon of
     /// this build, so the reader must not say so. This is the message the
     /// incident in #24 printed twice a second for an hour.
+    #[test]
+    fn question_frontier_migration_is_atomic_and_preserved_by_previous_writers() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("question-frontier.sqlite");
+        save_session_to(&path, &super::super::tests::session("child", "project")).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE materialized_sessions SET applied_event_ordinal=7 WHERE session_id='child'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        stamp_schema_version(&path, 92);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TRIGGER stop_question_migration BEFORE INSERT ON schema_migrations WHEN NEW.version=94 BEGIN SELECT RAISE(ABORT,'question frontier fixture'); END;").unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        connection
+            .execute_batch("ROLLBACK; DROP TRIGGER stop_question_migration;")
+            .unwrap();
+        assert!(
+            !legacy_schema::table_has_column(
+                &connection,
+                "materialized_sessions",
+                "input_required_event_frontier"
+            )
+            .unwrap()
+        );
+        assert_eq!(read_schema_state(&connection).unwrap().revision, 93);
+        migrate_schema(&connection).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(92));
+        state.ensure_supported_by(92).unwrap();
+        // The old writer names only the old projection columns. Its update
+        // must not erase the new build's already-delivered question frontier.
+        connection.execute("UPDATE materialized_sessions SET applied_event_ordinal=2, pending_elicitations_json='[]' WHERE session_id='child'", []).unwrap();
+        assert_eq!(connection.query_row("SELECT input_required_event_frontier FROM materialized_sessions WHERE session_id='child'", [], |row| row.get::<_,u64>(0)).unwrap(), 7);
+    }
+
     #[test]
     fn strict_reader_reports_a_newer_store_without_blaming_the_daemon() {
         let directory = tempfile::tempdir().unwrap();

@@ -14,7 +14,8 @@ use mj_core::relay::RelayCommand;
 use super::PromptImage;
 use super::attachments;
 use super::{
-    ChatState, PlanControl, PlanReviewFollowup, PromptPayload, TurnControlIntent, UnsentKind,
+    ChatState, PlanControl, PlanReviewFollowup, PromptPayload, SubmissionKind, TurnControlIntent,
+    queued_prompt_preview,
 };
 #[cfg(test)]
 use crate::clipboard::ClipboardImage;
@@ -112,7 +113,10 @@ impl ChatRemoteOperation {
 #[derive(Debug)]
 pub(super) enum ChatRemoteResult {
     Sync(std::result::Result<(), String>),
-    NoticeRecorded(std::result::Result<(), String>),
+    NoticeRecorded {
+        id: String,
+        result: std::result::Result<(), String>,
+    },
     Prompt {
         command_id: String,
         text: String,
@@ -191,7 +195,9 @@ impl ChatRemoteResult {
     fn failure_message(&self) -> Option<&str> {
         match self {
             Self::Sync(Err(error))
-            | Self::NoticeRecorded(Err(error))
+            | Self::NoticeRecorded {
+                result: Err(error), ..
+            }
             | Self::Prompt {
                 result: Err(error), ..
             }
@@ -414,14 +420,14 @@ async fn enqueue_chat_remote_operation(
             let attached = attached.clone();
             pending.spawn(async move {
                 let result = session
-                    .submit(id, RelayCommand::RecordNotice { text })
+                    .submit(id.clone(), RelayCommand::RecordNotice { text })
                     .await
                     .map(|_| ())
                     .map_err(|error| format!("{error:#}"));
                 publish_chat_remote_result(
                     &results,
                     &attached,
-                    ChatRemoteResult::NoticeRecorded(result),
+                    ChatRemoteResult::NoticeRecorded { id, result },
                 );
             });
         }
@@ -997,6 +1003,19 @@ pub(super) fn restore_unsent_prompt(chat: &mut ChatState, text: String, images: 
     chat.replace_input_range(0..0, &payload);
 }
 
+/// Report a submit the relay refused as a dated notice in the conversation.
+/// The composer already holds the text for a retry; the notice names it for
+/// someone who was away when it failed, since its echoed row is gone.
+fn report_refused_submission(chat: &mut ChatState, kind: SubmissionKind, text: &str, error: &str) {
+    let mut notice = format!("{}: {error}", kind.not_sent_headline());
+    let preview = queued_prompt_preview(text);
+    if !preview.is_empty() {
+        notice.push('\n');
+        notice.push_str(&preview);
+    }
+    chat.conversation_notice(notice);
+}
+
 /// The command word of a one-line slash command such as `/clear`.
 fn refused_slash_command<'a>(text: &'a str, images: &[PromptImage]) -> Option<&'a str> {
     let text = text.trim();
@@ -1022,9 +1041,10 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
         );
     }
     match result {
-        // The local row remains until projection confirms publication; failure
-        // is logged once without recursively trying to publish another notice.
-        ChatRemoteResult::NoticeRecorded(_) => {}
+        // The local row remains until projection confirms publication. A
+        // failure is logged without publishing another notice about it.
+        ChatRemoteResult::NoticeRecorded { result: Ok(()), .. } => {}
+        ChatRemoteResult::NoticeRecorded { id, result: Err(_) } => chat.refuse_notice(&id),
 
         ChatRemoteResult::Sync(Ok(())) => {
             chat.connection_feedback = None;
@@ -1036,14 +1056,10 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
         }
         ChatRemoteResult::Prompt {
             command_id,
-            text,
-            images,
             result: Ok(_),
+            ..
         } => {
             chat.finish_submission(&command_id, true);
-            // The same text has now reached the relay, so the record of the
-            // earlier refusal has nothing left to report.
-            chat.clear_unsent_prompt(UnsentKind::Prompt, &text, &images);
         }
         ChatRemoteResult::Prompt {
             command_id,
@@ -1055,24 +1071,21 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
                 return;
             }
             restore_unsent_prompt(chat, text.clone(), images.clone());
-            // A refused slash command is an event in the conversation, not
-            // lost text: the draft already holds it for a retry. It becomes a
-            // dated notice in time order instead of a row pinned below every
-            // later turn (I1-12).
+            // A refusal is an event in the conversation, and the draft already
+            // holds the text for a retry. It becomes a dated notice in time
+            // order instead of a row pinned below every later turn (I1-12).
             if let Some(command) = refused_slash_command(&text, &images) {
                 chat.conversation_notice(format!("{command} was not run: {error}"));
                 return;
             }
-
-            chat.record_unsent_prompt(UnsentKind::Prompt, text, images, error);
+            report_refused_submission(chat, SubmissionKind::Prompt, &text, &error);
         }
         ChatRemoteResult::RunShell {
             command_id,
-            command,
             result: Ok(_),
+            ..
         } => {
             chat.finish_submission(&command_id, true);
-            chat.clear_unsent_prompt(UnsentKind::Shell, &command, &[]);
         }
         ChatRemoteResult::RunShell {
             command_id,
@@ -1083,8 +1096,7 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
                 return;
             }
             restore_unsent_input(chat, &format!("!{command}"));
-
-            chat.record_unsent_prompt(UnsentKind::Shell, command, Vec::new(), error);
+            report_refused_submission(chat, SubmissionKind::Shell, &command, &error);
         }
         ChatRemoteResult::RemoveQueuedPrompt { result: Ok(()), .. } => {}
         ChatRemoteResult::RemoveQueuedPrompt {
@@ -1236,7 +1248,7 @@ pub(super) fn queue_chat_remote_operation(
             images,
         } => chat.begin_submission(
             command_id.clone(),
-            UnsentKind::Prompt,
+            SubmissionKind::Prompt,
             PromptPayload {
                 text: text.clone(),
                 images: images.clone(),
@@ -1248,7 +1260,7 @@ pub(super) fn queue_chat_remote_operation(
             command,
         } => chat.begin_submission(
             command_id.clone(),
-            UnsentKind::Shell,
+            SubmissionKind::Shell,
             PromptPayload::text(command.clone()),
             "Sending…",
         ),
@@ -1258,7 +1270,7 @@ pub(super) fn queue_chat_remote_operation(
             ..
         } => chat.begin_submission(
             format!("{command_id}-prompt"),
-            UnsentKind::Prompt,
+            SubmissionKind::Prompt,
             PromptPayload::text(text.clone()),
             "Changing mode…",
         ),
@@ -1270,7 +1282,7 @@ pub(super) fn queue_chat_remote_operation(
             if let Some(text) = &followup.prompt {
                 chat.begin_submission(
                     format!("plan-review-{}-feedback", request.id),
-                    UnsentKind::Prompt,
+                    SubmissionKind::Prompt,
                     PromptPayload::text(text.clone()),
                     "Sending answer…",
                 );
@@ -1290,12 +1302,12 @@ pub(super) fn queue_chat_remote_operation(
                 images,
             } => {
                 chat.finish_submission(&command_id, false);
-                restore_unsent_prompt(chat, text.clone(), images.clone());
-                chat.record_unsent_prompt(
-                    UnsentKind::Prompt,
-                    text,
-                    images,
-                    "session command queue is full".into(),
+                restore_unsent_prompt(chat, text.clone(), images);
+                report_refused_submission(
+                    chat,
+                    SubmissionKind::Prompt,
+                    &text,
+                    "session command queue is full",
                 );
             }
             ChatRemoteOperation::RunShell {
@@ -1303,11 +1315,11 @@ pub(super) fn queue_chat_remote_operation(
                 command,
             } => {
                 chat.finish_submission(&command_id, false);
-                chat.record_unsent_prompt(
-                    UnsentKind::Shell,
-                    command.clone(),
-                    Vec::new(),
-                    "session command queue is full".into(),
+                report_refused_submission(
+                    chat,
+                    SubmissionKind::Shell,
+                    &command,
+                    "session command queue is full",
                 );
                 restore_unsent_input(chat, &format!("!{command}"));
             }
@@ -1356,7 +1368,7 @@ mod tests {
     use super::*;
     use crate::chat::test_support::{snapshot, transcript_text};
     use base64::Engine as _;
-    use mj_core::state::MaterializedSession;
+    use mj_core::state::{MaterializedSession, TranscriptBody, TranscriptItem};
 
     fn valid_image() -> ClipboardImage {
         let mut bytes = Vec::new();
@@ -1748,8 +1760,8 @@ mod tests {
         // The row is timestamped like the rest of the transcript.
         assert!(transcript_shows(&mut chat, "Mjolnir · "));
 
-        // A newer projection rebuilds the entries; the record is client-local
-        // and the relay never saw the prompt, so it has to outlive that.
+        // A newer projection rebuilds the entries; the notice is local until
+        // the journal has it, so it has to outlive that.
         let mut session = MaterializedSession::empty("1234567890");
         session.applied_event_ordinal = 9;
         chat.apply_materialized(&session, &[], &[]);
@@ -1760,74 +1772,118 @@ mod tests {
         ));
     }
 
+    /// The screenshot case: a prompt refused while context is being cleared.
+    /// The relay refuses the notice too, so it is sent again once the journal
+    /// moves on, and then sits above the next prompt instead of below it.
     #[test]
-    fn only_accepting_the_same_text_clears_a_refused_prompt() {
+    fn a_prompt_refused_during_a_clear_lands_in_time_order_once_the_clear_ends() {
+        // What `ActiveChat::publish_conversation_notices` does for each
+        // notice it hands to the relay. Returns how many it sent.
+        fn publish(chat: &mut ChatState) -> usize {
+            let applied = chat.latest_seq;
+            let mut sent = 0;
+            for notice in &mut chat.conversation_notices {
+                if !notice.submitted {
+                    notice.submitted = true;
+                    notice.sent_at = applied;
+                    sent += 1;
+                }
+            }
+            sent
+        }
+        fn at(ordinal: u64) -> MaterializedSession {
+            let mut session = MaterializedSession::empty("1234567890");
+            session.applied_event_ordinal = ordinal;
+            session
+        }
+        fn item(stable_id: String, position: u64, body: TranscriptBody) -> TranscriptItem {
+            TranscriptItem {
+                stable_id,
+                position,
+                latest_content_event_ordinal: None,
+                created_at_ms: 10,
+                last_changed_at_ms: 10,
+                body,
+            }
+        }
+        let clearing = "Context is being cleared; wait for the new conversation";
         let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.apply_materialized(&at(4), &[], &[]);
         apply_chat_remote_result(
             &mut chat,
             ChatRemoteResult::Prompt {
                 command_id: "test-submit".into(),
-                text: "read the journal".into(),
+                text: "tweak the close tool description".into(),
                 images: Vec::new(),
-                result: Err("relay attach failed".into()),
+                result: Err(clearing.into()),
             },
         );
-
-        apply_chat_remote_result(
-            &mut chat,
-            ChatRemoteResult::Prompt {
-                command_id: "test-submit".into(),
-                text: "something else entirely".into(),
-                images: Vec::new(),
-                result: Ok(11),
-            },
+        let id = chat.conversation_notices[0].id.clone();
+        let text = chat.conversation_notices[0].text.clone();
+        assert_eq!(
+            text,
+            format!("Prompt was not sent: {clearing}\ntweak the close tool description")
         );
-        assert!(transcript_shows(
-            &mut chat,
-            "Prompt was not sent: relay attach failed"
-        ));
+        assert_eq!(publish(&mut chat), 1);
+        let refused = |id: &str| ChatRemoteResult::NoticeRecorded {
+            id: id.to_owned(),
+            result: Err(clearing.into()),
+        };
 
-        apply_chat_remote_result(
-            &mut chat,
-            ChatRemoteResult::Prompt {
-                command_id: "test-submit".into(),
-                text: "read the journal".into(),
-                images: Vec::new(),
-                result: Ok(12),
-            },
+        // Refused, and nothing has happened since: no resend, even when the
+        // same projection is applied again.
+        apply_chat_remote_result(&mut chat, refused(&id));
+        chat.apply_materialized(&at(4), &[], &[]);
+        assert_eq!(publish(&mut chat), 0);
+
+        // The journal moves on, so it is sent again.
+        chat.apply_materialized(&at(6), &[], &[]);
+        assert_eq!(publish(&mut chat), 1);
+
+        // Refused again, but the journal moved before the reply arrived: it
+        // is resent at once rather than waiting for yet another event.
+        chat.apply_materialized(&at(7), &[], &[]);
+        apply_chat_remote_result(&mut chat, refused(&id));
+        assert_eq!(publish(&mut chat), 1);
+
+        // Journaled, then a later prompt is sent: the notice appears once,
+        // above that prompt, and the chat holds no local copy.
+        let mut journaled = at(9);
+        journaled.transcript.push(
+            item(
+                format!("system:notice:{id}"),
+                8,
+                TranscriptBody::System { text },
+            )
+            .into(),
         );
-        assert!(!transcript_shows(&mut chat, "Prompt was not sent"));
-    }
-
-    #[test]
-    fn a_refused_shell_command_is_recorded_the_same_way() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-
-        apply_chat_remote_result(
-            &mut chat,
-            ChatRemoteResult::RunShell {
-                command_id: "test-submit".into(),
-                command: "cargo test".into(),
-                result: Err("relay attach failed".into()),
-            },
+        journaled.transcript.push(
+            item(
+                "user:9".into(),
+                9,
+                TranscriptBody::User {
+                    content: vec![serde_json::json!({"type": "text", "text": "a later prompt"})],
+                },
+            )
+            .into(),
         );
-
-        assert_eq!(chat.input, "!cargo test");
-        assert!(chat.notice().is_none());
-        assert!(transcript_shows(
-            &mut chat,
-            "Shell command was not sent: relay attach failed"
-        ));
-
-        apply_chat_remote_result(
-            &mut chat,
-            ChatRemoteResult::RunShell {
-                command_id: "test-submit".into(),
-                command: "cargo test".into(),
-                result: Ok(4),
-            },
+        chat.apply_materialized(&journaled, &[], &[]);
+        assert!(chat.conversation_notices.is_empty());
+        let screen = transcript_text(&mut chat, 100);
+        let notice = screen
+            .iter()
+            .position(|line| line.contains("Prompt was not sent"));
+        let later = screen
+            .iter()
+            .position(|line| line.contains("a later prompt"));
+        assert!(notice.is_some() && notice < later, "{screen:#?}");
+        assert_eq!(
+            screen
+                .iter()
+                .filter(|line| line.contains("Prompt was not sent"))
+                .count(),
+            1
         );
-        assert!(!transcript_shows(&mut chat, "Shell command was not sent"));
     }
 
     #[test]

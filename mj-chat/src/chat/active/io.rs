@@ -58,6 +58,7 @@ impl ActiveChat {
     }
 
     pub(super) fn publish_conversation_notices(&mut self) {
+        let applied_ordinal = self.state.latest_seq;
         for notice in &mut self.state.conversation_notices {
             if notice.submitted {
                 continue;
@@ -69,7 +70,10 @@ impl ActiveChat {
                     id: notice.id.clone(),
                     text: notice.text.clone(),
                 }) {
-                Ok(()) => notice.submitted = true,
+                Ok(()) => {
+                    notice.submitted = true;
+                    notice.sent_at = applied_ordinal;
+                }
                 Err(error) => tracing::warn!(%error, "could not queue conversation notice"),
             }
         }

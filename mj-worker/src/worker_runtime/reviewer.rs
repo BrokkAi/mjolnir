@@ -813,6 +813,7 @@ impl ReviewerRole {
                 .map(crate::acp::ReviewerMcpServer::new)
                 .collect(),
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
+            managed_subagent: false,
             subagent_mcp_socket: None,
             resume_session,
             native_session_may_have_history,

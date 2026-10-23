@@ -315,6 +315,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         &session_environment,
         &mut additional_directories,
     );
+    let managed_subagent = config.is_managed_subagent();
     let acp_spec = LaunchSpec {
         imported_logins: None,
         clear_context_request: None,
@@ -338,6 +339,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         } else {
             config.subagents.clone()
         },
+        managed_subagent,
         subagent_mcp_socket: subagent_role.map(|role| crate::acp::SubagentMcpSocket {
             path: root.join(super::subagents::SUBAGENT_SOCKET),
             role,

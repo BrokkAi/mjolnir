@@ -273,9 +273,12 @@ pub(super) fn write_materialized_session(
         "INSERT INTO materialized_sessions(
              session_id, applied_event_ordinal, applied_event_digest, execution_state,
              running_started_at_ms, session_title, configuration_json, last_activity_at_ms,
-             pending_elicitations_json, active_turn_json, last_turn_outcome_json
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+             pending_elicitations_json, active_turn_json, last_turn_outcome_json,
+             input_required_event_frontier
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?2)
          ON CONFLICT(session_id) DO UPDATE SET
+             input_required_event_frontier = max(materialized_sessions.input_required_event_frontier,
+                 materialized_sessions.applied_event_ordinal, excluded.applied_event_ordinal),
              applied_event_ordinal = excluded.applied_event_ordinal,
              applied_event_digest = excluded.applied_event_digest,
              execution_state = excluded.execution_state,
