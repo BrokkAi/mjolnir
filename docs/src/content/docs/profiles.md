@@ -22,7 +22,11 @@ needs judgment themselves.
 
 **Create** and **Move…** offer **Native** or **Mjolnir** delegation. Mjolnir
 requires a Claude, Codex, or DSH profile and a configured Straightforward task.
-DSH has no sub-agents of its own, so Native gives a DSH session no delegation.
+DSH has no sub-agents of its own, so for a DSH profile they offer **Mjolnir** or
+**None** instead. A DSH session starts on Mjolnir when the last choice was
+Mjolnir and Straightforward is configured, and on None otherwise. Its choice
+becomes the remembered one only when it is Mjolnir, so choosing None for DSH
+does not change what the next Claude or Codex session starts with.
 Existing sessions keep their recorded policy; leaving Move's choice unchanged
 retains it.
 
@@ -991,8 +995,9 @@ handoffs; see
   SessionWiki search do not support DSH yet. A DSH session can use Mjolnir's
   sub-agents, and a DSH profile can run them: it reads the delegation policy
   from its staged `AGENTS.md` and receives the `mj-agents` tools over ACP.
-  dsh-acp has no sub-agents of its own, so Native gives a DSH session no
-  delegation, the same as None. It serves DeepSeek-family
+  dsh-acp has no sub-agents of its own, so DSH offers Mjolnir and None but
+  not Native. A DSH session stored with Native keeps working and behaves as
+  None. It serves DeepSeek-family
   utility inference with its flash model only when its base URL is DeepSeek's
   own `api.deepseek.com` and its key is set.
 - A custom bridge must speak the ACP version and features Mjolnir expects.

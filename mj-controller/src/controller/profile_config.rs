@@ -76,6 +76,14 @@ pub async fn validate_session_subagent_policy(
             kind.display_name()
         )));
     }
+    if policy.is_native() && !kind.has_native_subagents() {
+        return Err(anyhow::Error::new(mj_core::refusal::Refusal::unusable(
+            format!(
+                "{} has no sub-agents of its own, so Native delegation does nothing for it; choose Mjolnir or None",
+                kind.display_name()
+            ),
+        )));
+    }
     if !policy.uses_mjolnir() {
         return Ok(());
     }
@@ -1370,6 +1378,34 @@ mod tests {
                 assert!(refusal.message().contains("--subagent-straightforward"));
             } else {
                 assert!(refusal.message().contains("Claude, Codex, or DSH"));
+            }
+            // Native keeps a harness's own sub-agents; DSH has none, so an
+            // explicit Native is refused with the two choices it offers.
+            let native = validate_session_subagent_policy(
+                &config,
+                "parent",
+                &mj_core::subagent::SubagentPolicy::Native,
+            )
+            .await;
+            if kind.has_native_subagents() {
+                native.unwrap();
+            } else {
+                let error = native.unwrap_err();
+                let refusal = Refusal::of(&error).unwrap();
+                assert_eq!(refusal.code(), None, "the Settings remedy does not apply");
+                assert!(
+                    refusal.message().contains("choose Mjolnir or None"),
+                    "{}",
+                    refusal.message()
+                );
+                // The default for an omitted policy is accepted.
+                validate_session_subagent_policy(
+                    &config,
+                    "parent",
+                    &mj_core::subagent::SubagentPolicy::default_for(kind),
+                )
+                .await
+                .unwrap();
             }
         }
     }

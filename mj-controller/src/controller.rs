@@ -1040,6 +1040,8 @@ impl Controller {
         targets::validate_additional_mounts(&additional_mounts)?;
         let id = new_session_id()?;
         let now = now();
+        let subagents = subagents
+            .unwrap_or_else(|| mj_core::subagent::SubagentPolicy::default_for(profile.kind));
         let record = SessionRecord {
             project,
             target_runtime: Some(template.into()),
@@ -1049,7 +1051,7 @@ impl Controller {
             launch_branch,
             checkout,
             publication: None,
-            subagents: Some(subagents.unwrap_or_default()),
+            subagents: Some(subagents),
             archived: false,
             container_cpus: None,
             container_memory: None,
@@ -1089,8 +1091,9 @@ impl Controller {
         // record reaches memory only once it is durable: a session this process
         // alone knows about is one the database can never resume or clean up.
         crate::database::save_new_session(&record, selected_container_size.clone())?;
-        if record.harness_kind.supports_delegation_tools() {
-            self.state.last_subagent_policy = record.subagents.clone().unwrap_or_default();
+        let policy = record.subagents.clone().unwrap_or_default();
+        if policy.updates_remembered_choice(record.harness_kind) {
+            self.state.last_subagent_policy = policy;
         }
         self.state.sessions.insert(id.clone(), record);
         if let Some((host, size)) = selected_container_size {

@@ -32,8 +32,9 @@ pub(super) fn save_new_session_to(
     if let Some((host, size)) = container_size {
         write_host_container_size(&tx, &host, size)?;
     }
-    if session.harness_kind.supports_delegation_tools() {
-        tx.execute("INSERT INTO subagent_preference(singleton, policy) VALUES(1, ?1) ON CONFLICT(singleton) DO UPDATE SET policy = excluded.policy", [serde_json::to_string(&session.subagents.clone().unwrap_or_default())?])?;
+    let policy = session.subagents.clone().unwrap_or_default();
+    if policy.updates_remembered_choice(session.harness_kind) {
+        tx.execute("INSERT INTO subagent_preference(singleton, policy) VALUES(1, ?1) ON CONFLICT(singleton) DO UPDATE SET policy = excluded.policy", [serde_json::to_string(&policy)?])?;
     }
     tx.commit()?;
     Ok(())

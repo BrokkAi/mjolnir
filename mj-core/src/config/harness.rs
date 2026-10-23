@@ -1029,6 +1029,13 @@ impl HarnessKind {
         matches!(self, Self::Claude | Self::Codex | Self::Dsh)
     }
 
+    /// Whether the harness has sub-agents of its own, which the Native
+    /// delegation choice keeps. dsh-acp has none, so Native would do nothing
+    /// for DSH and is not offered there.
+    pub const fn has_native_subagents(self) -> bool {
+        !matches!(self, Self::Dsh)
+    }
+
     /// The harness-home-relative directories that hold its native session
     /// files, scanned when a checkpoint captures or restores native state.
     pub const fn native_session_dirs(self) -> &'static [&'static str] {
