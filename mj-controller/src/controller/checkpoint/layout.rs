@@ -97,6 +97,19 @@ impl Controller {
                     &backend,
                     session.container_workspace.as_deref(),
                 );
+                // A checkout without later history has no origin remote, so
+                // the archive records the one the session was created from.
+                let cutoff_origin = |repository: &mj_core::config::ProjectRepository| {
+                    session
+                        .checkout
+                        .as_ref()
+                        .filter(|checkout| {
+                            checkout.no_later_history && checkout.repository_id == repository.id
+                        })
+                        .and(session.project.as_ref())
+                        .and_then(|project| project.network_sources.get(&repository.id))
+                        .map(|source| source.fetch_url.clone())
+                };
                 let repositories = bundle
                     .repositories
                     .iter()
@@ -104,7 +117,7 @@ impl Controller {
                         id: repository.id.clone(),
                         relative_destination: repository.destination.clone(),
                         capture: CheckpointRepositoryCapture::RemoteWorkspace,
-                        origin_override: None,
+                        origin_override: cutoff_origin(repository),
                     })
                     .collect();
                 (workspace_root, bundle.primary_repo.clone(), repositories)

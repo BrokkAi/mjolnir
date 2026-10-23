@@ -4988,6 +4988,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             at: None,
             branch: None,
             base: None,
+            no_later_history: false,
             subagents: None,
             initial_prompt: None,
             workspace_id: workspace.id.clone(),

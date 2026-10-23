@@ -38,6 +38,9 @@ pub enum ControllerAction {
         /// revision for a raw managed worktree.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base: Option<String>,
+        /// With `at`, start with `at`, `base` and their ancestors only.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_later_history: bool,
         /// Omitted uses the selected profile's subagent setting.
         #[serde(default)]
         subagents: Option<mj_core::subagent::SubagentPolicy>,

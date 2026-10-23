@@ -26,7 +26,7 @@ pub fn provision_on_locator_plan(
         bundle,
         workspace,
         |args| match github_token {
-            Some(token) if args.get(1).is_some_and(|arg| arg == "clone") => {
+            Some(token) if fetches_repository(&args) => {
                 let (args, input) = clone_with_github_token(args, token);
                 ssh_command_owned(ssh, args).with_sensitive_stdin(input)
             }

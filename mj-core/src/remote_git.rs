@@ -24,6 +24,12 @@ pub struct ExactCheckout {
     pub commit: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// The workspace holds `commit`, the diff base, and their ancestors, and
+    /// nothing later: it has no `origin` remote, remote-tracking refs, or
+    /// tags, and does not borrow objects from the clone cache. The API and
+    /// `mj new` name it `no_later_history`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_later_history: bool,
 }
 
 impl ExactCheckout {

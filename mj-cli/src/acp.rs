@@ -1032,6 +1032,7 @@ fn start_request(
         at: args.at.clone(),
         branch: args.branch.clone(),
         base: args.base.clone(),
+        no_later_history: false,
         // A managed target provisions its own workspace from the bundle. A
         // local one works in the directory the consumer is already in, which is
         // what its working directory means.

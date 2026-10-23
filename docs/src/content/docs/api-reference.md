@@ -364,7 +364,7 @@ fails without changing the requested model or effort. Supplying both
 `profile_id` and `model` pins the profile and validates the model and effort on
 it.
 
-Three fields choose where the session starts:
+Four fields choose where the session starts:
 
 - `at`: a full commit object ID to start the workspace at. Before the first
   prompt, the bundle's primary repository is checked out at that commit. HEAD
@@ -376,6 +376,8 @@ Three fields choose where the session starts:
   defaults to `at`. It does not move the checkout. A bundle session resolves it
   in the fresh clone, so name a commit SHA, a tag, or `origin/<branch>`. For a
   raw project's managed worktree without `at`, the worktree also starts here.
+- `no_later_history`: with `at`, give the workspace only `at`, `base` and
+  their ancestors. See [Start without later history](#start-without-later-history).
 
 To start a bundle session at an exact commit on a new private branch:
 
@@ -401,6 +403,54 @@ With `at`, `branch` creates a new local branch without an upstream. Preparation
 never pushes or modifies the source checkout. Existing branches, dirty
 workspaces, and invalid selections fail visibly. `at` cannot be combined with
 `project_directory` alone or with `create_managed_worktree: false`.
+
+### Start without later history
+
+Set `no_later_history: true` with `at` when the agent must not see commits made
+after `at`, for example to review a pull request as it stood:
+
+```json
+{
+  "workspace_id": "workspace-1",
+  "profile_id": "codex",
+  "target_id": "builder",
+  "bundle_id": "product",
+  "at": "0123456789abcdef0123456789abcdef01234567",
+  "base": "89abcdef0123456789abcdef0123456789abcdef",
+  "branch": "review/pr-670",
+  "no_later_history": true
+}
+```
+
+The workspace is not a clone. Mjolnir runs `git init`, fetches `at` and `base`
+by object ID, which brings their whole history and nothing later, and checks
+out `at`. The workspace then holds:
+
+- the full history up to `at` and `base`: both commits and every ancestor
+  commit, tree and blob, with their real object IDs. It is not shallow. `base` need not be an ancestor of `at`; it is kept as the ref
+  `refs/mj/base`.
+- the `branch` you named, or a detached HEAD.
+- no `origin` remote, remote-tracking branches, tags, or other refs.
+
+On container targets with a GitHub repository, the clone cache does not mount
+its mirror. It mounts a Git bundle that holds only the same history, and the
+workspace fetches from it. Elsewhere, the workspace fetches from the network.
+
+Requirements:
+
+- `at` must be given, and `base`, if given, must be a full commit object ID.
+  There are no remote branches or tags to resolve a name against.
+- The bundle must have one repository. Others would start with their whole
+  history.
+- The session cannot be resumed or moved, because both clone the repository
+  again with its full history. Start a new session instead.
+
+What the agent can still reach: this limits the Git history in the workspace.
+It is not a network sandbox. The agent can still run `git fetch <url>`, call
+the GitHub API or `gh`, or read the web, any of which can show later work. To
+give the agent one later revision on purpose, ask it to run
+`git fetch --no-tags <url> <sha>`. That fetches only the commit and its
+ancestors. Directories you attach with `additional_mounts` are not checked.
 
 `subagents` sets the session's delegation policy:
 
@@ -481,7 +531,8 @@ readiness or inspect the session's failure before prompting. Readiness guarantee
 that preparation verified the selected commit, branch, and clean working tree.
 Session receipts report the immutable starting selection as `at`, `branch` and
 `base`, the same names the request uses, alongside the session and bundle IDs.
-`base` reads as `at` when no other base was named. While provisioning, these
+`base` reads as `at` when no other base was named. A session started without
+later history also reports `no_later_history: true`. While provisioning, these
 record intent, not completed work.
 After prompting or resuming a checkpoint, the current checkout can differ: use
 the diff endpoint's repository metadata to inspect it. Resume preserves saved

@@ -1034,6 +1034,7 @@ impl Controller {
             !self.state.subagents.contains_key(&source.id),
             "sub-agent sessions cannot move independently of their parent"
         );
+        super::resume::ensure_full_history_allowed(source)?;
         let previous = crate::database::load_move_operation(&source.id)?;
         // The sealed selection owns retry defaults. Reconstructing them from
         // the source can change the destination or lose an explicit policy.

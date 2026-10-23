@@ -441,6 +441,7 @@ impl Controller {
                     destination: metadata.relative_destination.to_string_lossy().into_owned(),
                     git_ref: None,
                     reference: None,
+                    history_cutoff: None,
                 })
             })
             .collect::<Result<Vec<_>>>()?;

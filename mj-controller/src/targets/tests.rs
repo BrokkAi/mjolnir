@@ -82,6 +82,7 @@ fn bundle() -> ProjectBundleSpec {
                 destination: "app".to_owned(),
                 git_ref: None,
                 reference: None,
+                history_cutoff: None,
             },
             RepositorySpec {
                 url: Some("https://github.com/example/lib.git".to_owned()),
@@ -89,6 +90,7 @@ fn bundle() -> ProjectBundleSpec {
                 destination: "libs/lib".to_owned(),
                 git_ref: None,
                 reference: None,
+                history_cutoff: None,
             },
         ],
     }
@@ -2622,6 +2624,102 @@ fn aws_clone_receives_github_token_on_stdin_only() {
             .filter(|command| command.purpose.starts_with("clone "))
             .all(|command| command.args.last().unwrap().starts_with("'git' 'clone'"))
     );
+}
+
+fn cutoff_bundle(reference: Option<&str>) -> ProjectBundleSpec {
+    let mut bundle = bundle();
+    bundle.repositories.truncate(1);
+    bundle.repositories[0].reference = reference.map(str::to_owned);
+    bundle.repositories[0].history_cutoff = Some(HistoryCutoff {
+        head: "a".repeat(40),
+        base: Some("b".repeat(40)),
+    });
+    bundle
+}
+
+#[test]
+fn a_history_cutoff_initializes_and_fetches_by_object_id_instead_of_cloning() {
+    let commands = clone_commands(&cutoff_bundle(None), "/workspace", |args| {
+        CommandSpec::new(args[0].clone(), args[1..].to_vec())
+    });
+    let argv = commands
+        .iter()
+        .map(|command| {
+            std::iter::once(command.program.as_str())
+                .chain(command.args.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>();
+    let head = "a".repeat(40);
+    let base = "b".repeat(40);
+    assert_eq!(
+        argv,
+        [
+            "mkdir -p /workspace".to_owned(),
+            "git init --quiet -- /workspace/app".to_owned(),
+            format!(
+                "git -C /workspace/app fetch --quiet --no-tags -- git@github.com:example/app.git {head} {base}:refs/mj/base"
+            ),
+            format!("git -C /workspace/app checkout --quiet --detach {head}"),
+        ]
+    );
+    // The steps depend on each other, so none of them joins a parallel batch.
+    assert!(
+        commands
+            .iter()
+            .all(|command| command.parallel_group.is_none())
+    );
+    assert!(
+        commands[1..]
+            .iter()
+            .all(|command| command.stage == Some(ProvisionStage::Cloning))
+    );
+
+    // A prepared cutoff bundle replaces the network, and is never a
+    // `--reference` whose alternates would lend the checkout every object.
+    let commands = clone_commands(
+        &cutoff_bundle(Some("/run/hel/git-cache/key.bundle")),
+        "/workspace",
+        |args| CommandSpec::new(args[0].clone(), args[1..].to_vec()),
+    );
+    assert!(commands.iter().all(|command| {
+        !command
+            .args
+            .iter()
+            .any(|arg| arg == "clone" || arg.starts_with("--reference"))
+    }));
+    assert_eq!(
+        commands[2].args[commands[2].args.len() - 4..],
+        [
+            "--",
+            "/run/hel/git-cache/key.bundle",
+            "refs/mj/head",
+            "refs/mj/base:refs/mj/base"
+        ]
+    );
+}
+
+#[test]
+fn aws_cutoff_fetch_receives_github_token_on_stdin_only() {
+    let locator = TargetLocator::AwsEc2 {
+        profile: "work".to_owned(),
+        region: "us-east-2".to_owned(),
+        instance_id: "i-0123456789abcdef0".to_owned(),
+        ssh: ssh(),
+        workspace: format!(".local/share/hel/workspaces/{SESSION}"),
+    };
+    let token = "ghs_secret-token";
+    let plan =
+        provision_on_locator_plan(&locator, SESSION, &cutoff_bundle(None), Some(token)).unwrap();
+    let with_token = plan
+        .commands
+        .iter()
+        .filter(|command| command.args.last().unwrap().contains("GH_TOKEN"))
+        .collect::<Vec<_>>();
+    assert_eq!(with_token.len(), 1, "{:#?}", plan.commands);
+    assert!(with_token[0].purpose.starts_with("fetch app history"));
+    assert!(!format!("{:?}", plan.commands).contains(token));
 }
 
 #[test]
