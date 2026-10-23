@@ -486,8 +486,9 @@ command-line tool must match the version Mjolnir links.
 
 ## Sub-agents `[subagents]`
 
-A Claude or Codex session can use Mjolnir's `spawn` tool. Create and Move offer
-Native or Mjolnir. Native uses the harness's own delegation. Mjolnir needs a
+A Claude, Codex, or DSH session can use Mjolnir's `spawn` tool. Create and Move offer
+Native or Mjolnir. Native uses the harness's own delegation; DSH has none, so
+Native gives a DSH session no delegation. Mjolnir needs a
 straightforward choice, configured in Settings → Sub-agents or config.toml, or a
 session override. The subtle choice is optional, but cannot be configured without
 straightforward:
@@ -533,7 +534,7 @@ optional effort must be offered by an eligible profile. Each effort flag require
 its matching model flag; `adaptive` and combining an override with `native` or
 `none` are rejected. Omitted effort uses the harness default. The retired
 `--subagent-model` and `--subagent-effort` flags fail with guidance to use the
-four per-type flags. `none` (CLI only) gives a Claude or Codex session no
+four per-type flags. `none` (CLI only) gives a Claude, Codex, or DSH session no
 delegation tools.
 
 | Field | TOML type | Required | Default | Validation and behavior |

@@ -1,4 +1,4 @@
-//! Mjolnir-owned delegation tools for Claude and Codex parent sessions.
+//! Mjolnir-owned delegation tools for Claude, Codex, and DSH sessions.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -1028,7 +1028,7 @@ mod tests {
             SubagentMcpRole::MessageOnly,
             SubagentMcpRole::Child,
         ] {
-            for harness in [HarnessKind::Claude, HarnessKind::Codex] {
+            for harness in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Dsh] {
                 let input = format!(
                     "{}\n{}\n",
                     json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),

@@ -202,7 +202,7 @@ the matching task choice for this session; each unspecified type uses its global
 choice. Either override implies Mjolnir. The matching
 `--subagent-*-effort` flag requires its model flag. Omitted policy retains
 the session's override. `--subagents none` removes delegation tools entirely;
-it needs a Claude or Codex session. A retry of a sealed
+it needs a Claude, Codex, or DSH session. A retry of a sealed
 Move retains its recorded policy; an explicit different policy is refused.
 
 A session that works in a bare checkout on an SSH host cannot move to
@@ -357,7 +357,7 @@ mj new --workspace eval --bundle product --target builder \
   the request fails.
 - `mj new --subagents native|mjolnir|none` selects delegation. Omitted defaults to
   Native. `none` gives the session no delegation tools, native or Mjolnir; it
-  needs a Claude or Codex profile and is not offered in the TUI or browser. Mjolnir requires a Claude or Codex parent and a straightforward
+  needs a Claude, Codex, or DSH profile and is not offered in the TUI or browser. Mjolnir requires a Claude, Codex, or DSH parent and a straightforward
   choice in `[subagents.straightforward]` or a session override. The subtle
   choice in `[subagents.subtle]` is optional. Configure global defaults in
   config.toml or TUI Settings → Sub-agents.

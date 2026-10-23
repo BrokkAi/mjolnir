@@ -671,8 +671,8 @@ pub(super) fn apply_continuation_switch(launch: &mut WorkerLaunchConfig, enabled
 /// harness's own. The session's stored choice governs; `None` means native
 /// sub-agents, so a session created before the per-session choice existed (or
 /// through `mj new` with neither flag given) gets its harness's own
-/// sub-agents. A child never gets them, and only Claude and Codex can receive
-/// them at all.
+/// sub-agents. A child never gets them, and only a harness whose
+/// `HarnessKind::supports_delegation_tools` holds can receive them at all.
 #[cfg(test)]
 pub(super) fn subagent_tools_enabled(
     session: &mj_core::state::SessionRecord,

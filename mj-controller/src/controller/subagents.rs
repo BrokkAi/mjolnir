@@ -394,11 +394,9 @@ impl Controller {
             .with_context(|| format!("unknown parent session {}", request.parent_session_id))?
             .clone();
         ensure!(
-            matches!(
-                parent.harness_kind,
-                HarnessKind::Claude | HarnessKind::Codex
-            ),
-            "only Claude and Codex sessions can spawn sub-agents"
+            parent.harness_kind.supports_delegation_tools(),
+            "{} sessions cannot spawn Mjolnir sub-agents",
+            parent.harness_kind.display_name()
         );
         ensure_parent_may_delegate(&parent)?;
         ensure!(
@@ -755,11 +753,11 @@ fn borrowed_locator(
     })
 }
 
-/// Whether a child can be given the `handback` tool. Codex takes Mjolnir's MCP
-/// servers over ACP; Claude reads them from its staged profile, which every
-/// session has. Other harnesses keep reporting through their last message.
+/// Whether a child can be given the `handback` tool: it can whenever its
+/// harness receives Mjolnir's delegation tools. Other harnesses keep reporting
+/// through their last message.
 fn child_gets_handback_tool(harness: HarnessKind) -> bool {
-    matches!(harness, HarnessKind::Codex | HarnessKind::Claude)
+    harness.supports_delegation_tools()
 }
 
 /// A parent may delegate to Mjolnir children only if its own stored choice

@@ -5734,7 +5734,7 @@ fn delegation_rejects_disabled_mjolnir_on_create_and_move() {
         draft
             .unavailable_reason()
             .unwrap()
-            .contains("Claude or Codex")
+            .contains("Claude, Codex, or DSH")
     );
 }
 

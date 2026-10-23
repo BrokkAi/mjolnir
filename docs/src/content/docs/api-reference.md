@@ -459,7 +459,7 @@ ancestors. Directories you attach with `additional_mounts` are not checked.
 ```
 
 Choose `native` for harness delegation or `mjolnir` for Mjolnir-managed children.
-Omitted policy defaults to Native. Mjolnir requires a Claude or Codex parent and
+Omitted policy defaults to Native. Mjolnir requires a Claude, Codex, or DSH parent and
 a straightforward choice, either global or a session override. A subtle choice
 is optional:
 

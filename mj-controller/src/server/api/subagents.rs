@@ -12,10 +12,15 @@ pub(super) async fn spawn_subagent(
         let snapshot = state.snapshot_rx.borrow();
         require_session_record(&snapshot, &parent_session_id)?.clone()
     };
-    if !matches!(parent.harness_kind.as_str(), "claude" | "codex") {
-        return Err(ApiFailure::conflict(
-            "only Claude and Codex sessions can spawn sub-agents",
-        ));
+    let parent_harness = parent
+        .harness_kind
+        .parse::<mj_core::config::HarnessKind>()
+        .map_err(|error| ApiFailure::conflict(format!("{error:#}")))?;
+    if !parent_harness.supports_delegation_tools() {
+        return Err(ApiFailure::conflict(format!(
+            "{} sessions cannot spawn Mjolnir sub-agents",
+            parent_harness.display_name()
+        )));
     }
     let initial_prompt = build_subagent_prompt(&request.instructions)?;
     if request.task_name.trim().is_empty() {

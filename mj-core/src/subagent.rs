@@ -1561,6 +1561,7 @@ mod tests {
         for harness in [
             crate::config::HarnessKind::Claude,
             crate::config::HarnessKind::Codex,
+            crate::config::HarnessKind::Dsh,
         ] {
             for policy in [
                 SubagentPolicy::Native,
