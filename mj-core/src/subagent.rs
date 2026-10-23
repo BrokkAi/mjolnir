@@ -822,6 +822,9 @@ pub const HANDBACK_REMINDER_GRACE_MS: i64 = 30_000;
 /// Details belong in files in the child's report directory.
 pub const MAX_HANDBACK_CHARS: usize = 4_000;
 
+/// Reviewers return their complete structured findings in one handback.
+pub const MAX_REVIEWER_HANDBACK_CHARS: usize = 128 * 1024;
+
 /// Directory under a parent's workspace root that holds its children's report
 /// directories, outside every repository.
 pub const REPORT_ROOT_DIR: &str = ".mj-agents";

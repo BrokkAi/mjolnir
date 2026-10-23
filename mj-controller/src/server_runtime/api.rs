@@ -1037,22 +1037,29 @@ impl ApiBackend {
                     !message.trim().is_empty(),
                     "a report cannot be empty; call handback with your full report"
                 );
-                ensure!(
-                    message.chars().count() <= mj_core::subagent::MAX_HANDBACK_CHARS,
-                    "a report can be at most {} characters and this one has {}. Write the details \
-                     to files in the report directory named in your first prompt, then call \
-                     handback again with a short report that lists their paths",
-                    mj_core::subagent::MAX_HANDBACK_CHARS,
-                    message.chars().count()
-                );
                 let record = blocking("load sub-agent record", {
                     let child_id = child_id.clone();
                     move || crate::database::load_subagent(&child_id)
                 })
-                .await?;
+                .await?
+                .filter(|record| record.handback_tool)
+                .context("handback is only for a Mjolnir sub-agent that was given the tool")?;
+                let maximum = match record.kind {
+                    mj_core::subagent::SubagentKind::Worker => {
+                        mj_core::subagent::MAX_HANDBACK_CHARS
+                    }
+                    mj_core::subagent::SubagentKind::Reviewer => {
+                        mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS
+                    }
+                };
+                let characters = message.chars().count();
                 ensure!(
-                    record.is_some_and(|record| record.handback_tool),
-                    "handback is only for a Mjolnir sub-agent that was given the tool"
+                    characters <= maximum,
+                    "a report can be at most {} characters and this one has {}. Write the details \
+                     to files in the report directory named in your first prompt, then call \
+                     handback again with a short report that lists their paths",
+                    maximum,
+                    characters
                 );
                 let command_id = if let Some(prepared) = prepared {
                     prepared
