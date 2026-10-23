@@ -23,10 +23,10 @@ To see it working: set `[review] trigger = "push"`, start a Claude or Codex sess
 - [x] (2026-10-24 04:10Z) Milestones 4 and 5 wiring: `request_review` (Parent role, `--review-gate`), push admission in the review host without a prompt hold, relay protocol 43 with `CaptureDelta` scopes and `RecordReviewed`, `MailboxBody::ReviewVerdict` with plain-text fallback, store migration 97, `MJ_REVIEW_GATE=1` and hook installation at worker start for Claude and Codex primaries, transcript notices for refused hooks and unsupported harnesses.
 - [x] (2026-10-24 04:40Z) Review refs standardized under `refs/mj/` (`refs/mj/review-baseline`, `refs/mj/worktrees/<name>/review-baseline`; legacy `refs/hel/` refs moved in one ref transaction when first read). Managed-clone checkpoints carry all of `refs/mj/` with their objects (archive schema 10); raw checkpoints record names and object IDs only and recreate refs whose objects exist; moves restore review refs even when checkout restoration is off. Temporary checkpoint refs moved to `refs/mj-checkpoint/`.
 - [x] (2026-10-24 04:40Z) Milestone 6: documentation (turn-review, CLI and API pages, the configuration reference in `mj-core/assets/skills/mj/references/configuration.md`, the site hero).
-- [ ] Live e2e run of `tests/e2e/review_before_push.py` against master 9b339a4d9 (running).
+- [x] (2026-10-24) Live e2e `tests/e2e/review_before_push.py` passes on the merged build 95de8cd89 (Codex harness, isolated instance): one clean review round, the agent pushed the reviewed tree, an unreviewed commit pushed with `MJ_REVIEW_GATE=1` was refused, and the same push without the variable succeeded. Earlier runs on 9b339a4d9 and 95de8cd89 showed the same feature behavior but failed in the script itself (wrong branch, wrong transcript role, an undefined variable).
 - [x] (2026-10-24) Merge origin/master (released 2.55.0) into rbp/merge-origin: keep released migrations 93/94 unchanged, move our breaking migrations to 95/96/97 (floors 95/96/97); preserve D-9 held replies through durable child registration; enable DSH push review through its existing delegation registration and approval path; cover cutoff checkouts in capture tests.
 - [x] (2026-10-24) Merge validation passed in the assigned worktree: requested workspace tests (desktop excluded, four test threads), final controller suite (2,068 passed, 17 ignored), final worker suite (705 passed, 12 ignored, plus integration tests), workspace Clippy with -D warnings, and cargo fmt --check. No failures or timeout retries. Registration-refusal regression covers manual and push entry points; migration regression compares released-94 upgrade with a fresh store.
-- [ ] Push to origin.
+- [x] (2026-10-24) Pushed to origin/master.
 
 ## Surprises & Discoveries
 
@@ -89,7 +89,13 @@ To see it working: set `[review] trigger = "push"`, start a Claude or Codex sess
 
 ## Outcomes & Retrospective
 
-Not started.
+(2026-10-24) All six milestones are implemented and merged with released 2.55.0. `[review] trigger` offers off, turn and push. Turn and push reviews run their reviewer as a hidden child session; the plan second opinion and the worker sidecar are gone. In push mode, Claude Code, Codex and DSH primaries get `request_review`, the verdict arrives as a mailbox message, a clean verdict writes `refs/mj/reviewed/<tree>`, and a pre-push hook gated by `MJ_REVIEW_GATE=1` refuses unreviewed trees. Review refs live under `refs/mj/` and survive checkpoints and moves.
+
+Live evidence (`tests/e2e/review_before_push.py`, isolated instance, Codex harness): the agent committed, called `request_review`, received "Review clean for commits 3a68ba8..dfc9772 … Tree c8bdb0b is recorded as reviewed; you may push.", pushed, and replied DONE. The first two runs failed only in the script: it assumed the managed clone was on the fixture's `rbp-test` branch (managed clones use their own branch), and it looked for mailbox deliveries under the `message` role (they are `system` items).
+
+Lessons: splitting the work into parallel worktrees by subsystem kept each change reviewable, but every merge needed a renumbering or naming pass (migrations 93–97, relay 43, the moved capture handler). Released history wins: unreleased migrations are renumbered after released ones, never the other way. Two first-draft choices were wrong in ways only visible at the system level: bundling `refs/mj/` into raw checkpoints (full history every time) and refusing restores when another session owns the baseline (blocks shared raw checkouts).
+
+Not done: `git push --no-verify` still skips the gate, by design. Moving the plan second opinion's use case to the child reviewer was not requested and is not planned.
 
 ## Context and Orientation
 
