@@ -82,7 +82,7 @@ also accepted when reading and is saved under `[github.watch] enabled`.
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
 | `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
 | `notify` | table | no | default `[notify]` values | How the terminal dashboard reports sessions that need you. |
-| `review` | table | no | default `[review]` values | Independent turn-review settings. |
+| `review` | table | no | default `[review]` values | Automatic review trigger and reviewer settings. |
 | `continuation` | table | no | enabled | Automatic continuation of already-requested unfinished work; also requires Jev. |
 | `jev` | table | no | enabled | Hosted turn classification, continuation checks, and semantic help search. |
 | `sessionwiki` | table | no | default `[sessionwiki]` values | Full-text session index and automatic archiving. |
@@ -336,7 +336,7 @@ precedence. See [Web viewer and desktop app](/web-viewer/) for access and login.
 
 ```toml
 [review]
-enabled = true
+trigger = "turn"
 profile = "reviewer"
 # model = "provider-model-id"
 # effort = "high"
@@ -344,7 +344,7 @@ profile = "reviewer"
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `enabled` | boolean | no | `false` | Examines each eligible completed turn after queued work drains; an unchanged delta resolves without a review prompt. |
+| `trigger` | string enum | no | `"off"` | `"off"` disables automatic review, `"turn"` reviews eligible completed turns after queued work drains, and `"push"` reviews commits before push. An unchanged turn delta resolves without a review prompt. |
 | `tier` | string | no | unset | Deprecated compatibility field. Existing `quick` or `extended` values are accepted but ignored. |
 | `profile` | string | no | Auto (unset) | Auto selects an eligible profile by provider and quota. A named enabled review-capable profile is honored, including the primary profile. |
 | `model` | string | no | unset (harness default) | Reviewer model override for a named profile. Auto uses fixed model-family defaults. |
@@ -352,17 +352,22 @@ profile = "reviewer"
 
 Auto prefers
 another provider, falling back to another profile or the primary profile when
-needed. Turn review uses one reviewer. See [Independent turn review](/turn-review/).
+needed. Reviewers run as hidden child sessions, use the configured review
+profile, model, and effort, and show their transcripts in the review view. See
+[Code review](/turn-review/).
 
-`mj new --review-model <model>` and `--review-effort <effort>` review every turn
-of one new session with that model or effort, even when `enabled` is false. In
-Auto, Mjolnir picks the first enabled profile that offers the model.
-`mj new --no-review` turns off automatic review for one session, even when
-`enabled` is true; `/review` still works. Sessions created without these flags
-follow `[review]`.
+An older configuration with `enabled = true` still loads as `trigger = "turn"`;
+`enabled = false` or an absent `enabled` loads as `"off"`. Saving settings
+writes `trigger`, not `enabled`.
+
+`mj new --review off|turn|push` and `mj import <harness> --review off|turn|push`
+set the trigger for one session, overriding `[review]`. `--review-model <model>`
+and `--review-effort <effort>` set reviewer choices. Without `--review`, either
+option selects `turn`. In Auto, Mjolnir picks an enabled profile that offers
+the model. `/review` remains available when the trigger is `off`.
 
 The deprecated `mj new --review-tier quick|extended` option still accepts
-either value and enables automatic review for that session, but the value is
+either value and selects `turn` when used without `--review`, but the value is
 ignored. `mj import <harness>` accepts the same compatibility option. Existing
 `tier` values in session settings are also ignored.
 
@@ -1096,7 +1101,7 @@ bind = "127.0.0.1:3765"
 tailscale_detect = true
 
 [review]
-enabled = false
+trigger = "off"
 profile = "claude-review"
 
 [profiles.codex-work]

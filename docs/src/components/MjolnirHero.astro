@@ -116,7 +116,7 @@ const hammerArt = [...hammerMask]
       <div
         class="turn-flow"
         role="img"
-        aria-label="Your prompt goes to the session — any of the five supported harnesses — which owns the turn. The session runs on a selected local worktree, container, SSH host, or EC2 instance, and the answer streams back to your dashboard. Managed targets are rebuilt per session; raw local and SSH targets use existing hosts. When the review config is enabled, an independent second opinion challenges changed turns."
+        aria-label="Your prompt goes to the session — any of the five supported harnesses — which owns the turn. The session runs on a selected local worktree, container, SSH host, or EC2 instance, and the answer streams back to your dashboard. Managed targets are rebuilt per session; raw local and SSH targets use existing hosts. Review settings can check changed turns or, for Claude Code and Codex, review commits before push."
       >
         <div class="flow-node flow-node--you">
           <div><strong>YOU</strong><span>/ ONE DASHBOARD</span></div>
@@ -143,10 +143,10 @@ const hammerArt = [...hammerMask]
         </div>
 
         <aside class="flow-observer">
-          <div><strong>TURN REVIEW</strong><span>/ OPT-IN</span></div>
-          <small>an independent pass re-reads the diff</small>
+          <div><strong>CODE REVIEW</strong><span>/ OPT-IN</span></div>
+          <small>a reviewer checks turn changes or commits</small>
           <small>armed by the [review] config section</small>
-          <b>CHALLENGES CHANGED TURNS</b>
+          <b>REVIEWS TURNS OR BEFORE PUSH</b>
           <i class="flow-tap flow-tap--in" aria-hidden="true"></i>
           <i class="flow-tap flow-tap--out" aria-hidden="true"></i>
           <i class="flow-tap flow-tap--forge" aria-hidden="true"></i>
