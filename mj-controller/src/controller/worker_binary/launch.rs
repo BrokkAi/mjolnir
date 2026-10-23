@@ -147,6 +147,9 @@ impl Controller {
             self.config.subagents.max_concurrent,
             launch.subtle_subagents,
         )?;
+        // The notes above can make instructions the profile alone could
+        // deliver too long, so the staged file is checked before it travels.
+        profile.ensure_staged_instructions_deliverable(&session.last_profile, &profile_stage)?;
         apply_staged_execution_setting(profile.kind, launch.execution_policy, &profile_stage)?;
         // The `mj-agents` registration is not staged here: the worker writes
         // it on every start, because an upgrade or recovery replaces the
