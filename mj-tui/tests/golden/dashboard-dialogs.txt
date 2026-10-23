@@ -569,7 +569,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │    │                                                                                                            │  ──╯
 │    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
-│    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · base rates                                        │    │
 │    │  Refresh     Close                                                                                         │    │
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
@@ -607,7 +607,7 @@ Ent                                                                             
 │    │                                                                                                            │  ──╯
 │    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
-│    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · base rates                                        │    │
 │    │  Refresh     Close                                                                                         │    │
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
@@ -645,7 +645,7 @@ Ent                                                                             
 │    │                                                                                                            │  ──╯
 │    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
-│    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · base rates                                        │    │
 │    │  Refresh     Close                                                                                         │    │
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
@@ -683,7 +683,7 @@ Ent                                                                             
 │    │                                                                                                            │  ──╯
 │    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
-│    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · base rates                                        │    │
 │    │  Refresh     Close                                                                                         │    │
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
@@ -721,7 +721,7 @@ Ent                                                                             
 │    │                                                                                                            │  ──╯
 │    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
-│    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · base rates                                        │    │
 │    │  Refresh     Close                                                                                         │    │
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
@@ -759,7 +759,7 @@ Ent                                                                             
 │    │                                                                                                            │  ──╯
 │    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
-│    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · base rates                                        │    │
 │    │  Refresh     Close                                                                                         │    │
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
@@ -797,7 +797,7 @@ Ent                                                                             
 │    │                                                                                                            │  ──╯
 │    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
-│    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
+│    │Sub-agents included · profile filters turns · + partial · base rates                                        │    │
 │    │  Refresh     Close                                                                                         │    │
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯

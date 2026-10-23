@@ -35,22 +35,23 @@ fn load_from(path: &Path, query: &SessionUsageQuery, now_ms: i64) -> Result<Sess
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    report.profiles = roots
+    let mut profiles = roots
         .iter()
         .map(|(_, _, profile, _)| profile.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
+        .collect::<BTreeSet<_>>();
+    let mut turn_profiles = tx.prepare(
+        "SELECT DISTINCT profile FROM session_turn_selections WHERE profile IS NOT NULL",
+    )?;
+    for profile in turn_profiles.query_map([], |row| row.get::<_, String>(0))? {
+        profiles.insert(profile?);
+    }
+    report.profiles = profiles.into_iter().collect();
+    let wanted = query.profile.as_deref();
     for (session_id, title, profile, state) in roots {
         let suspended = !SessionState::from_stored(&state)
             .context("unknown usage session state")?
             .is_active();
-        if (suspended && !query.include_suspended)
-            || query
-                .profile
-                .as_ref()
-                .is_some_and(|wanted| wanted != &profile)
-        {
+        if suspended && !query.include_suspended {
             continue;
         }
         let mut tree = tx.prepare("WITH RECURSIVE tree(id) AS (
@@ -73,9 +74,10 @@ fn load_from(path: &Path, query: &SessionUsageQuery, now_ms: i64) -> Result<Sess
                 "SELECT u.body, s.model, s.effort FROM session_turn_usage u
                 LEFT JOIN session_turn_selections s USING(session_id, command_id)
                 WHERE u.session_id=?1 AND json_extract(u.body, '$.completed_at_ms') >= ?2
-                AND json_extract(u.body, '$.completed_at_ms') <= ?3 ORDER BY u.completed_ordinal",
+                AND json_extract(u.body, '$.completed_at_ms') <= ?3
+                AND (?4 IS NULL OR s.profile=?4) ORDER BY u.completed_ordinal",
             )?;
-            let rows = turns.query_map(params![member, since_ms, now_ms], |row| {
+            let rows = turns.query_map(params![member, since_ms, now_ms, wanted], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     UsageSelection {
@@ -130,9 +132,25 @@ fn load_from(path: &Path, query: &SessionUsageQuery, now_ms: i64) -> Result<Sess
                 }
             }
             // A turn already running at the start of the window can still consume in it.
-            let unfinished: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM materialized_sessions WHERE session_id=?1
-                AND active_turn_json IS NOT NULL AND json_extract(active_turn_json, '$.started_at_ms') <= ?2)", params![member, now_ms], |row| row.get(0))?;
+            let unfinished: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM materialized_sessions m
+                LEFT JOIN session_turn_selections s ON s.session_id=m.session_id
+                    AND s.command_id=json_extract(m.active_turn_json, '$.command_id')
+                WHERE m.session_id=?1 AND m.active_turn_json IS NOT NULL
+                AND json_extract(m.active_turn_json, '$.started_at_ms') <= ?2
+                AND (?3 IS NULL OR s.profile=?3))",
+                params![member, now_ms, wanted],
+                |row| row.get(0),
+            )?;
             estimate.coverage.unfinished_turns += u64::from(unfinished);
+        }
+        // A profile selects its own parents and any parent whose tree ran a
+        // turn on it in the period; only that profile's turns are counted.
+        if wanted.is_some_and(|wanted| wanted != estimate.profile)
+            && estimate.coverage.recorded_turns == 0
+            && estimate.coverage.unfinished_turns == 0
+        {
+            continue;
         }
         estimate.models = groups.into_values().collect();
         estimate.models.sort_by(|a, b| {
@@ -176,7 +194,12 @@ mod tests {
         let mut state = State::default();
         for id in ["root", "child", "grandchild", "suspended"] {
             let mut session = super::super::tests::session(id, "project");
-            session.last_profile = if id == "suspended" { "claude" } else { "codex" }.into();
+            session.last_profile = match id {
+                "suspended" => "claude",
+                "child" => "codex2",
+                _ => "codex",
+            }
+            .into();
             session.state = if id == "suspended" {
                 SessionState::Stopped
             } else {
@@ -198,9 +221,13 @@ mod tests {
                 "outcome":{"kind":"completed","stop_reason":"EndTurn"},"usage":usage});
             let turn: MaterializedTurnOutcome = serde_json::from_value(body)?;
             connection.execute("INSERT INTO session_turn_usage(session_id,command_id,completed_ordinal,body) VALUES (?1,?2,?3,?4)", params![session, command, seq, serialize_turn_outcome(&turn)?])?;
-            connection.execute(
-                "INSERT INTO session_turn_selections VALUES (?1,?2,?3,'high')",
-                params![session, command, model],
+            let configuration =
+                serde_json::from_value(serde_json::json!({"model":model,"effort":"high"}))?;
+            super::super::usage::record_turn_selection(
+                &connection,
+                session,
+                &command,
+                &configuration,
             )?;
             Ok(())
         };
@@ -222,6 +249,11 @@ mod tests {
             serde_json::json!({"scope":"turn","total_tokens":1_800_000,"input_tokens":1_000_000,"output_tokens":100_000,"cached_read_tokens":500_000,"cached_write_tokens":200_000}),
         )?;
         insert("grandchild", 1, now, "custom-model", inclusive.clone())?;
+        // A restart switches the grandchild's profile between its turns.
+        connection.execute(
+            "UPDATE sessions SET last_profile='codex2' WHERE session_id='grandchild'",
+            [],
+        )?;
         let mut missing_cache_breakdown = inclusive.clone();
         missing_cache_breakdown["provider_details"] = serde_json::json!({"model_usage":{"gpt-6.1-sol":{
             "scope":"turn","total_tokens":1_100_000,"input_tokens":1_000_000,"output_tokens":100_000
@@ -262,6 +294,17 @@ mod tests {
             "gpt-6-astra",
             inclusive,
         )?;
+        let running: mj_core::state::SessionConfiguration =
+            serde_json::from_value(serde_json::json!({"model":"gpt-6-astra"}))?;
+        super::super::usage::record_turn_selection(&connection, "root", "running", &running)?;
+        let active = serde_json::json!({"command_id":"running","turn_start_position":9,"started_at_ms":now - 10});
+        assert_eq!(
+            connection.execute(
+                "UPDATE materialized_sessions SET active_turn_json=?1 WHERE session_id='root'",
+                [active.to_string()],
+            )?,
+            1
+        );
         drop(connection);
         delete_session_from(&path, "grandchild")?;
         delete_session_from(&path, "child")?;
@@ -285,8 +328,41 @@ mod tests {
         assert_eq!(root.coverage.last_request_reports, 1);
         assert_eq!(root.coverage.missing_reports, 1);
         assert!(root.is_partial());
-        assert_eq!(hourly.profiles, ["claude", "codex"]);
+        assert_eq!(root.coverage.unfinished_turns, 1);
+        assert_eq!(hourly.profiles, ["claude", "codex", "codex2"]);
         assert_eq!(hourly.cost_usd_ticks, root.cost_usd_ticks);
+
+        // A profile counts the turns recorded on it anywhere in the tree, by
+        // the profile at turn start, after the children are destroyed.
+        let on = |profile: &str, period| {
+            load_from(
+                &path,
+                &SessionUsageQuery {
+                    profile: Some(profile.into()),
+                    period,
+                    include_suspended: true,
+                },
+                now,
+            )
+        };
+        let codex2 = on("codex2", UsagePeriod::Hourly)?;
+        assert_eq!(codex2.sessions.len(), 1);
+        let tree = &codex2.sessions[0];
+        assert_eq!(
+            (tree.session_id.as_str(), tree.profile.as_str()),
+            ("root", "codex")
+        );
+        assert_eq!(tree.subagent_count, 2);
+        assert_eq!(tree.cost_usd_ticks, 71_000_000_000);
+        assert_eq!(tree.coverage.recorded_turns, 2);
+        assert_eq!(tree.coverage.unfinished_turns, 0);
+        let codex = on("codex", UsagePeriod::Hourly)?;
+        assert_eq!(
+            codex.sessions[0].cost_usd_ticks + tree.cost_usd_ticks,
+            root.cost_usd_ticks
+        );
+        assert_eq!(codex.sessions[0].coverage.recorded_turns, 4);
+        assert_eq!(codex.sessions[0].coverage.unfinished_turns, 1);
 
         let daily = load_from(
             &path,
@@ -317,15 +393,9 @@ mod tests {
         assert!(weekly.sessions[0].suspended);
         assert_eq!(weekly.sessions[1].cost_usd_ticks, 93_050_000_000);
         assert_eq!(weekly.cost_usd_ticks, 198_050_000_000);
-        let filtered = load_from(
-            &path,
-            &SessionUsageQuery {
-                profile: Some("codex".into()),
-                ..weekly_query.clone()
-            },
-            now,
-        )?;
-        assert_eq!(filtered.sessions, [weekly.sessions[1].clone()]);
+        let filtered = on("codex", UsagePeriod::Weekly)?;
+        assert_eq!(filtered.sessions.len(), 1);
+        assert_eq!(filtered.sessions[0].cost_usd_ticks, 22_050_000_000);
         let monthly = load_from(
             &path,
             &SessionUsageQuery {
@@ -335,8 +405,22 @@ mod tests {
             },
             now,
         )?;
+        // Root ran no turns on claude, so only the claude parent remains.
+        assert_eq!(monthly.sessions.len(), 1);
         assert_eq!(monthly.sessions[0].cost_usd_ticks, 126_000_000_000);
         assert_eq!(monthly.sessions[0].coverage.recorded_turns, 2);
+
+        // Renaming a profile carries destroyed children's turns with it.
+        super::super::sessions::rename_session_reference_at(
+            &path,
+            "last_profile",
+            "codex2",
+            "codex-two",
+        )?;
+        assert_eq!(
+            on("codex-two", UsagePeriod::Hourly)?.sessions,
+            codex2.sessions
+        );
         Ok(())
     }
 }

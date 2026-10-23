@@ -33,9 +33,15 @@ usage by model and estimated API cost, including its Mjolnir sub-agents. Rows
 are sorted by total cost, highest first. Accounting retained for destroyed
 sub-agents still contributes to their parent.
 
-The profile dropdown starts on **All**. Choosing a profile selects parents
-whose last profile matches; their complete sub-agent trees remain included,
-even when children used other profiles. **Hourly** is the default period;
+The profile dropdown starts on **All**. Choosing a profile counts only the
+turns that ran on that profile, wherever they are in a parent's sub-agent
+tree, and still shows them under the parent. For example, a Claude session
+whose sub-agents ran on `codex2` appears under `codex2` with the cost of
+those sub-agents' turns. Parents on the chosen profile appear even when they
+have no usage in the period. Earlier versions did not record each turn's
+profile, so their turns count under the session's profile at the time of the
+upgrade, and usage from sub-agents destroyed before the upgrade appears only
+under **All**. **Hourly** is the default period;
 **Daily** covers the trailing 24 hours; **Weekly** and **Monthly** cover the
 trailing seven and thirty days. Check
 **Include suspended sessions** to include inactive parents. The report refreshes

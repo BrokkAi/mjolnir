@@ -22,7 +22,7 @@ The reference report exists in the TUI as CPU by session. The existing usage sto
 
 ## Decision Log
 
-The three periods mean trailing one hour, seven days, and thirty days, measured at query time. Profiles select the parent session's last profile; its whole descendant tree remains aggregated, including children using other profiles. All sums every listed root exactly once. This matches a session report and works with retained accounting that does not retain destroyed children's profile identity. The dialog states this interpretation. Standard token API rates are embedded with dated primary-source references, rather than adding a network dependency to opening the report. Unrecognized prices and missing usage remain visible as partial estimates. No schema or relay migration is required.
+The three periods mean trailing one hour, seven days, and thirty days, measured at query time. All sums every listed root exactly once. The dialog states the profile interpretation. (Superseded 2026-10-23: profiles originally selected the parent session's last profile and aggregated its whole tree, because retained accounting did not keep destroyed children's profile identity. A Claude parent whose sub-agents spent a Codex profile's quota then hid that usage from the Codex profile. Revision 93 records each turn's profile at turn start; a profile now counts only its own turns anywhere in a tree, still grouped under the parent, and lists parents of that profile even when idle.) Standard token API rates are embedded with dated primary-source references, rather than adding a network dependency to opening the report. Unrecognized prices and missing usage remain visible as partial estimates. No schema or relay migration is required.
 
 ## Outcomes & Retrospective
 
@@ -79,3 +79,5 @@ Revision note: distinguish a missing model token total from zero in the rendered
 Revision note: final validation completed; refresh only the three existing discovery goldens affected by the new command, then commit and publish the validated result.
 
 Revision note: the authorized push succeeded after fetching and merging the concurrently advanced upstream. All feature work and validation are complete.
+
+Revision note (2026-10-23): a user saw no `codex2` usage although Codex reported 9% used; 132 of 134 `codex2` turns that day belonged to sub-agents under parents on other profiles. Schema revision 93 (compatible) adds `session_turn_selections.profile`, written from the session's profile at turn start, backfilled from current session profiles, and renamed with profile renames. The report filters turns by it and keeps rows per parent.

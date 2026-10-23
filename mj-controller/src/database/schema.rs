@@ -1663,6 +1663,26 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             .context("migrate DSH harness constraints")?;
     }
 
+    // Compatible: each turn's selection now records the profile that ran it,
+    // so usage reports can filter by profile across sub-agent trees and after
+    // a child is destroyed. Older daemons name their columns when recording a
+    // selection and never read this one; turns they record leave it NULL,
+    // which the report treats as an unknown profile. Existing rows take their
+    // session's current profile, the only record that survives for them.
+    if version < 93 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE session_turn_selections ADD COLUMN profile TEXT;
+             UPDATE session_turn_selections SET profile = (
+                 SELECT last_profile FROM sessions s
+                 WHERE s.session_id = session_turn_selections.session_id);
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (93, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 93;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2270,7 +2290,7 @@ mod reader_tests {
         // Rebuilding sessions must retain discovery triggers and admit the new state.
         writer.execute_batch(
             "UPDATE sessions SET state='startup-cleanup',project_directory=X'2F6E6577' WHERE session_id='kept';
-             INSERT INTO session_turn_selections VALUES ('kept','turn','model','high');"
+             INSERT INTO session_turn_selections(session_id,command_id,model,effort) VALUES ('kept','turn','model','high');"
         ).unwrap();
         let changed: Vec<u8> = writer
             .query_row(
@@ -2723,6 +2743,7 @@ mod reader_tests {
                      ON prompt_history(session_id, history_id DESC);
                  CREATE INDEX prompt_history_recent ON prompt_history(history_id DESC);
                  ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE session_restart_intents DROP COLUMN container_upgrade_json;
+                 ALTER TABLE session_turn_selections DROP COLUMN profile;
                  DELETE FROM schema_migrations WHERE version >= 77;
                  UPDATE schema_compatibility SET minimum_compatible_version = 74;
                  PRAGMA user_version = 76;",
@@ -2876,6 +2897,14 @@ mod reader_tests {
         {
             connection
                 .execute_batch("ALTER TABLE mailbox_outbox DROP COLUMN failure;")
+                .unwrap();
+        }
+        if version < 93
+            && legacy_schema::table_has_column(&connection, "session_turn_selections", "profile")
+                .unwrap()
+        {
+            connection
+                .execute_batch("ALTER TABLE session_turn_selections DROP COLUMN profile;")
                 .unwrap();
         }
         connection
@@ -3148,6 +3177,54 @@ mod reader_tests {
                 .unwrap()
                 .exists([&record.id])
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn turn_profile_migration_backfills_live_sessions_and_stays_compatible() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        for (id, profile) in [("kept", "codex2"), ("destroyed", "codex")] {
+            let mut record = super::super::tests::session(id, "project");
+            record.last_profile = profile.into();
+            save_session_to(&path, &record).unwrap();
+        }
+        stamp_schema_version(&path, 92);
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(
+            "INSERT INTO session_turn_selections(session_id,command_id,model,effort)
+                 VALUES ('kept','one','sol','high'),('destroyed','one','luna','low');
+             DELETE FROM sessions WHERE session_id='destroyed';",
+        )
+        .unwrap();
+        drop(old);
+        let upgraded = open_writer(&path).unwrap();
+        let state = read_schema_state(&upgraded).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        state.ensure_supported_by(92).unwrap();
+        // A revision-92 daemon names its columns and leaves the profile unknown.
+        upgraded
+            .execute_batch(
+                "INSERT INTO session_turn_selections(session_id,command_id,model,effort)
+                 VALUES ('kept','two','sol','high');",
+            )
+            .unwrap();
+        let profiles = upgraded
+            .prepare(
+                "SELECT session_id, command_id, profile FROM session_turn_selections ORDER BY 1, 2",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<(String, String, Option<String>)>>>()
+            .unwrap();
+        assert_eq!(
+            profiles,
+            [
+                ("destroyed".into(), "one".into(), None),
+                ("kept".into(), "one".into(), Some("codex2".into())),
+                ("kept".into(), "two".into(), None),
+            ]
         );
     }
 
