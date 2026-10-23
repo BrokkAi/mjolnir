@@ -488,14 +488,17 @@ environment.
 
 For DSH, configure `kind = "dsh"`, for example with
 `home = "/home/me/.dsh-acp"`. DSH runs BrokkAi's
-[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.2.0, a DeepSeek coding agent
+[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.2.1, a DeepSeek coding agent
 that speaks ACP itself, so there is no separate bridge. It is not the DeepSeek
 harness earlier releases offered as `kind = "deepseek"`; that kind still fails
 to load. The home is a `DSH_ACP_DATA_DIR` root. It holds an optional
 `AGENTS.md` and dsh-acp's native session records, `sessions/<id>.json`; there
 is no configuration file, no login file, and no skills support. dsh-acp
-receives `AGENTS.md` in one environment variable, so it can be at most 131049
-bytes; a session with a larger one refuses to start and says so. With no login
+receives `AGENTS.md` in one environment variable, so the file must be UTF-8
+text of at most 131049 bytes, including the notes Mjolnir adds to describe a
+container or EC2 session's environment. Mjolnir refuses to start a session whose
+file breaks either rule and says which rule and by how much, and `mj doctor`
+reports the profile's own file the same way. With no login
 to create it, create the home directory yourself; `mj doctor` reports it
 missing until you do. DSH reads no
 instruction file itself, so Mjolnir passes the staged `AGENTS.md` as dsh-acp's
@@ -862,7 +865,7 @@ MiMo Code installs from the pinned `@mimo-ai/cli` npm package. Its managed
 launch disables automatic updates so a running session never replaces its own
 binary.
 DSH requires curl and tar, and no Node.js; Mjolnir downloads the pinned
-dsh-acp 0.2.0 GitHub release archive for the platform and verifies its SHA-256
+dsh-acp 0.2.1 GitHub release archive for the platform and verifies its SHA-256
 checksum. Linux and macOS, on x86-64 and ARM64, are supported. Linux needs
 glibc 2.34 or newer, so musl distributions such as Alpine cannot run it.
 Mjolnir reports a missing prerequisite and leaves the existing worker alone;

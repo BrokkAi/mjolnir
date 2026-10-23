@@ -61,9 +61,9 @@ image needs Node.js 22, npm, and npx. Bake `@mimo-ai/cli@0.1.15` and set
 `MIMOCODE_DISABLE_AUTOUPDATE=1` for a stable managed runtime.
 
 DSH speaks ACP itself, so `dsh-acp` is both its bridge and its agent. Without
-`dsh-acp` on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.2.0`,
+`dsh-acp` on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.2.1`,
 which needs Node.js 22 or newer, npm, and npx; the npm package bundles the
-release binaries. To bake it in, run `npm install -g @brokkai/dsh-acp@0.2.0`
+release binaries. To bake it in, run `npm install -g @brokkai/dsh-acp@0.2.1`
 (Node.js 22 or newer), or put the `dsh-acp` binary from a release archive at
 <https://github.com/BrokkAi/dsh-acp/releases> on `PATH`, as the reference image
 does. The Linux binaries need glibc 2.34 or newer, so musl images such as

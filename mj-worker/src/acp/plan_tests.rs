@@ -423,7 +423,7 @@ impl PlanProbe {
         } else {
             json!([])
         };
-        // dsh-acp 0.2.0 carries its permission policy on its own selector.
+        // dsh-acp carries its permission policy on its own selector.
         if harness == HarnessKind::Dsh {
             options.as_array_mut().unwrap().push(json!(
                 {"id": "permission_mode", "name": "Tool permissions", "type": "select",

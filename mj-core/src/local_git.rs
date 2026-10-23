@@ -99,10 +99,21 @@ impl ChangedFile {
     }
 }
 
+/// The git arguments whose output [`parse_git_status`] reads. Both are `-z`
+/// so git prints names as they are, not C-quoted with octal escapes.
+pub const NUMSTAT_ARGS: [&str; 5] = ["--no-optional-locks", "diff", "--numstat", "-z", "HEAD"];
+pub const STATUS_ARGS: [&str; 5] = [
+    "--no-optional-locks",
+    "status",
+    "--porcelain",
+    "-z",
+    "--untracked-files=normal",
+];
+
 /// Builds a [`SessionGitStatus`] from the raw output of four git commands:
 /// `rev-parse --abbrev-ref HEAD`, `rev-list --left-right --count
-/// @{upstream}...HEAD` (or `None` when there is no upstream), `diff --numstat
-/// HEAD`, and `status --porcelain`. Pure, so the parsing has tests that need
+/// @{upstream}...HEAD` (or `None` when there is no upstream), `diff --numstat -z
+/// HEAD`, and `status --porcelain -z`. Pure, so the parsing has tests that need
 /// no repository.
 pub fn parse_git_status(
     checkout: PathBuf,
@@ -119,35 +130,47 @@ pub fn parse_git_status(
             Some((behind, ahead))
         })
         .map_or((None, None), |(behind, ahead)| (Some(behind), Some(ahead)));
+    // Both listings are NUL-separated (`-z`), so git does not quote names.
     let mut counts = std::collections::BTreeMap::new();
-    for line in numstat.lines() {
-        let mut parts = line.splitn(3, '\t');
+    let mut records = numstat.split('\0').filter(|record| !record.is_empty());
+    while let Some(record) = records.next() {
+        let mut parts = record.splitn(3, '\t');
         let (Some(added), Some(removed), Some(path)) = (parts.next(), parts.next(), parts.next())
         else {
             continue;
         };
+        // A rename has an empty path here, followed by the old and new names.
+        let path = if path.is_empty() {
+            let _old = records.next();
+            records.next().unwrap_or_default()
+        } else {
+            path
+        };
         counts.insert(
-            path.trim().to_owned(),
+            path.to_owned(),
             (added.parse::<u32>().ok(), removed.parse::<u32>().ok()),
         );
     }
-    let changed = porcelain
-        .lines()
-        .filter(|line| line.len() > 3)
-        .map(|line| {
-            let status = line[..2].to_owned();
-            let path = line[3..].trim();
-            // A rename is written `old -> new`; the new name is the file.
-            let path = path.rsplit(" -> ").next().unwrap_or(path).to_owned();
-            let (added, removed) = counts.get(&path).copied().unwrap_or((None, None));
-            ChangedFile {
-                path,
-                status,
-                added,
-                removed,
-            }
-        })
-        .collect();
+    let mut changed = Vec::new();
+    let mut records = porcelain.split('\0').filter(|record| !record.is_empty());
+    while let Some(record) = records.next() {
+        if record.len() < 4 || !record.is_char_boundary(3) {
+            continue;
+        }
+        let status = record[..2].to_owned();
+        // With `-z`, a rename or copy lists the new name, then the old one.
+        if status.contains(['R', 'C']) {
+            let _old = records.next();
+        }
+        let path = record[3..].to_owned();
+        let (added, removed) = counts.get(&path).copied().unwrap_or((None, None));
+        changed.push(ChangedFile {
+            path,
+            status,
+            added,
+            removed,
+        });
+    }
     SessionGitStatus {
         checkout,
         branch: branch.trim().to_owned(),
@@ -1298,14 +1321,68 @@ mod tests {
         assert!(error.to_string().contains("multiple Git remotes"));
     }
 
+    // Hard-won: DSH campaign 2026-10-23 (A-6): changed files showed git-quoted octal escapes for non-ASCII names
+    #[test]
+    fn git_status_names_files_as_they_are_on_disk_for_real_git_output() {
+        let directory = initialized_repository();
+        let path = directory.path();
+        git(path, &["config", "user.name", "Status Test"]);
+        git(path, &["config", "user.email", "status@example.test"]);
+        fs::write(path.join("before.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        fs::write(path.join("tracked 日本.txt"), "x\n").unwrap();
+        git(path, &["add", "."]);
+        git(path, &["commit", "-q", "-m", "base"]);
+        git(path, &["mv", "before.txt", "after 名前.txt"]);
+        fs::write(path.join("my notes 日本.txt"), "hello\n").unwrap();
+        fs::write(path.join("quo\"te.txt"), "q\n").unwrap();
+        fs::write(path.join("tracked 日本.txt"), "x\ny\n").unwrap();
+        let read = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let status = parse_git_status(
+            path.to_owned(),
+            "main",
+            None,
+            &read(&NUMSTAT_ARGS),
+            &read(&STATUS_ARGS),
+        );
+        let mut files: Vec<(&str, &str)> = status
+            .changed
+            .iter()
+            .map(|file| (file.path.as_str(), file.kind()))
+            .collect();
+        files.sort();
+        assert_eq!(
+            files,
+            [
+                ("after 名前.txt", "renamed"),
+                ("my notes 日本.txt", "new"),
+                ("quo\"te.txt", "new"),
+                ("tracked 日本.txt", "modified"),
+            ]
+        );
+        let tracked = status
+            .changed
+            .iter()
+            .find(|file| file.path == "tracked 日本.txt")
+            .unwrap();
+        assert_eq!((tracked.added, tracked.removed), (Some(1), Some(0)));
+    }
+
     #[test]
     fn git_status_parsing_joins_porcelain_names_with_numstat_counts() {
         let status = parse_git_status(
             PathBuf::from("/work"),
             "feature/x\n",
             Some("2\t1\n"),
-            "12\t3\tsrc/main.rs\n-\t-\tlogo.png\n0\t5\told.rs\n",
-            " M src/main.rs\n?? notes.md\nR  old.rs -> new.rs\nA  logo.png\n",
+            "12\t3\tsrc/main.rs\0-\t-\tlogo.png\x00\t5\t\0old.rs\0new.rs\0",
+            " M src/main.rs\0?? notes.md\0R  new.rs\0old.rs\0A  logo.png\0",
         );
         assert_eq!(status.branch, "feature/x");
         assert_eq!((status.behind, status.ahead), (Some(2), Some(1)));
@@ -1323,7 +1400,7 @@ mod tests {
             ("new.rs", "renamed")
         );
         assert_eq!(status.changed[3].added, None, "binary files count nothing");
-        assert_eq!(status.totals(), (12, 3));
+        assert_eq!(status.totals(), (12, 8), "a rename carries its own counts");
         assert_eq!(status.row_text(), "⎇ feature/x ↑1 ↓2 ±4");
 
         let clean = parse_git_status(PathBuf::from("/work"), "main", None, "", "");
