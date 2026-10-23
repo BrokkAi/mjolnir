@@ -6,6 +6,8 @@
 //! feeds both of them read, and [`import`] session adoption.
 
 mod acp;
+#[cfg(unix)]
+mod acp_login;
 mod api_client;
 mod api_commands;
 mod daemon;
@@ -39,7 +41,6 @@ use mj_core::config::{Config, config_path};
 use mj_core::state::{MoveSelection, MoveSessionRequest, ResumeQueueDisposition};
 use std::io::{self, Write};
 
-use mj_controller::controller::Controller;
 use mj_controller::controller::update::StartupUpdateNotice;
 use mj_controller::setup::run_setup_command;
 #[cfg(test)]
@@ -368,6 +369,10 @@ struct LoginArgs {
     /// `claude setup-token` and store it for every session of this profile.
     #[arg(long)]
     setup_token: bool,
+    /// ACP authentication method id. Sign-in normally picks an interactive
+    /// method itself; use this to choose one when a bridge offers several.
+    #[arg(long, value_name = "ID")]
+    method: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1861,39 +1866,52 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
 /// Hel never sees the credential contents; it compares fingerprints before and
 /// after so it can tell the operator whether anything changed.
 async fn login(args: LoginArgs) -> Result<()> {
-    let controller = Controller::load()?;
-    let profile_id = resolve_login_profile(&controller.config, args.profile.as_deref())?;
-    let profile = controller
-        .config
-        .profiles
-        .get(&profile_id)
-        .with_context(|| {
-            format!(
-                "unknown profile {profile_id:?}; configured profiles: {}",
-                profile_ids(&controller.config)
-            )
-        })?;
+    // Signing in only needs the configuration and the profile's own home. It
+    // must also work before the daemon or its database exists, which is the
+    // first thing a freshly configured machine does.
+    let config = Config::load()?;
+    let profile_id = resolve_login_profile(&config, args.profile.as_deref())?;
+    let profile = config.profiles.get(&profile_id).with_context(|| {
+        format!(
+            "unknown profile {profile_id:?}; configured profiles: {}",
+            profile_ids(&config)
+        )
+    })?;
     if args.setup_token {
         return store_claude_setup_token(&profile_id, profile).await;
     }
-    let (program, arguments) = mj_core::credentials::login_command(profile)
-        .with_context(|| format!("profile {profile_id:?}"))?;
     // OpenCode keeps its logins in its database, so its fingerprint is the
     // logins read from there, and a live session reloads to take them up.
     let stored = profile.auth_scheme() == mj_core::config::AuthScheme::NativeLoginStore;
-    let fingerprint = || -> Result<Option<String>> {
-        if stored {
-            return Ok(mj_controller::opencode_logins::profile_logins(profile)?
-                .map(|logins| mj_core::credentials::credential_fingerprint(&logins)));
-        }
-        let (snapshot, _) = mj_core::credentials::read_credential_file(
-            profile.kind,
-            &profile.authentication_marker(),
-        )?;
-        Ok(snapshot.present.then_some(snapshot.fingerprint))
-    };
-    let before = fingerprint()?;
+    let before = profile_credential_fingerprint(profile)?;
 
+    #[cfg(unix)]
+    {
+        match crate::acp_login::login(profile, args.method.as_deref()).await {
+            Ok(crate::acp_login::Outcome::SignedIn { method }) => {
+                println!("Signed in to profile {profile_id} through the ACP method {method}.");
+                report_login_change(&profile_id, profile, before, stored)?;
+                return Ok(());
+            }
+            Ok(crate::acp_login::Outcome::Unavailable(reason)) => {
+                if args.method.is_some() {
+                    bail!("ACP sign-in was requested but is unavailable: {reason}");
+                }
+                eprintln!(
+                    "ACP sign-in is unavailable for {} ({reason}); using its command-line login.",
+                    profile.kind.display_name()
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    #[cfg(not(unix))]
+    if args.method.is_some() {
+        bail!("--method requires a Unix host");
+    }
+
+    let (program, arguments) = mj_core::credentials::login_command(profile)
+        .with_context(|| format!("profile {profile_id:?}"))?;
     println!(
         "Running `{program} {}` against {}.",
         arguments.join(" "),
@@ -1918,7 +1936,33 @@ async fn login(args: LoginArgs) -> Result<()> {
             )
         })?;
 
-    let after = fingerprint()?;
+    report_login_change(&profile_id, profile, before, stored)?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+/// The credential fingerprint a login is expected to change.
+fn profile_credential_fingerprint(
+    profile: &mj_core::config::HarnessProfile,
+) -> Result<Option<String>> {
+    if profile.auth_scheme() == mj_core::config::AuthScheme::NativeLoginStore {
+        return Ok(mj_controller::opencode_logins::profile_logins(profile)?
+            .map(|logins| mj_core::credentials::credential_fingerprint(&logins)));
+    }
+    let (snapshot, _) =
+        mj_core::credentials::read_credential_file(profile.kind, &profile.authentication_marker())?;
+    Ok(snapshot.present.then_some(snapshot.fingerprint))
+}
+
+fn report_login_change(
+    profile_id: &str,
+    profile: &mj_core::config::HarnessProfile,
+    before: Option<String>,
+    stored: bool,
+) -> Result<()> {
+    let after = profile_credential_fingerprint(profile)?;
     if after.is_some() && after != before {
         if stored {
             println!(
@@ -1931,9 +1975,6 @@ async fn login(args: LoginArgs) -> Result<()> {
         }
     } else {
         println!("Credentials for profile {profile_id} are unchanged.");
-    }
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
     }
     Ok(())
 }
@@ -2394,6 +2435,7 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mj_controller::controller::Controller;
     use mj_core::state::{SessionRecord, SessionState, State};
 
     // Hard-won: 0475c51230: Launch finding C-2 found large-transfer consent flags incorrectly added to every move refusal; this checks they appear only for that consent error.

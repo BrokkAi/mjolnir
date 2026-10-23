@@ -49,6 +49,11 @@ tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# `mj login` installs and runs the same pinned ACP harness that a bare worker
+# uses, so a profile does not need a separate ambient harness installation.
+mj-worker.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 # Stops an unresponsive daemon through a handle that pins its identity.
 windows-sys = { workspace = true, features = ["Win32_System_Threading"] }

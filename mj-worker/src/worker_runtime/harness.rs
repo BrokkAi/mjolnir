@@ -32,12 +32,16 @@ const MIMO_PACKAGE_JSON: &[u8] = include_bytes!("../../assets/harnesses/mimo/pac
 const MIMO_PACKAGE_LOCK: &[u8] = include_bytes!("../../assets/harnesses/mimo/package-lock.json");
 
 #[derive(Debug)]
-pub(crate) struct ManagedHarness {
+pub struct ManagedHarness {
     pub command: PathBuf,
     pub args: Vec<String>,
     pub environment: BTreeMap<String, String>,
-    pub lease_path: PathBuf,
-    pub cache_root: PathBuf,
+    /// The installed harness executable itself. For an adapter that is launched
+    /// through a shell bootstrap, this is the native harness or ACP binary the
+    /// bootstrap would exec; login fallbacks use it directly.
+    pub entrypoint: PathBuf,
+    pub(crate) lease_path: PathBuf,
+    pub(crate) cache_root: PathBuf,
     _lease: File,
 }
 
@@ -70,7 +74,7 @@ pub(crate) fn spawn_gc_on(
     })
 }
 
-pub(crate) async fn resolve(
+pub async fn resolve(
     runtime: HarnessRuntimePolicy,
     harness: HarnessKind,
     execution_policy: ExecutionPolicy,
@@ -106,6 +110,25 @@ fn resolve_at(
             execution_policy,
             environment,
         ))
+}
+
+/// Install or reuse the exact managed harness for `kind` from a fully
+/// resolved environment.
+///
+/// Unlike [`resolve`], this does not start the account's login shell. Callers
+/// that already hold a resolved environment (notably `mj login`, which may run
+/// before any daemon and under a shell that cannot be started non-interactively)
+/// use this directly.
+pub async fn resolve_with_environment(
+    harness: HarnessKind,
+    execution_policy: ExecutionPolicy,
+    environment: &BTreeMap<String, String>,
+) -> Result<ManagedHarness> {
+    let root = managed_harness_cache_root(
+        environment.get("XDG_CACHE_HOME").map(OsStr::new),
+        environment.get("HOME").map(OsStr::new),
+    )?;
+    resolve_at_async(&root, harness, execution_policy, environment).await
 }
 
 async fn resolve_at_async(
@@ -240,6 +263,7 @@ async fn resolve_at_async(
         command,
         args,
         environment: launch_environment,
+        entrypoint: install.join(selected.entrypoint),
         lease_path,
         cache_root: root.to_path_buf(),
         _lease: lease,

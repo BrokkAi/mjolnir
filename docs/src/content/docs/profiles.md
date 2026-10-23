@@ -529,21 +529,29 @@ mj login --profile codex-work
 
 When exactly one profile exists, `--profile` may be omitted. With several
 profiles it is required. Mjolnir sets the selected home variable and profile
-environment before starting the harness's interactive login:
+environment, installs the exact pinned harness under its own cache, and starts
+that harness as an ACP agent. It reads the methods the bridge advertises:
 
-| Harness | Command run by `mj login` |
+| Harness | What `mj login` does |
 | --- | --- |
-| Codex | `codex login` (not applicable to an API-key provider) |
-| Claude Code | `claude auth login` |
-| Kimi Code | `kimi login` |
-| Grok Build | `grok login` |
-| Muse Code | `muse login` |
-| OpenCode | `opencode auth login` |
-| MiMo Code | `mimo auth login` |
+| Codex | ACP `authenticate` for `chat-gpt` (browser) or `api-key` (environment key) |
+| Claude Code | No ACP methods; falls back to `claude auth login` when the Claude CLI is installed |
+| Kimi Code | Falls back to `kimi login` when the bridge advertises no terminal method |
+| Grok Build | Falls back to `grok login` when the bridge advertises no terminal method |
+| Muse Code | Runs the ACP `terminal` method `muse-acp login` |
+| OpenCode | Runs the pinned `opencode auth login --standalone` |
+| MiMo Code | Runs the pinned `mimo auth login` |
 | DSH | none; `mj login` refuses the profile, which authenticates with `DEEPSEEK_API_KEY` |
 
-The login command is always resolved from the controller's `PATH`. A profile
-selects credentials and environment, not another harness executable.
+Use `--method <id>` when a bridge advertises several methods. A bridge that
+advertises no usable method, or a pinned installation that cannot be prepared,
+falls back to the harness CLI's own login. A failure inside a chosen ACP method
+is reported instead of silently trying a different flow.
+
+The pinned harness is the same version a session runs, so signing in never
+requires a separate installation of the harness on the controller. API-key
+profiles, and profiles whose harness is configured for an API key rather than a
+native login, have no interactive login.
 
 On macOS, Claude Code keeps its login in one Keychain item rather than in the
 home ([anthropics/claude-code#20553](https://github.com/anthropics/claude-code/issues/20553)),
