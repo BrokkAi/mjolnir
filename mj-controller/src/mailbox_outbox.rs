@@ -153,6 +153,9 @@ async fn process_pending(
     sessions: SessionManagerControl,
     stop: CancellationToken,
 ) -> Result<()> {
+    tokio::task::spawn_blocking(crate::database::reconcile_pending_subagent_questions)
+        .await
+        .context("child question reconciliation task failed")??;
     let pruned_stopped_children =
         tokio::task::spawn_blocking(crate::database::prune_pending_messages_for_stopped_children)
             .await

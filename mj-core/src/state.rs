@@ -1652,6 +1652,8 @@ pub struct StartSelection {
     pub branch: Option<String>,
     /// Diff base; `at` unless the caller named another.
     pub base: Option<String>,
+    /// The workspace started with `at`, `base` and their ancestors only.
+    pub no_later_history: bool,
 }
 
 impl SessionRecord {
@@ -1679,6 +1681,10 @@ impl SessionRecord {
                 .or_else(|| self.launch_branch.clone()),
             base: self.launch_base.clone().or_else(|| at.clone()),
             at,
+            no_later_history: self
+                .checkout
+                .as_ref()
+                .is_some_and(|checkout| checkout.no_later_history),
         }
     }
 

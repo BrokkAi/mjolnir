@@ -117,6 +117,12 @@ pub(crate) struct NewArgs {
     /// Start the workspace checked out at this full commit ID in the bundle's primary repository.
     #[arg(long, value_name = "SHA", requires = "bundle")]
     at: Option<String>,
+    /// With --at, give the workspace the full history up to that commit and
+    /// --base, and nothing later: no later commits, branches, tags, or origin
+    /// remote. --base must then be a full commit ID. The session cannot be
+    /// resumed or moved.
+    #[arg(long, requires = "at")]
+    no_later_history: bool,
     /// With --at, the new branch to create there; otherwise the existing branch to check out.
     #[arg(long)]
     branch: Option<String>,
@@ -1173,6 +1179,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         at: args.at.clone(),
         branch: args.branch.clone(),
         base: args.base.clone(),
+        no_later_history: args.no_later_history,
         workspace_id,
         profile_id: args.profile.clone(),
         target_id: args.target.clone(),
@@ -1217,6 +1224,7 @@ pub(crate) fn name_launch_flags(error: anyhow::Error) -> anyhow::Error {
         .replace("target_id", "--target")
         .replace("bundle_id", "--bundle")
         .replace("project_directory", "--project-directory")
+        .replace("`no_later_history`", "--no-later-history")
         .replace("`at`", "--at")
         .replace("`branch`", "--branch")
         .replace("`base`", "--base")
@@ -2991,6 +2999,28 @@ mod tests {
             parse(&["--no-github-events", "--no-project-memory"]),
             (true, true)
         );
+    }
+
+    #[test]
+    fn no_later_history_needs_at() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["mj", "new", "--bundle", "product"];
+            argv.extend_from_slice(extra);
+            Cli::try_parse_from(argv).map(|cli| match cli.command {
+                Some(Command::New(args)) => (args.at, args.no_later_history),
+                _ => panic!("expected the new command"),
+            })
+        };
+        assert_eq!(parse(&[]).unwrap(), (None, false));
+        assert_eq!(parse(&["--at", sha]).unwrap(), (Some(sha.into()), false));
+        assert_eq!(
+            parse(&["--at", sha, "--no-later-history"]).unwrap(),
+            (Some(sha.into()), true)
+        );
+        assert!(parse(&["--no-later-history"]).is_err(), "requires --at");
+        let refused = name_launch_flags(anyhow::anyhow!("`no_later_history` requires `at`"));
+        assert_eq!(refused.to_string(), "--no-later-history requires --at");
     }
 
     #[test]

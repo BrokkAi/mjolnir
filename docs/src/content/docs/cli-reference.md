@@ -184,7 +184,7 @@ the matching task choice for this session; each unspecified type uses its global
 choice. Either override implies Mjolnir. The matching
 `--subagent-*-effort` flag requires its model flag. Omitted policy retains
 the session's override. `--subagents none` removes delegation tools entirely;
-it needs a Claude or Codex session. A retry of a sealed
+it needs a Claude, Codex, or DSH session. A retry of a sealed
 Move retains its recorded policy; an explicit different policy is refused.
 
 A session that works in a bare checkout on an SSH host cannot move to
@@ -264,7 +264,8 @@ Inspect `scan` output before adopting or destroying anything. See [session recov
 mj workspaces list [--json]
 mj workspaces create <name> [--json]
 mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id>] [--bundle <id>]
-       [--project-directory <path>] [--at <sha>] [--branch <name>] [--base <revision>]
+       [--project-directory <path>] [--at <sha> [--no-later-history]]
+       [--branch <name>] [--base <revision>]
        [--title <text>]
        [--model <name>] [--effort <name>] [--subagents native|mjolnir|none]
        [--subagent-straightforward <model>] [--subagent-straightforward-effort <effort>]
@@ -314,6 +315,21 @@ not move the checkout. A local clone resolves the base in the source
 repository, while a network clone resolves it from fetched Git history. A base
 cannot be combined with a session that runs directly in the selected directory.
 
+`mj new --at <sha> --no-later-history` gives the workspace the full history up
+to that commit and the `--base` commit, and nothing later. Use it when the
+agent must not see what happened after a commit, for example to review a pull
+request as it stood. See
+[Start without later history](/api-reference/#start-without-later-history) for
+what the workspace holds and what the agent can still reach. `--base` must then
+be a full commit ID, the bundle must have one repository, and the session
+cannot be resumed or moved.
+
+```text
+mj new --workspace eval --bundle product --target builder \
+  --at 0123456789abcdef0123456789abcdef01234567 --no-later-history \
+  --base 89abcdef0123456789abcdef0123456789abcdef --branch review/pr-670
+```
+
 - `mj new` without `--profile` or `--target` uses the saved default for the
   missing one (the pair `GET /api/v1/options` reports as `default`).
 - `mj new --model <name>` chooses the highest-quota enabled, usable profile
@@ -323,7 +339,7 @@ cannot be combined with a session that runs directly in the selected directory.
   the request fails.
 - `mj new --subagents native|mjolnir|none` selects delegation. Omitted defaults to
   Native. `none` gives the session no delegation tools, native or Mjolnir; it
-  needs a Claude or Codex profile and is not offered in the TUI or browser. Mjolnir requires a Claude or Codex parent and a straightforward
+  needs a Claude, Codex, or DSH profile and is not offered in the TUI or browser. Mjolnir requires a Claude, Codex, or DSH parent and a straightforward
   choice in `[subagents.straightforward]` or a session override. The subtle
   choice in `[subagents.subtle]` is optional. Configure global defaults in
   config.toml or TUI Settings → Sub-agents.

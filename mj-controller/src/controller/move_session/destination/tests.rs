@@ -49,6 +49,20 @@ fn fixture() -> (Controller, MoveOperation) {
     });
     let mut config = mj_core::config::Config::default();
     config.targets.insert("ec2".into(), ec2_target());
+    // The repository `write_network_checkpoint_archive` records.
+    config.bundles.insert(
+        session.bundle_id.clone(),
+        mj_core::config::ProjectBundle {
+            primary_repo: "project".into(),
+            repositories: vec![mj_core::config::ProjectRepository {
+                id: "project".into(),
+                github: Some("https://fetch.example.test/project.git".into()),
+                local: None,
+                destination: "project".into(),
+                git_ref: None,
+            }],
+        },
+    );
     let state = mj_core::state::State {
         sessions: [(ID.into(), session.clone())].into_iter().collect(),
         ..Default::default()

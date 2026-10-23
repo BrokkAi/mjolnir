@@ -37,7 +37,8 @@ impl UsagePeriod {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionUsageQuery {
-    /// Parent's last profile; None includes every parent and its full tree.
+    /// Counts only turns recorded on this profile, anywhere in a parent's
+    /// sub-agent tree; None counts every turn. Rows remain whole parents.
     pub profile: Option<String>,
     #[serde(default)]
     pub period: UsagePeriod,
@@ -80,7 +81,8 @@ impl SessionUsageEstimate {
 pub struct SessionUsageReport {
     pub since_ms: i64,
     pub until_ms: i64,
-    /// Includes retained parent profile names even if no longer configured.
+    /// Includes retained parent and turn profile names even if no longer
+    /// configured.
     pub profiles: Vec<String>,
     pub sessions: Vec<SessionUsageEstimate>,
     pub cost_usd_ticks: u64,

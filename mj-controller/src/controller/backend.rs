@@ -115,21 +115,10 @@ impl Controller {
             "count commits against upstream",
         )?;
         // A repository with no commit yet has no HEAD to diff against.
-        let numstat = run(
-            &["--no-optional-locks", "diff", "--numstat", "HEAD"],
-            "count changed lines",
-        )?
-        .unwrap_or_default();
-        let porcelain = run(
-            &[
-                "--no-optional-locks",
-                "status",
-                "--porcelain",
-                "--untracked-files=normal",
-            ],
-            "list changed files",
-        )?
-        .unwrap_or_default();
+        let numstat =
+            run(&mj_core::local_git::NUMSTAT_ARGS, "count changed lines")?.unwrap_or_default();
+        let porcelain =
+            run(&mj_core::local_git::STATUS_ARGS, "list changed files")?.unwrap_or_default();
         Ok(mj_core::local_git::parse_git_status(
             cwd,
             &branch,
@@ -767,16 +756,60 @@ pub(super) fn backend_session_bundle(
     config: &mj_core::config::Config,
     executor: &impl CommandExecutor,
 ) -> Result<ProjectBundleSpec> {
-    backend_bundle_with_sources(
-        session
-            .project_bundle(config)
-            .context("session bundle is missing")?,
+    let bundle = session
+        .project_bundle(config)
+        .context("session bundle is missing")?;
+    let mut spec = backend_bundle_with_sources(
+        bundle,
         session
             .project
             .as_ref()
             .map(|project| &project.network_sources),
         executor,
-    )
+    )?;
+    if let Some(cutoff) = session_history_cutoff(session)? {
+        let checkout = session
+            .checkout
+            .as_ref()
+            .expect("cutoff comes from the checkout");
+        let destination = bundle
+            .repositories
+            .iter()
+            .find(|repository| repository.id == checkout.repository_id)
+            .context("checkout repository is no longer in the configured bundle")?
+            .destination
+            .to_string_lossy()
+            .into_owned();
+        spec.repositories
+            .iter_mut()
+            .find(|repository| repository.destination == destination)
+            .expect("bundle spec mirrors the bundle")
+            .history_cutoff = Some(cutoff);
+    }
+    Ok(spec)
+}
+
+/// The history a session created with `no_later_history` starts with: its
+/// exact checkout and the launch base, which must then be a commit ID.
+pub(super) fn session_history_cutoff(
+    session: &SessionRecord,
+) -> Result<Option<targets::HistoryCutoff>> {
+    let Some(checkout) = session
+        .checkout
+        .as_ref()
+        .filter(|checkout| checkout.no_later_history)
+    else {
+        return Ok(None);
+    };
+    let cutoff = targets::HistoryCutoff {
+        head: checkout.commit.clone(),
+        base: session
+            .launch_base
+            .clone()
+            .filter(|base| *base != checkout.commit),
+    };
+    cutoff.validate()?;
+    Ok(Some(cutoff))
 }
 
 fn backend_bundle_with_sources(
@@ -802,6 +835,7 @@ fn backend_bundle_with_sources(
                     destination: repository.destination.to_string_lossy().into_owned(),
                     git_ref: None,
                     reference: None,
+                    history_cutoff: None,
                 })
             })
             .collect::<Result<Vec<_>>>()?,

@@ -1962,7 +1962,8 @@ fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
 #[test]
 fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     use mj_core::harness_runtime::{
-        CLAUDE_CLI_VERSION, DSH_ACP_VERSION, MIMO_CLI_VERSION, MUSE_ACP_PACKAGE, MUSE_ACP_VERSION,
+        CLAUDE_CLI_VERSION, DSH_ACP_PACKAGE, DSH_ACP_VERSION, MIMO_CLI_VERSION, MUSE_ACP_PACKAGE,
+        MUSE_ACP_VERSION,
     };
 
     const CONTAINERFILE: &str = include_str!("../../../../containers/Containerfile.agent-dev");
@@ -2004,17 +2005,16 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     );
     assert!(CONTAINERFILE.contains("ENV MIMOCODE_DISABLE_AUTOUPDATE=1"));
 
-    // The image installs dsh-acp from the same pinned metadata as managed
-    // workers, so the two cannot run different releases.
-    let dsh: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../mj-worker/assets/dsh/runtime.json"
-    ))
-    .unwrap();
-    assert_eq!(dsh["version"], DSH_ACP_VERSION);
+    // DSH has no managed installation or image layer; its only launch path is
+    // the npm bootstrap, which must name the pinned package version.
+    let (command, arguments) =
+        bridge_launch(HarnessKind::Dsh, ExecutionPolicy::ConfiguredApprovals);
+    assert_eq!(command, "sh");
     assert!(
-        CONTAINERFILE.contains("COPY mj-worker/assets/dsh/runtime.json")
-            && CONTAINERFILE.contains("install-dsh-acp.py"),
-        "containers/Containerfile.agent-dev must install dsh-acp from mj-worker/assets/dsh/runtime.json"
+        arguments.iter().any(|argument| {
+            argument.contains(&format!("npx -y {DSH_ACP_PACKAGE}@{DSH_ACP_VERSION}"))
+        }),
+        "the DSH launch must fetch the pinned {DSH_ACP_PACKAGE}@{DSH_ACP_VERSION}"
     );
 
     let package: serde_json::Value = serde_json::from_str(include_str!(
@@ -2092,7 +2092,8 @@ fn run_default_bridge_install(
 
 /// dsh-acp reads no instruction file, so its launch passes the staged one as
 /// the system prompt dsh-acp appends to its own, byte for byte, up to the one
-/// environment string the operating system allows. A value the target's login
+/// environment string the operating system allows, and only as UTF-8. A
+/// value the target's login
 /// shell exports never reaches the session, and a launch without a staged home
 /// refuses rather than let dsh-acp keep its sessions in the repository it runs
 /// in.
@@ -2138,27 +2139,156 @@ fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
         format!("|{instructions}")
     );
 
-    // The variable holds at most one environment string: the largest file
-    // starts, and one byte more is refused by name before dsh-acp starts.
+    // The variable holds at most one environment string, and dsh-acp takes
+    // only UTF-8 from it. The controller refuses anything else before a
+    // session launches, as the reason the client is shown, naming the
+    // profile's own file; the launch refuses it again on the target.
+    let home = root.path().join("profile");
+    std::fs::create_dir_all(&home).unwrap();
+    let own = home.join("AGENTS.md");
+    let profile = mj_core::config::HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Dsh,
+        home: home.clone(),
+        environment: BTreeMap::from([("DEEPSEEK_API_KEY".to_owned(), "sk-dummy".to_owned())])
+            .into(),
+        context_window_bytes: None,
+        legacy_subagents: Default::default(),
+        guardian_review_model: None,
+        codex_profile: None,
+    };
+    let refusal = |error: anyhow::Error| {
+        let refusal = mj_core::refusal::Refusal::of(&error).expect("a refusal for the client");
+        assert_eq!(refusal.kind(), mj_core::refusal::RefusalKind::Precondition);
+        let message = refusal.message().to_owned();
+        assert!(
+            message.starts_with("profile \"dsh\": ")
+                && message.contains(&own.display().to_string()),
+            "{message}"
+        );
+        message
+    };
+    let refused_on_target = |expected: &[&str]| {
+        let output = launch(Some(&staged));
+        assert!(!output.status.success(), "{:?}", output.status);
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            expected.iter().all(|part| stderr.contains(part)),
+            "{stderr}"
+        );
+    };
+
+    // The largest file starts, and one byte more is refused. The largest is
+    // mostly two-byte characters, so the target's UTF-8 check reads more
+    // than a pipe holds.
     let limit = mj_core::harness_runtime::DSH_ACP_INSTRUCTIONS_LIMIT;
-    let largest = "x".repeat(limit);
-    std::fs::write(staged.join("AGENTS.md"), &largest).unwrap();
+    let largest = format!("x{}", "é".repeat((limit - 1) / 2));
+    assert_eq!(largest.len(), limit);
+    std::fs::write(&own, &largest).unwrap();
+    profile.ensure_ready("dsh").unwrap();
+    stage_profile(&profile, &staged).unwrap();
+    profile
+        .ensure_staged_instructions_deliverable("dsh", &staged)
+        .unwrap();
     let output = launch(Some(&staged));
     assert!(output.status.success(), "{:?}", output.status);
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         format!("|{largest}")
     );
-    std::fs::write(staged.join("AGENTS.md"), format!("{largest}x")).unwrap();
-    let output = launch(Some(&staged));
-    assert!(!output.status.success(), "{:?}", output.status);
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    std::fs::write(&own, format!("{largest}x")).unwrap();
+    // Hard-won: DSH campaign 2026-10-23: one byte too many reached the user only as relay noise naming the staged copy
+    let message = refusal(profile.ensure_ready("dsh").unwrap_err());
     assert!(
-        stderr.contains(&format!("is {} bytes", limit + 1))
-            && stderr.contains(&format!("at most {limit} bytes")),
-        "{stderr}"
+        message.contains(&format!("is {} bytes", limit + 1))
+            && message.contains(&format!("at most {limit} bytes"))
+            && message.ends_with("Shorten the file by at least 1 byte."),
+        "{message}"
     );
+    stage_profile(&profile, &staged).unwrap();
+    refused_on_target(&[
+        &format!("is {} bytes", limit + 1),
+        &format!("at most {limit} bytes"),
+    ]);
+
+    // Mjolnir's note about a container can take a file the profile alone
+    // could deliver over the limit; the staged file is refused before it
+    // travels.
+    let within = limit - 10;
+    std::fs::write(&own, "x".repeat(within)).unwrap();
+    profile.ensure_ready("dsh").unwrap();
+    stage_profile(&profile, &staged).unwrap();
+    append_hel_target_environment(
+        HarnessKind::Dsh,
+        &staged,
+        &targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: "container".into(),
+            workspace_storage: Default::default(),
+        },
+    )
+    .unwrap();
+    let total = within + "\n\n".len() + MJ_CONTAINER_ENVIRONMENT.len();
+    let message = refusal(
+        profile
+            .ensure_staged_instructions_deliverable("dsh", &staged)
+            .unwrap_err(),
+    );
+    assert!(
+        message.contains(&format!("is {within} bytes"))
+            && message.contains(&format!(
+                "with the {} bytes Mjolnir adds to describe",
+                total - within
+            ))
+            && message.contains(&format!("would be {total} bytes"))
+            && message.contains(&format!("at least {} bytes", total - limit)),
+        "{message}"
+    );
+    refused_on_target(&[&format!("is {total} bytes")]);
+
+    // Hard-won: DSH campaign 2026-10-23: instructions that were not UTF-8 failed as dsh-acp's usage error, naming neither the file nor the variable
+    std::fs::write(&own, b"\xff\xfeK\0e\0e\0p\0\n\0").unwrap();
+    let message = refusal(profile.ensure_ready("dsh").unwrap_err());
+    assert!(
+        message.contains("is not UTF-8 text (line 1 has"),
+        "{message}"
+    );
+    // The target's check accepts exactly what Rust's UTF-8 check accepts and
+    // names the same line.
+    for bytes in [
+        &b"Keep this.\n\xff\xfe\n"[..],
+        "U+0080 \u{80}, U+07FF \u{7ff}, U+0800 \u{800}, U+D7FF \u{d7ff}, U+E000 \u{e000}, U+FFFF \u{ffff}, U+10000 \u{10000}, U+10FFFF \u{10ffff}".as_bytes(),
+        b"overlong\n\xc0\xaf",
+        b"overlong\n\xe0\x9f\xbf",
+        b"overlong\n\xf0\x8f\xbf\xbf",
+        b"surrogate\n\n\xed\xa0\x80",
+        b"above U+10FFFF\n\xf4\x90\x80\x80",
+        b"\xf5\x80\x80\x80",
+        b"continuation alone \x80",
+        b"cut off\n\xe2\x80",
+        b"cut off before text \xe2\x80 here",
+    ] {
+        std::fs::write(staged.join("AGENTS.md"), bytes).unwrap();
+        match std::str::from_utf8(bytes) {
+            Ok(text) => {
+                let output = launch(Some(&staged));
+                assert!(output.status.success(), "{text:?}: {output:?}");
+                assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("|{text}"));
+            }
+            Err(error) => {
+                let line = bytes[..error.valid_up_to()]
+                    .iter()
+                    .filter(|&&byte| byte == b'\n')
+                    .count()
+                    + 1;
+                refused_on_target(&[
+                    &format!("is not UTF-8 text (line {line} has"),
+                    "Save AGENTS.md in the DSH profile home as UTF-8.",
+                ]);
+            }
+        }
+    }
 
     std::fs::remove_file(staged.join("AGENTS.md")).unwrap();
     let output = launch(Some(&staged));
@@ -5712,7 +5842,7 @@ fn installed_digest_matches_bytes_on_linux_and_darwin_with_quoted_paths() {
 #[test]
 fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
     use mj_core::subagent::SubagentPolicy;
-    for harness in [HarnessKind::Claude, HarnessKind::Codex] {
+    for harness in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Dsh] {
         let home = tempfile::tempdir().unwrap();
         let source = home.path().join(harness.agent_instructions_file());
         std::fs::write(&source, "User instructions without final newline").unwrap();

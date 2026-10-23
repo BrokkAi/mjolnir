@@ -149,11 +149,14 @@ areas are lifecycle-managed; a linked worktree you selected yourself remains
 yours. `workspace_prefix` controls a separate per-session lifecycle/cleanup
 path, not the selected project or its linked-worktree location.
 
-The host does not need a preinstalled harness bridge. Its worker installs and
-reuses the exact harness version pinned by Mjolnir in the remote user's cache.
-It does require Node.js 22 and npm for Codex, Claude, and MiMo Code, or curl
-and Bash for Kimi and Grok, or curl and tar for Muse, OpenCode, and DSH. Mjolnir never uses sudo to add these prerequisites and does not
-fall back to another harness executable from the remote `PATH`.
+The host does not need a preinstalled harness bridge, except DSH. Its worker
+installs and reuses the exact harness version pinned by Mjolnir in the remote
+user's cache; DSH instead runs the host's own `dsh-acp` or the pinned npm
+package. It does require Node.js 22 and npm for Codex, Claude, and MiMo Code,
+or curl and Bash for Kimi and Grok, or curl and tar for Muse and OpenCode.
+DSH needs `dsh-acp` on `PATH`, or Node.js 22 with npm and npx. Mjolnir never
+uses sudo to add these prerequisites and does not fall back to another harness
+executable from the remote `PATH`.
 
 `permissions` accepts `guardian` or `yolo` and defaults to `guardian`. The
 machine's SSH connection fields include `identity_file` and `extra_args`. See

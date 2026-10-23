@@ -147,6 +147,9 @@ impl Controller {
             self.config.subagents.max_concurrent,
             launch.subtle_subagents,
         )?;
+        // The notes above can make instructions the profile alone could
+        // deliver too long, so the staged file is checked before it travels.
+        profile.ensure_staged_instructions_deliverable(&session.last_profile, &profile_stage)?;
         apply_staged_execution_setting(profile.kind, launch.execution_policy, &profile_stage)?;
         if let Some(reviewer) = &launch.reviewer_launch
             && mj_core::worker_launch::ReviewMcpDelivery::for_harness(profile.kind)
@@ -698,8 +701,8 @@ pub(super) fn apply_continuation_switch(launch: &mut WorkerLaunchConfig, enabled
 /// harness's own. The session's stored choice governs; `None` means native
 /// sub-agents, so a session created before the per-session choice existed (or
 /// through `mj new` with neither flag given) gets its harness's own
-/// sub-agents. A child never gets them, and only Claude and Codex can receive
-/// them at all.
+/// sub-agents. A child never gets them, and only a harness whose
+/// `HarnessKind::supports_delegation_tools` holds can receive them at all.
 #[cfg(test)]
 pub(super) fn subagent_tools_enabled(
     session: &mj_core::state::SessionRecord,

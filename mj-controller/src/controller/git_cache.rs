@@ -8,8 +8,8 @@ use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 
 use crate::targets::{
-    self, AdditionalMount, CommandExecutor, CommandOutput, CommandSpec, ProjectBundleSpec,
-    ProvisionStage, ProvisionStageGuard,
+    self, AdditionalMount, CommandExecutor, CommandOutput, CommandSpec, HistoryCutoff,
+    ProjectBundleSpec, ProvisionStage, ProvisionStageGuard,
 };
 
 const CACHE_CONTAINER_ROOT: &str = "/run/hel/git-cache";
@@ -81,6 +81,10 @@ impl PreparedCloneCache {
 /// Populate immutable, session-scoped reference repositories and attach them
 /// to a container bundle. Every failure is an optimization miss: the original
 /// network clone remains authoritative and receives a user-visible notice.
+///
+/// A repository with a history cutoff gets a Git bundle of the cutoff commits
+/// and their ancestors instead of a copy of the mirror, so nothing later is
+/// mounted into its container.
 pub(super) fn prepare(
     target: &targets::TargetTemplate,
     session_id: &str,
@@ -97,7 +101,7 @@ pub(super) fn prepare(
         .filter_map(|repository| {
             let source = repository.url.as_deref()?;
             repository_cache_key(source)
-                .map(|key| (key, source.to_owned()))
+                .map(|key| (key, (source.to_owned(), repository.history_cutoff.clone())))
                 .map_err(|error| {
                     executor.notify_notice(&format!(
                         "Clone cache skipped for {}: {error:#}",
@@ -137,10 +141,9 @@ pub(super) fn prepare(
     let prepared = std::thread::scope(|scope| {
         let handles = repositories
             .iter()
-            .map(|(key, source)| {
-                let snapshot = session_root.join(format!("{key}.git"));
+            .map(|(key, (source, cutoff))| {
+                let snapshot = session_root.join(snapshot_name(key, cutoff.as_ref()));
                 let key = key.clone();
-                let source = source.clone();
                 let host = &host;
                 let cache_root = &cache_root;
                 scope.spawn(move || {
@@ -148,12 +151,13 @@ pub(super) fn prepare(
                         host,
                         cache_root,
                         &key,
-                        &source,
+                        source,
                         &snapshot,
+                        cutoff.as_ref(),
                         github_token,
                         executor,
                     )
-                    .map(|()| (key, snapshot))
+                    .map(|()| key)
                 })
             })
             .collect::<Vec<_>>();
@@ -173,8 +177,9 @@ pub(super) fn prepare(
     let mut references = BTreeMap::new();
     for result in prepared {
         match result {
-            Ok((key, _snapshot)) => {
-                references.insert(key.clone(), format!("{CACHE_CONTAINER_ROOT}/{key}.git"));
+            Ok(key) => {
+                let name = snapshot_name(&key, repositories[&key].1.as_ref());
+                references.insert(key, format!("{CACHE_CONTAINER_ROOT}/{name}"));
             }
             Err(error) => executor.notify_notice(&format!(
                 "Clone cache preparation failed: {error:#}; using a direct clone for that repository."
@@ -218,6 +223,15 @@ pub(super) fn prepare(
     Some(PreparedCloneCache { host, session_root })
 }
 
+/// A session snapshot's file name: a bare repository, or for a cutoff the
+/// bundle a checkout without later history fetches from.
+fn snapshot_name(key: &str, cutoff: Option<&HistoryCutoff>) -> String {
+    match cutoff {
+        Some(_) => format!("{key}.bundle"),
+        None => format!("{key}.git"),
+    }
+}
+
 fn cache_home(host: &CacheHost, executor: &impl CommandExecutor) -> Result<PathBuf> {
     let command = host.git_shell_command(
         "command -v git >/dev/null 2>&1 || exit 127; printf '%s' \"$HOME\"",
@@ -252,6 +266,8 @@ key=$2
 source=$3
 snapshot=$4
 has_token=$5
+# Any further arguments are a history cutoff: its head, then its base.
+shift 5
 umask 077
 mkdir -p "$cache_root/mirrors" "$cache_root/locks" "$(dirname "$snapshot")"
 lock="$cache_root/locks/$key"
@@ -266,8 +282,9 @@ while ! mkdir "$lock" 2>/dev/null; do
 done
 partial="$cache_root/mirrors/$key.partial-$$"
 snapshot_partial="$snapshot.partial-$$"
+cutoff_repository="$snapshot.cutoff-$$"
 cleanup() {
-    rm -rf -- "$partial" "$snapshot_partial" "$lock"
+    rm -rf -- "$partial" "$snapshot_partial" "$cutoff_repository" "$lock"
 }
 trap cleanup EXIT HUP INT TERM
 if [ "$has_token" = 1 ]; then
@@ -297,7 +314,35 @@ else
     : > "$entry/last-used"
 fi
 rm -rf -- "$snapshot" "$snapshot_partial"
-git clone --mirror --local -- "$mirror" "$snapshot_partial"
+if [ "$#" -eq 0 ]; then
+    git clone --mirror --local -- "$mirror" "$snapshot_partial"
+else
+    # Copy only the cutoff commits and their history out of the mirror, which
+    # holds every later commit too. A fetch sends only what the wanted
+    # commits reach.
+    git init --quiet --bare -- "$cutoff_repository"
+    # The names HistoryCutoff::BUNDLE_HEAD_REF and BASE_REF give them, which
+    # the checkout fetches by.
+    refspecs=
+    refs=
+    name=head
+    for commit do
+        case $commit in
+            ''|*[!0-9a-f]*) echo "invalid history cutoff commit" >&2; exit 2 ;;
+        esac
+        refspecs="$refspecs $commit:refs/mj/$name"
+        refs="$refs refs/mj/$name"
+        name=base
+    done
+    # Object IDs and these ref names contain no spaces, so splitting is safe.
+    # shellcheck disable=SC2086
+    git -C "$cutoff_repository" fetch --quiet --no-tags \
+        --upload-pack='git -c uploadpack.allowAnySHA1InWant=true upload-pack' \
+        -- "$mirror" $refspecs
+    # shellcheck disable=SC2086
+    git -C "$cutoff_repository" bundle create "$snapshot_partial" $refs
+    rm -rf -- "$cutoff_repository"
+fi
 mv -- "$snapshot_partial" "$snapshot"
 # A bind mount can expose the host owner as container root, while the worker
 # runs as an unprivileged user. The private cache parents still protect these
@@ -308,25 +353,32 @@ trap - EXIT HUP INT TERM
 rm -rf -- "$lock"
 "#;
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_repository(
     host: &CacheHost,
     cache_root: &Path,
     key: &str,
     source: &str,
     snapshot: &Path,
+    cutoff: Option<&HistoryCutoff>,
     github_token: Option<&str>,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
     let token = github_token.is_some();
+    let mut arguments = vec![
+        cache_root.to_string_lossy().into_owned(),
+        key.to_owned(),
+        source.to_owned(),
+        snapshot.to_string_lossy().into_owned(),
+        u8::from(token).to_string(),
+    ];
+    if let Some(cutoff) = cutoff {
+        cutoff.validate()?;
+        arguments.extend(cutoff.commits().map(str::to_owned));
+    }
     let mut command = host.git_shell_command(
         PREPARE_REPOSITORY_SCRIPT,
-        [
-            cache_root.to_string_lossy().into_owned(),
-            key.to_owned(),
-            source.to_owned(),
-            snapshot.to_string_lossy().into_owned(),
-            u8::from(token).to_string(),
-        ],
+        arguments,
         format!("prepare cached Git objects for {source}"),
     );
     if let Some(token) = github_token {
@@ -501,6 +553,7 @@ mod tests {
                 destination: "app".to_owned(),
                 git_ref: None,
                 reference: None,
+                history_cutoff: None,
             }],
         };
         let mut mounts = Vec::new();
@@ -534,6 +587,7 @@ mod tests {
             "abc123",
             "https://github.com/example/app.git",
             Path::new("/home/test/.cache/mjolnir/git/sessions/session-12345678/abc123.git"),
+            None,
             Some(token),
             &executor,
         );
@@ -648,6 +702,7 @@ mod tests {
             source.to_str().unwrap(),
             &snapshot,
             None,
+            None,
             &ProcessExecutor,
         )
         .unwrap();
@@ -689,6 +744,134 @@ mod tests {
         )
         .purpose("verify cached snapshot");
         checked(ProcessExecutor.execute(&command).unwrap(), &command).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cutoff_snapshot_is_a_bundle_of_the_cutoff_history_alone() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source");
+        let cache_root = temporary.path().join("cache");
+        let snapshot = cache_root.join("sessions/session-12345678/repository.bundle");
+        let git = |directory: &Path, args: &[&str]| -> String {
+            let mut arguments = vec!["-C", directory.to_str().unwrap()];
+            arguments.extend(args);
+            let command = CommandSpec::new("git", arguments).purpose("cutoff fixture Git");
+            let output = checked(ProcessExecutor.execute(&command).unwrap(), &command).unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        std::fs::create_dir(&source).unwrap();
+        git(&source, &["init", "--quiet", "--initial-branch=main"]);
+        git(&source, &["config", "user.name", "Hel Test"]);
+        git(&source, &["config", "user.email", "hel@example.test"]);
+        let commit = |message: &str| {
+            std::fs::write(source.join("README.md"), format!("{message}\n")).unwrap();
+            git(&source, &["add", "README.md"]);
+            git(&source, &["commit", "--quiet", "-m", message]);
+            git(&source, &["rev-parse", "HEAD"])
+        };
+        commit("initial");
+        git(&source, &["switch", "--quiet", "-c", "trunk"]);
+        let base = commit("base");
+        git(&source, &["switch", "--quiet", "main"]);
+        let head = commit("head");
+        let later = commit("later");
+        git(&source, &["tag", "-a", "v-later", "-m", "later"]);
+        let cutoff = HistoryCutoff {
+            head: head.clone(),
+            base: Some(base.clone()),
+        };
+
+        prepare_repository(
+            &CacheHost::Local,
+            &cache_root,
+            "repository",
+            source.to_str().unwrap(),
+            &snapshot,
+            Some(&cutoff),
+            None,
+            &ProcessExecutor,
+        )
+        .unwrap();
+
+        assert!(snapshot.is_file());
+        assert_eq!(
+            std::fs::read_dir(snapshot.parent().unwrap())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>(),
+            ["repository.bundle"]
+        );
+        assert_eq!(
+            git(
+                temporary.path(),
+                &["bundle", "list-heads", snapshot.to_str().unwrap()]
+            ),
+            format!("{head} refs/mj/head\n{base} refs/mj/base")
+        );
+        // The mirror keeps the full history on the host; only the bundle is
+        // mounted.
+        let mirror = cache_root.join("mirrors/repository/repo.git");
+        git(&mirror, &["cat-file", "-e", &later]);
+
+        let checkout = temporary.path().join("checkout");
+        git(
+            temporary.path(),
+            &["init", "--quiet", checkout.to_str().unwrap()],
+        );
+        git(
+            &checkout,
+            &[
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--",
+                snapshot.to_str().unwrap(),
+                &head,
+            ],
+        );
+        let mut present = git(
+            &checkout,
+            &[
+                "cat-file",
+                "--batch-all-objects",
+                "--batch-check=%(objectname)",
+            ],
+        )
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        present.sort();
+        let mut reachable = git(&checkout, &["rev-list", "--objects", &head, &base])
+            .lines()
+            .map(|line| line.split(' ').next().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        reachable.sort();
+        reachable.dedup();
+        // Fetching the head alone stored the whole bundle, base included.
+        assert_eq!(present, reachable);
+        assert!(!present.contains(&later));
+
+        // A cutoff the mirror cannot serve fails, so the session falls back
+        // to the network instead of mounting anything.
+        let missing = HistoryCutoff {
+            head: "1".repeat(40),
+            base: None,
+        };
+        assert!(
+            prepare_repository(
+                &CacheHost::Local,
+                &cache_root,
+                "repository",
+                source.to_str().unwrap(),
+                &snapshot,
+                Some(&missing),
+                None,
+                &ProcessExecutor,
+            )
+            .is_err()
+        );
+        assert!(!snapshot.exists());
     }
 
     #[test]

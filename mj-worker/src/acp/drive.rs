@@ -101,8 +101,10 @@ where
     let ext_review_ids = Arc::new(AtomicU64::new(1));
     let session_elicitations = pending_elicitations.clone();
     let next_elicitation_id = Arc::new(AtomicU64::new(1));
+    let managed_subagent = spec.managed_subagent;
     let permission_policy = spec.execution_policy;
     let permission_harness = spec.harness;
+    let permission_owned_mcp = OwnedMcpApprovals::for_launch(&spec);
     let plan_implementation_slot = PlanImplementationSlot::default();
     let permission_implementation_slot = plan_implementation_slot.clone();
     let terminals = TerminalRegistry::new()?;
@@ -372,7 +374,7 @@ where
                     && !plan_permission
                     && !claude_plan_approval
                 {
-                    let Some(response) = unconstrained_permission_response(&request) else {
+                    let Some(response) = allow_permission_response(&request) else {
                         let message = format!(
                             "{} requested tool permission in YOLO mode without offering an allow response (session {}, tool {}).",
                             permission_harness.display_name(), request.session_id, request.tool_call.tool_call_id,
@@ -396,6 +398,16 @@ where
                     );
                     return responder.respond(response);
                 }
+                if let Some(response) = permission_owned_mcp.response(&request) {
+                    tracing::debug!(
+                        harness = %permission_harness.display_name(),
+                        session_id = %request.session_id,
+                        tool_call_id = %request.tool_call.tool_call_id,
+                        selected_option = ?response.outcome,
+                        "automatically approved a Mjolnir-owned MCP tool"
+                    );
+                    return responder.respond(response);
+                }
                 // Preserve Muse's Guardian forms; YOLO plans use plan review.
                 let prefer_form_over_plan_review = permission_harness == HarnessKind::Muse
                     && !permission_policy.is_unconstrained();
@@ -409,6 +421,10 @@ where
                     let value = serde_json::to_value(&request)
                         .map_err(|_| agent_client_protocol::Error::internal_error())?;
                     let review = normalized_plan_review(id.clone(), &value);
+                    if managed_subagent {
+                        record_delegated_question(&permission_events, review).await?;
+                        return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
+                    }
                     let approved_plan = plan_review_proposal(&review).unwrap_or_default().to_owned();
                     let implementation = permission_implementation_slot
                         .lock().expect("plan implementation lock poisoned").clone();
@@ -566,6 +582,10 @@ where
                     }}
                 })).map_err(|_| agent_client_protocol::Error::invalid_params())?;
                 form.tool_permission = Some(ToolPermissionForm { skip: skip.is_some() });
+                if managed_subagent {
+                    record_delegated_question(&permission_events, form).await?;
+                    return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
+                }
                 let (answer, answer_rx) = oneshot::channel();
                 permission_elicitations.lock().expect("pending elicitation lock poisoned")
                     .insert(id.clone(), PendingElicitation { question: form.clone(), answer });
@@ -805,6 +825,10 @@ where
                     if let Some(child) = child {
                         request.message = format!("Native agent {child}: {}", request.message);
                     }
+                    if managed_subagent {
+                        record_delegated_question(&elicitation_events, request).await?;
+                        return responder.respond(serde_json::json!({"action":"cancel"}));
+                    }
                     let (answer, answer_rx) = oneshot::channel();
                     handler_elicitations
                         .lock()
@@ -905,6 +929,10 @@ where
                 if grok::handles_exit_plan_mode(ext_harness, &method) {
                     let id = grok::plan_review_id(ext_review_ids.fetch_add(1, Ordering::Relaxed));
                     let review = normalized_plan_review(id.clone(), request.params());
+                    if managed_subagent {
+                        record_delegated_question(&ext_events, review).await?;
+                        return responder.respond(serde_json::json!({"outcome":"cancelled"}));
+                    }
                     let (answer, answer_rx) = oneshot::channel();
                     handler_elicitations
                         .lock()
@@ -1728,22 +1756,6 @@ pub(super) fn steering_supported_from_meta(
         .unwrap_or(false)
 }
 
-/// Whether the bridge returns a steer it cannot inject (`promptRequired`)
-/// instead of starting a turn of its own. Codex bridges advertise it; Claude
-/// ACP 0.94.0 does not. Claude steers are routed through PostToolBatch, so this
-/// compatibility fact enables automatic admission without sending ACP steering.
-pub(super) fn steering_returns_idle_input(
-    meta: Option<&agent_client_protocol::schema::v1::Meta>,
-    harness: HarnessKind,
-) -> bool {
-    let advertised = meta
-        .and_then(|meta| meta.get("steering"))
-        .and_then(|steering| steering.get("idleBehaviors"))
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|behaviors| behaviors.iter().any(|b| b == "promptRequired"));
-    advertised || harness == HarnessKind::Claude
-}
-
 pub(super) struct PendingSteer {
     pub(super) request_id: String,
     pub(super) queued_command_id: String,
@@ -1999,4 +2011,24 @@ pub(super) fn harness_reports_missing_native_session(
         existing,
         &format!("{error:#}"),
     )
+}
+
+/// The original ACP responder closes the form; no later RPC can cancel a reused id.
+async fn record_delegated_question(
+    events: &mpsc::Sender<RuntimeEvent>,
+    request: ElicitationRequest,
+) -> std::result::Result<(), agent_client_protocol::Error> {
+    let elicitation_id = request.id.clone();
+    events
+        .send(RuntimeEvent::ElicitationRequested { request })
+        .await
+        .map_err(|_| relay_event_channel_error())?;
+    events
+        .send(RuntimeEvent::ElicitationResolved {
+            elicitation_id,
+            action: "cancel".into(),
+            reply: None,
+        })
+        .await
+        .map_err(|_| relay_event_channel_error())
 }

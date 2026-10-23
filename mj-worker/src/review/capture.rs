@@ -803,6 +803,54 @@ mod capture_tests {
     }
 
     #[test]
+    fn a_detached_cutoff_checkout_keeps_review_capture_inside_its_history() {
+        let source = repository();
+        let head = git(source.path(), &["rev-parse", "HEAD"]);
+        std::fs::write(source.path().join("tracked.rs"), "later history\n").unwrap();
+        git(source.path(), &["commit", "-qam", "later"]);
+        let later = git(source.path(), &["rev-parse", "HEAD"]);
+        let cutoff = tempfile::tempdir().unwrap();
+        let root = cutoff.path();
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.name", "Review Test"]);
+        git(root, &["config", "user.email", "review@example.invalid"]);
+        // The no-later-history transport fetches only the selected ancestry,
+        // leaves no remote, and pins selected commits under refs/mj/.
+        git(
+            root,
+            &["fetch", "--no-tags", source.path().to_str().unwrap(), &head],
+        );
+        git(root, &["checkout", "--detach", &head]);
+        git(root, &["update-ref", "refs/mj/base", &head]);
+        let roots = [root.to_path_buf()];
+        initialize_review_baselines(&SystemGit, &roots, "cutoff").unwrap();
+        assert!(
+            git(root, &["for-each-ref", "--format=%(refname)"]).contains("refs/mj/review-baseline")
+        );
+        assert!(!object_exists(&SystemGit, root, &later));
+        std::fs::write(root.join("tracked.rs"), "reviewed work\n").unwrap();
+        let deltas = capture_repository_deltas(
+            &SystemGit,
+            &roots,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            "cutoff",
+        )
+        .unwrap();
+        assert!(deltas[0].patch.contains("+reviewed work"));
+        assert!(!deltas[0].patch.contains("later history"));
+        git(root, &["commit", "-qam", "work"]);
+        let start = ensure_session_start_head(&SystemGit, root, "cutoff")
+            .unwrap()
+            .unwrap();
+        assert_eq!(start, head);
+        let push = capture_pushable_commits(&SystemGit, root, &start).unwrap();
+        assert_eq!(push.base.commit(), head);
+        assert!(push.delta.patch.contains("+reviewed work"));
+        assert_eq!(git(root, &["rev-parse", "refs/mj/base"]), head);
+    }
+
+    #[test]
     fn legacy_review_refs_migrate_before_the_next_capture() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("repo");

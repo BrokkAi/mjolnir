@@ -1,5 +1,6 @@
 //! Move-only workspace transport. It never reads or writes a checkpoint payload.
 use super::*;
+use crate::controller::checkpoint::HOST_CHECKOUT_REPOSITORY;
 use crate::targets::{self, CommandSpec};
 use mj_core::move_workspace::*;
 use std::path::Path;
@@ -124,6 +125,11 @@ const RSYNC_TRANSFER_OPTIONS: [&str; 6] = [
 /// older releases, and neither accepts `--protect-args`.
 const RSYNC_REQUIREMENT: &str = "Move needs rsync 3.0 or newer, which accepts --protect-args; \
 the rsync that ships with macOS does not (install one with `brew install rsync`)";
+
+/// Why an rsync inside a container failed the probe. The container image
+/// supplies that rsync, so the macOS advice does not apply.
+const CONTAINER_RSYNC_REQUIREMENT: &str = "Move needs rsync 3.0 or newer, which accepts --protect-args; \
+the container image must provide it (add rsync to the image)";
 
 /// Rsync arguments that succeed only if rsync accepts every transfer option.
 /// `--version` makes rsync exit once it has parsed them.
@@ -399,6 +405,53 @@ impl Controller {
         }
     }
 
+    /// Each repository of a Move's workspace transfer, under the id the source
+    /// captured it as, with the repository of the session's accepted bundle
+    /// that receives it on a destination that clones the bundle.
+    ///
+    /// The bundle names every destination folder, so the clone made while
+    /// provisioning and the restore that fills it reach the same directory,
+    /// the one [`Self::session_export_layout`] reports afterwards. A source
+    /// that ran in a host checkout captured its one repository as
+    /// [`HOST_CHECKOUT_REPOSITORY`], whatever the bundle calls it; moving into
+    /// a bundle workspace makes that checkout the bundle's primary repository,
+    /// as every raw-to-workspace conversion does.
+    fn move_destination_repositories(
+        &self,
+        id: &str,
+        transfer: &WorkspaceTransfer,
+    ) -> Result<(
+        &mj_core::config::ProjectBundle,
+        Vec<(String, &mj_core::config::ProjectRepository)>,
+    )> {
+        let bundle = self
+            .state
+            .sessions
+            .get(id)
+            .with_context(|| format!("unknown session {id}"))?
+            .project_bundle(&self.config)
+            .context("session bundle is missing")?;
+        let repositories = if self
+            .state
+            .checkout_for_record(id, &transfer.source)?
+            .project_directory()
+            .is_some()
+        {
+            let primary = bundle.primary().context("bundle primary is missing")?;
+            vec![(HOST_CHECKOUT_REPOSITORY.to_owned(), primary)]
+        } else {
+            bundle
+                .repositories
+                .iter()
+                .map(|repository| (repository.id.clone(), repository))
+                .collect()
+        };
+        Ok((bundle, repositories))
+    }
+
+    /// What a Move that rebuilds into a bundle workspace clones: the folders
+    /// come from the session's bundle, and only the clone and push URLs come
+    /// from the handoff, which recorded the source's remotes.
     pub(in crate::controller) fn move_destination_bundle(
         &self,
         id: &str,
@@ -406,21 +459,19 @@ impl Controller {
         let Some(operation) = crate::database::load_move_operation(id)? else {
             return Ok(None);
         };
-        if operation.workspace_transfer.is_none()
-            || operation.phase != MovePhase::ResumingDestination
-        {
+        let Some(transfer) = operation.workspace_transfer.as_ref() else {
+            return Ok(None);
+        };
+        if operation.phase != MovePhase::ResumingDestination {
             return Ok(None);
         }
-        let handoff = operation.handoff.context("Move handoff missing")?;
-        let archive = super::super::resume::verify_resume_checkpoint(id, &handoff)?;
-        let primary = archive
-            .manifest
-            .repositories
-            .iter()
-            .find(|repo| repo.metadata.id == archive.manifest.bundle.primary_repository)
-            .context("Move primary repository missing")?
-            .metadata
-            .relative_destination
+        let handoff = operation.handoff.as_ref().context("Move handoff missing")?;
+        let archive = super::super::resume::verify_resume_checkpoint(id, handoff)?;
+        let (bundle, destinations) = self.move_destination_repositories(id, transfer)?;
+        let primary = bundle
+            .primary()
+            .context("bundle primary is missing")?
+            .destination
             .to_string_lossy()
             .into_owned();
         let repositories = archive
@@ -429,13 +480,23 @@ impl Controller {
             .iter()
             .map(|repo| {
                 let metadata = &repo.metadata;
+                let (_, repository) = destinations
+                    .iter()
+                    .find(|(source_id, _)| *source_id == metadata.id)
+                    .with_context(|| {
+                        format!(
+                            "the Move handoff's repository {:?} has no counterpart in the session's project, so Mjolnir cannot tell which folder to clone it into",
+                            metadata.id
+                        )
+                    })?;
                 mj_core::remote_git::validate_network_url(&metadata.origin)?;
                 Ok(targets::RepositorySpec {
                     url: Some(metadata.origin.clone()),
                     push_urls: metadata.push_urls.clone(),
-                    destination: metadata.relative_destination.to_string_lossy().into_owned(),
+                    destination: repository.destination.to_string_lossy().into_owned(),
                     git_ref: None,
                     reference: None,
+                    history_cutoff: None,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -466,20 +527,31 @@ impl Controller {
                 repositories: repositories(&layout),
             },
         )?)?;
-        for command in [
-            CommandSpec::new("rsync", rsync_probe_arguments())
-                .purpose("check controller Move transport"),
-            targets::command_on_locator(
-                &layout.backend,
-                id,
-                rsync_probe(),
-                "check source Move transport",
-            )?,
+        let source_requirement = if targets::is_container(&layout.backend) {
+            CONTAINER_RSYNC_REQUIREMENT
+        } else {
+            RSYNC_REQUIREMENT
+        };
+        for (command, requirement) in [
+            (
+                CommandSpec::new("rsync", rsync_probe_arguments())
+                    .purpose("check controller Move transport"),
+                RSYNC_REQUIREMENT,
+            ),
+            (
+                targets::command_on_locator(
+                    &layout.backend,
+                    id,
+                    rsync_probe(),
+                    "check source Move transport",
+                )?,
+                source_requirement,
+            ),
         ] {
             match executor.execute(&command) {
                 Ok(output) if output.status == 0 => {}
                 Ok(output) => assessment.blockers.push(format!(
-                    "{}: {RSYNC_REQUIREMENT}: {}",
+                    "{}: {requirement}: {}",
                     command.purpose,
                     String::from_utf8_lossy(&output.stderr)
                 )),
@@ -588,9 +660,19 @@ impl Controller {
             CommandSpec::new(program, arguments)
         };
         match executor.execute(&command.purpose("check destination Move transport")) {
-            Ok(output) if output.status == 0 => {},
-            Ok(output) => assessment.blockers.push(format!("Destination: {RSYNC_REQUIREMENT}. Update the target image or install rsync there: {}", String::from_utf8_lossy(&output.stderr))),
-            Err(error) => assessment.blockers.push(format!("Destination transport check failed: {error:#}")),
+            Ok(output) if output.status == 0 => {}
+            Ok(output) => assessment.blockers.push(format!(
+                "Destination: {}. Update the target image or install rsync there: {}",
+                if destination_engine.is_some() {
+                    CONTAINER_RSYNC_REQUIREMENT
+                } else {
+                    RSYNC_REQUIREMENT
+                },
+                String::from_utf8_lossy(&output.stderr)
+            )),
+            Err(error) => assessment
+                .blockers
+                .push(format!("Destination transport check failed: {error:#}")),
         }
         let destination_ssh = destination_ssh.map(targets::SshTarget::from);
         if let mj_core::config::TargetTemplate::LocalPodman { container }
@@ -867,13 +949,31 @@ impl Controller {
             &transfer.controller_stage,
             true,
         )?;
+        // A bundle workspace was cloned where `move_destination_bundle` said,
+        // under the bundle's ids; the transfer names each repository as the
+        // source did.
+        let repositories = if self.state.checkout(id)?.project_directory().is_some() {
+            repositories(&layout)
+        } else {
+            self.move_destination_repositories(id, &transfer)?
+                .1
+                .into_iter()
+                .map(|(source_id, repository)| WorkspaceRepository {
+                    id: source_id,
+                    root: mj_core::target_path::join(
+                        Path::new(&layout.workspace_root),
+                        &repository.destination,
+                    ),
+                })
+                .collect()
+        };
         utility(
             executor,
             &layout.backend,
             id,
             &WorkspaceCommand::Restore {
                 source: stage,
-                repositories: repositories(&layout),
+                repositories,
             },
         )?;
         operation.workspace_transfer.as_mut().unwrap().phase = WorkspaceTransferPhase::Restored;

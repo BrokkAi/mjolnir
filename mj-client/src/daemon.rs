@@ -354,6 +354,12 @@ pub struct CreateSessionRequest {
     /// revision for a raw managed worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// With `at`, start the workspace with `at`, `base` and their ancestors
+    /// only: no `origin` remote, remote-tracking refs, tags, or clone-cache
+    /// objects. `base` must then be a full commit object ID, and the bundle
+    /// must hold one repository. The session cannot be resumed or moved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_later_history: bool,
     /// Omitted uses the selected profile's subagent setting.
     #[serde(
         default,

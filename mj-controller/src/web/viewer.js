@@ -1736,9 +1736,10 @@ function freshDraft() {
 }
 
 
+// Mirrors HarnessKind::supports_delegation_tools.
 function subagentChoiceApplies(draft = newDraft) {
   const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
-  return kind === 'claude' || kind === 'codex';
+  return kind === 'claude' || kind === 'codex' || kind === 'dsh';
 }
 
 const SUBAGENT_MODES = [['native', 'Native'], ['mjolnir', 'Mjolnir'], ['none', 'None']];

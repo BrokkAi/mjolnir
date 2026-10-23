@@ -37,9 +37,12 @@ pub(super) fn record_turn_selection(
 ) -> Result<()> {
     let surface =
         mj_core::acp::surface::AcpSessionSurface::from_configuration(&configuration.values);
+    // The session's profile at turn start: a later restart can switch it, and
+    // destroying a sub-agent deletes its session row.
     connection.execute(
-        "INSERT INTO session_turn_selections(session_id, command_id, model, effort)
-        VALUES (?1, ?2, ?3, ?4) ON CONFLICT(session_id, command_id) DO NOTHING",
+        "INSERT INTO session_turn_selections(session_id, command_id, model, effort, profile)
+        VALUES (?1, ?2, ?3, ?4, (SELECT last_profile FROM sessions WHERE session_id=?1))
+        ON CONFLICT(session_id, command_id) DO NOTHING",
         params![
             session,
             command,
@@ -422,7 +425,7 @@ mod tests {
             )?;
         }
         super::super::schema::restore_github_v84_schema(&connection);
-        connection.execute_batch("ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; DELETE FROM schema_migrations WHERE version>=82; UPDATE schema_compatibility SET minimum_compatible_version=81; PRAGMA user_version=81;")?;
+        connection.execute_batch("ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE session_turn_selections DROP COLUMN profile; DELETE FROM schema_migrations WHERE version>=82; UPDATE schema_compatibility SET minimum_compatible_version=81; PRAGMA user_version=81;")?;
         drop(connection);
         super::super::schema::forget_verified_schema(&path);
         let connection = open(&path)?;

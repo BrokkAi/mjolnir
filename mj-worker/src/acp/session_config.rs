@@ -253,7 +253,7 @@ pub(super) fn resolve_selector_value(
     value: &str,
 ) -> Result<Option<String>> {
     let option = find_session_config_option(options, key)
-        .with_context(|| mj_core::acp::missing_config_selector_refusal(key))?;
+        .with_context(|| mj_core::acp::missing_config_selector_refusal(Some(harness), key))?;
     if select_contains(&option.kind, value) {
         return Ok(Some(value.to_owned()));
     }
@@ -316,7 +316,7 @@ pub(super) async fn set_session_config(
 ) -> Result<String> {
     let resolved = resolve_selector_value(options, harness, key, value)?;
     let option = find_session_config_option(options, key)
-        .with_context(|| mj_core::acp::missing_config_selector_refusal(key))?;
+        .with_context(|| mj_core::acp::missing_config_selector_refusal(Some(harness), key))?;
     let option_id = option.id.clone();
     let previous = selector_current_value(&option.kind);
     let sent = resolved.clone().unwrap_or_else(|| value.to_owned());

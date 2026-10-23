@@ -371,7 +371,7 @@ pub(crate) fn render(
         }
     }
     frame.render_widget(
-        Paragraph::new("Parent profile · full sub-agent tree · + partial · standard base rates")
+        Paragraph::new("Sub-agents included · profile filters turns · + partial · base rates")
             .style(theme::muted()),
         Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
     );

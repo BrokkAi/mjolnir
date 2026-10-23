@@ -152,6 +152,12 @@ impl HostState {
         // Take the lane once and use that single sender for every final write.
         // No sender may survive the join below or the receiver can never
         // observe EOF.
+        for slot in self.reviews.values_mut() {
+            answer(
+                slot.start_reply.take(),
+                Err(StartRefusal("the daemon is shutting down".into())),
+            );
+        }
         let lane = self.persistence.take();
         // A review still preparing has no state row to keep its marker in.
         for session_id in &self.preparing {

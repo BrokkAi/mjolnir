@@ -157,6 +157,7 @@ pub(super) struct ReviewSlot {
     pub(super) _background: Option<BackgroundHold>,
     pub(super) command_id: Option<String>,
     pub(super) push: Option<PushReview>,
+    pub(super) start_reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
 }
 
 pub(super) struct HostState {

@@ -657,6 +657,7 @@ fn normalized_state_round_trip_preserves_children_and_order() {
         repository_id: "project".into(),
         commit: "a".repeat(40),
         branch: Some("town/run-123".into()),
+        no_later_history: false,
     });
     record.target = Some(TargetLocator::LocalBare {
         worker_root: PathBuf::from("/var/lib/hel/workers/session-1"),
@@ -856,6 +857,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
         repository_id: "project".into(),
         commit: "a".repeat(40),
         branch: Some("town/run-123".into()),
+        no_later_history: false,
     });
     save_session_to(&path, &record).unwrap();
     let mut connection = open(&path).unwrap();

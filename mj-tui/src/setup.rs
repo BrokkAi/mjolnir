@@ -505,6 +505,11 @@ fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
     match parts.as_slice() {
         // This machine is always this machine; its type is not a choice.
         ["profiles", _] if key == "subagents" => true,
+        // These two settings are read only for a Codex profile; the profile's
+        // own validation rejects them on any other kind.
+        ["profiles", _] if matches!(key, "guardian_review_model" | "codex_profile") => {
+            value["kind"].as_str() != Some("codex")
+        }
         ["machines", mj_core::config::LOCAL_MACHINE_ID] => key == "kind",
         // Approvals are a remote-machine setting: a bare runtime here always
         // uses the configured approvals.

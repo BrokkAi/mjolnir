@@ -309,6 +309,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         &session_environment,
         &mut additional_directories,
     );
+    let managed_subagent = config.is_managed_subagent();
     let acp_spec = LaunchSpec {
         imported_logins: None,
         clear_context_request: None,
@@ -343,6 +344,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         } else {
             config.subagents.clone()
         },
+        managed_subagent,
         subagent_mcp_socket: subagent_role.map(|role| crate::acp::SubagentMcpSocket {
             path: root.join(super::subagents::SUBAGENT_SOCKET),
             role,
@@ -1405,10 +1407,7 @@ async fn prepare_and_start_harness(
         resume_session,
         native_session_may_have_history,
     } = setup;
-    if config
-        .environment
-        .contains_key(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV)
-    {
+    if config.is_managed_subagent() {
         config.review_trigger = Default::default();
     }
     let review_gate = config.review_gate();
@@ -1700,9 +1699,7 @@ async fn prepare_and_start_harness(
     }
 
     if config.review_trigger == mj_core::config::ReviewTrigger::Push
-        && !config
-            .environment
-            .contains_key(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV)
+        && !config.is_managed_subagent()
         && !config.handback_tool
         && config.reviewer_launch.is_none()
     {

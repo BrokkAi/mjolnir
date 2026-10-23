@@ -2147,6 +2147,46 @@ async fn model_first_session_start_reports_incompatible_profiles_in_the_api_erro
     );
 }
 
+#[tokio::test]
+async fn start_without_later_history_needs_at_and_reaches_the_controller() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
+
+    let response = app
+        .clone()
+        .oneshot(start_request(start_body(r#","no_later_history":true"#)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        json_body(response)
+            .await
+            .to_string()
+            .contains("requires `at`"),
+        "the refusal names the missing field"
+    );
+    assert!(actions.try_recv().is_err());
+
+    let at = "0123456789abcdef0123456789abcdef01234567";
+    let base = "89abcdef0123456789abcdef0123456789abcdef";
+    let _response = tokio::spawn(app.oneshot(start_request(start_body(&format!(
+        r#","at":"{at}","base":"{base}","no_later_history":true"#
+    )))));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New {
+        at: requested_at,
+        base: requested_base,
+        no_later_history,
+        ..
+    } = &request.action
+    else {
+        panic!("expected a new session action");
+    };
+    assert_eq!(requested_at.as_deref(), Some(at));
+    assert_eq!(requested_base.as_deref(), Some(base));
+    assert!(*no_later_history);
+}
+
 // Hard-won: d91504f8: API-created container sessions had no CPU or memory limits.
 #[tokio::test]
 async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup() {
@@ -2174,6 +2214,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
             at: None,
             branch: None,
             base: None,
+            no_later_history: false,
             subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),

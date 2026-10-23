@@ -401,10 +401,17 @@ pub fn resolve_subagent_mcp_role(
 impl WorkerLaunchConfig {
     pub fn review_gate(&self) -> bool {
         self.review_trigger == crate::config::ReviewTrigger::Push
-            && matches!(self.harness, HarnessKind::Claude | HarnessKind::Codex)
-            && !self.environment.contains_key(SESSION_MANAGED_SUBAGENT_ENV)
+            && self.harness.supports_delegation_tools()
+            && !self.is_managed_subagent()
             && !self.handback_tool
             && self.reviewer_launch.is_none()
+    }
+
+    /// Managed ownership is independent of the MCP role and historical handback tools.
+    pub fn is_managed_subagent(&self) -> bool {
+        self.environment
+            .get(SESSION_MANAGED_SUBAGENT_ENV)
+            .is_some_and(|value| value == "1")
     }
 
     /// The `mj-agents` role is derived once from the launch's ownership and
@@ -415,9 +422,7 @@ impl WorkerLaunchConfig {
         }
         resolve_subagent_mcp_role(
             &self.subagents,
-            self.environment
-                .get(SESSION_MANAGED_SUBAGENT_ENV)
-                .is_some_and(|value| value == "1"),
+            self.is_managed_subagent(),
             self.handback_tool,
             self.agent_mailboxes_enabled,
             self.environment
@@ -578,7 +583,12 @@ mod tests {
 
     #[test]
     fn persisted_review_trigger_controls_primary_mcp_without_leaking_to_children() {
-        for harness in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Muse] {
+        for harness in [
+            HarnessKind::Claude,
+            HarnessKind::Codex,
+            HarnessKind::Dsh,
+            HarnessKind::Muse,
+        ] {
             for trigger in [
                 crate::config::ReviewTrigger::Off,
                 crate::config::ReviewTrigger::Turn,

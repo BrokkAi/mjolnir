@@ -291,6 +291,7 @@ impl RuntimeState {
                     at: request.at,
                     branch: request.branch,
                     base: request.base,
+                    no_later_history: request.no_later_history,
                     subagents: request.subagents,
                     review: request.review,
                     no_project_memory: request.no_project_memory,
@@ -477,6 +478,7 @@ mod delegation_replay_tests {
             at: None,
             branch: None,
             base: None,
+            no_later_history: false,
             subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir {
                 straightforward: None,
                 subtle: None,

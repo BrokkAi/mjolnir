@@ -411,9 +411,11 @@ pub(super) fn permission_plan_response(
     )
 }
 
-/// Harnesses can still ask for tool approval after their full-access mode was
-/// selected. YOLO authorizes those requests, preferably for this call alone.
-pub(super) fn unconstrained_permission_response(
+/// The answer that allows a tool call the worker has already authorized,
+/// preferably for this call alone. Harnesses can still ask for tool approval
+/// after their full-access mode was selected, and YOLO authorizes those
+/// requests; [`OwnedMcpApprovals`] authorizes calls to Mjolnir's own servers.
+pub(super) fn allow_permission_response(
     request: &RequestPermissionRequest,
 ) -> Option<RequestPermissionResponse> {
     request
@@ -431,6 +433,57 @@ pub(super) fn unconstrained_permission_response(
                 SelectedPermissionOutcome::new(option.option_id.clone()),
             ))
         })
+}
+
+/// Calls to Mjolnir's own MCP servers, for a harness that cannot be told to
+/// trust them. Under configured approvals DSH asks before every MCP tool call
+/// and has no per-server rule, so the worker allows calls to the servers this
+/// launch registered itself, as Claude's allowed tools and Codex's server
+/// approval mode do for those harnesses. Every other request still reaches a
+/// person.
+#[derive(Debug, Clone, Default)]
+pub(super) struct OwnedMcpApprovals {
+    /// The start of the permission title of each owned server's tool calls.
+    title_prefixes: Vec<String>,
+}
+
+impl OwnedMcpApprovals {
+    pub(super) fn for_launch(spec: &LaunchSpec) -> Self {
+        if spec.harness != HarnessKind::Dsh
+            || spec.execution_policy != ExecutionPolicy::ConfiguredApprovals
+        {
+            return Self::default();
+        }
+        // dsh-acp names an MCP tool `mcp__<server>__<tool>` and titles its
+        // call with that name, underscores shown as spaces, then any `path`
+        // argument.
+        let title_prefixes = owned_acp_mcp_server_names(spec)
+            .into_iter()
+            .map(|server| format!("mcp__{server}__").replace('_', " "))
+            .collect();
+        Self { title_prefixes }
+    }
+
+    /// The allowing answer when `request` is a call to an owned server.
+    pub(super) fn response(
+        &self,
+        request: &RequestPermissionRequest,
+    ) -> Option<RequestPermissionResponse> {
+        let title = request.tool_call.fields.title.as_deref()?;
+        let owned = self.title_prefixes.iter().any(|prefix| {
+            // No owned tool name starts with an underscore, so a space here
+            // means a longer server name, such as `mj-agents_`, that merely
+            // begins with an owned one.
+            title
+                .strip_prefix(prefix.as_str())
+                .is_some_and(|tool| !tool.is_empty() && !tool.starts_with(' '))
+        });
+        if owned {
+            allow_permission_response(request)
+        } else {
+            None
+        }
+    }
 }
 
 /// Taking the pending entry decides whether answering or withdrawal wins.

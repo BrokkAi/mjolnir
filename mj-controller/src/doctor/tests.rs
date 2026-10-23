@@ -1651,23 +1651,31 @@ fn doctor_reports_a_profile_or_target_that_cannot_start_with_the_fix() {
          base_url = \"https://api.deepseek.com\"\nwire_api = \"responses\"\nenv_key = \"MJ_TEST_UNSET_PROVIDER_KEY\"\n",
     )
     .unwrap();
+    let dsh = directory.path().join("dsh");
+    std::fs::create_dir(&dsh).unwrap();
+    let limit = mj_core::harness_runtime::DSH_ACP_INSTRUCTIONS_LIMIT;
+    std::fs::write(dsh.join("AGENTS.md"), "x".repeat(limit + 1)).unwrap();
     let config_path = directory.path().join("config.toml");
     std::fs::write(
         &config_path,
         format!(
             "version = {}\n\n[profiles.deepseek]\nkind = \"codex\"\nhome = {:?}\n\n\
+             [profiles.dsh]\nkind = \"dsh\"\nhome = {:?}\n\n\
+             [profiles.dsh.environment]\nDEEPSEEK_API_KEY = \"sk-dummy\"\n\n\
              [targets.boxed]\nkind = \"podman\"\nimage = \"example\"\n\n\
              [targets.boxed.environment]\nTOKEN = {{ from_secret = \"TOKEN\" }}\n",
             mj_core::config::CONFIG_VERSION,
-            home.to_string_lossy()
+            home.to_string_lossy(),
+            dsh.to_string_lossy()
         ),
     )
     .unwrap();
     // The configuration loads even though neither can start.
     let config = Config::load_from(&config_path).unwrap();
 
-    let profile = harness_checks(Ok(&config), &AlwaysFailingExecutor)
-        .into_iter()
+    let profiles = harness_checks(Ok(&config), &AlwaysFailingExecutor);
+    let profile = profiles
+        .iter()
         .find(|check| check.id == "harness.deepseek")
         .expect("the profile is reported");
     assert_eq!(profile.status, CheckStatus::Fixable);
@@ -1677,6 +1685,21 @@ fn doctor_reports_a_profile_or_target_that_cannot_start_with_the_fix() {
             .contains("export MJ_TEST_UNSET_PROVIDER_KEY and run `mj daemon restart`"),
         "{}",
         profile.detail
+    );
+    // Hard-won: DSH campaign 2026-10-23: doctor reported a DSH profile ready while its AGENTS.md was too long to deliver
+    let dsh_check = profiles
+        .iter()
+        .find(|check| check.id == "harness.dsh")
+        .expect("the DSH profile is reported");
+    assert_eq!(dsh_check.status, CheckStatus::Fixable);
+    assert!(
+        dsh_check.detail.contains(&format!(
+            "{} is {} bytes, but DSH can receive at most {limit} bytes",
+            dsh.join("AGENTS.md").display(),
+            limit + 1
+        )),
+        "{}",
+        dsh_check.detail
     );
 
     let target = secret_checks(Ok(&config), &config_path)

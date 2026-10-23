@@ -1601,9 +1601,57 @@ pub struct RepositorySpec {
     pub destination: String,
     pub git_ref: Option<String>,
     /// Read-only bare repository mounted into the target for Git object reuse.
-    /// A missing or unusable reference is only an optimization miss.
+    /// A missing or unusable reference is only an optimization miss. With
+    /// `history_cutoff`, it is instead a Git bundle in the target that holds
+    /// only the cutoff history, and the checkout fetches from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
+    /// Start the checkout with these commits and their ancestors only. It is
+    /// created by `git init` and a fetch by object ID instead of a clone, so
+    /// it has no `origin` remote and no other refs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_cutoff: Option<HistoryCutoff>,
+}
+
+/// The commits a checkout created without later history may hold, with their
+/// ancestors. See [`RepositorySpec::history_cutoff`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryCutoff {
+    /// The commit the checkout starts at, detached.
+    pub head: String,
+    /// The diff base when it is not `head`. The checkout keeps it reachable
+    /// as `refs/mj/base`, because it need not be an ancestor of `head`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+}
+
+impl HistoryCutoff {
+    /// The ref the checkout keeps the base at, which is also the base's name
+    /// in a clone-cache cutoff bundle.
+    pub const BASE_REF: &str = "refs/mj/base";
+    /// The head's name in a clone-cache cutoff bundle.
+    pub const BUNDLE_HEAD_REF: &str = "refs/mj/head";
+
+    /// `head`, then the base when there is one.
+    pub fn commits(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.head.as_str()).chain(self.base.as_deref())
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        for commit in self.commits() {
+            ensure!(
+                crate::remote_git::is_object_id(commit)
+                    && !commit.bytes().any(|byte| byte.is_ascii_uppercase()),
+                "history cutoff commit {commit:?} is not a lowercase full object ID"
+            );
+        }
+        ensure!(
+            self.base.as_deref() != Some(self.head.as_str()),
+            "history cutoff base repeats its head"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1638,6 +1686,9 @@ impl ProjectBundleSpec {
                 repository.git_ref.is_none(),
                 "git_ref is no longer supported; remove it to start from the remote's default branch"
             );
+            if let Some(cutoff) = &repository.history_cutoff {
+                cutoff.validate()?;
+            }
             if !destinations.insert(&repository.destination) {
                 bail!(
                     "duplicate repository destination {}",

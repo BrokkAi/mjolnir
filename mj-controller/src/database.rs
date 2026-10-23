@@ -31,7 +31,7 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 95;
+const SCHEMA_VERSION: i64 = 97;
 
 mod session_move;
 pub use session_move::*;
@@ -50,6 +50,8 @@ mod usage;
 pub use usage::*;
 mod usage_report;
 pub use usage_report::load_session_usage_report;
+mod subagent_questions;
+pub(crate) use subagent_questions::reconcile_pending_subagent_questions;
 mod events;
 pub use events::*;
 

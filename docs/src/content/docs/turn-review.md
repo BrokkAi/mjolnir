@@ -82,7 +82,7 @@ An open review holds new prompts for that session from preparation through a cle
 
 ## Review before push
 
-With `trigger = "push"`, Claude Code and Codex sessions get the `request_review` tool. The agent is instructed to commit its work and call this tool before `git push` or `gh pr create`. The tool answers when a review starts. The reviewer checks committed changes; tracked working-tree changes must be committed or stashed first. Untracked files are ignored.
+With `trigger = "push"`, Claude Code, Codex, and DSH sessions get the `request_review` tool. The agent is instructed to commit its work and call this tool before `git push` or `gh pr create`. The tool answers when a review starts. The reviewer checks committed changes; tracked working-tree changes must be committed or stashed first. Untracked files are ignored.
 
 The review starts from the last cleanly reviewed commit when that commit is still in the current history and is not older than the merge base with the default branch. Otherwise, it starts from that merge base. Mjolnir uses `origin/HEAD` to find the default branch, then tries `main`, then `master`. If the session is on the default branch, or no default branch is available, it uses the commit that was checked out when the session started.
 

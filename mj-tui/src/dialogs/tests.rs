@@ -916,14 +916,14 @@ fn golden_dashboard_dialogs() {
     let mut numstat = String::new();
     let mut porcelain = String::new();
     for index in 0..36 {
-        writeln!(
+        write!(
             numstat,
-            "{}\t{}\tsrc/module-{index:02}.rs",
+            "{}\t{}\tsrc/module-{index:02}.rs\0",
             index + 1,
             index
         )
         .unwrap();
-        writeln!(porcelain, " M src/module-{index:02}.rs").unwrap();
+        write!(porcelain, " M src/module-{index:02}.rs\0").unwrap();
     }
     changed.set_git_status(
         "session-1".into(),

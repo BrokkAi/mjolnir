@@ -1,7 +1,5 @@
 use super::*;
-use mj_core::harness_runtime::{
-    DSH_ACP_VERSION, GROK_VERSION, KIMI_VERSION, MIMO_CLI_VERSION, OPENCODE_VERSION,
-};
+use mj_core::harness_runtime::{GROK_VERSION, KIMI_VERSION, MIMO_CLI_VERSION, OPENCODE_VERSION};
 
 /// The repository paths a worker opens. `session_id` and `container_workspace`
 /// identify the session whose workspace is used, which for a sub-agent child is
@@ -115,16 +113,14 @@ pub(in crate::controller) fn bridge_launch(
                 ),
             ],
         ),
-        // The reference image carries dsh-acp; npm's package bundles the same
-        // release binaries for an image without it.
+        // The npm package bundles the same release binaries as the GitHub
+        // archives: the target's own `dsh-acp` when one is on PATH, otherwise
+        // npx fetches the pinned package. DSH has no managed installation.
         mj_core::config::HarnessKind::Dsh => (
             "sh".into(),
             vec![
                 "-c".into(),
-                format!(
-                    "if command -v dsh-acp >/dev/null 2>&1; then set -- dsh-acp; elif command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then set -- npx -y @brokkai/dsh-acp@{DSH_ACP_VERSION}; else echo 'Mjolnir needs dsh-acp or Node.js, npm, and npx on PATH; install one in the target environment' >&2; exit 127; fi; {}",
-                    mj_core::harness_runtime::dsh_acp_script()
-                ),
+                mj_core::harness_runtime::dsh_acp_launch_script(),
             ],
         ),
     }

@@ -428,6 +428,7 @@ fn validate_action_against(
             at: _,
             branch: _,
             base: _,
+            no_later_history: _,
             subagents: _,
             review,
             no_project_memory: _,
@@ -638,7 +639,12 @@ fn validate_action_against(
                 .unwrap_or(&session.config_options)
                 .iter()
                 .find(|option| option.key == *key)
-                .ok_or_else(|| ApiError::bad_request("this agent does not offer that setting"))?;
+                .ok_or_else(|| {
+                    ApiError::bad_request(mj_core::acp::missing_config_selector_refusal(
+                        session.harness_kind.parse().ok(),
+                        key,
+                    ))
+                })?;
             if !option.choices.iter().any(|choice| choice.value == *value) {
                 return Err(ApiError::bad_request(
                     "this agent does not offer that value for that setting",

@@ -455,7 +455,6 @@ pub(crate) fn record_runtime_event(
             capabilities: Some(capabilities),
             agent_info,
             steering_supported,
-            steering_returns_idle_input,
             ..
         } => {
             crate::worker_runtime::record_startup_step(relay.root(), "acp-initialized");
@@ -466,9 +465,12 @@ pub(crate) fn record_runtime_event(
                 runtime: None,
             })?;
             relay.set_steering_supported(steering_supported);
-            relay.set_automatic_steering(
-                steering_supported == Some(true) && steering_returns_idle_input,
-            );
+            // Every bridge that advertises the steering extension queues the
+            // steer until the running turn can take it, at its next tool
+            // boundary. Do not require a second capability: the extension is
+            // the whole contract, and some bridges (Muse) implement it without
+            // advertising `idleBehaviors`.
+            relay.set_automatic_steering(steering_supported == Some(true));
         }
         RuntimeEvent::Connected { .. } => {
             relay.record_observation(RelayObservation::Warning {

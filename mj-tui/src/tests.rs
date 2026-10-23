@@ -2715,8 +2715,8 @@ fn git_status_fixture() -> mj_core::local_git::SessionGitStatus {
         std::path::PathBuf::from("/work"),
         "feature/x",
         Some("2\t1"),
-        "12\t3\tsrc/main.rs\n",
-        " M src/main.rs\n?? notes.md\n",
+        "12\t3\tsrc/main.rs\0",
+        " M src/main.rs\0?? notes.md\0",
     )
 }
 
@@ -2743,8 +2743,8 @@ fn a_long_branch_name_is_elided_in_the_middle_so_the_marker_keeps_its_counts() {
             "/work".into(),
             branch,
             Some("2\t1"),
-            "12\t3\tsrc/main.rs\n",
-            " M src/main.rs\n?? notes.md\n",
+            "12\t3\tsrc/main.rs\0",
+            " M src/main.rs\0?? notes.md\0",
         )),
     );
     // A third of a 100-column terminal, floored at 40, is a 40-column pane.
@@ -3168,14 +3168,10 @@ fn resize_mode_respects_custom_commands_and_workspace_changes() {
     assert!(!dashboard.resize_mode_active());
 }
 
-/// Launch finding R11-1: a Claude sub-agent sat on a permission question in
-/// the Sub-agents view while its parent's row read only "Working" with no
-/// attention mark, so nobody knew to look. A child's question marks its parent
-/// the way the parent's own question would: the row's symbol, the attention
-/// queue and a notification, and the row says whose question it is.
-// Hard-won: 91244ea: a child permission question left its parent without an attention mark.
+/// A child's pending question belongs to the parent agent; it does not change
+/// the parent's own attention level or notification.
 #[test]
-fn a_subagent_question_marks_its_parent_for_attention() {
+fn a_subagent_question_does_not_change_parent_attention() {
     let (mut dashboard, parent) = dashboard_with_one_subagent();
     dashboard
         .state
@@ -3183,10 +3179,9 @@ fn a_subagent_question_marks_its_parent_for_attention() {
         .get_mut("child-session")
         .unwrap()
         .acp_session_title = Some("Answer project codename".into());
-    set_working(&mut dashboard, &parent);
     set_working(&mut dashboard, "child-session");
     dashboard.set_current_session(None);
-    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Working);
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Idle);
     assert!(dashboard.notification_events(0).is_empty());
 
     dashboard
@@ -3195,52 +3190,25 @@ fn a_subagent_question_marks_its_parent_for_attention() {
         .unwrap()
         .pending_elicitations = vec![question("child-session")];
 
-    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Waiting);
-    assert_eq!(
-        dashboard
-            .attention_queue()
-            .iter()
-            .map(|entry| entry.session_id.as_str())
-            .collect::<Vec<_>>(),
-        [parent.as_str()],
-        "the queue lists top-level rows, so it leads to the parent"
-    );
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Idle);
     let lines = drawn(&mut dashboard, 120, 40);
     let row = lines
         .iter()
         .position(|line| line.contains("ACP pretty name"))
         .expect("the parent's row is drawn");
-    assert!(
-        lines[row].contains(&format!(
-            "{} ACP pretty name",
-            mj_chat::theme::glyphs().waiting
-        )),
-        "{}",
-        lines[row]
-    );
-    assert!(
-        lines[row + 1].contains("Sub-agent question"),
-        "{}",
-        lines[row + 1]
-    );
+    assert!(!lines[row].contains(&mj_chat::theme::glyphs().waiting.to_string()));
+    assert!(!lines[row + 1].contains("Sub-agent question"));
     assert!(dashboard.notification_events(0).is_empty());
-    let due = dashboard.notification_events(2_000);
-    assert_eq!(due.len(), 1, "{due:?}");
-    assert_eq!(due[0].session_id, parent);
-    assert_eq!(due[0].level, AttentionLevel::Waiting);
-    assert_eq!(
-        due[0].body,
-        "Sub-agent \"Answer project codename\": Choose a path"
-    );
+    assert!(dashboard.notification_events(2_000).is_empty());
 
-    // Answering the child's question clears the parent's mark.
+    // Answering the child's question leaves the parent's attention unchanged.
     dashboard
         .session_details
         .get_mut("child-session")
         .unwrap()
         .pending_elicitations
         .clear();
-    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Working);
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Idle);
 }
 
 /// A suspend stops the parent's sub-agents without a checkpoint of their own.

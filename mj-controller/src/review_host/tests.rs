@@ -292,6 +292,7 @@ struct FakeEnvironment {
     started: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
     start_error: Mutex<Option<String>>,
+    register_error: Mutex<Option<String>>,
     register_gate: Mutex<Option<Arc<SaveGate>>>,
     /// The review bookkeeping, in memory rather than in the developer's
     /// own database.
@@ -363,6 +364,7 @@ impl FakeEnvironment {
             started: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
             start_error: Mutex::new(None),
+            register_error: Mutex::new(None),
             register_gate: Mutex::new(None),
             state: Mutex::new(TurnReviewState::default()),
             writes: Mutex::new(Vec::new()),
@@ -439,6 +441,9 @@ impl ReviewEnvironment for FakeEnvironment {
         let gate = self.register_gate.lock().unwrap().clone();
         if let Some(gate) = gate {
             gate.wait();
+        }
+        if let Some(error) = self.register_error.lock().unwrap().take() {
+            return Err(error);
         }
         let mut children = self.children.lock().unwrap();
         let child = format!("{session}-child-{}", children.len());
@@ -2216,6 +2221,98 @@ async fn open_push(
     );
     assert_eq!(answer["repositories"][0]["changed_file_count"], 1);
     wait_for_child(environment, host, &manager.session).await
+}
+
+// Hard-won: 5dde3143c: child registration refusal was acknowledged as a started review.
+#[tokio::test]
+async fn review_starts_report_child_registration_refusal_to_their_callers() {
+    for push in [false, true] {
+        let session = session_id("pushlaunchrefusal");
+        let mut manager = FakeManager::new(&session).await;
+        let environment = FakeEnvironment::new();
+        *environment.register_error.lock().unwrap() =
+            Some("review child registration refused".into());
+        let host = TurnReviewHost::spawn_in(
+            manager.control.clone(),
+            if push {
+                push_config()
+            } else {
+                armed(Some("reviewer"))
+            },
+            environment.clone(),
+        );
+        let mut running = view(
+            &manager.session,
+            if push {
+                MaterializedExecutionState::Running { started_at_ms: 1 }
+            } else {
+                MaterializedExecutionState::Idle
+            },
+        );
+        running
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .operational
+            .relay_protocol_version = Some(43);
+        manager
+            .publisher
+            .publish(manager.session.clone(), running)
+            .await
+            .unwrap();
+        host.observe(
+            &manager.session,
+            &view(&manager.session, MaterializedExecutionState::Idle),
+        );
+        let request = {
+            let host = host.clone();
+            let session = manager.session.clone();
+            tokio::spawn(async move {
+                if push {
+                    host.begin_push(&session).await.map(|_| ())
+                } else {
+                    host.start(&session, true).await
+                }
+            })
+        };
+        let (_, action, reply) = manager
+            .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+            .await;
+        assert!(matches!(
+            action,
+            ReviewerAction::CaptureDelta {
+                scope,
+                ..
+            } if scope == if push { mj_core::relay::CaptureScope::PushableCommits } else { mj_core::relay::CaptureScope::TurnDelta }
+        ));
+        assert_eq!(host.refuses_prompt(&manager.session), !push);
+        reply
+            .send(Ok(ReviewerOutcome::Delta {
+                repositories: vec![mj_core::relay::RepoDelta {
+                    root: "/workspace/app".into(),
+                    base_commit: Some("aaaaaaa123".into()),
+                    head_commit: Some("bbbbbbb456".into()),
+                    base_kind: Some("merge base with main".into()),
+                    baseline_tree: Some("base".into()),
+                    current_tree: "newtree".into(),
+                    patch: "diff --git a/a b/a\n@@\n+one\n".into(),
+                    files: vec![mj_core::relay::FileLineChange {
+                        path: "a".into(),
+                        insertions: 1,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+            }))
+            .unwrap();
+        let refusal = request.await.unwrap().unwrap_err();
+        assert!(
+            refusal.0.contains("review child registration refused"),
+            "{refusal}"
+        );
+        assert!(!host.refuses_prompt(&session));
+        host.shutdown().await.unwrap();
+    }
 }
 
 #[tokio::test]

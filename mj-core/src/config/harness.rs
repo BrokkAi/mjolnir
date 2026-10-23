@@ -511,7 +511,11 @@ impl HarnessKind {
             Self::Muse => ".config/muse",
             Self::OpenCode => ".config/opencode",
             Self::Mimo => ".mimocode",
-            Self::Dsh => ".dsh-acp",
+            // DeepSeek's own CLI, `dsh`, keeps its home here. Detection keys
+            // off the user's DeepSeek installation; the dsh-acp bridge that
+            // serves a session is installed on demand and proves nothing
+            // about one.
+            Self::Dsh => ".dsh",
         }
     }
 
@@ -611,7 +615,10 @@ impl HarnessKind {
             Self::Muse => "muse",
             Self::OpenCode => "opencode",
             Self::Mimo => "mimo",
-            Self::Dsh => "dsh-acp",
+            // DeepSeek's `dsh`, not the dsh-acp bridge Mjolnir installs to
+            // serve sessions: a machine carrying the bridge but no DeepSeek
+            // installation has nothing to detect.
+            Self::Dsh => "dsh",
         }
     }
 
@@ -1013,10 +1020,13 @@ impl HarnessKind {
         }
     }
 
-    /// Whether this harness receives Mjolnir's delegation tools, and so gets
-    /// the subagent choice in the wizards.
+    /// Whether this harness receives Mjolnir's delegation tools: a parent's
+    /// `spawn` and related tools, and a child's `handback`. Such a harness
+    /// gets the subagent choice in the wizards. Claude reads the tools from
+    /// its staged profile; Codex and DSH take them over ACP, and DSH reads
+    /// the delegation policy from its staged `AGENTS.md`.
     pub const fn supports_delegation_tools(self) -> bool {
-        matches!(self, Self::Claude | Self::Codex)
+        matches!(self, Self::Claude | Self::Codex | Self::Dsh)
     }
 
     /// The harness-home-relative directories that hold its native session
@@ -1501,8 +1511,9 @@ impl HarnessProfile {
     }
 
     /// Whether a harness can start from this profile: every environment
-    /// reference resolved, the harness home's own configuration readable, and
-    /// the credential that configuration names supplied.
+    /// reference resolved, the harness home's own configuration readable, the
+    /// credential that configuration names supplied, and the home's
+    /// instruction file one the harness can receive.
     ///
     /// These depend on files and variables outside Mjolnir's config.toml, so
     /// they are not part of [`Config::validate`](super::Config::validate): a
@@ -1541,12 +1552,66 @@ impl HarnessProfile {
                     self.describe_codex_config()
                 );
             }
-            Ok(())
+            self.ensure_instructions_deliverable(None)
         };
-        ready().map_err(|error| {
-            crate::refusal::Refusal::precondition(format!("profile {id:?}: {error:#}")).into()
-        })
+        ready().map_err(|error| profile_refusal(id, &error))
     }
+
+    /// Refuse a session whose harness cannot receive the instruction file
+    /// staged for it in `staged`. That file is the profile's own file
+    /// followed by any notes Mjolnir adds for the session, such as the one
+    /// describing a disposable container, so it can be refused when the
+    /// profile's file alone, which [`Self::ensure_ready`] checks, is not. The
+    /// refusal names the profile's file, the one the person edits, and is the
+    /// same kind of refusal.
+    pub fn ensure_staged_instructions_deliverable(&self, id: &str, staged: &Path) -> Result<()> {
+        self.ensure_instructions_deliverable(Some(staged))
+            .map_err(|error| profile_refusal(id, &error))
+    }
+
+    /// dsh-acp receives its instructions in one environment variable
+    /// ([`crate::harness_runtime::UndeliverableDshInstructions`]); every
+    /// other harness reads its instruction file itself.
+    fn ensure_instructions_deliverable(&self, staged: Option<&Path>) -> Result<()> {
+        use crate::harness_runtime::{DSH_ACP_INSTRUCTIONS_LIMIT, UndeliverableDshInstructions};
+        if self.kind != HarnessKind::Dsh {
+            return Ok(());
+        }
+        let name = self.kind.agent_instructions_file();
+        let own = self.home.join(name);
+        let checked = staged.map_or_else(|| own.clone(), |staged| staged.join(name));
+        let problem = crate::harness_runtime::undeliverable_dsh_instructions(&checked)
+            .with_context(|| format!("read {}", checked.display()))?;
+        let own_text = own.display();
+        match problem {
+            None => Ok(()),
+            Some(UndeliverableDshInstructions::NotUtf8 { line }) => bail!(
+                "{own_text} is not UTF-8 text (line {line} has the first byte that is not), but dsh-acp accepts only UTF-8 instructions. Save the file as UTF-8."
+            ),
+            Some(UndeliverableDshInstructions::TooLong { bytes }) => {
+                let limit = DSH_ACP_INSTRUCTIONS_LIMIT as u64;
+                let own_bytes = std::fs::metadata(&own).map_or(0, |metadata| metadata.len());
+                let size = match bytes.saturating_sub(own_bytes) {
+                    0 => format!("{own_text} is {bytes} bytes"),
+                    added => format!(
+                        "{own_text} is {own_bytes} bytes, and with the {added} bytes Mjolnir adds to describe this session's environment, DSH's instructions would be {bytes} bytes"
+                    ),
+                };
+                let excess = match bytes - limit {
+                    1 => "1 byte".to_owned(),
+                    excess => format!("{excess} bytes"),
+                };
+                bail!(
+                    "{size}, but DSH can receive at most {limit} bytes of instructions, because dsh-acp takes them in one environment variable. Shorten the file by at least {excess}."
+                )
+            }
+        }
+    }
+}
+
+/// A profile that cannot start, as the reason its client is given.
+fn profile_refusal(id: &str, error: &anyhow::Error) -> anyhow::Error {
+    crate::refusal::Refusal::precondition(format!("profile {id:?}: {error:#}")).into()
 }
 
 /// The service a profile's harness sends model requests to, as far as

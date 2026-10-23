@@ -1923,6 +1923,52 @@ fn checkpoints_collect_memory_through_a_legacy_worker_profile_link() {
 }
 
 #[test]
+fn a_managed_workspace_without_an_origin_checkpoints_with_the_origin_it_is_given() {
+    // A checkout started without later history has no `origin` remote; the
+    // controller supplies the URL the session was created from.
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, archive_path) = fixture(temp.path());
+    let repository = spec.workspace_root.join("app");
+    let launch_base = git(&repository, &["rev-parse", "HEAD"]);
+    git(&repository, &["remote", "remove", "origin"]);
+    git(
+        &repository,
+        &["config", "--local", "mj.remoteWorkspace", "true"],
+    );
+    git(
+        &repository,
+        &["config", "--local", "mj.baseCommit", &launch_base],
+    );
+    spec.repositories[0].capture = CheckpointRepositoryCapture::RemoteWorkspace;
+    fs::write(repository.join("review.md"), b"findings").unwrap();
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "review notes"]);
+
+    let error = export_checkpoint(&spec).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("managed workspace has no Git origin"),
+        "{error:#}"
+    );
+    assert!(!archive_path.exists());
+
+    let origin = "https://github.com/example/app.git";
+    spec.repositories[0].origin_override = Some(origin.into());
+    export_checkpoint(&spec).unwrap();
+    let archive = verify_archive_streaming(&archive_path).unwrap();
+    let metadata = &archive.manifest.repositories[0].metadata;
+    assert!(metadata.remote_workspace);
+    assert_eq!(metadata.origin, origin);
+    assert!(metadata.push_urls.is_empty());
+    assert_eq!(metadata.base_commit, launch_base);
+    assert_eq!(
+        metadata.head_commit,
+        git(&repository, &["rev-parse", "HEAD"])
+    );
+    // Capture reads the override; it does not give the checkout a remote.
+    assert_eq!(git(&repository, &["remote"]), "");
+}
+
+#[test]
 fn checkpoint_refuses_a_home_different_from_the_installed_worker() {
     let temp = tempfile::tempdir().unwrap();
     let (spec, _) = fixture(temp.path());

@@ -579,6 +579,9 @@ pub struct SessionLaunchOptions {
     pub branch: Option<String>,
     /// Diff base; defaults to `at`.
     pub base: Option<String>,
+    /// With `at`, start the workspace with `at`, `base` and their ancestors
+    /// only; see `ExactCheckout::no_later_history`.
+    pub no_later_history: bool,
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
     /// Turn review for this session; `None` follows `[review]`.
     pub review: Option<mj_core::config::SessionReview>,
@@ -875,6 +878,7 @@ impl Controller {
             at,
             branch,
             base,
+            no_later_history,
             subagents,
             review,
             no_project_memory,
@@ -954,12 +958,34 @@ impl Controller {
                     repository_id: bundle.primary_repo.clone(),
                     commit: at.trim().to_owned(),
                     branch,
+                    no_later_history,
                 };
                 checkout.validate()?;
                 checkout.commit.make_ascii_lowercase();
                 (Some(checkout), None)
             }
-            None => (None, branch),
+            None => {
+                ensure!(!no_later_history, "`no_later_history` requires `at`");
+                (None, branch)
+            }
+        };
+        let launch_base = if no_later_history {
+            // The other repositories would start with their whole history.
+            ensure!(
+                bundle.is_some_and(|bundle| bundle.repositories.len() == 1),
+                "`no_later_history` requires a single-repository bundle"
+            );
+            launch_base
+                .map(|base| {
+                    ensure!(
+                        mj_core::remote_git::is_object_id(&base),
+                        "with `no_later_history`, `base` must be a full commit object ID; the workspace has no remote branches or tags to name it by"
+                    );
+                    Ok(base.to_ascii_lowercase())
+                })
+                .transpose()?
+        } else {
+            launch_base
         };
         if profile.kind == mj_core::config::HarnessKind::Muse
             && (!additional_mounts.is_empty()

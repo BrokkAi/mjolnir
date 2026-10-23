@@ -327,6 +327,15 @@ pub(super) fn phone_commands(
     };
     if option("model") {
         commands.push(command("model", "change the active model", Some("value")));
+    }
+    // Same condition as the dashboard (`AcpSurface::supports_fast_mode`):
+    // the harness advertises `fast-mode` with both on and off.
+    if session.config_options.iter().any(|option| {
+        option.key == "fast-mode"
+            && ["on", "off"]
+                .iter()
+                .all(|value| option.choices.iter().any(|choice| choice.value == *value))
+    }) {
         commands.push(command("fast", "toggle Codex Fast mode", None));
     }
     if option("effort") {

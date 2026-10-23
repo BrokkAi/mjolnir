@@ -749,11 +749,19 @@ impl Controller {
                 // text. Rebuilding it from the archive's repository layout loses a
                 // trailing separator, which Grok Build keys by, and cannot name
                 // the checkout a move put the session on. A session in a target
-                // workspace has no project directory, and the archive's layout
-                // names its directory under `/workspace`.
-                primary_repository_root: resumed_project_directory
-                    .as_ref()
-                    .map(|directory| target_path(&directory.to_string_lossy())),
+                // workspace launches in its accepted project's primary
+                // repository under the workspace. The archive need not name
+                // that folder: a Move from a host checkout records the
+                // checkout's own folder. A session with no accepted project
+                // keeps the archive's layout, as before.
+                primary_repository_root: match &resumed_project_directory {
+                    Some(directory) => Some(target_path(&directory.to_string_lossy())),
+                    None => self.state.sessions[session_id]
+                        .project
+                        .as_ref()
+                        .and_then(|project| project.bundle.primary())
+                        .map(|primary| target_path(&workspace_root).join(&primary.destination)),
+                },
                 queue_policy,
             };
             // Prepare the worker root before the worker binary is installed:
@@ -1115,6 +1123,21 @@ fn load_in_place_subagent_prompt_data(
 /// Canonicalizing first keeps one exact absolute path for the restore. The
 /// digest and session id must both match the record, and a legacy host-bridge
 /// archive is refused here rather than part way through a restore.
+/// Resume and Move clone the repository again from its origin, which would
+/// bring back every later commit, so a session that started without later
+/// history refuses them.
+pub(super) fn ensure_full_history_allowed(session: &SessionRecord) -> Result<()> {
+    ensure!(
+        !session
+            .checkout
+            .as_ref()
+            .is_some_and(|checkout| checkout.no_later_history),
+        "session {} was started without later history, and resuming or moving it would clone the full history; start a new session instead",
+        session.id
+    );
+    Ok(())
+}
+
 pub(super) fn verify_resume_checkpoint(
     session_id: &str,
     checkpoint: &mj_core::state::CheckpointMetadata,
@@ -1545,6 +1568,7 @@ impl Controller {
         {
             bail!("session {session_id} is not stopped, lost, or retryable");
         }
+        ensure_full_history_allowed(&previous)?;
         let checkpoint = move_operation
             .and_then(|op| op.handoff.as_ref())
             .or(previous.checkpoint.as_ref())

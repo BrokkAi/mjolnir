@@ -177,6 +177,11 @@ pub(super) async fn start_session(
             "`at` requires bundle_id: it checks out the bundle's primary repository",
         ));
     }
+    if request.no_later_history && request.at.is_none() {
+        return Err(ApiFailure::bad_request(
+            "`no_later_history` requires `at`: it limits the history of that checkout",
+        ));
+    }
     let bundle_id = match (&request.bundle_id, &request.project_directory) {
         (Some(bundle_id), _) => bundle_id.clone(),
         // Bare directories belong to the selected target. The daemon validates
@@ -209,6 +214,7 @@ pub(super) async fn start_session(
         at: request.at.clone(),
         branch: request.branch.clone(),
         base: request.base.clone(),
+        no_later_history: request.no_later_history,
         subagents: request.subagents,
         review: request.review.clone(),
         no_project_memory: request.no_project_memory,

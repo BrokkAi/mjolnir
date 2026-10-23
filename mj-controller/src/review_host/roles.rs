@@ -93,6 +93,17 @@ impl HostState {
                     return;
                 }
                 if let Some(slot) = self.reviews.get_mut(session_id) {
+                    let outcome = if matches!(
+                        slot.driver.phase(),
+                        TurnReviewPhase::Resolved(Resolution::Cancelled)
+                    ) {
+                        Err(StartRefusal(
+                            "review cancelled before its reviewer started".into(),
+                        ))
+                    } else {
+                        Ok(())
+                    };
+                    answer(slot.start_reply.take(), outcome);
                     slot.state.active = None;
                     if matches!(
                         slot.driver.phase(),

@@ -71,7 +71,10 @@ pub async fn validate_session_subagent_policy(
         .context("parent profile unavailable")?
         .kind;
     if !kind.supports_delegation_tools() && !policy.is_native() {
-        return Err(refuse("Mjolnir sub-agents are supported only by Claude and Codex; configure [subagents.straightforward] and optionally [subagents.subtle]".into()));
+        return Err(refuse(format!(
+            "{} sessions use their harness's own delegation; Mjolnir sub-agents and the None choice need a Claude, Codex, or DSH profile",
+            kind.display_name()
+        )));
     }
     if !policy.uses_mjolnir() {
         return Ok(());
@@ -1330,6 +1333,7 @@ mod tests {
     async fn create_and_move_mjolnir_policy_refuse_unconfigured_and_unsupported_parents() {
         for kind in [
             mj_core::config::HarnessKind::Codex,
+            mj_core::config::HarnessKind::Dsh,
             mj_core::config::HarnessKind::Grok,
         ] {
             let mut config = Config::default();
@@ -1365,7 +1369,7 @@ mod tests {
                 assert!(refusal.message().contains("[subagents.straightforward]"));
                 assert!(refusal.message().contains("--subagent-straightforward"));
             } else {
-                assert!(refusal.message().contains("Claude and Codex"));
+                assert!(refusal.message().contains("Claude, Codex, or DSH"));
             }
         }
     }

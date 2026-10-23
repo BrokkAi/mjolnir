@@ -193,6 +193,7 @@ impl ViewerSnapshot {
                     at: start.at,
                     branch: start.branch,
                     base: start.base,
+                    no_later_history: start.no_later_history,
                     container_upgrade_supported:
                         mj_core::state::ContainerSettings::upgrade_supported(session),
                     targeted_turn_control_supported: false,
@@ -460,6 +461,10 @@ pub struct ViewerSession {
     /// Diff base the session was started with; `at` unless another was named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// Whether the workspace started with `at`, `base` and their ancestors
+    /// only, as `StartSessionRequest::no_later_history` asked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_later_history: bool,
     #[serde(default)]
     pub targeted_turn_control_supported: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

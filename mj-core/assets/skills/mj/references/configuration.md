@@ -356,6 +356,8 @@ needed. Reviewers run as hidden child sessions, use the configured review
 profile, model, and effort, and show their transcripts in the review view. See
 [Code review](/turn-review/).
 
+Push review is available for Claude Code, Codex, and DSH primaries, the harnesses that receive Mjolnir delegation tools. They receive `request_review` and a pre-push gate; other harnesses run without review and receive a transcript notice.
+
 An older configuration with `enabled = true` still loads as `trigger = "turn"`;
 `enabled = false` or an absent `enabled` loads as `"off"`. Saving settings
 writes `trigger`, not `enabled`.
@@ -491,8 +493,9 @@ command-line tool must match the version Mjolnir links.
 
 ## Sub-agents `[subagents]`
 
-A Claude or Codex session can use Mjolnir's `spawn` tool. Create and Move offer
-Native or Mjolnir. Native uses the harness's own delegation. Mjolnir needs a
+A Claude, Codex, or DSH session can use Mjolnir's `spawn` tool. Create and Move offer
+Native or Mjolnir. Native uses the harness's own delegation; DSH has none, so
+Native gives a DSH session no delegation. Mjolnir needs a
 straightforward choice, configured in Settings → Sub-agents or config.toml, or a
 session override. The subtle choice is optional, but cannot be configured without
 straightforward:
@@ -538,7 +541,7 @@ optional effort must be offered by an eligible profile. Each effort flag require
 its matching model flag; `adaptive` and combining an override with `native` or
 `none` are rejected. Omitted effort uses the harness default. The retired
 `--subagent-model` and `--subagent-effort` flags fail with guidance to use the
-four per-type flags. `none` (CLI only) gives a Claude or Codex session no
+four per-type flags. `none` (CLI only) gives a Claude, Codex, or DSH session no
 delegation tools.
 
 | Field | TOML type | Required | Default | Validation and behavior |
@@ -611,9 +614,10 @@ that sets either fails to load. Other dsh-acp settings may go in
 
 Profiles do not select target-side executables. All bare workers, including
 localhost, SSH, and EC2, resolve an exact pinned runtime from their managed
-cache. Containers use their image-provided runtime or the documented installer
-fallback. `mj login` invokes the harness's canonical
-controller-side command from `PATH`.
+cache, except DSH, which has no managed runtime and runs the target's own
+`dsh-acp` or the pinned npm package. Containers use their image-provided
+runtime or the documented installer fallback. `mj login` invokes the harness's
+canonical controller-side command from `PATH`.
 
 Profiles do not accept `model` or `reasoning_effort`. Use `/model` and `/effort`
 inside a session, or configure the harness's own defaults in its home. For
@@ -628,7 +632,7 @@ string travels with it. Keep credentials out of it by writing a reference
 instead of a value in any `environment` table:
 
 ```toml
-[profiles.deepseek.environment]
+[profiles.dsh.environment]
 DEEPSEEK_API_KEY = { from_secret = "DEEPSEEK_API_KEY" }
 GITHUB_TOKEN = { from_env = "GITHUB_TOKEN" }
 ```
@@ -1177,7 +1181,7 @@ Harness-home variables influence automatic first-run discovery and explicit
 | Muse Code | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` |
 | OpenCode | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` |
 | MiMo Code | `MIMOCODE_HOME` | `~/.mimocode` (the stock install keeps `config/` and `data/` in XDG) |
-| DSH | `DSH_ACP_DATA_DIR` | `~/.dsh-acp` |
+| DSH | `DSH_ACP_DATA_DIR` | `~/.dsh` |
 
 The release installer separately accepts `MJOLNIR_INSTALL_DIR` (preferred over
 `INSTALL_DIR`), `MJOLNIR_GITHUB_OWNER`, `MJOLNIR_VERSION`, `GITHUB_TOKEN`, and

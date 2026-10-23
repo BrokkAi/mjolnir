@@ -1291,8 +1291,8 @@ impl DurableRelay {
     }
 
     /// The running prompt and the queued prompt to steer into it, when the
-    /// bridge would return the prompt instead of starting a turn and nothing
-    /// is waiting for the running turn to end.
+    /// bridge advertises steering and nothing is waiting for the running turn
+    /// to end. The bridge queues the steer to its next safe boundary.
     fn automatic_steer_target(&self) -> Option<(String, String)> {
         if !self.automatic_steering || self.checkpoint_only {
             return None;

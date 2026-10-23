@@ -92,6 +92,11 @@ impl HostState {
                     self.close_reviewer_child(&session_id);
                     return;
                 }
+                // Registration is durable. Provisioning and harness readiness
+                // continue asynchronously, within the accepted review.
+                if let Some(slot) = self.reviews.get_mut(&session_id) {
+                    answer(slot.start_reply.take(), Ok(()));
+                }
                 self.launch_reviewer_child(&session_id);
             }
             PersistenceCompletion::Open => {
@@ -175,9 +180,9 @@ impl HostState {
                         _background: pending.prepared.background,
                         command_id: None,
                         push,
+                        start_reply: pending.reply,
                     },
                 );
-                answer(pending.reply, Ok(()));
                 self.run(&session_id, requests);
             }
             PersistenceCompletion::Forward => {

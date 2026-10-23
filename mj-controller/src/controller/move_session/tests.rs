@@ -501,7 +501,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
                 additional_mounts: None,
                 resource_allocation: None,
             },
-            "supported only by Claude and Codex",
+            "need a Claude, Codex, or DSH profile",
         ),
         (
             "unconfigured Mjolnir delegation",
@@ -1758,6 +1758,217 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     assert_eq!(first.fingerprint, second.fingerprint);
 }
 
+/// Answers for a new Move destination container, recording the restore its
+/// worker is asked to run instead of running it. Git runs for real, with the
+/// fixture's network URL rewritten wherever it contacts a remote.
+#[cfg(unix)]
+struct RecordedMoveRestore {
+    remote: PathBuf,
+    restore: std::sync::Mutex<Option<Vec<mj_core::move_workspace::WorkspaceRepository>>>,
+}
+
+#[cfg(unix)]
+impl CommandExecutor for RecordedMoveRestore {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        if command.program == "git" {
+            return crate::controller::test_support::FixtureRemoteExecutor {
+                remote: self.remote.clone(),
+            }
+            .execute(command);
+        }
+        // The image carries this build's worker, so nothing is uploaded.
+        let (status, stdout) = match command.purpose.as_str() {
+            "read the container image's worker build" => {
+                (0, mj_core::worker_build::WORKER_BUILD_ID.as_bytes())
+            }
+            "detect target platform" => (1, &b""[..]),
+            _ => (0, &b""[..]),
+        };
+        Ok(CommandOutput {
+            status,
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn io::Read + Send),
+    ) -> Result<CommandOutput> {
+        assert_eq!(command.purpose, "prepare or verify Move workspace");
+        let mj_core::move_workspace::WorkspaceCommand::Restore { repositories, .. } =
+            serde_json::from_reader(input)?
+        else {
+            panic!("the destination is only asked to restore");
+        };
+        *self.restore.lock().unwrap() = Some(repositories);
+        Ok(CommandOutput {
+            status: 0,
+            stdout: b"null".to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
+// Hard-won: DSH campaign 2026-10-23 (C-1): a Move from a managed clone into a container cloned into the session-id folder
+#[cfg(unix)]
+#[test]
+fn a_managed_clone_moved_into_a_container_is_restored_where_it_was_cloned() {
+    use crate::controller::checkpoint::HOST_CHECKOUT_REPOSITORY;
+    use crate::controller::test_support::{
+        checkpoint_archive_input, managed_clone_session, write_checkpoint_archive_input,
+    };
+    use mj_checkpoint::archive::{
+        GitCollectionSpec, GitHistoryMode, SystemGit, collect_git_metadata_snapshot,
+    };
+    let short = "a_managed_clone_moved_into_a_container_is_restored_where_it_was_cloned";
+    if !isolated_test_child(&test_name(short), "MJ_MOVE_CLONE_DESTINATION_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (repository, _remote_parent, remote) = checkout_with_network_remote();
+    let executor = RecordedMoveRestore {
+        remote,
+        restore: Default::default(),
+    };
+    let session_id = MOVE_QUEUE_SESSION_ID;
+    // Accepted as `mj new --project-directory` accepts it, so the bundle
+    // calls the repository after its remote (`repo`), not `project`.
+    let (bundle_id, project) = crate::project_catalog::accept_directory(
+        &mj_core::config::TargetTemplate::LocalBare,
+        repository.path(),
+        &executor,
+    )
+    .unwrap();
+    let mut source = managed_clone_session(repository.path(), session_id);
+    source.bundle_id = bundle_id;
+    source.project = Some(project);
+    source.state = SessionState::Closing;
+    source.target = Some(TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir().join("workers").join(session_id),
+    });
+    crate::database::save_session(&source).unwrap();
+    let mut controller = Controller {
+        config: resume_compatibility_config(),
+        state: State {
+            sessions: [(session_id.into(), source.clone())].into_iter().collect(),
+            ..State::default()
+        },
+    };
+
+    // The handoff records the source's layout, which names the clone's own
+    // folder, the session id, as the repository's destination.
+    let layout = controller
+        .session_export_layout(session_id, &executor)
+        .unwrap();
+    let repositories = layout
+        .repositories
+        .iter()
+        .map(|repository| {
+            collect_git_metadata_snapshot(
+                &SystemGit,
+                &Path::new(&layout.workspace_root).join(&repository.relative_destination),
+                &GitCollectionSpec {
+                    id: repository.id.clone(),
+                    relative_destination: repository.relative_destination.clone(),
+                    history: GitHistoryMode::NoBundle,
+                    origin_override: None,
+                },
+            )
+            .unwrap()
+        })
+        .collect();
+    let archives = tempfile::tempdir().unwrap();
+    let mut operation = source_recovery_operation(&source);
+    operation.selection.target_template_id = Some("podman".into());
+    operation.phase = MovePhase::ResumingDestination;
+    operation.handoff = Some(write_checkpoint_archive_input(
+        archives.path(),
+        session_id,
+        &checkpoint_archive_input(session_id, 0, repositories, Vec::new()),
+    ));
+    operation.workspace_transfer = Some(
+        controller
+            .new_workspace_transfer(
+                session_id,
+                &operation.operation_id,
+                Default::default(),
+                &executor,
+            )
+            .unwrap(),
+    );
+    crate::database::save_move_operation(&operation).unwrap();
+
+    // Resume reshapes the record for the container before provisioning it.
+    let conversion = crate::controller::worktree::plan_raw_to_workspace_for_session(
+        &source,
+        &controller.state.checkout(session_id).unwrap(),
+        &controller.config,
+        &executor,
+    )
+    .unwrap();
+    let container_workspace = mj_core::targets::new_container_workspace(session_id).unwrap();
+    let record = controller.state.sessions.get_mut(session_id).unwrap();
+    record.target_template_id = "podman".into();
+    record.target_runtime = Some((&controller.config.targets["podman"]).into());
+    record.container_workspace = Some(container_workspace.clone());
+    record.target = None;
+    crate::controller::worktree::apply_raw_to_workspace(record, &conversion).unwrap();
+
+    let resource =
+        mj_core::targets::move_resource_name(session_id, &operation.operation_id).unwrap();
+    let bundle = controller
+        .move_destination_bundle(session_id)
+        .unwrap()
+        .expect("a Move into a container clones the session's bundle");
+    let plan = crate::targets::provision_plan_named(
+        &crate::controller::backend::backend_target(
+            &controller.config.targets["podman"],
+            None,
+            Default::default(),
+        )
+        .unwrap(),
+        session_id,
+        &bundle,
+        &[],
+        Some(&container_workspace),
+        &resource,
+    )
+    .unwrap();
+    let cloned = plan
+        .commands
+        .iter()
+        .filter(|command| command.purpose.starts_with("clone "))
+        .map(|command| PathBuf::from(command.args.last().unwrap()))
+        .collect::<Vec<_>>();
+
+    let destination = controller.state.sessions.get_mut(session_id).unwrap();
+    destination.target = Some(TargetLocator::LocalPodman {
+        container_id: resource,
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    });
+    controller
+        .restore_move_workspace(session_id, &executor)
+        .unwrap();
+    let restored = executor
+        .restore
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the destination restores the transferred workspace");
+
+    assert_eq!(cloned, [container_workspace.join("repo")]);
+    assert_eq!(
+        restored,
+        [mj_core::move_workspace::WorkspaceRepository {
+            // The transfer names the repository as the source captured it.
+            id: HOST_CHECKOUT_REPOSITORY.into(),
+            root: cloned[0].clone(),
+        }]
+    );
+}
+
 /// The rsync that ships with macOS answers `--version` but rejects
 /// `--protect-args`, which every Move transfer passes.
 struct RsyncWithoutProtectArgs(GitWithPodmanPreflightExecutor);
@@ -1849,7 +2060,8 @@ fn a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args() {
                 .iter()
                 .any(|blocker| blocker.contains(side)
                     && blocker.contains("--protect-args")
-                    && blocker.contains("brew install rsync")),
+                    // The destination is a container: its rsync comes from the image, not brew.
+                    && blocker.contains("brew install rsync") == (side != "Destination")),
             "{side} rsync is not reported: {:?}",
             assessment.blockers
         );

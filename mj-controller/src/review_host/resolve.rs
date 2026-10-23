@@ -89,6 +89,8 @@ impl HostState {
         let Some(slot) = self.reviews.get_mut(session_id) else {
             return;
         };
+        let message = message.into();
+        answer(slot.start_reply.take(), Err(StartRefusal(message.clone())));
         slot.state.active = None;
         let state = slot.state.clone();
         let requests = slot.driver.request_failed(message);

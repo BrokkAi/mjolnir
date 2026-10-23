@@ -869,7 +869,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward."
         }
         "eligible_profiles" => {
-            "Check profiles that Claude and Codex parents may use in addition to their own profile."
+            "Check profiles that Claude, Codex, and DSH parents may use in addition to their own profile."
         }
         "build_cache" => {
             "Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and Bazel."
