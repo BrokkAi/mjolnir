@@ -25,9 +25,9 @@ Two words come up on every screen:
   a local container, an SSH host, or an EC2 instance.
 
 When no workspace exists, Mjolnir creates one named after the current
-directory. On first launch, it automatically discovers your installed agents,
-adds their profiles, and creates a bundle for the current GitHub repository
-when one is found. Every later plain `mj` launch adds profiles for agents
+directory. On first launch, it automatically discovers your installed agents
+and any login-free API key exported to Mjolnir, adds their profiles, and
+creates a bundle for the current GitHub repository when one is found. Every later plain `mj` launch adds profiles for agents
 installed since (`mj go`, `mj workspaces`, and the relaunch after an upgrade
 do not); disable a profile in Settings to stop using an agent, because a removed
 profile for an installed agent comes back. A one-time welcome dialog shows the detected agents and
@@ -65,8 +65,9 @@ found, the welcome reports the missing profile. To fix this:
    @openai/codex`, then run `codex login`. Signing in creates the agent's home
    directory (`~/.claude`, `~/.codex`, `~/.kimi-code`, `~/.grok`,
    `~/.config/muse`, `~/.config/opencode`, or a MiMo Code `MIMOCODE_HOME`).
-   DSH has no sign-in: it reads `DEEPSEEK_API_KEY` from the environment
-   Mjolnir starts with; see [Profiles](/profiles/).
+   DSH has no sign-in: export `DEEPSEEK_API_KEY` before starting Mjolnir and
+   detection offers it without a DeepSeek CLI installation; see
+   [Profiles](/profiles/).
 2. Open Settings (`prefix+s`), choose **Agent Profiles**, and choose **Detect
    profiles**, or run `mj setup` again.
 

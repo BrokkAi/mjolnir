@@ -77,8 +77,11 @@ home that belongs to the session, and the harness's home variable points at
 that copy. See [What a session's staged home holds](#what-a-sessions-staged-home-holds).
 
 `mj setup` checks the home variable first and otherwise looks in the
-conventional location. A detected home becomes the explicit `home` path in
-`config.toml`; subsequent sessions use that configured path.
+conventional location. It also treats an API key in the environment Mjolnir
+started with as an installation signal for a harness that authenticates with
+no login, such as `DEEPSEEK_API_KEY` for DSH. A detected home becomes the
+explicit `home` path in `config.toml`; subsequent sessions use that configured
+path.
 
 Kimi Code does not expose a guardian approval mode. OpenCode and MiMo Code ask
 before tools according to their permission rules, and DSH asks before every
@@ -487,7 +490,9 @@ runtime on this machine. Do not override `MIMOCODE_HOME` in the profile
 environment.
 
 For DSH, configure `kind = "dsh"`, for example with
-`home = "/home/me/.dsh"`. DSH runs BrokkAi's
+`home = "/home/me/.dsh"`. Detection accepts DeepSeek's own `dsh` CLI, its
+`~/.dsh` home, or `DEEPSEEK_API_KEY` in the environment Mjolnir started with,
+so a key alone is enough to be offered a profile. DSH runs BrokkAi's
 [dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.2.1, a DeepSeek coding agent
 that speaks ACP itself, so there is no separate bridge. It is not the DeepSeek
 harness earlier releases offered as `kind = "deepseek"`; that kind still fails

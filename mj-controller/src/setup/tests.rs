@@ -199,6 +199,7 @@ fn an_installed_mimo_is_offered_before_its_first_login() {
         &BTreeMap::new(),
         &mut homes,
         &executor,
+        |_| false,
     );
 
     assert_eq!(
@@ -237,6 +238,7 @@ fn an_installed_dsh_is_offered_before_its_first_login() {
         &BTreeMap::new(),
         &mut homes,
         &executor,
+        |_| false,
     );
 
     assert_eq!(
@@ -257,6 +259,42 @@ fn an_installed_dsh_is_offered_before_its_first_login() {
     assert!(
         commands.iter().all(|command| command.program != "dsh-acp"),
         "the dsh-acp bridge is installed on demand and is not a detection signal"
+    );
+}
+
+#[test]
+fn a_deepseek_api_key_offers_dsh_without_a_cli_or_home() {
+    let directory = tempfile::tempdir().unwrap();
+    let executor = FakeExecutor {
+        commands: RefCell::new(Vec::new()),
+        statuses: vec![1; HarnessKind::ALL.len()],
+    };
+    let mut homes = Vec::new();
+
+    discover_installed_harnesses(
+        Some(directory.path()),
+        &BTreeMap::new(),
+        &mut homes,
+        &executor,
+        |key| key == "DEEPSEEK_API_KEY",
+    );
+
+    assert_eq!(
+        homes,
+        [DiscoveredHome {
+            kind: HarnessKind::Dsh,
+            path: directory.path().join(".dsh"),
+            codex_profile: None,
+            authenticated: true,
+        }]
+    );
+    assert!(
+        executor
+            .commands
+            .borrow()
+            .iter()
+            .all(|command| command.program != "dsh"),
+        "the key alone is enough; no installed DeepSeek CLI is required"
     );
 }
 
