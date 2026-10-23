@@ -765,7 +765,7 @@ fn a_selector_the_harness_does_not_expose_is_refused_before_anything_is_sent() {
     assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
     assert_eq!(
         chat.feedback.current().as_deref(),
-        Some("ACP bridge does not expose a model selector")
+        Some("This agent does not offer a model setting")
     );
     // Nothing was sent, but the command was still handled: the composer
     // clears exactly as it would for an accepted command, so the next
@@ -777,7 +777,7 @@ fn a_selector_the_harness_does_not_expose_is_refused_before_anything_is_sent() {
     assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
     assert_eq!(
         chat.feedback.current().as_deref(),
-        Some("ACP bridge does not expose an effort selector")
+        Some("This agent does not offer a reasoning effort setting")
     );
     assert_eq!(chat.input, "");
 }

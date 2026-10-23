@@ -235,24 +235,23 @@ pub fn session_config_choices(
         .collect()
 }
 
-/// `a` or `an` for a session-configuration key, so a sentence built from the
-/// key's own name reads as English: "a model selector", "an effort selector".
-pub fn config_key_article(key: &str) -> &'static str {
-    if key.starts_with(['a', 'e', 'i', 'o', 'u']) {
+/// What to report when the harness advertises no setting for `key` at all.
+/// The worker, the terminal and the web viewer say the same words, so the
+/// refusal a surface shows the moment it knows and the one the transcript
+/// records agree. Names the harness when it is known: "DSH does not offer a
+/// reasoning effort setting".
+pub fn missing_config_selector_refusal(harness: Option<HarnessKind>, key: &str) -> String {
+    let setting = match key {
+        "effort" => "reasoning effort",
+        other => other,
+    };
+    let article = if setting.starts_with(['a', 'e', 'i', 'o', 'u']) {
         "an"
     } else {
         "a"
-    }
-}
-
-/// What to report when the harness advertises no selector for `key` at all.
-/// The worker and the terminal say the same words, so the refusal a surface
-/// shows the moment it knows and the one the transcript records agree.
-pub fn missing_config_selector_refusal(key: &str) -> String {
-    format!(
-        "ACP bridge does not expose {} {key} selector",
-        config_key_article(key)
-    )
+    };
+    let subject = harness.map_or("This agent", HarnessKind::display_name);
+    format!("{subject} does not offer {article} {setting} setting")
 }
 
 /// Option ids harnesses use for the effort selector when they publish no

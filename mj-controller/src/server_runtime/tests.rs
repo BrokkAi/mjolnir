@@ -632,6 +632,48 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
     assert_eq!(inspect.description, "Inspect the workspace");
     assert_eq!(inspect.argument.as_deref(), Some("query"));
 
+    // `/fast` follows the dashboard's rule: the harness must advertise
+    // `fast-mode` with both on and off. A model selector alone (DSH, Claude,
+    // Kimi) does not earn it; Codex's fast-mode option does.
+    let model_option = || {
+        SessionConfigOption::select(
+            "model",
+            "Model",
+            "a",
+            SessionConfigSelectOptions::Ungrouped(vec![SessionConfigSelectOption::new("a", "A")]),
+        )
+        .category(SessionConfigOptionCategory::Model)
+    };
+    let fast_option = |values: &[&str]| {
+        SessionConfigOption::select(
+            "fast-mode",
+            "Fast mode",
+            "off",
+            SessionConfigSelectOptions::Ungrouped(
+                values
+                    .iter()
+                    .map(|value| {
+                        SessionConfigSelectOption::new(value.to_string(), value.to_string())
+                    })
+                    .collect(),
+            ),
+        )
+    };
+    for (options, offers_fast) in [
+        (vec![model_option()], false),
+        (vec![model_option(), fast_option(&["on"])], false),
+        (vec![model_option(), fast_option(&["on", "off"])], true),
+        (Vec::new(), false),
+    ] {
+        operational.get_mut("session-1").unwrap().config_options = options;
+        let names = project(&operational).sessions[0]
+            .available_commands
+            .iter()
+            .map(|command| command.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(names.contains(&"fast".to_owned()), offers_fast, "{names:?}");
+    }
+
     assert!(session.is_idle);
     assert_eq!(session.activity, "[idle]");
     let state = operational.get_mut("session-1").unwrap();
