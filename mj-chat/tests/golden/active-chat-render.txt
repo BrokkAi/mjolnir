@@ -1613,49 +1613,6 @@ subagents fg=Reset bg=Reset modifiers=BOLD | REVERSED tasks fg=Reset bg=Reset mo
 
 modal body=(53,14,42,2)
 
-=== review setup stays in host overlay (140x40) ===
-
-
-                                                  ╭ Conversation ────────────────────────────────╮
-                                                  │ Loading…                                     │
-                                                  │                                              │
-
-
-                                                    ╭ × Second opinion ────────────────────────╮
-                                                    │Reviewing a 1-line plan                   │
-                                                    │                                          │
-                                                    │Preparing reviewer from Settings → Review…│
-                                                    │                                          │
-                                                    │                                          │
-                                                    │                                          │
-                                                    │                                          │
-                                                    │                                          │
-                                                    │                                          │
-                                                    │                                          │
-                                                    │                                          │
-                                                    │                                          │
-                                                    │                                          │
-                                                    │  Cancel                                  │
-                                                    ╰──────────────────────────────────────────╯
-
-
-                                                  │                                              │
-                                                  │                                              │
-                                                  ╰──────────────────────────────────────────────╯
-
-
-
-
-
-
-
-
-
-
-
-
-modal body=(53,8,42,14)
-
 === transcript and prompt stay within host regions (80x24) ===
 
 

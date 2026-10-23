@@ -889,11 +889,6 @@ pub struct DashboardState {
     /// as a whole whenever a runtime snapshot arrives, so removals clear
     /// stale row badges as well as closing the review pane.
     pub(crate) session_reviews: Tracked<BTreeMap<String, RuntimeReviewView>>,
-    /// Sessions with an attached plan-review second opinion. This is kept
-    /// separately from the controller's turn-review projection because the
-    /// chat owns this older reviewer workflow and its stop warning still
-    /// needs to follow the live chat state.
-    pub(crate) sessions_with_review: BTreeSet<String>,
     pub(crate) project_sources: Tracked<BTreeMap<String, ProjectSourceIdentity>>,
     pub(crate) checkpoint_archive_sizes: BTreeMap<String, Option<u64>>,
     /// Stopped records loaded one at a time: the row picked in the resume
@@ -1212,7 +1207,6 @@ impl DashboardState {
             session_details: Default::default(),
             unreachable_sessions: Default::default(),
             session_reviews: Default::default(),
-            sessions_with_review: BTreeSet::new(),
             project_sources: Default::default(),
             session_facts: RefCell::default(),
             cpu_rollups: RefCell::default(),

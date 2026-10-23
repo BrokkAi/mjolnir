@@ -19,7 +19,7 @@ mod input;
 mod pasted_paths;
 mod remote;
 mod rendering;
-mod second_opinion;
+mod reviewer_pane;
 mod submissions;
 mod transcript;
 mod turn_review;
@@ -83,7 +83,6 @@ use history::{HistorySearch, HistorySearchRequest};
 use rendering::voice_button_area;
 use rendering::{TranscriptRenderMode, sanitize_terminal_text};
 pub use rendering::{truncate_line_to_width, wrap_styled_line};
-use second_opinion::{SecondOpinion, SecondOpinionIntent};
 use transcript::{
     ToolDiffstatRequest, TranscriptAnchor, TranscriptClickTarget, TranscriptLinkFrame,
     TranscriptRenderCache, TranscriptScrollbarState, TranscriptSelectionSpace,
@@ -114,7 +113,6 @@ fn voice_form() -> Form<VoiceControl> {
 }
 
 pub use active::{ActiveChat, ChatDaemonRequest, ChatInstance, PreparedChat};
-pub use second_opinion::SecondOpinionIntent as SecondOpinionRequest;
 pub use transcript::{
     TAIL_SEED_ITEMS, ToolDisplay, TranscriptPosition, TranscriptSnapshot, format_event_time,
     render_agent_message_head, render_agent_message_tail,
@@ -288,16 +286,6 @@ pub enum ChatAction {
         request: ElicitationRequest,
         response: ElicitationResponse,
     },
-    /// The user asked for a second opinion on `request`'s plan. Hel answers
-    /// this decision itself, so the harness's review stays pending until the
-    /// reviewer is set up.
-    StartSecondOpinion {
-        request: ElicitationRequest,
-        /// The proposal text as the harness sent it.
-        proposal: String,
-    },
-    /// Work the second-opinion view asked the session to perform.
-    SecondOpinion(SecondOpinionIntent),
     /// Review the turn that just finished, on the user's explicit request.
     /// Auto-review starts the same path without a key press.
     StartTurnReview,
@@ -453,7 +441,6 @@ pub struct SessionHeaderIdentity {
 pub struct ChatSessionContext {
     pub config: Config,
     pub session: SessionRecord,
-    pub reviewer_stager: mj_client::session::ReviewerStager,
 }
 
 pub struct ChatState {
@@ -538,20 +525,9 @@ pub struct ChatState {
     /// the display so the primary can surface immediately when that review
     /// request is answered or withdrawn.
     pending_elicitations: Vec<ElicitationRequest>,
-    /// The second-opinion view, when one is open. It owns this pane while it
-    /// is up, so the composer and the elicitation dialog stand down.
-    second_opinion: Option<SecondOpinion>,
-    /// Where the reviewer pane sat on the last frame, so hover can decide
-    /// which transcript the wheel drives.
+    /// Where the reviewer pane sat on the last frame, for pointer routing.
     reviewer_area: Option<Rect>,
-    /// Where the split's action buttons sat on the last frame, so a click
-    /// picks the same action the keyboard would.
-    split_action_areas: Vec<(second_opinion::SplitAction, Rect)>,
-    /// Distinguishes the command ids the review's own steps submit.
-    second_opinion_sequence: u64,
-    /// The turn-review view, when one is open. Like the second opinion, it
-    /// owns this pane while it is up, which is what makes review synchronous:
-    /// findings can never land in the middle of the next conversation.
+    /// The turn-review view owns the pane while findings await a decision.
     turn_review: Option<Box<TurnReview>>,
     /// Where the turn review's action buttons sat on the last frame.
     turn_review_action_areas: Vec<(turn_review::ReviewAction, Rect)>,
@@ -744,10 +720,7 @@ impl ChatState {
             claimed_agent_terminals: BTreeMap::new(),
             elicitation: None,
             pending_elicitations: Vec::new(),
-            second_opinion: None,
             reviewer_area: None,
-            split_action_areas: Vec::new(),
-            second_opinion_sequence: 0,
             turn_review: None,
             turn_review_action_areas: Vec::new(),
             review_config: mj_core::config::ReviewConfig::default(),
@@ -1244,23 +1217,14 @@ impl ChatState {
         if !draft.reviewer {
             return false;
         }
-        match (self.second_opinion(), self.turn_review()) {
-            (Some(view), _) => view.reviewer().is_some_and(|reviewer| {
-                reviewer
-                    .pending_elicitations()
-                    .iter()
-                    .any(|request| request == draft.request())
-            }),
-            (None, Some(review)) => {
-                review
-                    .pending_elicitations()
-                    .into_iter()
-                    .any(|(role, request)| {
-                        draft.reviewer_role() == Some(role.as_str()) && request == *draft.request()
-                    })
-            }
-            (None, None) => false,
-        }
+        self.turn_review().is_some_and(|review| {
+            review
+                .pending_elicitations()
+                .into_iter()
+                .any(|(role, request)| {
+                    draft.reviewer_role() == Some(role.as_str()) && request == *draft.request()
+                })
+        })
     }
 
     /// Take a process-local snapshot before this chat is replaced by another

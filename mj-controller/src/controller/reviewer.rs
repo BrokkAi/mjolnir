@@ -1,4 +1,4 @@
-//! Staging the second-opinion reviewer's profile onto a session's target.
+//! Staging the turn-review reviewer's profile onto a session's target.
 //!
 //! The reviewer runs a different configured profile in the primary session's
 //! own target. Its harness home is a fresh copy of that profile, placed inside

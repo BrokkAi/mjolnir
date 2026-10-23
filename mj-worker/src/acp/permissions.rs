@@ -357,9 +357,6 @@ pub(super) fn permission_plan_response(
         "implement" => &["implement_plan", "plan_approve", "default", "approve"],
         "revise" => &["plan_revise", "revise"],
         "exit" => &["reject_and_exit", "exit"],
-        // A second opinion is answered locally and never reaches here. If one
-        // ever did, it must not approve the plan, so it declines like every
-        // other non-approval and leaves the session in plan mode.
         _ => &[],
     };
     let selected = request

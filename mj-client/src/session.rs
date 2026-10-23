@@ -198,11 +198,6 @@ impl PendingRelaySync {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct ReviewState {
-    pub review: Option<mj_core::storage::StoredReview>,
-}
-
 pub trait SessionHandleBackend: Send + Sync {
     fn transcript_history(
         &self,
@@ -216,7 +211,6 @@ pub trait SessionHandleBackend: Send + Sync {
         scope: mj_core::storage::HistoryScope,
         query: String,
     ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>>;
-    fn review_state(&self) -> BoxFuture<'_, Result<ReviewState>>;
     fn resolve_review_settings(
         &self,
         cancelled: Arc<std::sync::atomic::AtomicBool>,
@@ -276,9 +270,6 @@ impl SessionHandle {
         query: String,
     ) -> Result<Vec<mj_core::storage::PromptHistoryEntry>> {
         self.backend.search_prompts(bundle_id, scope, query).await
-    }
-    pub async fn review_state(&self) -> Result<ReviewState> {
-        self.backend.review_state().await
     }
 
     pub async fn resolve_review_settings(
@@ -646,9 +637,6 @@ impl SessionHandleBackend for ReplacementTestSession {
             });
         }
         Box::pin(async { Ok(Vec::new()) })
-    }
-    fn review_state(&self) -> BoxFuture<'_, Result<ReviewState>> {
-        Box::pin(async { Ok(ReviewState::default()) })
     }
 
     fn config_result(&self, _command_id: String) -> BoxFuture<'_, Result<Option<Option<String>>>> {

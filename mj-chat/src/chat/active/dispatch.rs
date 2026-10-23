@@ -289,12 +289,6 @@ impl ActiveChat {
                     &mut self.state,
                 );
             }
-            ChatAction::StartSecondOpinion { request, proposal } => {
-                self.open_second_opinion(request, proposal);
-            }
-            ChatAction::SecondOpinion(intent) => {
-                self.run_second_opinion(intent);
-            }
             ChatAction::StartTurnReview => self.request_turn_review(),
             ChatAction::TurnReview(intent) => self.run_turn_review(intent),
             ChatAction::RespondReviewerElicitation {

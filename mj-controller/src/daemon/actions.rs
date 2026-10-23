@@ -179,14 +179,6 @@ pub(super) async fn handle_action(
             .await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::SaveActiveReview { session_id, review } => {
-            blocking(move || crate::database::save_active_review(&session_id, &review)).await?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::ClearActiveReview { session_id } => {
-            blocking(move || crate::database::clear_active_review(&session_id)).await?;
-            Ok(DaemonReply::Done)
-        }
         DaemonAction::RecordAbandonedPrompt {
             session_id,
             bundle_id,

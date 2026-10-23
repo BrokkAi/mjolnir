@@ -1,4 +1,4 @@
-//! One resolver for turn review and plan second opinion.
+//! One resolver for turn review and plan turn review.
 use crate::controller::Controller;
 use crate::server_runtime::profile_catalog::ProfileCatalog;
 use crate::session_manager::ManagedSessionHandle;

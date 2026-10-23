@@ -350,7 +350,7 @@ profile = "reviewer"
 | `model` | string | no | unset (harness default) | Reviewer model override for a named profile. Auto uses fixed model-family defaults. |
 | `effort` | string | no | unset (harness default) | Reviewer effort override for a named profile. Auto does not accept manual overrides. Required effort is checked against the selected model. |
 
-These settings also select the plan second-opinion reviewer. Auto prefers
+Auto prefers
 another provider, falling back to another profile or the primary profile when
 needed. Turn review uses one reviewer. See [Independent turn review](/turn-review/).
 

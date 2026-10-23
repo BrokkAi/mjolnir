@@ -885,9 +885,7 @@ impl SessionHandleBackend for FakeSession {
     ) -> BoxFuture<'_, AnyResult<Vec<mj_core::storage::PromptHistoryEntry>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
-    fn review_state(&self) -> BoxFuture<'_, AnyResult<mj_client::session::ReviewState>> {
-        Box::pin(async { Ok(Default::default()) })
-    }
+
     fn config_result(
         &self,
         _command_id: String,

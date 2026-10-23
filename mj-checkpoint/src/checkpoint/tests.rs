@@ -2389,7 +2389,7 @@ fn assert_canonical_restore_rejected_before_mutation(
     assert!(!harness_home.exists());
 }
 
-/// A second opinion keeps its whole world — profile, native session and
+/// A turn review keeps its whole world — profile, native session and
 /// relay — inside the primary worker root. A v1 checkpoint is single
 /// session, so none of it may end up in the archive.
 #[test]

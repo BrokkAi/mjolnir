@@ -1846,7 +1846,7 @@ pub(super) struct ConnectionRuntime {
     /// The ACP coordinator's command channel, or `None` once the session is
     /// sealed and no ACP runtime is left to serve scratch prompts.
     pub(super) commands: Option<mpsc::Sender<CommandRequest>>,
-    /// The second-opinion reviewer, when this worker has an ACP runtime to run
+    /// The turn-review reviewer, when this worker has an ACP runtime to run
     /// one beside. A sealed session has none.
     pub(super) reviewer: Option<Arc<ReviewerSidecar>>,
     pub(super) subagents: Option<super::subagents::SubagentEndpoint>,

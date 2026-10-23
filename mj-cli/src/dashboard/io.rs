@@ -23,7 +23,6 @@ use mj_core::state::{
 
 use mj_controller::controller::Controller;
 use mj_controller::controller::ResumeRepositorySourcePreflight;
-use mj_controller::session_manager::SessionManagerControl;
 use mj_controller::targets::CancellableProcessExecutor;
 use mj_tui::{
     DashboardAction, DetectScope, PreparedMaterializedSessionDetail,

@@ -383,7 +383,9 @@ where
 /// Discovers advertised reviewer choices in a supervised task. The TUI
 /// drops replies whose generation no longer matches the current draft.
 pub(crate) fn spawn_review_settings_discovery(
-    control: SessionManagerControl,
+    catalog: tokio::sync::watch::Receiver<
+        mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    >,
     request: mj_controller::review_settings::ReviewDiscoveryRequest,
     generation: u64,
     updates: UnboundedSender<DashboardIoUpdate>,
@@ -397,7 +399,7 @@ pub(crate) fn spawn_review_settings_discovery(
     tokio::spawn(async move {
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
         let discovery = mj_controller::review_settings::discover_review_settings(
-            control,
+            catalog,
             request,
             worker_cancelled,
             progress_tx,

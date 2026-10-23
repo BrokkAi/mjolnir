@@ -56,7 +56,7 @@ pub(crate) fn render_in(
 ) {
     chat.footer_command_areas.borrow_mut().clear();
     chat.voice_form.begin_frame();
-    if chat.composer_replaced() || chat.second_opinion_split() || chat.turn_review_split() {
+    if chat.composer_replaced() || chat.turn_review_split() {
         chat.voice_form.cancel_pointer();
     }
     chat.frame_surfaces.clear();
@@ -110,7 +110,6 @@ pub(crate) fn render_in(
         chat.subagent_control_area = None;
         chat.task_dialog_area = None;
         chat.reviewer_area = None;
-        chat.split_action_areas.clear();
         chat.turn_review_action_areas.clear();
         chat.voice_form.cancel_pointer();
         chat.voice_form
@@ -142,7 +141,7 @@ pub(crate) fn render_in(
         return;
     }
 
-    let split = chat.second_opinion_split() || chat.turn_review_split();
+    let split = chat.turn_review_split();
     // Review panes replace the composer, so retain their existing activity
     // row. Normal conversations put the spinner in the composer border.
     let activity_area =
@@ -182,37 +181,19 @@ pub(crate) fn render_in(
         regions.pane_focused,
     );
     chat.reviewer_area = None;
-    if let Some(area) = reviewer_area {
-        if chat.turn_review_split() {
-            if let Some(review) = chat.turn_review_mut() {
-                let (inner, top, total) =
-                    crate::chat::turn_review::render_turn_review_pane(frame, area, review);
-                // Route the wheel to whichever review tab is selected.
-                chat.reviewer_area = Some(area);
-                chat.frame_surfaces.push(SurfaceFrame::scrollable(
-                    SurfaceId::ReviewerTranscript,
-                    inner,
-                    top,
-                    total,
-                ));
-            }
-        } else {
-            let status = match chat.second_opinion() {
-                Some(SecondOpinion::Review(review)) => review.status.clone(),
-                _ => String::new(),
-            };
-            if let Some(SecondOpinion::Review(review)) = chat.second_opinion_mut() {
-                let (inner, top, total) =
-                    render_reviewer(frame, area, &mut review.reviewer, &status);
-                chat.reviewer_area = Some(inner);
-                chat.frame_surfaces.push(SurfaceFrame::scrollable(
-                    SurfaceId::ReviewerTranscript,
-                    inner,
-                    top,
-                    total,
-                ));
-            }
-        }
+    if let Some(area) = reviewer_area
+        && let Some(review) = chat.turn_review_mut()
+    {
+        let (inner, top, total) =
+            crate::chat::turn_review::render_turn_review_pane(frame, area, review);
+        // Route the wheel to whichever review tab is selected.
+        chat.reviewer_area = Some(area);
+        chat.frame_surfaces.push(SurfaceFrame::scrollable(
+            SurfaceId::ReviewerTranscript,
+            inner,
+            top,
+            total,
+        ));
     }
     if chat.turn_review_split() {
         // The split has no composer: a review is synchronous, so the only
@@ -231,22 +212,7 @@ pub(crate) fn render_in(
             None => Vec::new(),
         };
         chat.turn_review_action_areas = buttons;
-        chat.split_action_areas.clear();
-    } else if let Some(SecondOpinion::Review(review)) = chat.second_opinion_mut() {
-        // The split has no composer: the revised plan is the planner's to
-        // write, so the only input here is which of the three actions to take.
-        let buttons = render_split_actions(
-            frame,
-            prompt_area,
-            &review.workflow,
-            review.action,
-            &review.status,
-            &mut review.form,
-        );
-        chat.split_action_areas = buttons;
-        chat.turn_review_action_areas.clear();
     } else {
-        chat.split_action_areas.clear();
         chat.turn_review_action_areas.clear();
         render_composer_band(frame, prompt_area, chat, prompt_focused, None);
     }
@@ -295,29 +261,6 @@ pub(crate) fn render_in(
         // The selector owns this pane's interaction, so the chat behind it
         // stops being selectable. An elicitation dialog still draws over it,
         // matching the key routing that lets the dialog win.
-        chat.frame_surfaces.clear();
-        chat.frame_surfaces
-            .push(SurfaceFrame::fixed(SurfaceId::ModalBody, body));
-    }
-    if let Some(SecondOpinion::Setup {
-        captured,
-        setup,
-        form,
-    }) = chat.second_opinion_mut()
-    {
-        // The preparation owns this pane's interaction, so the chat behind it
-        // stops being selectable while a reviewer is being chosen.
-        let area = crate::modal::centered_modal_rect_fixed(frame, 60, 16, inner);
-        let body = render_setup(
-            frame,
-            area,
-            &format!(
-                "Reviewing a {}-line plan",
-                captured.proposal.lines().count()
-            ),
-            setup,
-            form,
-        );
         chat.frame_surfaces.clear();
         chat.frame_surfaces
             .push(SurfaceFrame::fixed(SurfaceId::ModalBody, body));

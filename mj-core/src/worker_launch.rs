@@ -317,7 +317,7 @@ impl ProjectMemoryMcpDelivery {
     }
 }
 
-/// How to launch the second-opinion reviewer beside a primary session.
+/// How to launch the turn-review reviewer beside a primary session.
 ///
 /// The reviewer shares the primary's target and working directory and nothing
 /// else: its harness home is a fresh copy of the chosen profile, staged under
