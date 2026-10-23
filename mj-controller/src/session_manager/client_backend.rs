@@ -131,10 +131,10 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
 
     fn reviewer(
         &self,
-        role: Option<String>,
+        _role: Option<String>,
         action: ReviewerAction,
     ) -> mj_client::session::BoxFuture<'_, Result<ReviewerOutcome>> {
-        Box::pin(self.0.reviewer_as(role, action))
+        Box::pin(self.0.reviewer(action))
     }
 }
 

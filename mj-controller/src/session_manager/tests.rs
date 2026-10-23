@@ -165,44 +165,6 @@ async fn different_sessions_still_overlap() {
 }
 
 #[tokio::test]
-async fn slow_reviewer_does_not_delay_primary_or_another_role_at_the_bridge() {
-    let mut order = SessionRequestOrder::new();
-    let release = Arc::new(tokio::sync::Notify::new());
-    let (done, mut received) = mpsc::unbounded_channel();
-    let reviewer = |role: &str| RemoteSessionRequest::Reviewer {
-        session_id: "one-session".to_owned(),
-        role: Some(role.to_owned()),
-        action: ReviewerAction::Pause,
-        reply: oneshot::channel().0,
-    };
-    let held = release.clone();
-    order.dispatch(
-        reviewer("slow"),
-        move |_| async move { held.notified().await },
-    );
-    let done_role = done.clone();
-    order.dispatch(reviewer("other"), move |_| async move {
-        done_role.send("other").unwrap();
-    });
-    order.dispatch(
-        ordering_request("one-session", "prompt"),
-        move |_| async move {
-            done.send("primary").unwrap();
-        },
-    );
-    let first = tokio::time::timeout(Duration::from_secs(2), received.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let second = tokio::time::timeout(Duration::from_secs(2), received.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_ne!(first, second);
-    release.notify_one();
-}
-
-#[tokio::test]
 async fn request_queue_refuses_overload_without_blocking_another_session() {
     let mut order = SessionRequestOrder::new();
     let release = Arc::new(tokio::sync::Notify::new());
@@ -1517,7 +1479,7 @@ fn leased_relay_child_serves_stdio() {
                         request_id: request.request_id,
                         protocol_version: request.protocol_version,
                         body: mj_core::relay::RelayResponseBody::Ok {
-                            payload: mj_core::relay::RelayResponsePayload::ReviewerPaused,
+                            payload: mj_core::relay::RelayResponsePayload::ReviewBaselineAdvanced,
                         },
                     }
                 } else {
@@ -1726,72 +1688,6 @@ async fn retirement_ends_a_connect_that_never_answers() {
         error.message.contains("session manager stopped"),
         "unexpected rejection: {error:?}"
     );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn a_blocked_reviewer_keeps_primary_responsive_and_disconnects_on_cancellation() {
-    const CHILD: &str = "MJ_TEST_REVIEWER_CANCELLATION_CHILD";
-    if std::env::var_os(CHILD).is_none() {
-        run_in_isolated_child(
-            CHILD,
-            "a_blocked_reviewer_keeps_primary_responsive_and_disconnects_on_cancellation",
-        );
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    register_leased_relay_session();
-    let directory = tempfile::tempdir().unwrap();
-    let marker = directory.path().join("reviewer-status");
-    let mut target = leased_relay_target(directory.path());
-    target.spec.env.insert(
-        "MJ_TEST_BLOCKED_REVIEWER".into(),
-        marker.to_string_lossy().into_owned(),
-    );
-    let manager = spawn_session_manager().unwrap();
-    manager.targets.send_replace(vec![target]);
-    let session = manager
-        .control
-        .wait_for_session(LEASED_RELAY_SESSION, Duration::from_secs(5))
-        .await
-        .unwrap();
-    session.sync_now().await.unwrap();
-    let slow = session.clone();
-    let blocked = tokio::spawn(async move {
-        slow.reviewer_as(Some("slow".into()), ReviewerAction::Pause)
-            .await
-    });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !marker.exists() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("slow reviewer started");
-    tokio::time::timeout(Duration::from_secs(2), session.sync_now())
-        .await
-        .expect("primary sync must not wait for reviewer")
-        .unwrap();
-    tokio::time::timeout(
-        Duration::from_secs(2),
-        session.reviewer_as(Some("other".into()), ReviewerAction::Pause),
-    )
-    .await
-    .expect("another role must remain responsive")
-    .unwrap();
-    blocked.abort();
-    assert!(blocked.await.unwrap_err().is_cancelled());
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while std::fs::read(&marker).unwrap() != b"disconnected" {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("cancelling the caller must disconnect its in-flight reviewer proxy");
-    tokio::time::timeout(Duration::from_secs(2), manager.shutdown.shutdown())
-        .await
-        .unwrap()
-        .unwrap();
 }
 
 #[cfg(unix)]
