@@ -129,43 +129,309 @@ pub fn capture_repository_deltas(
         .with_context(|| format!("record the capture of {}", root.display()))?;
         let (base, patch, files) = match base {
             Some(base) => {
-                let patch = diff_between_trees(git, root, Some(&base.tree), &tree)
-                    .with_context(|| format!("diff the captured trees of {}", root.display()))?;
-                let numstat = numstat_between_trees(git, root, &base.tree, &tree)
-                    .with_context(|| format!("count the changed lines of {}", root.display()))?;
-                (Some(base), patch, parse_numstat(&numstat))
+                let (patch, files) = capture_diff(git, root, &base.tree, &tree)?;
+                (Some(base), patch, files)
             }
             // Neither baseline is usable. Keep the coverage reset honest: an
             // empty-tree diff would report the restored or pre-existing
             // repository as work from this turn.
             None => (None, String::new(), Vec::new()),
         };
-        let summary = RawDiffSummary::from_patch(&patch);
         let (baseline_tree, merged_in, unattributed) = base
             .map_or((None, Vec::new(), None), |base| {
                 (Some(base.tree), base.merged_in, base.unattributed)
             });
-        deltas.push(RepoDelta {
-            root: root.clone(),
+        deltas.push(build_delta(
+            root,
             baseline_tree,
-            current_tree: current,
-            patch: bound_review_section(&patch, REVIEW_CAPTURE_DIFF_LIMIT, "workspace diff"),
-            diffstat: summary.diffstat(),
-            changed_lines: summary.changed_line_count(),
+            current,
+            patch,
             files,
             merged_in,
             unattributed,
-        });
+        ));
     }
     Ok(deltas)
 }
 
+#[allow(dead_code)] // Runtime callers are added in the next integration step.
+#[derive(Debug)]
+pub struct PushCapture {
+    pub delta: RepoDelta,
+    pub base: PushBase,
+    pub head_commit: String,
+}
+
+#[allow(dead_code)] // Runtime callers are added in the next integration step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushBase {
+    ReviewPoint {
+        commit: String,
+    },
+    MergeBase {
+        default_branch: String,
+        commit: String,
+    },
+    SessionStart {
+        commit: String,
+    },
+}
+
+#[allow(dead_code)] // Runtime callers are added in the next integration step.
+impl PushBase {
+    pub fn commit(&self) -> &str {
+        match self {
+            Self::ReviewPoint { commit }
+            | Self::MergeBase { commit, .. }
+            | Self::SessionStart { commit } => commit,
+        }
+    }
+}
+
+#[allow(dead_code)] // Runtime callers are added in the next integration step.
+#[derive(Debug)]
+pub enum PushCaptureRefusal {
+    DirtyTracked { files: Vec<PathBuf> },
+    NoHead,
+    Git(anyhow::Error),
+}
+
+impl From<anyhow::Error> for PushCaptureRefusal {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Git(error)
+    }
+}
+
+impl std::fmt::Display for PushCaptureRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DirtyTracked { files } => write!(
+                formatter,
+                "commit or stash these tracked changes first: {files:?}"
+            ),
+            Self::NoHead => formatter.write_str("the repository has no HEAD commit"),
+            Self::Git(error) => write!(formatter, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for PushCaptureRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Git(error) => Some(error.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+/// Captures committed work only, using the last reviewed commit within the
+/// branch's current merge-base boundary.
+#[allow(dead_code)] // Runtime callers are added in the next integration step.
+pub fn capture_pushable_commits(
+    runner: &dyn GitCommandRunner,
+    root: &Path,
+    session_start_head: &str,
+) -> std::result::Result<PushCapture, PushCaptureRefusal> {
+    let status = checked_git(
+        runner,
+        root,
+        &["status", "--porcelain", "--untracked-files=no", "-z"],
+    )?;
+    let mut entries = status.split(|byte| *byte == 0);
+    let mut files = Vec::new();
+    while let Some(entry) = entries.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        files.push(PathBuf::from(
+            String::from_utf8_lossy(&entry[3..]).into_owned(),
+        ));
+        if entry[..2].iter().any(|byte| matches!(byte, b'R' | b'C')) {
+            entries.next();
+        }
+    }
+    if !files.is_empty() {
+        return Err(PushCaptureRefusal::DirtyTracked { files });
+    }
+    let head = resolve_head(runner, root)?.ok_or(PushCaptureRefusal::NoHead)?;
+    let mut base = PushBase::SessionStart {
+        commit: session_start_head.to_owned(),
+    };
+    if let Some(default_branch) = default_branch(runner, root)? {
+        let mb = checked_git_text(runner, root, &["merge-base", &head, &default_branch])?;
+        if mb != head {
+            base = PushBase::MergeBase {
+                default_branch,
+                commit: mb,
+            };
+        }
+    }
+    let refs = checked_git_text(
+        runner,
+        root,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(objectname)",
+            "refs/mj/reviewed/",
+        ],
+    )?;
+    for commit in refs.lines() {
+        if is_ancestor(runner, root, commit, &head)?
+            && is_ancestor(runner, root, base.commit(), commit)?
+        {
+            base = PushBase::ReviewPoint {
+                commit: commit.to_owned(),
+            };
+            break;
+        }
+    }
+    let baseline = checked_git_text(
+        runner,
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("{}^{{tree}}", base.commit()),
+        ],
+    )?;
+    let current = checked_git_text(
+        runner,
+        root,
+        &["rev-parse", "--verify", &format!("{head}^{{tree}}")],
+    )?;
+    let (patch, files) = capture_diff(runner, root, &baseline, &current)?;
+    let delta = build_delta(
+        root,
+        Some(baseline),
+        current,
+        patch,
+        files,
+        Vec::new(),
+        None,
+    );
+    Ok(PushCapture {
+        delta,
+        base,
+        head_commit: head,
+    })
+}
+
+fn default_branch(runner: &dyn GitCommandRunner, root: &Path) -> Result<Option<String>> {
+    let remote = run(
+        runner,
+        root,
+        &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"],
+    )?;
+    match remote.status {
+        0 => return Ok(Some(String::from_utf8(remote.stdout)?.trim().to_owned())),
+        1 => {}
+        _ => anyhow::bail!(
+            "read origin's default branch: {}",
+            String::from_utf8_lossy(&remote.stderr)
+        ),
+    }
+    for branch in ["refs/heads/main", "refs/heads/master"] {
+        if resolve_commit(runner, root, branch)?.is_some() {
+            return Ok(Some(branch.to_owned()));
+        }
+    }
+    Ok(None)
+}
+
+fn is_ancestor(
+    runner: &dyn GitCommandRunner,
+    root: &Path,
+    older: &str,
+    newer: &str,
+) -> Result<bool> {
+    let output = run(runner, root, &["merge-base", "--is-ancestor", older, newer])?;
+    match output.status {
+        0 => Ok(true),
+        1 => Ok(false),
+        _ => anyhow::bail!(
+            "check review ancestry: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    }
+}
+
+pub(super) fn checked_git(
+    runner: &dyn GitCommandRunner,
+    root: &Path,
+    args: &[&str],
+) -> Result<Vec<u8>> {
+    let output = run(runner, root, args)?;
+    anyhow::ensure!(
+        output.status == 0,
+        "git {}: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(output.stdout)
+}
+
+fn checked_git_text(runner: &dyn GitCommandRunner, root: &Path, args: &[&str]) -> Result<String> {
+    Ok(String::from_utf8(checked_git(runner, root, args)?)?
+        .trim()
+        .to_owned())
+}
+
+fn capture_diff(
+    runner: &dyn GitCommandRunner,
+    root: &Path,
+    baseline: &str,
+    current: &str,
+) -> Result<(String, Vec<FileLineChange>)> {
+    let patch = diff_between_trees(runner, root, Some(baseline), current)
+        .with_context(|| format!("diff the captured trees of {}", root.display()))?;
+    let numstat = numstat_between_trees(runner, root, baseline, current)
+        .with_context(|| format!("count the changed lines of {}", root.display()))?;
+    Ok((patch, parse_numstat(&numstat)))
+}
+
+fn build_delta(
+    root: &Path,
+    baseline_tree: Option<String>,
+    current_tree: String,
+    patch: String,
+    files: Vec<FileLineChange>,
+    merged_in: Vec<String>,
+    unattributed: Option<String>,
+) -> RepoDelta {
+    let summary = RawDiffSummary::from_patch(&patch);
+    RepoDelta {
+        root: root.to_path_buf(),
+        baseline_tree,
+        current_tree,
+        patch: bound_review_section(&patch, REVIEW_CAPTURE_DIFF_LIMIT, "workspace diff"),
+        diffstat: summary.diffstat(),
+        changed_lines: summary.changed_line_count(),
+        files,
+        merged_in,
+        unattributed,
+    }
+}
+
 /// The commit HEAD names, or `None` on an unborn branch.
 fn resolve_head(git: &dyn GitCommandRunner, repository: &Path) -> Result<Option<String>> {
+    resolve_commit(git, repository, "HEAD")
+}
+
+fn resolve_commit(
+    git: &dyn GitCommandRunner,
+    repository: &Path,
+    reference: &str,
+) -> Result<Option<String>> {
     let output = run(
         git,
         repository,
-        &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{reference}^{{commit}}"),
+        ],
     )?;
     match output.status {
         0 => Ok(Some(
@@ -173,7 +439,7 @@ fn resolve_head(git: &dyn GitCommandRunner, repository: &Path) -> Result<Option<
         )),
         1 => Ok(None),
         status => anyhow::bail!(
-            "resolving HEAD of {} failed with status {status}: {}",
+            "resolving {reference} of {} failed with status {status}: {}",
             repository.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         ),
@@ -262,6 +528,50 @@ fn parse_numstat(output: &[u8]) -> Vec<FileLineChange> {
     files
 }
 
+fn session_start_ref(runner: &dyn GitCommandRunner, root: &Path, session: &str) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let baseline = review_baseline_ref(runner, root)?;
+    Ok(format!(
+        "refs/mj/session-start/{}/{}",
+        mj_core::hex::lower_hex(Sha256::digest(session.as_bytes())),
+        mj_core::hex::lower_hex(Sha256::digest(baseline.as_bytes())),
+    ))
+}
+
+/// Reads the immutable start commit, if this checkout has recorded one.
+/// Legacy checkouts and moves that omit private refs return `None`.
+pub fn session_start_head(
+    runner: &dyn GitCommandRunner,
+    root: &Path,
+    session: &str,
+) -> Result<Option<String>> {
+    resolve_commit(runner, root, &session_start_ref(runner, root, session)?)
+}
+
+/// Preserves a recorded start, or starts coverage at the current HEAD when
+/// an older session or a restored checkout has no start ref.
+pub fn ensure_session_start_head(
+    runner: &dyn GitCommandRunner,
+    root: &Path,
+    session: &str,
+) -> Result<Option<String>> {
+    if let Some(head) = session_start_head(runner, root, session)? {
+        return Ok(Some(head));
+    }
+    let Some(head) = resolve_head(runner, root)? else {
+        return Ok(None);
+    };
+    let reference = session_start_ref(runner, root, session)?;
+    // An empty old value creates the ref only if it does not exist.
+    if let Err(error) = checked_git(runner, root, &["update-ref", &reference, &head, ""]) {
+        // A concurrent initializer may have published the start first.
+        return session_start_head(runner, root, session)?
+            .map(Some)
+            .ok_or(error);
+    }
+    Ok(Some(head))
+}
+
 /// Pins the current worktree as `session`'s baseline for a fresh worker
 /// workspace.
 ///
@@ -303,6 +613,7 @@ pub fn initialize_review_baselines(
                 "could not remove review pins of removed worktrees"
             );
         }
+        ensure_session_start_head(git, root, session)?;
         let reference = review_baseline_ref(git, root)?;
         if pinned_baseline(git, root, &reference)
             .is_some_and(|(_, point)| point.session.as_deref() == Some(session))
@@ -1831,5 +2142,333 @@ impl GitCommandRunner for BoundedGit {
             stdout: output.stdout,
             stderr: output.stderr,
         })
+    }
+}
+
+#[cfg(test)]
+pub(super) mod push_tests {
+    use super::*;
+    use crate::test_support::git;
+    use mj_checkpoint::archive::{SystemGit, record_reviewed_tree};
+
+    pub(in crate::review) fn repository() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().unwrap();
+        let origin = temp.path().join("origin.git");
+        let root = temp.path().join("checkout");
+        std::fs::create_dir(&origin).unwrap();
+        git(&origin, &["init", "--bare", "-q", "-b", "main"]);
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                root.to_str().unwrap(),
+            ],
+        );
+        git(&root, &["config", "user.name", "Review Test"]);
+        git(&root, &["config", "user.email", "review@example.test"]);
+        commit(&root, "base");
+        git(&root, &["push", "-q", "origin", "main"]);
+        git(&root, &["remote", "set-head", "origin", "main"]);
+        temp
+    }
+
+    pub(in crate::review) fn commit(root: &Path, text: &str) -> String {
+        std::fs::write(root.join("tracked.txt"), format!("{text}\n")).unwrap();
+        git(root, &["add", "tracked.txt"]);
+        git(root, &["commit", "-qm", text]);
+        git(root, &["rev-parse", "HEAD"])
+    }
+
+    fn capture(root: &Path, start: &str) -> PushCapture {
+        capture_pushable_commits(&SystemGit, root, start).unwrap()
+    }
+
+    #[test]
+    fn push_capture_refuses_dirty_tracked_paths_and_ignores_untracked() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let head = git(&root, &["rev-parse", "HEAD"]);
+        std::fs::write(root.join("untracked"), "ignored").unwrap();
+        assert!(capture(&root, &head).delta.patch.is_empty());
+        git(&root, &["mv", "tracked.txt", "renamed with spaces.txt"]);
+        assert!(matches!(capture_pushable_commits(&SystemGit, &root, &head),
+            Err(PushCaptureRefusal::DirtyTracked { files }) if files == [PathBuf::from("renamed with spaces.txt")]));
+    }
+
+    #[test]
+    fn push_capture_uses_origin_default_merge_base_and_shared_diff_summary() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let base = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["checkout", "-qb", "feature"]);
+        let head = commit(&root, "feature");
+        let capture = capture(&root, &head);
+        assert_eq!(
+            capture.base,
+            PushBase::MergeBase {
+                default_branch: "refs/remotes/origin/main".into(),
+                commit: base.clone()
+            }
+        );
+        assert_eq!(capture.head_commit, head);
+        assert_eq!(
+            capture.delta.baseline_tree,
+            Some(git(&root, &["rev-parse", &format!("{base}^{{tree}}")]))
+        );
+        assert!(capture.delta.patch.contains("+feature"));
+        assert_eq!(capture.delta.changed_lines, 2);
+        assert_eq!(capture.delta.files[0].path, "tracked.txt");
+    }
+
+    #[test]
+    fn push_capture_uses_reviewed_descendant_and_handles_head_as_base() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["checkout", "-qb", "feature"]);
+        let reviewed = commit(&root, "reviewed");
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_reviewed_tree(&SystemGit, &root, &tree, &reviewed).unwrap();
+        assert_eq!(
+            git(&root, &["rev-parse", &format!("refs/mj/reviewed/{tree}")]),
+            reviewed
+        );
+        let empty = capture(&root, &start);
+        assert_eq!(
+            empty.base,
+            PushBase::ReviewPoint {
+                commit: reviewed.clone()
+            }
+        );
+        assert!(empty.delta.patch.is_empty());
+        assert!(empty.delta.files.is_empty());
+        assert_eq!(empty.delta.changed_lines, 0);
+        commit(&root, "later");
+        assert_eq!(capture(&root, &start).base.commit(), reviewed);
+    }
+
+    #[test]
+    fn push_capture_orders_reviewed_ancestors_by_committer_date() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["checkout", "-qb", "feature"]);
+        commit(&root, "reviewed with later clock");
+        let amended = SystemGit
+            .run(
+                &root,
+                &GitCommand {
+                    arguments: ["commit", "--amend", "--no-edit", "-q"]
+                        .map(Into::into)
+                        .to_vec(),
+                    stdin: Vec::new(),
+                    env: vec![("GIT_COMMITTER_DATE".into(), "2030-01-01T00:00:00Z".into())],
+                },
+            )
+            .unwrap();
+        assert_eq!(amended.status, 0);
+        let newer_date = git(&root, &["rev-parse", "HEAD"]);
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_reviewed_tree(&SystemGit, &root, &tree, &newer_date).unwrap();
+        let later = commit(&root, "reviewed with earlier clock");
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_reviewed_tree(&SystemGit, &root, &tree, &later).unwrap();
+        assert_eq!(capture(&root, &start).base.commit(), newer_date);
+        git(&root, &["checkout", "-qb", "sibling", &start]);
+        let sibling = commit(&root, "not an ancestor");
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_reviewed_tree(&SystemGit, &root, &tree, &sibling).unwrap();
+        git(&root, &["checkout", "-q", "feature"]);
+        assert_eq!(capture(&root, &start).base.commit(), newer_date);
+    }
+
+    #[test]
+    fn push_capture_ignores_reviewed_history_before_current_merge_base() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let old = git(&root, &["rev-parse", "HEAD"]);
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_reviewed_tree(&SystemGit, &root, &tree, &old).unwrap();
+        git(&root, &["checkout", "-qb", "feature"]);
+        commit(&root, "feature before rebase");
+        git(&root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("default-only"), "advance default\n").unwrap();
+        git(&root, &["add", "default-only"]);
+        git(&root, &["commit", "-qm", "advance default"]);
+        let mb = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        git(&root, &["checkout", "-q", "feature"]);
+        git(&root, &["rebase", "main"]);
+        assert_eq!(capture(&root, &old).base.commit(), mb);
+    }
+
+    #[test]
+    fn push_capture_on_default_branch_uses_session_start() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        commit(&root, "later");
+        git(&root, &["push", "-q", "origin", "main"]);
+        assert_eq!(
+            capture(&root, &start).base,
+            PushBase::SessionStart { commit: start }
+        );
+    }
+
+    #[test]
+    fn push_capture_without_default_branch_uses_session_start() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["remote", "remove", "origin"]);
+        git(&root, &["branch", "-m", "topic"]);
+        commit(&root, "later");
+        assert_eq!(
+            capture(&root, &start).base,
+            PushBase::SessionStart { commit: start }
+        );
+    }
+
+    #[test]
+    fn push_capture_without_origin_head_uses_local_main() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        git(
+            &root,
+            &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+        );
+        git(&root, &["checkout", "-qb", "feature"]);
+        let head = commit(&root, "later");
+        assert_eq!(
+            capture(&root, &head).base,
+            PushBase::MergeBase {
+                default_branch: "refs/heads/main".into(),
+                commit: start
+            }
+        );
+    }
+
+    #[test]
+    fn session_start_pin_survives_baseline_advancement_restart_and_missing_baseline() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let roots = std::slice::from_ref(&root);
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            session_start_head(&SystemGit, &root, "session").unwrap(),
+            None
+        );
+        initialize_review_baselines(&SystemGit, roots, "session").unwrap();
+        commit(&root, "later");
+        assert_eq!(
+            ensure_session_start_head(&SystemGit, &root, "session").unwrap(),
+            Some(start.clone())
+        );
+        let deltas = capture_repository_deltas(
+            &SystemGit,
+            roots,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            "session",
+        )
+        .unwrap();
+        advance_baselines(&SystemGit, &mj_review::delta::captured_trees(&deltas)).unwrap();
+        initialize_review_baselines(&SystemGit, roots, "session").unwrap();
+        assert_eq!(
+            session_start_head(&SystemGit, &root, "session").unwrap(),
+            Some(start.clone())
+        );
+        git(
+            &root,
+            &[
+                "update-ref",
+                "-d",
+                &review_baseline_ref(&SystemGit, &root).unwrap(),
+            ],
+        );
+        initialize_review_baselines(&SystemGit, roots, "session").unwrap();
+        assert_eq!(
+            session_start_head(&SystemGit, &root, "session").unwrap(),
+            Some(start)
+        );
+        let moved = temp.path().join("moved");
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "-q",
+                root.to_str().unwrap(),
+                moved.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            session_start_head(&SystemGit, &moved, "session").unwrap(),
+            None
+        );
+        let moved_head = git(&moved, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            ensure_session_start_head(&SystemGit, &moved, "session").unwrap(),
+            Some(moved_head.clone())
+        );
+        initialize_review_baselines(&SystemGit, std::slice::from_ref(&moved), "session").unwrap();
+        assert_eq!(
+            ensure_session_start_head(&SystemGit, &moved, "session").unwrap(),
+            Some(moved_head)
+        );
+        let linked = temp.path().join("linked");
+        git(
+            &root,
+            &["worktree", "add", "-qb", "linked", linked.to_str().unwrap()],
+        );
+        let linked_head = git(&linked, &["rev-parse", "HEAD"]);
+        initialize_review_baselines(&SystemGit, std::slice::from_ref(&linked), "session").unwrap();
+        assert_eq!(
+            session_start_head(&SystemGit, &linked, "session").unwrap(),
+            Some(linked_head)
+        );
+        assert_ne!(
+            session_start_head(&SystemGit, &root, "session").unwrap(),
+            session_start_head(&SystemGit, &linked, "session").unwrap()
+        );
+        // An old advancing baseline cannot reveal its original start commit.
+        git(
+            &root,
+            &[
+                "update-ref",
+                "-d",
+                &session_start_ref(&SystemGit, &root, "session").unwrap(),
+            ],
+        );
+        let restored_head = git(&root, &["rev-parse", "HEAD"]);
+        initialize_review_baselines(&SystemGit, roots, "session").unwrap();
+        assert_eq!(
+            ensure_session_start_head(&SystemGit, &root, "session").unwrap(),
+            Some(restored_head)
+        );
+    }
+    #[test]
+    fn ensuring_session_start_waits_for_an_unborn_head_to_be_committed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.name", "Review Test"]);
+        git(root, &["config", "user.email", "review@example.test"]);
+        assert_eq!(
+            ensure_session_start_head(&SystemGit, root, "session").unwrap(),
+            None
+        );
+        let head = commit(root, "first commit");
+        assert_eq!(
+            ensure_session_start_head(&SystemGit, root, "session").unwrap(),
+            Some(head.clone())
+        );
+        commit(root, "later commit");
+        assert_eq!(
+            ensure_session_start_head(&SystemGit, root, "session").unwrap(),
+            Some(head)
+        );
     }
 }

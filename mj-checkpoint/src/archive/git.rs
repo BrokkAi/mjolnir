@@ -1321,6 +1321,21 @@ pub fn pin_review_tree(
     .map(|_| ())
 }
 
+/// Records a clean review of `tree` at `commit`.
+pub fn record_reviewed_tree(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    tree: &str,
+    commit: &str,
+) -> Result<()> {
+    pin_review_tree(
+        runner,
+        repository,
+        &format!("refs/mj/reviewed/{tree}"),
+        commit,
+    )
+}
+
 /// The empty tree of this repository's object format, read from Git rather
 /// than hardcoded so a SHA-256 repository works as well as a SHA-1 one.
 pub fn empty_tree_id(runner: &dyn GitCommandRunner, repository: &Path) -> Result<String> {
@@ -2777,4 +2792,57 @@ fn push_remote(
         return Ok("origin".to_owned());
     }
     Err(PushBranchError::NoRemote)
+}
+
+#[cfg(test)]
+mod review_record_tests {
+    use super::*;
+
+    #[test]
+    fn reviewed_tree_ref_points_to_the_reviewed_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        git_bytes(
+            &SystemGit,
+            root,
+            ["init", "-q"],
+            &[],
+            "initialize repository",
+        )
+        .unwrap();
+        let tree = empty_tree_id(&SystemGit, root).unwrap();
+        let commit = SystemGit
+            .run(
+                root,
+                &GitCommand {
+                    arguments: vec![
+                        "commit-tree".into(),
+                        tree.clone().into(),
+                        "-m".into(),
+                        "reviewed".into(),
+                    ],
+                    stdin: Vec::new(),
+                    env: [
+                        "GIT_AUTHOR_NAME",
+                        "GIT_AUTHOR_EMAIL",
+                        "GIT_COMMITTER_NAME",
+                        "GIT_COMMITTER_EMAIL",
+                    ]
+                    .into_iter()
+                    .map(|key| (key.into(), "review@example.test".into()))
+                    .collect(),
+                },
+            )
+            .unwrap();
+        assert_eq!(commit.status, 0);
+        let commit = String::from_utf8(commit.stdout).unwrap().trim().to_owned();
+        record_reviewed_tree(&SystemGit, root, &tree, &commit).unwrap();
+        let recorded = git_text(
+            &SystemGit,
+            root,
+            ["rev-parse", "--verify", &format!("refs/mj/reviewed/{tree}")],
+        )
+        .unwrap();
+        assert_eq!(recorded, commit);
+    }
 }
