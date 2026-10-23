@@ -213,7 +213,7 @@ pub(crate) async fn resolve(
         }
     }
     if reasons.is_empty() {
-        reasons.push("configure an enabled Codex, Claude, DeepSeek, or Kimi profile, or select a reviewer manually in Settings".into());
+        reasons.push("Auto chooses only Codex, Claude, Kimi, or DeepSeek-through-Codex profiles; enable one, or select another profile, such as DSH, as the reviewer in Settings".into());
     }
     bail!("No usable Auto reviewer: {}", reasons.join("; "))
 }

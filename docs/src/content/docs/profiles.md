@@ -498,9 +498,13 @@ receives `AGENTS.md` in one environment variable, so it can be at most 131049
 bytes; a session with a larger one refuses to start and says so. With no login
 to create it, create the home directory yourself; `mj doctor` reports it
 missing until you do. DSH reads no
-instruction file itself, so Mjolnir passes the staged `AGENTS.md`, including
-its own session guidance, as dsh-acp's system prompt through
-`DSH_ACP_SYSTEM_PROMPT` on every launch.
+instruction file itself, so Mjolnir passes the staged `AGENTS.md` as dsh-acp's
+system prompt through `DSH_ACP_SYSTEM_PROMPT` on every launch. The staged file
+is the profile's own `AGENTS.md` plus any guidance Mjolnir adds for the
+session: a disposable-environment note on container and EC2 targets, container
+storage notes, and sub-agent instructions when sub-agent delegation applies. On
+a bare local or SSH target with none of these, it is the profile's file
+unchanged.
 
 DSH authenticates with an API key in `DEEPSEEK_API_KEY`. As with a
 [Codex custom provider](#codex-with-a-custom-provider), Mjolnir takes the key

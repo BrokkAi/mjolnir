@@ -623,7 +623,7 @@ string travels with it. Keep credentials out of it by writing a reference
 instead of a value in any `environment` table:
 
 ```toml
-[profiles.deepseek.environment]
+[profiles.dsh.environment]
 DEEPSEEK_API_KEY = { from_secret = "DEEPSEEK_API_KEY" }
 GITHUB_TOKEN = { from_env = "GITHUB_TOKEN" }
 ```
