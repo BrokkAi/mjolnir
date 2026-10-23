@@ -164,3 +164,126 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 action: CreateSession { create_managed_worktree: Some(false), subagents: Some(None), review: None, workspace_id: "default", profile_id: "codex-1", bundle_id: "hel", project_directory: None, target_template_id: "podman", additional_mounts: [], resource_allocation: None }
+=== DSH, remembered Native, configured=true ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ≡ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________││                                                                                            │
+│hel ────────────────────────────────────────││                                                                                            │
+│› ■ ACP pretty name                                                                                                                       │
+│  Stopped  podman  codex-                                                                                                                 │
+│  │ No messages yet        ╭ × New session · 4/4 review ──────────────────────────────────────────────────────╮                           │
+│  │                        │                                                                                  │                           │
+│                           │ Profile: codex-1                                                                 │                           │
+│                           │ Project: hel                                                                     │                           │
+│                           │ Target: podman (local Podman)                                                    │                           │
+│                           │ Compute: fixed/default resources                                                 │                           │
+│                           │                                                                                  │                           │
+│                           │ Attached directories: 0                                                          │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │ Delegation None ▾                                                                │                           │
+│                           │            ╭ Values ─╮                                                           │                           │
+│                           │            │Mjolnir  │                                                           │                           │
+│                           │            │None     │                                                           │                           │
+│                           │            ╰─────────╯                                                           │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │  ─────────────────────────╯
+│                           │                                                                                  │  ─────────────────────────╮
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │  ─────────────────────────╯
+│                           │   Cancel     Back     Add directory…     Create                                  │  ────────────────── ▁   ▄ ╮
+│                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
+│                                                                                                                 ─────────────────────────╯
+│                                                                                                                 ────────────────── ▁   ▄ ╮
+│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
+│                                            ││  claude-1  Claude Code  refreshing…                                                        │
+│                                            ││  codex-1   DSH          refreshing…                                                        │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== DSH, remembered Mjolnir { straightforward: None, subtle: None }, configured=true ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ≡ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________││                                                                                            │
+│hel ────────────────────────────────────────││                                                                                            │
+│› ■ ACP pretty name                                                                                                                       │
+│  Stopped  podman  codex-                                                                                                                 │
+│  │ No messages yet        ╭ × New session · 4/4 review ──────────────────────────────────────────────────────╮                           │
+│  │                        │                                                                                  │                           │
+│                           │ Profile: codex-1                                                                 │                           │
+│                           │ Project: hel                                                                     │                           │
+│                           │ Target: podman (local Podman)                                                    │                           │
+│                           │ Compute: fixed/default resources                                                 │                           │
+│                           │                                                                                  │                           │
+│                           │ Attached directories: 0                                                          │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │ Delegation Mjolnir ▾                                                             │                           │
+│                           │            ╭ Values ─╮                                                           │                           │
+│                           │            │Mjolnir  │                                                           │                           │
+│                           │            │None     │                                                           │                           │
+│                           │            ╰─────────╯                                                           │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │  ─────────────────────────╯
+│                           │                                                                                  │  ─────────────────────────╮
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │  ─────────────────────────╯
+│                           │   Cancel     Back     Add directory…     Create                                  │  ────────────────── ▁   ▄ ╮
+│                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
+│                                                                                                                 ─────────────────────────╯
+│                                                                                                                 ────────────────── ▁   ▄ ╮
+│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
+│                                            ││  claude-1  Claude Code  refreshing…                                                        │
+│                                            ││  codex-1   DSH          refreshing…                                                        │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== DSH, remembered Mjolnir { straightforward: None, subtle: None }, configured=false ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ≡ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________││                                                                                            │
+│hel ────────────────────────────────────────││                                                                                            │
+│› ■ ACP pretty name                                                                                                                       │
+│  Stopped  podman  codex-                                                                                                                 │
+│  │ No messages yet        ╭ × New session · 4/4 review ──────────────────────────────────────────────────────╮                           │
+│  │                        │                                                                                  │                           │
+│                           │ Profile: codex-1                                                                 │                           │
+│                           │ Project: hel                                                                     │                           │
+│                           │ Target: podman (local Podman)                                                    │                           │
+│                           │ Compute: fixed/default resources                                                 │                           │
+│                           │                                                                                  │                           │
+│                           │ Attached directories: 0                                                          │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │ Delegation None ▾                                                                │                           │
+│                           │ Set up Mjol╭ Values ─╮nts in Settings -> Sub-agents                              │                           │
+│                           │            │Mjolnir  │                                                           │                           │
+│                           │            │None     │                                                           │                           │
+│                           │            ╰─────────╯                                                           │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │  ─────────────────────────╯
+│                           │                                                                                  │  ─────────────────────────╮
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │  ─────────────────────────╯
+│                           │   Cancel     Back     Add directory…     Create                                  │  ────────────────── ▁   ▄ ╮
+│                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
+│                                                                                                                 ─────────────────────────╯
+│                                                                                                                 ────────────────── ▁   ▄ ╮
+│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
+│                                            ││  claude-1  Claude Code  refreshing…                                                        │
+│                                            ││  codex-1   DSH          refreshing…                                                        │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys

@@ -242,11 +242,12 @@ impl RuntimeState {
         let supplied = request.subagents.clone();
         let (config, policy) = blocking(move || {
             let controller = Controller::load()?;
-            let _profile = controller
+            let profile = controller
                 .config
                 .enabled_profile(&parent)
                 .context("parent profile unavailable")?;
-            let policy = supplied.unwrap_or_default();
+            let policy = supplied
+                .unwrap_or_else(|| mj_core::subagent::SubagentPolicy::default_for(profile.kind));
             Ok((controller.config, policy))
         })
         .await?;

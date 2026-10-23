@@ -1740,6 +1740,20 @@ function subagentChoiceApplies(draft = newDraft) {
   return kind === 'claude' || kind === 'codex' || kind === 'dsh';
 }
 
+// Mirrors HarnessKind::has_native_subagents. DSH has none, so Native would
+// do nothing there and is not offered.
+function subagentNativeOffered(draft = newDraft) {
+  const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
+  return kind !== 'dsh';
+}
+
+// A policy as the delegation choice shows and submits it for the draft's
+// profile (SubagentPolicy::as_choice_for): Native reads as None where the
+// harness has no sub-agents of its own.
+function shownDelegation(draft, policy) {
+  return policy?.mode === 'native' && !subagentNativeOffered(draft) ? { mode: 'none' } : policy;
+}
+
 const SUBAGENT_MODES = [['native', 'Native'], ['mjolnir', 'Mjolnir'], ['none', 'None']];
 const SUBAGENT_SETUP_REASON = "Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents";
 
@@ -1775,7 +1789,9 @@ function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}
   const select = el('select');
   select.id = `${prefix}-subagents`;
   const available = mjolnirAvailable(draft);
+  const shown = shownDelegation(draft, draft.subagents);
   for (const [value, title] of SUBAGENT_MODES) {
+    if (value === 'native' && !subagentNativeOffered(draft)) continue;
     const overrides = value === 'mjolnir' ? ['straightforward', 'subtle'].flatMap((type) => {
       const choice = draft.subagents?.[type];
       return choice ? [`${type}: ${choice.model}${choice.effort ? `, ${choice.effort}` : ''}`] : [];
@@ -1786,10 +1802,10 @@ function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}
     option.disabled = value === 'mjolnir' && !available;
     select.append(option);
   }
-  select.value = draft.subagents.mode;
+  select.value = shown.mode;
   select.disabled = draft.queueLocked === true;
   select.onchange = () => {
-    if (select.value !== draft.subagents.mode) {
+    if (select.value !== shown.mode) {
       draft.subagents = select.value === 'mjolnir' && draft.storedSubagents?.mode === 'mjolnir'
         ? { ...draft.storedSubagents } : { mode: select.value };
     }
@@ -2833,7 +2849,7 @@ async function commitNew() {
     target_id: newDraft.targetId,
     project_directory: bare ? newDraft.projectDirectory : null,
     create_managed_worktree: bare && draft.worktreeOptions?.available === true && draft.createManagedWorktree,
-    subagents: draft.subagents,
+    subagents: shownDelegation(draft, draft.subagents),
     no_github_events: false,
   };
   if (!bare) body.additional_mounts = mountEditorWire(draft.mountEditors[draft.targetId]);
@@ -3817,7 +3833,9 @@ function freshMoveDraft(session) {
 /// The delegation policy a Move prepare request carries: null keeps the
 /// session's own.
 function moveSubagentChange(draft) {
-  return JSON.stringify(draft.subagents) === JSON.stringify(draft.storedSubagents) ? null : draft.subagents;
+  // A stored Native that the destination shows as None is untouched.
+  const shown = shownDelegation(draft, draft.subagents);
+  return JSON.stringify(shown) === JSON.stringify(shownDelegation(draft, draft.storedSubagents)) ? null : shown;
 }
 
 /// Working children the prepared Move stops; an in-place Move that keeps

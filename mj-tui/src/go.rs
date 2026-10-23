@@ -173,6 +173,15 @@ impl DashboardState {
     }
 
     pub fn go_launch_action(&mut self, workspace_id: String, recipe: GoRecipe) -> DashboardAction {
+        // A recipe saved before DSH stopped offering Native, or one without a
+        // policy, reads as the choice this profile's harness offers.
+        let subagents = match self.config.profiles.get(&recipe.profile_id) {
+            Some(profile) => recipe
+                .subagents
+                .unwrap_or_else(|| mj_core::subagent::SubagentPolicy::default_for(profile.kind))
+                .as_choice_for(profile.kind),
+            None => recipe.subagents.unwrap_or_default(),
+        };
         DashboardAction::CreateSession {
             workspace_id,
             profile_id: recipe.profile_id,
@@ -188,7 +197,7 @@ impl DashboardState {
             }),
             project_directory: recipe.project_directory,
             create_managed_worktree: recipe.create_managed_worktree,
-            subagents: Some(recipe.subagents.unwrap_or_default()),
+            subagents: Some(subagents),
             review: self
                 .simple_mode
                 .then_some(mj_core::config::SessionReview::Off),

@@ -494,8 +494,10 @@ command-line tool must match the version Mjolnir links.
 ## Sub-agents `[subagents]`
 
 A Claude, Codex, or DSH session can use Mjolnir's `spawn` tool. Create and Move offer
-Native or Mjolnir. Native uses the harness's own delegation; DSH has none, so
-Native gives a DSH session no delegation. Mjolnir needs a
+Native or Mjolnir. Native uses the harness's own delegation. DSH has none, so
+for a DSH profile they offer Mjolnir or None, starting on Mjolnir only when the
+last choice was Mjolnir and it is configured; a DSH session's None does not
+change the remembered choice that Claude and Codex sessions start from. Mjolnir needs a
 straightforward choice, configured in Settings → Sub-agents or config.toml, or a
 session override. The subtle choice is optional, but cannot be configured without
 straightforward:
@@ -533,7 +535,7 @@ choice. The parent is told to delegate straightforward work and to do work
 that needs judgment itself. Mjolnir chooses the eligible profile offering that task type's
 model and effort with the most quota. The agent cannot override the selection.
 Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to
-Native; `mj move --subagents native|mjolnir|none` retains the recorded policy when
+Native, or to None for DSH, which refuses `native`; `mj move --subagents native|mjolnir|none` retains the recorded policy when
 omitted, including any session override. `--subagent-straightforward M` and `--subagent-subtle M` independently override
 their matching task type and imply Mjolnir. An unspecified type uses its global
 choice, so one override can be combined with one global choice. Each model and

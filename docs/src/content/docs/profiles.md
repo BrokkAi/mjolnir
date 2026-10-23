@@ -22,7 +22,11 @@ needs judgment themselves.
 
 **Create** and **Move…** offer **Native** or **Mjolnir** delegation. Mjolnir
 requires a Claude, Codex, or DSH profile and a configured Straightforward task.
-DSH has no sub-agents of its own, so Native gives a DSH session no delegation.
+DSH has no sub-agents of its own, so for a DSH profile they offer **Mjolnir** or
+**None** instead. A DSH session starts on Mjolnir when the last choice was
+Mjolnir and Straightforward is configured, and on None otherwise. Its choice
+becomes the remembered one only when it is Mjolnir, so choosing None for DSH
+does not change what the next Claude or Codex session starts with.
 Existing sessions keep their recorded policy; leaving Move's choice unchanged
 retains it.
 
@@ -494,7 +498,7 @@ For DSH, configure `kind = "dsh"`, for example with
 `home = "/home/me/.dsh"`. Detection accepts DeepSeek's own `dsh` CLI, its
 `~/.dsh` home, or `DEEPSEEK_API_KEY` in the environment Mjolnir started with,
 so a key alone is enough to be offered a profile. DSH runs BrokkAi's
-[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.2.1, a DeepSeek coding agent
+[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.2.2, a DeepSeek coding agent
 that speaks ACP itself, so there is no separate bridge. It is not the DeepSeek
 harness earlier releases offered as `kind = "deepseek"`; that kind still fails
 to load. The home is a `DSH_ACP_DATA_DIR` root. It holds an optional
@@ -880,7 +884,7 @@ MiMo Code installs from the pinned `@mimo-ai/cli` npm package. Its managed
 launch disables automatic updates so a running session never replaces its own
 binary.
 DSH is never installed. A launch resolves the target's own `dsh-acp` on
-`PATH`, or fetches the pinned `@brokkai/dsh-acp@0.2.1` package through `npx`,
+`PATH`, or fetches the pinned `@brokkai/dsh-acp@0.2.2` package through `npx`,
 so a bare target needs Node.js 22 or newer with npm and npx; the npm package
 bundles the release binaries. Linux and macOS, on x86-64 and ARM64, are
 supported. Linux needs glibc 2.34 or newer, so musl distributions such as
@@ -991,8 +995,9 @@ handoffs; see
   SessionWiki search do not support DSH yet. A DSH session can use Mjolnir's
   sub-agents, and a DSH profile can run them: it reads the delegation policy
   from its staged `AGENTS.md` and receives the `mj-agents` tools over ACP.
-  dsh-acp has no sub-agents of its own, so Native gives a DSH session no
-  delegation, the same as None. It serves DeepSeek-family
+  dsh-acp has no sub-agents of its own, so DSH offers Mjolnir and None but
+  not Native. A DSH session stored with Native keeps working and behaves as
+  None. It serves DeepSeek-family
   utility inference with its flash model only when its base URL is DeepSeek's
   own `api.deepseek.com` and its key is set.
 - A custom bridge must speak the ACP version and features Mjolnir expects.

@@ -1057,7 +1057,7 @@ pub(crate) fn render_review_wizard(
                 .into_iter()
                 .enumerate()
                 .map(|(index, value)| {
-                    if index == 1 && wizard.unavailable_reason().is_some() {
+                    if wizard.is_mjolnir_index(index) && wizard.unavailable_reason().is_some() {
                         Line::styled(value, theme::muted())
                     } else {
                         Line::raw(value)

@@ -181,7 +181,7 @@ impl DashboardState {
                         .and_then(|session| session.subagents.clone())
                         .unwrap_or_default()
                 });
-                if prepared != drafted {
+                if wizard.subagents.shown(&prepared) != drafted {
                     wizard.preparation = None;
                     return self.start_move_preparation(wizard, profile_id);
                 }
