@@ -219,8 +219,8 @@ fn an_installed_mimo_is_offered_before_its_first_login() {
     );
 }
 
-// Hard-won: dsh-acp harness detection keyed off the dsh-acp bridge and
-// ~/.dsh-acp, so a machine with DeepSeek's own CLI installed was never
+// Hard-won: 1bc3cfe43: dsh-acp harness detection keyed off the dsh-acp bridge
+// and ~/.dsh-acp, so a machine with DeepSeek's own CLI installed was never
 // detected: the bridge is installed on demand and proves nothing about a
 // DeepSeek installation.
 #[test]
