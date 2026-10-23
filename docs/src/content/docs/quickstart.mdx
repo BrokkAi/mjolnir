@@ -63,7 +63,10 @@ it needs a profile first. If no agent is found:
    the agent kind, point `home` at a directory for that profile, and save.
 2. Select the profile and choose **Sign in**. The first sign-in installs the
    pinned harness under Mjolnir's cache; `mj login --profile <id>` does the same
-   from a shell.
+   from a shell. Claude's ACP bridge advertises no login, so a Claude profile
+   still needs the `claude` CLI (or `mj login --setup-token`, which also runs
+   that CLI). DSH has no sign-in: set `DEEPSEEK_API_KEY` in the profile
+   environment or the environment Mjolnir starts with, then restart the daemon.
 
 Alternatively, install an agent and sign in with its own CLI, then choose
 **Detect profiles** (or run `mj setup`). That is also the path for a profile
@@ -73,8 +76,9 @@ pointed at your own agent home; `mj login --cli` always uses the command on
 Codex, Claude Code, Muse Code, and MiMo Code sessions on this machine also need
 Node.js 22 or newer and npm on `PATH`; Mjolnir launches its own pinned copy of
 each agent. OpenCode uses a verified download, and Kimi and Grok use their
-official installers. DSH needs no Node.js, but on Linux it needs glibc 2.34 or
-newer.
+official installers. The managed OpenCode and Muse downloads need `curl` and
+`tar` (and Muse also needs Node/npm for its adapter); Kimi and Grok need `bash`
+and `curl`. DSH needs no Node.js, but on Linux it needs glibc 2.34 or newer.
 
 The dashboard keeps its session list, Conversation and Prompt regions, target
 capacity, and profile quota visible together.

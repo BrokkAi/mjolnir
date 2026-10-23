@@ -967,6 +967,26 @@ impl SetupDialog {
             == Some(saved)
     }
 
+    /// Re-read the saved profile shape after another writer changed the
+    /// configuration while this dialog was open.
+    fn refresh_saved_profiles(&mut self, config: &Config) {
+        self.saved_profiles = config.profiles.keys().cloned().collect();
+        let mut saved = serde_json::to_value(config).expect("configuration serializes");
+        ensure_local_machine(&mut saved);
+        schema::expand(&mut saved, &mut Vec::new());
+        populate_subagent_profile_choices(&mut saved);
+        self.saved_profile_values = saved
+            .get("profiles")
+            .and_then(Value::as_object)
+            .map(|profiles| {
+                profiles
+                    .iter()
+                    .map(|(id, value)| (id.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+
     fn selected_path(&self) -> Option<Vec<String>> {
         let mut path = self.path.clone();
         path.push(self.keys().get(self.selected)?.clone());
@@ -2272,6 +2292,11 @@ impl DashboardState {
         self.profile_login_statuses.get(profile_id)
     }
 
+    /// The configuration this dashboard is currently showing.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
     /// Drop statuses and any read still in flight after the profile set
     /// changes. The generation bump makes an older result unusable.
     pub(crate) fn invalidate_profile_login_statuses(&mut self) {
@@ -2291,6 +2316,7 @@ impl DashboardState {
         }
         self.profile_login_statuses = statuses;
         if let Some(dialog) = setup_dialog_mut(&mut self.mode) {
+            dialog.refresh_saved_profiles(&self.config);
             dialog.login_statuses = self.profile_login_statuses.clone();
         }
     }
@@ -3262,8 +3288,8 @@ fn detection_notice(
     if added.is_empty() {
         sentences.push(match (scope, found_any) {
             (DetectScope::Profiles, false) => format!(
-                "No coding agent installation was found on this machine. Install {}, sign in to \
-                 it once, and choose Detect profiles again.",
+                "No coding agent installation was found on this machine. Add a profile, choose \
+                 Sign in, or install {}, sign in to it once, and choose Detect profiles again.",
                 mj_core::config::HarnessKind::every_display_name_or()
             ),
             (DetectScope::Profiles, true) => {

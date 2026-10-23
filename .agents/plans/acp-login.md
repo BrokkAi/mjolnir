@@ -13,7 +13,9 @@ a `terminal` method's command, a known terminal fallback, or ACP
 back to the harness CLI's own login command.
 
 The user-visible result is that `mj login --profile <id>` can sign in a profile
-using the pinned harness Mjolnir manages, with no ambient harness installation.
+using the pinned harness Mjolnir manages when its bridge supports ACP, and the
+installed harness CLI otherwise, with no ambient installation required for the
+ACP-capable harnesses.
 
 ## Progress
 
@@ -123,11 +125,12 @@ status (`signed in`, `signed out`, `credential expired`, or the API-key/no-login
 case); the status is read off the event loop when Settings opens and again
 after a login.
 
-Validation: eight focused tests exercise a scripted ACP bridge (terminal command
-with the profile environment and method env, `authenticate`, a colliding server
-request, unknown-method listing, empty methods, the OpenCode fallback, API-key
-refusal, and selection); five controller tests cover sign-in status. Isolated
-live runs with pinned harnesses confirmed both kinds of terminal method:
+Validation: the focused suite has eight cases: six drive a scripted ACP bridge
+(terminal command with the profile environment and method env, `authenticate`,
+a colliding server request, unknown-method listing, empty methods, and the
+OpenCode fallback) and two check API-key refusal and method selection. Five
+controller tests cover sign-in status. Isolated live runs with pinned harnesses
+confirmed both kinds of terminal method:
 OpenCode selected `opencode-login` and launched `opencode auth login
 --standalone` under a PTY, and Muse selected `muse-login`, ran the advertised
 `muse-acp login`, and printed the device URL and code from the pinned native

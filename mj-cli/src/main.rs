@@ -139,7 +139,8 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Run a harness login for a profile so live sessions pick up fresh credentials.
+    /// Sign in a profile, installing its pinned harness when needed. Live
+    /// sessions pick up fresh credentials.
     Login(LoginArgs),
     /// Create a session through the API and print its id.
     New(api_commands::NewArgs),
@@ -367,7 +368,7 @@ struct LoginArgs {
     profile: Option<String>,
     /// Claude profiles only: mint a long-lived subscription token with
     /// `claude setup-token` and store it for every session of this profile.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["method", "cli"])]
     setup_token: bool,
     /// ACP authentication method id. Sign-in normally picks an interactive
     /// method itself; use this to choose one when a bridge offers several.
@@ -2045,7 +2046,23 @@ async fn store_claude_setup_token(
         }
     })
     .await
-    .context("run `claude setup-token`")??;
+    .context("run `claude setup-token`")?
+    .map_err(|error| {
+        if error.chain().any(|cause| {
+            cause
+                .downcast_ref::<io::Error>()
+                .is_some_and(|cause| cause.kind() == io::ErrorKind::NotFound)
+        }) {
+            login_spawn_error(
+                io::Error::from(io::ErrorKind::NotFound),
+                "claude",
+                mj_core::config::HarnessKind::Claude,
+                profile_id,
+            )
+        } else {
+            error
+        }
+    })?;
     if !output.status.success() {
         bail!(
             "`claude setup-token` exited with {} for profile {profile_id}",
@@ -2157,7 +2174,9 @@ fn resolve_login_profile(config: &Config, requested: Option<&str>) -> Result<Str
             "several profiles are configured; pass --profile with one of: {}",
             profile_ids(config)
         ),
-        (None, _) => bail!("no enabled agent profiles are configured; run `mj setup` first"),
+        (None, _) => bail!(
+            "no enabled agent profiles are configured; add one in Settings → Agent Profiles, or run `mj setup`"
+        ),
     }
 }
 

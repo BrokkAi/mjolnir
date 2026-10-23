@@ -151,7 +151,8 @@ async fn sign_in(
         return Ok(Outcome::Unavailable(
             "the ACP bridge advertised no login methods".to_owned(),
         ));
-    } else if requested_method.is_none()
+    } else if kind == HarnessKind::Codex
+        && requested_method.is_none()
         && !has_desktop_session(environment)
         && api_key_present(environment)
     {
@@ -221,8 +222,13 @@ async fn sign_in(
                 let missing = method
                     .env_vars
                     .iter()
-                    .filter(|name| !environment.contains_key(*name))
-                    .cloned()
+                    .filter(|var| {
+                        !var.optional
+                            && !environment
+                                .get(&var.name)
+                                .is_some_and(|value| !value.trim().is_empty())
+                    })
+                    .map(|var| var.name.clone())
                     .collect::<Vec<_>>();
                 if !missing.is_empty() {
                     session.shutdown().await;
@@ -234,16 +240,24 @@ async fn sign_in(
                     );
                 }
             }
-            let result =
-                match tokio::time::timeout(AUTHENTICATE_TIMEOUT, session.authenticate(&method.id))
-                    .await
-                {
-                    Ok(result) => result,
-                    Err(_) => {
-                        session.shutdown().await;
-                        bail!("the ACP sign-in flow timed out");
-                    }
-                };
+            let authenticated = tokio::select! {
+                result = tokio::time::timeout(
+                    AUTHENTICATE_TIMEOUT,
+                    session.authenticate(&method.id),
+                ) => Some(result),
+                _ = tokio::signal::ctrl_c() => None,
+            };
+            let Some(result) = authenticated else {
+                session.shutdown().await;
+                bail!("the ACP sign-in flow was cancelled");
+            };
+            let result = match result {
+                Ok(result) => result,
+                Err(_) => {
+                    session.shutdown().await;
+                    bail!("the ACP sign-in flow timed out");
+                }
+            };
             if let Err(error) = result {
                 session.shutdown().await;
                 return Err(error.context(format!(
@@ -287,7 +301,13 @@ struct AuthMethod {
     description: Option<String>,
     terminal: Option<TerminalHint>,
     /// Variables an `env_var` method needs the agent to receive.
-    env_vars: Vec<String>,
+    env_vars: Vec<AuthEnvVar>,
+}
+
+#[derive(Debug, Clone)]
+struct AuthEnvVar {
+    name: String,
+    optional: bool,
 }
 
 /// What a bridge says about a `terminal` auth method.
@@ -481,16 +501,29 @@ impl AcpSession {
             next_id: 1,
             methods: Vec::new(),
         };
-        let initialized = tokio::time::timeout(INITIALIZE_TIMEOUT, session.initialize()).await;
+        let initialized = tokio::select! {
+            result = tokio::time::timeout(INITIALIZE_TIMEOUT, session.initialize()) => Some(result),
+            _ = tokio::signal::ctrl_c() => None,
+        };
         match initialized {
-            Ok(Ok(())) => Ok(session),
-            Ok(Err(error)) => Err(error),
-            Err(_) => {
+            Some(Ok(Ok(()))) => Ok(session),
+            Some(Ok(Err(error))) => {
+                session.shutdown().await;
+                Err(error)
+            }
+            Some(Err(_)) => {
                 session.shutdown().await;
                 bail!(
                     "the {} ACP bridge did not answer initialize within {} seconds",
                     kind.display_name(),
                     INITIALIZE_TIMEOUT.as_secs()
+                );
+            }
+            None => {
+                session.shutdown().await;
+                bail!(
+                    "the {} ACP bridge initialization was cancelled",
+                    kind.display_name()
                 );
             }
         }
@@ -683,8 +716,15 @@ fn parse_method(value: &Value) -> Option<AuthMethod> {
             .and_then(Value::as_array)
             .map(|vars| {
                 vars.iter()
-                    .filter_map(|var| var.get("name").and_then(Value::as_str))
-                    .map(str::to_owned)
+                    .filter_map(|var| {
+                        Some(AuthEnvVar {
+                            name: var.get("name").and_then(Value::as_str)?.to_owned(),
+                            optional: var
+                                .get("optional")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                        })
+                    })
                     .collect()
             })
             .unwrap_or_default()
