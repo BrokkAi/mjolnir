@@ -16,7 +16,7 @@ const snapshot = {
   bundles: [],
   capacity: [],
   launch_failures: [],
-  review_config: { enabled: false, profile: null },
+  review_config: { trigger: "off", profile: null },
 };
 
 async function mount(page, { signedIn = true, snapshotResponse }) {

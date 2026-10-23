@@ -1273,7 +1273,7 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
-    record.review = Some(mj_core::config::SessionReview::On {
+    record.review = Some(mj_core::config::SessionReview::Turn {
         model: Some("gpt-6-astra".into()),
         effort: Some("high".into()),
         tier: Some("extended".into()),
@@ -1285,7 +1285,7 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     let loaded = load_state_from(&database).unwrap();
     assert_eq!(
         loaded.sessions["session-1"].review,
-        Some(mj_core::config::SessionReview::On {
+        Some(mj_core::config::SessionReview::Turn {
             model: Some("gpt-6-astra".into()),
             effort: Some("high".into()),
             tier: None,
@@ -1456,102 +1456,6 @@ fn a_late_missing_workspace_report_cannot_invalidate_a_newer_session() {
     assert_eq!(
         loaded.sessions[&live.id].last_error.as_deref(),
         Some("current working directory is missing")
-    );
-}
-
-#[test]
-fn an_open_review_survives_a_restart_and_a_finished_one_does_not() {
-    use mj_core::second_opinion::ReviewWorkflow;
-
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    save_session_to(&database, &session("session-1", "project-1")).unwrap();
-    assert_eq!(active_review_in(&database, "session-1").unwrap(), None);
-
-    let (mut workflow, _) = ReviewWorkflow::start("plan-review-1", "1. Read\n2. Change", "ctx-1");
-    let reviewer_transcript = vec![std::sync::Arc::new(TranscriptItem {
-        stable_id: "agent:1".into(),
-        position: 1,
-        latest_content_event_ordinal: Some(1),
-        created_at_ms: 0,
-        last_changed_at_ms: 0,
-        body: TranscriptBody::Agent {
-            chunks: vec![serde_json::json!({
-                "content": {"type": "text", "text": "the plan misses error handling"}
-            })],
-            streaming: false,
-        },
-    })];
-    let stored = StoredReview {
-        workflow: workflow.clone(),
-        generation: 0,
-        context_baseline: 7,
-        native_lost: false,
-        reviewer_transcript: reviewer_transcript.clone(),
-    };
-    save_active_review_in(&database, "session-1", &stored).unwrap();
-
-    let restored = active_review_in(&database, "session-1").unwrap().unwrap();
-    assert_eq!(restored, stored);
-    assert_eq!(restored.workflow.proposal(), "1. Read\n2. Change");
-    assert!(!restored.workflow.finished());
-    // The reviewer's conversation is kept here too: its own journal dies with
-    // the target, and a finished review still has to be readable.
-    assert_eq!(restored.reviewer_transcript, reviewer_transcript);
-
-    // Advancing the review updates the same row rather than adding another.
-    workflow.primary_context_completed("ctx-1", "the user asked for X", "review-1");
-    save_active_review_in(&database, "session-1", &StoredReview { workflow, ..stored }).unwrap();
-    let restored = active_review_in(&database, "session-1").unwrap().unwrap();
-    assert_eq!(restored.workflow.summary(), Some("the user asked for X"));
-
-    clear_active_review_in(&database, "session-1").unwrap();
-    assert_eq!(active_review_in(&database, "session-1").unwrap(), None);
-}
-
-#[test]
-fn losing_the_target_ends_the_reviewer_conversation_and_bumps_its_generation() {
-    use mj_core::second_opinion::ReviewWorkflow;
-
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    save_session_to(&database, &session("session-1", "project-1")).unwrap();
-
-    // Nothing to lose when no review is open.
-    assert_eq!(
-        lose_reviewer_continuity_in(&database, "session-1").unwrap(),
-        0
-    );
-
-    let (workflow, _) = ReviewWorkflow::start("plan-review-1", "the plan", "ctx-1");
-    save_active_review_in(
-        &database,
-        "session-1",
-        &StoredReview {
-            workflow,
-            generation: 3,
-            context_baseline: 0,
-            native_lost: false,
-            reviewer_transcript: Vec::new(),
-        },
-    )
-    .unwrap();
-
-    assert_eq!(
-        lose_reviewer_continuity_in(&database, "session-1").unwrap(),
-        4
-    );
-    let restored = active_review_in(&database, "session-1").unwrap().unwrap();
-    assert!(restored.native_lost);
-    assert_eq!(restored.generation, 4);
-    // The captured plan is kept for reference rather than discarded with the
-    // conversation.
-    assert_eq!(restored.workflow.proposal(), "the plan");
-
-    // Losing it twice must not keep bumping the generation.
-    assert_eq!(
-        lose_reviewer_continuity_in(&database, "session-1").unwrap(),
-        4
     );
 }
 

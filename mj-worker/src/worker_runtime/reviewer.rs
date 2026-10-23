@@ -1,4 +1,4 @@
-//! The second-opinion reviewer that runs beside a primary session.
+//! The turn-review reviewer that runs beside a primary session.
 //!
 //! A reviewer is a sidecar, not a session. It shares the primary's target and
 //! working directory and owns nothing else: its harness home is a fresh copy

@@ -687,7 +687,7 @@ fn generated_code_and_cookie_attributes_are_phone_safe() {
 fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     let (mut config, state) = sample_config_state();
     config.review = mj_core::config::ReviewConfig {
-        enabled: true,
+        trigger: mj_core::config::ReviewTrigger::Turn,
         tier: Some("extended".into()),
         profile: Some("reviewer-1".into()),
         model: Some("private-review-model".into()),
@@ -699,7 +699,7 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     assert_eq!(
         value.get("review_config"),
         Some(&serde_json::json!({
-            "enabled": true,
+            "trigger": "turn",
             "profile": "reviewer-1",
         }))
     );
@@ -772,7 +772,7 @@ fn target_snapshot_uses_each_raw_host_project_history_and_leaves_managed_empty()
 fn public_snapshot_exposes_only_review_status_configuration() {
     let (mut config, state) = sample_config_state();
     config.review = mj_core::config::ReviewConfig {
-        enabled: true,
+        trigger: mj_core::config::ReviewTrigger::Turn,
         tier: Some("extended".into()),
         profile: Some("reviewer-1".into()),
         model: Some("private-review-model".into()),
@@ -785,7 +785,7 @@ fn public_snapshot_exposes_only_review_status_configuration() {
     assert_eq!(
         value.get("review_config"),
         Some(&serde_json::json!({
-            "enabled": true,
+            "trigger": "turn",
             "profile": "reviewer-1",
         }))
     );

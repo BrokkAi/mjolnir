@@ -1,7 +1,7 @@
 use super::*;
 
 impl RelayClient {
-    /// Start the second-opinion reviewer beside this session, or report the
+    /// Start the turn-review reviewer beside this session, or report the
     /// running one when it already matches `config`.
     ///
     /// The reviewer's profile must already be staged on the target. Starting

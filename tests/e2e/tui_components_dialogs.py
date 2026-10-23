@@ -238,9 +238,11 @@ def probe_review_settings(lab: Any, tmux: Any, evidence: Any) -> None:
     before = lab.snapshot()["review_config"]
     from tui_components_actions import open_review_settings
     open_review_settings(tmux)
-    _wait(tmux, "Automatic review")
+    _wait(tmux, "Trigger")
     _record(evidence, tmux, "review-settings-open", "open review settings", "review form visible")
-    tmux.send_key("Space")
+    tmux.send_key("Enter")
+    tmux.send_key("Down")
+    tmux.send_key("Enter")
     time.sleep(0.15)
     # Open the profile dropdown, then choose its explicit empty option.
     screen = _capture(tmux)

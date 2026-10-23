@@ -1234,7 +1234,7 @@ fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
     latest.save_to(&path).unwrap();
 
     let review = ReviewConfig {
-        enabled: true,
+        trigger: ReviewTrigger::Turn,
         tier: None,
         profile: Some("codex-1".into()),
         model: Some("review-model".into()),
@@ -1951,14 +1951,14 @@ fn a_disabled_eligible_subagent_profile_loads_instead_of_failing() {
 #[test]
 fn a_session_review_choice_is_stored_in_a_stable_shape() {
     // Stored in `sessions.review_json`; older and newer releases read it.
-    let on = SessionReview::On {
+    let on = SessionReview::Turn {
         model: Some("gpt-6-astra".into()),
         effort: None,
         tier: None,
     };
     assert_eq!(
         serde_json::to_string(&on).unwrap(),
-        r#"{"mode":"on","model":"gpt-6-astra"}"#
+        r#"{"mode":"turn","model":"gpt-6-astra"}"#
     );
     assert_eq!(
         serde_json::to_string(&SessionReview::Off).unwrap(),
@@ -1966,7 +1966,7 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
     );
     assert_eq!(
         serde_json::from_str::<SessionReview>(r#"{"mode":"on"}"#).unwrap(),
-        SessionReview::On {
+        SessionReview::Turn {
             model: None,
             effort: None,
             tier: None,
@@ -1978,24 +1978,37 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
             r#"{"mode":"on","model":"gpt-6-luna","effort":"max"}"#
         )
         .unwrap(),
-        SessionReview::On {
+        SessionReview::Turn {
             model: Some("gpt-6-luna".into()),
             effort: Some("max".into()),
             tier: None,
         }
     );
-    let extended = SessionReview::On {
+    let extended = SessionReview::Turn {
         model: None,
         effort: None,
         tier: Some("extended".into()),
     };
     assert_eq!(
         serde_json::to_string(&extended).unwrap(),
-        r#"{"mode":"on"}"#
+        r#"{"mode":"turn"}"#
     );
     assert_eq!(
         serde_json::from_str::<SessionReview>(r#"{"mode":"on","tier":"extended"}"#).unwrap(),
         extended
+    );
+    for trigger in ["turn", "push"] {
+        let value = format!(r#"{{"mode":"{trigger}","model":"astra","effort":"high"}}"#);
+        let choice: SessionReview = serde_json::from_str(&value).unwrap();
+        assert_eq!(serde_json::to_string(&choice).unwrap(), value);
+        assert_eq!(
+            ReviewConfig::default().for_session(Some(&choice)).trigger,
+            choice.trigger()
+        );
+    }
+    assert_eq!(
+        serde_json::from_str::<SessionReview>(r#"{"mode":"off"}"#).unwrap(),
+        SessionReview::Off
     );
 }
 
@@ -2715,4 +2728,33 @@ fn native_continuity_follows_the_codex_model_service_not_only_the_harness() {
     // any provider, while every Claude profile uses Claude's own service.
     assert!(!continues(HarnessKind::Codex, "removed", "codex4"));
     assert!(continues(HarnessKind::Claude, "removed", "claude2"));
+}
+
+#[test]
+fn review_trigger_loads_legacy_settings_and_saves_only_the_trigger() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    for (settings, expected) in [
+        ("", ReviewTrigger::Off),
+        ("enabled = true", ReviewTrigger::Turn),
+        ("enabled = false", ReviewTrigger::Off),
+        ("enabled = true\ntrigger = \"off\"", ReviewTrigger::Off),
+        ("enabled = false\ntrigger = \"turn\"", ReviewTrigger::Turn),
+        ("enabled = true\ntrigger = \"push\"", ReviewTrigger::Push),
+    ] {
+        fs::write(
+            &path,
+            format!("version = {CONFIG_VERSION}\n[profiles.reviewer]\nkind = \"claude\"\nhome = \"/profiles/reviewer\"\n[review]\nprofile = \"reviewer\"\n{settings}\n"),
+        )
+        .unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.review.trigger, expected, "{settings}");
+        config.save_to(&path).unwrap();
+        let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(saved["review"].get("enabled").is_none());
+        assert_eq!(
+            saved["review"]["trigger"].as_str(),
+            serde_json::to_value(expected).unwrap().as_str()
+        );
+    }
 }

@@ -64,7 +64,6 @@ impl DashboardContext {
         self.drain_import_tasks();
         self.drain_lifecycle_updates();
         let pending_completed = self.drain_dashboard_io();
-        self.refresh_open_review();
         // Collected rather than short-circuited: every feed's flag has to be
         // cleared for the next drain.
         [
@@ -161,20 +160,6 @@ impl DashboardContext {
         };
         let review = self.runtime_review_views.get(session_id).cloned();
         chat.apply_review_view(review);
-    }
-
-    /// Keeps the stop confirmation aware of the attached chat's plan-review
-    /// second opinion. Turn reviews come from `runtime_review_views` and are
-    /// projected independently, including for sessions without an open chat.
-    pub(crate) fn refresh_open_review(&mut self) {
-        for (session_id, open) in self
-            .chats
-            .values()
-            .map(|chat| (chat.session_id().to_owned(), chat.has_open_review()))
-            .collect::<Vec<_>>()
-        {
-            self.dashboard.set_session_review_open(&session_id, open);
-        }
     }
 
     pub(crate) fn drain_quota_updates(&mut self) {

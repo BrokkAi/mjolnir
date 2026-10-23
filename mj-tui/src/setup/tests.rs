@@ -65,7 +65,6 @@ fn every_boolean_setting_is_drawn_as_a_checkbox() {
         ("notify", "Ring the terminal bell"),
         ("notify", "Show counts in the terminal title"),
         ("advanced", "Detailed activity clocks"),
-        ("review", "Enabled"),
     ] {
         let mut dashboard = dashboard_with_session(stopped_session());
         dashboard.begin_settings_section(section.split('.').next().unwrap(), None);
@@ -1553,7 +1552,7 @@ fn cancelling_or_failing_to_save_a_theme_keeps_the_active_colors() {
 #[test]
 fn disabling_a_profile_clears_references_and_reports_the_cleanup() {
     let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.config.review.enabled = true;
+    dashboard.config.review.trigger = mj_core::config::ReviewTrigger::Turn;
     dashboard.config.review.profile = Some("codex-1".into());
     dashboard.config.review.model = Some("review-model".into());
     dashboard.config.review.effort = Some("high".into());
@@ -1574,7 +1573,7 @@ fn disabling_a_profile_clears_references_and_reports_the_cleanup() {
     };
     assert_eq!(dialog.draft["profiles"]["codex-1"]["enabled"], false);
     assert!(dialog.draft["review"]["profile"].is_null());
-    assert_eq!(dialog.draft["review"]["enabled"], false);
+    assert_eq!(dialog.draft["review"]["trigger"], "off");
     assert_eq!(dialog.draft["review"]["model"], "review-model");
     assert_eq!(dialog.draft["review"]["effort"], "high");
     let notice = dialog.notice.as_deref().unwrap();
@@ -1966,7 +1965,9 @@ fn escape_on_the_discard_prompt_keeps_editing_and_dashboard_escape_stays_inert()
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_setup();
     choose(&mut dashboard, "review");
-    dashboard.handle_key(key(KeyCode::Char(' ')));
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Down));
+    dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Esc));
     dashboard.handle_key(key(KeyCode::Esc));
     assert!(matches!(dashboard.mode, Mode::Confirm(_)));
@@ -1974,7 +1975,7 @@ fn escape_on_the_discard_prompt_keeps_editing_and_dashboard_escape_stays_inert()
     let Mode::Setup(dialog) = &dashboard.mode else {
         panic!("Esc on the discard prompt keeps editing")
     };
-    assert!(dialog.draft["review"]["enabled"].as_bool().unwrap());
+    assert_eq!(dialog.draft["review"]["trigger"], "turn");
     // Discard, then Esc on the plain dashboard does nothing.
     dashboard.handle_key(key(KeyCode::Esc));
     assert!(matches!(dashboard.mode, Mode::Confirm(_)));
@@ -1993,20 +1994,24 @@ fn review_changes_stay_in_setup_draft_until_save_and_cancel_discards_them() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_setup();
     choose(&mut dashboard, "review");
-    dashboard.handle_key(key(KeyCode::Char(' ')));
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Down));
+    dashboard.handle_key(key(KeyCode::Enter));
     // Esc goes back to the first page and keeps the change in the draft, as
     // the page says it will. Launch campaign finding C-19.
     dashboard.handle_key(key(KeyCode::Esc));
     assert!(!dashboard.dialog_confirmation_open());
-    assert!(!dashboard.config.review.enabled);
+    assert!(!dashboard.config.review.arms_turn_review());
     let Mode::Setup(dialog) = &dashboard.mode else {
         panic!("settings remains open after leaving review")
     };
     assert!(dialog.review_editor.is_none(), "Esc left Code Review");
-    assert!(dialog.draft["review"]["enabled"].as_bool().unwrap());
+    assert_eq!(dialog.draft["review"]["trigger"], "turn");
     // The Back button does the same.
     choose(&mut dashboard, "review");
-    dashboard.handle_key(key(KeyCode::Char(' ')));
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Up));
+    dashboard.handle_key(key(KeyCode::Enter));
     let Mode::Setup(dialog) = &mut dashboard.mode else {
         panic!("settings")
     };
@@ -2023,9 +2028,11 @@ fn review_changes_stay_in_setup_draft_until_save_and_cancel_discards_them() {
         panic!("settings remains open after leaving review")
     };
     assert!(dialog.review_editor.is_none(), "Back left Code Review");
-    assert!(!dialog.draft["review"]["enabled"].as_bool().unwrap_or(false));
+    assert_eq!(dialog.draft["review"]["trigger"], "off");
     choose(&mut dashboard, "review");
-    dashboard.handle_key(key(KeyCode::Char(' ')));
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Down));
+    dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Esc));
     // Leaving Settings with the review change still drafted asks once.
     dashboard.handle_key(key(KeyCode::Esc));
@@ -2033,11 +2040,13 @@ fn review_changes_stay_in_setup_draft_until_save_and_cancel_discards_them() {
     dashboard.handle_key(key(KeyCode::Right));
     dashboard.handle_key(key(KeyCode::Enter));
     assert!(!dashboard.modal_open());
-    assert!(!dashboard.config.review.enabled);
+    assert!(!dashboard.config.review.arms_turn_review());
 
     dashboard.begin_setup();
     choose(&mut dashboard, "review");
-    dashboard.handle_key(key(KeyCode::Char(' ')));
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Down));
+    dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Tab));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Down));
@@ -2056,10 +2065,10 @@ fn review_changes_stay_in_setup_draft_until_save_and_cancel_discards_them() {
         _ => unreachable!(),
     })
     .unwrap();
-    assert!(updated.review.enabled);
+    assert!(updated.review.arms_turn_review());
     dashboard.setup_saved(generation, Ok(updated));
     assert!(!dashboard.modal_open());
-    assert!(dashboard.config.review.enabled);
+    assert!(dashboard.config.review.arms_turn_review());
 }
 
 #[test]
@@ -2068,7 +2077,7 @@ fn unsaved_account_edits_block_review_cache_and_refresh_until_setup_is_saved() {
 
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.config.review.profile = Some("codex-1".into());
-    dashboard.config.review.enabled = true;
+    dashboard.config.review.trigger = mj_core::config::ReviewTrigger::Turn;
     dashboard
         .review_settings_choices
         .insert(("codex-1".into(), None), ReviewSettingsChoices::default());
@@ -2146,7 +2155,7 @@ fn unrelated_account_edits_do_not_allow_saving_a_known_unavailable_review_model(
 
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.config.review.profile = Some("codex-1".into());
-    dashboard.config.review.enabled = true;
+    dashboard.config.review.trigger = mj_core::config::ReviewTrigger::Turn;
     dashboard.config.review.model = Some("unavailable-model".into());
     let DashboardAction::DiscoverReviewSettings {
         generation,
@@ -2982,7 +2991,7 @@ fn setup_reports_monochrome_while_no_color_overrides_the_theme() {
 #[test]
 fn an_automatic_reviewer_is_summarized_the_same_before_and_after_a_visit() {
     let mut configured = config();
-    configured.review.enabled = true;
+    configured.review.trigger = mj_core::config::ReviewTrigger::Turn;
     let mut dashboard = dashboard_with_session(stopped_session());
     *dashboard.config = configured.clone();
     dashboard.mode = Mode::Setup(SetupDialog::new(&configured));

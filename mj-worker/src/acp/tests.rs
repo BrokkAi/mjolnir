@@ -6177,7 +6177,7 @@ async fn active_harness_turn_is_authoritative_even_after_prolonged_silence() {
                     let (started, release) = gate.take().unwrap();
                     started.send(()).unwrap();
                     release.await.unwrap();
-                    let update = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"scripted", "update":{"sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"Here is the requested second opinion."}}}});
+                    let update = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"scripted", "update":{"sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"Here is the requested turn review."}}}});
                     write
                         .write_all(format!("{update}\n").as_bytes())
                         .await
@@ -6221,8 +6221,8 @@ async fn active_harness_turn_is_authoritative_even_after_prolonged_silence() {
     });
     request_tx
         .send(CommandRequest::Prompt {
-            request_id: "prompt-second-opinion".into(),
-            prompt: vec![ContentBlock::from("fable, second opinion pls")],
+            request_id: "prompt-turn-review".into(),
+            prompt: vec![ContentBlock::from("fable, turn review pls")],
         })
         .await
         .unwrap();
@@ -6250,7 +6250,7 @@ async fn active_harness_turn_is_authoritative_even_after_prolonged_silence() {
         loop {
             match event_rx.recv().await.unwrap() {
                 RuntimeEvent::SessionUpdate { update }
-                    if update["content"]["text"] == "Here is the requested second opinion." =>
+                    if update["content"]["text"] == "Here is the requested turn review." =>
                 {
                     saw_reply = true
                 }
@@ -6260,7 +6260,7 @@ async fn active_harness_turn_is_authoritative_even_after_prolonged_silence() {
                     ..
                 } => {
                     assert!(saw_reply);
-                    assert_eq!(request_id, "prompt-second-opinion");
+                    assert_eq!(request_id, "prompt-turn-review");
                     assert_eq!(stop_reason, "EndTurn");
                     break;
                 }

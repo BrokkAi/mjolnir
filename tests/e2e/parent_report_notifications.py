@@ -239,7 +239,7 @@ to {project / 'report-b'}, and give your final answer.
 '''
         new_command = ["new", "--workspace", "Parent report notification regression", "--target", "localhost",
                        "--project-directory", str(project), "--model", args.model,
-                       "--effort", "medium", "--subagents", "mjolnir", "--no-review",
+                       "--effort", "medium", "--subagents", "mjolnir", "--review", "off",
                        "--no-project-memory", "--json"]
         if args.no_github_events:
             new_command.append("--no-github-events")

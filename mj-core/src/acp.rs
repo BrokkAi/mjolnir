@@ -23,10 +23,6 @@ pub const PLAN_REVIEW_ID_PREFIX: &str = "plan-review-";
 /// text. Reading the proposal back out is the inverse, so both live here.
 pub const PLAN_REVIEW_MESSAGE_PREFIX: &str = "Review the agent's plan:\n\n";
 
-/// The plan decision Hel answers itself instead of forwarding to the harness.
-/// Every other decision maps to a native option through the dialect bridge.
-pub const PLAN_REVIEW_SECOND_OPINION: &str = "second_opinion";
-
 pub const PLAN_REVIEW_ACTION: &str = "action";
 
 pub const PLAN_REVIEW_FEEDBACK: &str = "feedback";
@@ -73,34 +69,6 @@ pub fn plan_review_proposal(request: &ElicitationRequest) -> Option<&str> {
     request.message.strip_prefix(PLAN_REVIEW_MESSAGE_PREFIX)
 }
 
-/// The proposal to review when this answer asked for a second opinion.
-///
-/// A second opinion is local: the harness's decision stays pending while Hel
-/// sets the reviewer up, so this answer must never reach ACP. Callers use the
-/// returned proposal as the captured text they hand to the reviewer.
-#[must_use]
-pub fn plan_review_second_opinion<'a>(
-    request: &'a ElicitationRequest,
-    response: &ElicitationResponse,
-) -> Option<&'a str> {
-    let proposal = plan_review_proposal(request)?;
-    let ElicitationResponse::Accept { content } = response else {
-        return None;
-    };
-    match content.get(PLAN_REVIEW_ACTION) {
-        Some(ElicitationValue::String(action)) if action == PLAN_REVIEW_SECOND_OPINION => {
-            Some(proposal)
-        }
-        _ => None,
-    }
-}
-
-/// The answer Hel gives the harness once a second opinion has been set up.
-///
-/// Gathering context needs an idle planning session, so the pending decision
-/// has to be resolved first. Declining keeps plan mode active, which is why
-/// the captured proposal is the only copy of the plan that survives and why
-/// cancelling a review owes the user a Hel-owned decision in its place.
 #[must_use]
 pub fn plan_review_keep_planning() -> ElicitationResponse {
     ElicitationResponse::Accept {
@@ -142,14 +110,6 @@ pub fn normalized_plan_review(id: String, value: &serde_json::Value) -> Elicitat
                             value: "revise".into(),
                             title: "Revise".into(),
                             description: Some("Keep planning and incorporate feedback".into()),
-                            preview: None,
-                        },
-                        ElicitationOption {
-                            value: PLAN_REVIEW_SECOND_OPINION.into(),
-                            title: "Get a second opinion".into(),
-                            description: Some(
-                                "Ask another agent to review this plan before you decide".into(),
-                            ),
                             preview: None,
                         },
                         ElicitationOption {

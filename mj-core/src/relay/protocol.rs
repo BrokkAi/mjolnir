@@ -180,7 +180,7 @@ pub enum RelayRequest {
     CompleteSubagentRequest {
         result: crate::subagent::SubagentToolResult,
     },
-    /// Drive the second-opinion reviewer that runs beside this session.
+    /// Drive the turn-review reviewer that runs beside this session.
     ///
     /// The reviewer is a sidecar, not a session: it shares this worker's
     /// target and working directory and owns nothing else. Its own durable
@@ -198,7 +198,7 @@ pub enum RelayRequest {
     },
 }
 
-/// What a controller asks of the second-opinion reviewer sidecar.
+/// What a controller asks of the turn-review reviewer sidecar.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", content = "params", rename_all = "snake_case")]
 pub enum ReviewerRequest {

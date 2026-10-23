@@ -82,8 +82,8 @@ pub(super) async fn prepare(
     if child {
         return Err(StartRefusal(SUBAGENT_REFUSAL.to_owned()));
     }
-    // Mutual exclusion on the default reviewer role, which a plan-review
-    // second opinion shares: the running prompt keeps the role. Checked
+    // Mutual exclusion on the default reviewer role: the running prompt
+    // keeps the role. Checked
     // against the worker rather than against any UI's state, because the
     // worker is the only place that knows.
     let handle = control
@@ -104,7 +104,7 @@ pub(super) async fn prepare(
                     ))
                 })?;
             }
-            Some(prompt) => return Err(StartRefusal(busy_reviewer(&prompt.command_id))),
+            Some(_) => return Err(StartRefusal("the reviewer is busy".to_owned())),
             None => {}
         },
         Ok(_) => {}
@@ -276,16 +276,6 @@ pub(super) async fn prepare_recovery(
     }))
 }
 
-/// Why the default reviewing role cannot take a new review, from the id of
-/// a prompt it is running that is not a turn review's.
-fn busy_reviewer(command_id: &str) -> String {
-    if command_id.starts_with(mj_core::second_opinion::COMMAND_ID_PREFIX) {
-        "the reviewer is busy with a second opinion".to_owned()
-    } else {
-        "the reviewer is busy".to_owned()
-    }
-}
-
 fn is_turn_review_command(command_id: &str) -> bool {
     command_id.starts_with(mj_core::review::driver::COMMAND_ID_PREFIX)
 }
@@ -313,9 +303,8 @@ const LEGACY_ROLES: [&str; 9] = [
 /// later review is refused, and its form waits on a question no surface can
 /// show. Stopping it makes the daemon's "cancelled" true in the worker too.
 ///
-/// The default role is shared with a plan-review second opinion, so it is
-/// stopped only while it runs a turn review's prompt. The other roles belong
-/// to turn reviews alone; pausing one that is not running does nothing.
+/// Stop the default role when it runs a turn review's prompt. Pausing a
+/// legacy role that is not running does nothing.
 pub(super) async fn stop_leftover_review(handle: &ManagedSessionHandle) -> Result<(), String> {
     use mj_core::review::driver::REVIEWER_ROLE;
     let mut roles = LEGACY_ROLES.to_vec();

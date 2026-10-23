@@ -476,13 +476,6 @@ pub enum DaemonAction {
         owner_pid: u32,
         draft: mj_core::storage::DetachedSessionDraft,
     },
-    SaveActiveReview {
-        session_id: String,
-        review: mj_core::storage::StoredReview,
-    },
-    ClearActiveReview {
-        session_id: String,
-    },
     RecordAbandonedPrompt {
         session_id: String,
         bundle_id: String,
@@ -672,7 +665,7 @@ pub enum DaemonAction {
         session_id: String,
         background_task_id: String,
     },
-    /// Drive a session's second-opinion reviewer. The reviewer is a sidecar of
+    /// Drive a session's turn-review reviewer. The reviewer is a sidecar of
     /// the session's worker, so it travels the session's own relay rather than
     /// becoming a session of its own here.
     ReviewerAction {
@@ -1609,30 +1602,6 @@ impl DaemonClient {
         }
     }
 
-    pub async fn save_active_review(
-        &mut self,
-        session_id: String,
-        review: mj_core::storage::StoredReview,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::SaveActiveReview { session_id, review })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected save-review reply {reply:?}"),
-        }
-    }
-
-    pub async fn clear_active_review(&mut self, session_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::ClearActiveReview { session_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected clear-review reply {reply:?}"),
-        }
-    }
-
     /// Persist a prompt the user abandoned in the chat composer.
     pub async fn record_abandoned_prompt(
         &mut self,
@@ -2457,12 +2426,13 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
          Put the daemon's directory first on PATH, or reinstall this client from that build."
     )
 }
+// Plan-only review persistence actions were removed.
 // Settings can warm draft profile capabilities through the daemon-owned catalog.
 // Runtime deltas carry transcript item changes, and a client fetches a
 // session's tail from the daemon at its cursor instead of reading SQLite.
 // Lifecycle stages can name the harness preparation step a worker reports.
 // A pending form can say it is a tool permission and whether it offers Skip.
-pub const PROTOCOL_VERSION: u32 = 58;
+pub const PROTOCOL_VERSION: u32 = 59;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

@@ -725,7 +725,7 @@ async fn a_review_refused_for_another_reason_does_not_wait() {
 fn armed(profile: Option<&str>) -> ReviewConfigSource {
     let profile = profile.map(str::to_owned);
     Arc::new(move |_| ReviewConfig {
-        enabled: true,
+        trigger: mj_core::config::ReviewTrigger::Turn,
         tier: None,
         profile: profile.clone(),
         model: None,
@@ -1141,7 +1141,7 @@ async fn observation_bursts_do_not_drop_the_final_idle_edge() {
     let mut manager = FakeManager::new(session).await;
     let environment = FakeEnvironment::new();
     let config: ReviewConfigSource = Arc::new(|_| ReviewConfig {
-        enabled: false,
+        trigger: mj_core::config::ReviewTrigger::Off,
         tier: None,
         profile: Some("reviewer".to_owned()),
         model: None,
@@ -2027,7 +2027,7 @@ async fn serve_leftover_worker(manager: &mut FakeManager, paused: &mut Vec<Strin
 /// RVC-3(b): after a daemon restart, the worker's reviewer was still waiting
 /// on the Fable decline form from the review the restart cut off, which no
 /// surface could show. Every later turn's review was refused with "the
-/// reviewer is busy with a second opinion". A review that meets such a
+/// reviewer is busy". A review that meets such a
 /// leftover prompt stops it, since no daemon can use its answer, and starts.
 // Hard-won: 8b6ab5b0: a leftover reviewer prompt made every later review refuse after restart
 #[tokio::test]
@@ -2116,35 +2116,6 @@ async fn a_review_cut_off_by_a_restart_stops_its_reviewer_before_saying_so() {
         "the next review starts: {reached:?}"
     );
     new.shutdown().await.unwrap();
-}
-
-/// The second-opinion wording stays for a real second opinion, which the
-/// terminal runs on the same reviewer.
-#[tokio::test]
-async fn a_review_refused_by_a_second_opinion_still_says_second_opinion() {
-    let session = session_id("secondopinion");
-    let session = session.as_str();
-    let mut manager = FakeManager::new(session).await;
-    let environment = FakeEnvironment::new();
-    let host = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment.clone(),
-    );
-    finish_a_turn(&manager, &host).await;
-    let (_, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
-        .await;
-    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(busy_with(&format!(
-        "{}critique-1",
-        mj_core::second_opinion::COMMAND_ID_PREFIX
-    ))))));
-    assert_eq!(
-        next_notice(&mut manager).await,
-        "Turn review did not start: the reviewer is busy with a second opinion. \
-         The next review covers these changes."
-    );
-    host.shutdown().await.expect("shutdown the host");
 }
 
 /// A review asked for while the open one waits on a person names that
@@ -2380,5 +2351,25 @@ async fn cancelling_during_registration_closes_the_late_child_without_starting_i
     assert!(environment.started.lock().unwrap().is_empty());
     assert!(!host.refuses_prompt(&session));
     assert!(environment.state().baselines.is_empty());
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn push_trigger_does_not_arm_review_at_the_end_of_a_turn() {
+    let session = session_id("pushtrigger");
+    let mut manager = FakeManager::new(&session).await;
+    let config: ReviewConfigSource = Arc::new(|_| ReviewConfig {
+        trigger: mj_core::config::ReviewTrigger::Push,
+        ..Default::default()
+    });
+    let host = TurnReviewHost::spawn_in(manager.control.clone(), config, FakeEnvironment::new());
+    finish_a_turn(&manager, &host).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err()
+    );
+    assert!(host.view(&session).is_none());
+    assert!(!host.refuses_prompt(&session));
     host.shutdown().await.unwrap();
 }

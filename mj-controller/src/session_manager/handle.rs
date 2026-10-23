@@ -310,7 +310,7 @@ impl ManagedSessionHandle {
             .map_err(anyhow::Error::msg)
     }
 
-    /// Drive the session's second-opinion reviewer.
+    /// Drive the session's turn-review reviewer.
     ///
     /// The reviewer shares this session's relay connection, so its actions
     /// queue behind the session's own and are refused while a lifecycle

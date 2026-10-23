@@ -222,7 +222,6 @@ impl DashboardContext {
         let context = mj_chat::chat::ChatSessionContext {
             config: self.controller.config.clone(),
             session: session_record,
-            reviewer_stager: mj_controller::controller::reviewer_stager(),
         };
         let (persistence_tx, mut persistence_rx) =
             tokio::sync::mpsc::unbounded_channel::<mj_chat::chat::ChatDaemonRequest>();
@@ -250,12 +249,6 @@ impl DashboardContext {
                             daemon
                                 .record_abandoned_prompt(session_id, bundle_id, text)
                                 .await
-                        }
-                        mj_chat::chat::ChatDaemonRequest::SaveReview { session_id, review } => {
-                            daemon.save_active_review(session_id, review).await
-                        }
-                        mj_chat::chat::ChatDaemonRequest::ClearReview { session_id } => {
-                            daemon.clear_active_review(session_id).await
                         }
                         mj_chat::chat::ChatDaemonRequest::StartTurnReview { session_id } => {
                             daemon.start_turn_review(session_id).await
@@ -304,11 +297,6 @@ impl DashboardContext {
                     .wait_for_session(&session_id, attachment::ATTACH_TIMEOUT)
                     .await
                     .map_err(|error| format!("{error:#}"))?;
-                let review_state = managed
-                    .client()
-                    .review_state()
-                    .await
-                    .map_err(|error| format!("{error:#}"));
                 tokio_util::task::AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
                     mj_chat::chat::ActiveChat::prepare_with_persistence(
                         managed.client(),
@@ -320,7 +308,6 @@ impl DashboardContext {
                         notices,
                         Some(persistence_tx),
                     )
-                    .with_review_state(review_state)
                 }))
                 .await
                 .map_err(|error| format!("chat preparation task failed: {error}"))

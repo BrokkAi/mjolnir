@@ -20,7 +20,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"mode":"terminal","bell":true,"delay_seconds":2,"title":true})
         }
         "review" => {
-            json!({"enabled":false,"profile":null,"model":null,"effort":null})
+            json!({"trigger":"off","profile":null,"model":null,"effort":null})
         }
         "continuation" => json!({"enabled":true}),
         "github" if path.len() == 1 => json!({"watch":{}}),
@@ -256,6 +256,7 @@ pub(super) fn label(key: &str) -> String {
         "machine" => "Machine",
         "bundles" => "Projects",
         "enabled" => "Enabled",
+        "trigger" => "Trigger",
         "profile" => "Agent profile",
         "kind" => "Type",
         "home" => "Account directory",
@@ -459,7 +460,10 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             }
         }
         "review" => {
-            if section["enabled"] != Value::Bool(true) {
+            if section["trigger"].as_str() == Some("push") {
+                return Some("Before push".to_owned());
+            }
+            if section["trigger"].as_str().unwrap_or("off") == "off" {
                 "Off".to_owned()
             } else {
                 match section["profile"].as_str() {
@@ -573,6 +577,15 @@ pub(super) fn choice_label(path: &[String], value: &Value, draft: &Value) -> Str
             value.to_string()
         };
     };
+    if path == ["review", "trigger"] {
+        return match value {
+            "off" => "Off",
+            "turn" => "End of turn",
+            "push" => "Before push",
+            _ => value,
+        }
+        .to_owned();
+    }
     // Only the theme field: `auto` is also an image pull policy.
     if super::storage_path(path) == ["theme"]
         && let Ok(choice) =
@@ -650,6 +663,7 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         return choices;
     }
     let values: &[&str] = match key {
+        "trigger" if path == ["review", "trigger"] => &["off", "turn", "push"],
         "sessions_side" => &["left", "right"],
         "session_order" => &["project", "priority"],
         "symbols" => &["unicode", "ascii"],
@@ -836,9 +850,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "repositories" => {
             "Set either a local repository directory or a GitHub source for each repository."
         }
-        "review" => {
-            "Used by turn review and plan second opinions. Auto picks another provider with quota."
-        }
+        "review" => "Used by turn review. Auto picks another provider with quota.",
         "continuation" => {
             "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
         }
