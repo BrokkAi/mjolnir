@@ -1451,7 +1451,7 @@ fn carries_review_refs(repositories: &[RepositoryManifest]) -> bool {
                 .metadata
                 .saved_refs
                 .keys()
-                .any(|name| name.starts_with("refs/mj/"))
+                .any(|name| name.starts_with(mj_core::archive::MJOLNIR_REF_NAMESPACE))
     })
 }
 

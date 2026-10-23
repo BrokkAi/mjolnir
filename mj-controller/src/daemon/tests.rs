@@ -6351,6 +6351,60 @@ async fn a_suspend_without_the_acknowledgement_refuses_a_live_clone_with_unpushe
     clone.channels.shutdown.shutdown().await.unwrap();
 }
 
+/// Mjolnir's own review refs are never pushed, and a review baseline names a
+/// bare tree. A clone whose work is all published still suspends without the
+/// acknowledgement when it carries them.
+#[cfg(unix)]
+// Hard-won: 02208d7b9: review refs saved in the checkpoint made every reviewed clone read as unpublished.
+#[tokio::test]
+async fn a_suspend_without_the_acknowledgement_ignores_review_refs_on_a_published_clone() {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    use crate::controller::test_support::test_git;
+    if !in_isolated_live_parent_test(
+        "a_suspend_without_the_acknowledgement_ignores_review_refs_on_a_published_clone",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let clone = live_clone_with_an_unpushed_commit().await;
+    test_git(
+        &clone.checkout,
+        &["push", "origin", "HEAD:refs/heads/session"],
+    );
+    let tree = test_git(&clone.checkout, &["rev-parse", "HEAD^{tree}"]);
+    test_git(
+        &clone.checkout,
+        &[
+            "update-ref",
+            mj_checkpoint::archive::REVIEW_BASELINE_REF,
+            &tree,
+        ],
+    );
+    test_git(
+        &clone.checkout,
+        &[
+            "update-ref",
+            &format!("refs/mj/reviewed/{tree}"),
+            &clone.unpushed_commit,
+        ],
+    );
+
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        clone
+            .state
+            .suspend_session_with_ack(LATCH_RELAY_SESSION.to_owned(), false),
+    )
+    .await
+    .unwrap()
+    .expect("published work needs no acknowledgement");
+    let stored = crate::database::load_state().unwrap();
+    let record = &stored.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(record.state, SessionState::Stopped, "{record:?}");
+    assert!(clone.sealed());
+    clone.channels.shutdown.shutdown().await.unwrap();
+}
+
 /// A suspend whose checkpoint fails leaves the parent's sub-agents running,
 /// and so has nothing to tell the parent or the person (R15-3). The children
 /// stop only once the parent's checkpoint is verified.
