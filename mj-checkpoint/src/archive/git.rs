@@ -1939,7 +1939,7 @@ pub fn restore_git_snapshot(
     repository: &Path,
     snapshot: &RepositorySnapshot,
 ) -> Result<()> {
-    restore_git_snapshot_for_session(runner, repository, snapshot, None)
+    restore_git_snapshot_for_session(runner, repository, snapshot, None, true)
 }
 
 pub(crate) fn restore_git_snapshot_for_session(
@@ -1947,14 +1947,24 @@ pub(crate) fn restore_git_snapshot_for_session(
     repository: &Path,
     snapshot: &RepositorySnapshot,
     session: Option<&str>,
+    restore_contents: bool,
 ) -> Result<()> {
+    if !restore_contents
+        && !snapshot
+            .metadata
+            .saved_refs
+            .keys()
+            .any(|name| name.starts_with("refs/mj/"))
+    {
+        return Ok(());
+    }
     if snapshot.metadata.remote_workspace {
         mj_core::remote_git::validate_network_url(&snapshot.metadata.origin)?;
         for url in &snapshot.metadata.push_urls {
             mj_core::remote_git::validate_network_url(url)?;
         }
     }
-    if let Some(branch) = &snapshot.metadata.branch {
+    if restore_contents && let Some(branch) = &snapshot.metadata.branch {
         ensure_branch_available_for_checkout(runner, repository, branch)?;
     }
     let operation = match (
@@ -2000,41 +2010,46 @@ pub(crate) fn restore_git_snapshot_for_session(
     }
     let clone_refs =
         !snapshot.metadata.saved_refs.is_empty() || !snapshot.metadata.stash_stack.is_empty();
-    let checkout_target = if snapshot.committed_bundle.is_empty() || clone_refs {
-        snapshot.metadata.head_commit.as_str()
-    } else {
-        "FETCH_HEAD"
-    };
-    if let Some(branch) = &snapshot.metadata.branch {
-        git_bytes(
-            runner,
-            repository,
-            ["check-ref-format", "--branch", branch],
-            &[],
-            "validate restored branch",
-        )?;
-        git_bytes(
-            runner,
-            repository,
-            ["checkout", "-B", branch, checkout_target],
-            &[],
-            "restore committed branch",
-        )
-        .with_context(|| checkout_advice(snapshot))?;
-    } else {
-        git_bytes(
-            runner,
-            repository,
-            ["checkout", "--detach", checkout_target],
-            &[],
-            "restore detached commit",
-        )
-        .with_context(|| checkout_advice(snapshot))?;
+    if restore_contents {
+        let checkout_target = if snapshot.committed_bundle.is_empty() || clone_refs {
+            snapshot.metadata.head_commit.as_str()
+        } else {
+            "FETCH_HEAD"
+        };
+        if let Some(branch) = &snapshot.metadata.branch {
+            git_bytes(
+                runner,
+                repository,
+                ["check-ref-format", "--branch", branch],
+                &[],
+                "validate restored branch",
+            )?;
+            git_bytes(
+                runner,
+                repository,
+                ["checkout", "-B", branch, checkout_target],
+                &[],
+                "restore committed branch",
+            )
+            .with_context(|| checkout_advice(snapshot))?;
+        } else {
+            git_bytes(
+                runner,
+                repository,
+                ["checkout", "--detach", checkout_target],
+                &[],
+                "restore detached commit",
+            )
+            .with_context(|| checkout_advice(snapshot))?;
+        }
     }
     // Check out before moving saved refs: changing the currently checked-out
     // branch first leaves the old index and worktree staged against its new tip.
     if clone_refs {
         for (name, oid) in &saved_refs {
+            if !restore_contents && !name.starts_with("refs/mj/") {
+                continue;
+            }
             ensure!(
                 name.starts_with("refs/heads/")
                     || name.starts_with("refs/tags/")
@@ -2115,7 +2130,13 @@ pub(crate) fn restore_git_snapshot_for_session(
                 )?;
             }
         }
-        for entry in snapshot.metadata.stash_stack.iter().rev() {
+        for entry in snapshot
+            .metadata
+            .stash_stack
+            .iter()
+            .rev()
+            .filter(|_| restore_contents)
+        {
             git_bytes(
                 runner,
                 repository,
@@ -2138,6 +2159,9 @@ pub(crate) fn restore_git_snapshot_for_session(
                 "restore saved stash entry",
             )?;
         }
+    }
+    if !restore_contents {
+        return Ok(());
     }
     restore_remote_workspace_configuration(runner, repository, &snapshot.metadata)?;
     if !snapshot.staged_patch.is_empty() {

@@ -110,7 +110,11 @@ pub fn restore_checkpoint_with_native_state(
     }
     seed.validate()?;
     if spec.restore_repositories {
-        restore_repositories_from_archive(&archive, &spec.workspace_root, git)?;
+        restore_repositories_from_archive(&archive, &spec.workspace_root, git, true)?;
+    } else {
+        // Move has already transported workspace files. Review refs still
+        // need their destination checkout names without changing its index.
+        restore_repositories_from_archive(&archive, &spec.workspace_root, git, false)?;
     }
 
     // Attachment data belongs to the relay, even when native harness history
@@ -233,15 +237,25 @@ pub fn restore_repositories(
 ) -> Result<()> {
     ensure!(workspace_root.is_dir(), "restore workspace is missing");
     let archive = read_archive_verified(archive_path)?;
-    restore_repositories_from_archive(&archive, workspace_root, git)
+    restore_repositories_from_archive(&archive, workspace_root, git, true)
 }
 
 pub(super) fn restore_repositories_from_archive(
     archive: &crate::archive::VerifiedArchive,
     workspace_root: &Path,
     git: &dyn GitCommandRunner,
+    restore_contents: bool,
 ) -> Result<()> {
     for repository in &archive.manifest.repositories {
+        if !restore_contents
+            && !repository
+                .metadata
+                .saved_refs
+                .keys()
+                .any(|name| name.starts_with("refs/mj/"))
+        {
+            continue;
+        }
         let id = &repository.metadata.id;
         let snapshot = archived_repository_snapshot(archive, repository)?;
         let path = checkout_top_level(
@@ -254,6 +268,7 @@ pub(super) fn restore_repositories_from_archive(
             &path,
             &snapshot,
             Some(&archive.manifest.session.id),
+            restore_contents,
         )
         .with_context(|| format!("restore repository {id:?}"))?;
     }
@@ -362,6 +377,7 @@ pub fn restore_single_repository_onto_branch(
         repository_path,
         &snapshot,
         Some(&archive.manifest.session.id),
+        true,
     )
     .with_context(|| format!("restore repository {:?}", repository.metadata.id))?;
     Ok(archived_branch)
@@ -385,6 +401,7 @@ pub fn restore_single_repository_into_checkout(
         repository_path,
         &snapshot,
         Some(&archive.manifest.session.id),
+        true,
     )
     .context("restore independent checkout before moving it into a target")
 }

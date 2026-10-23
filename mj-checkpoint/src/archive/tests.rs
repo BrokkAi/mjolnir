@@ -1852,6 +1852,7 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
                 &destination,
                 &conflicting,
                 Some("moving"),
+                true,
             )
             .unwrap();
             assert_eq!(git_line(&destination, &["rev-parse", &reviewed]), later);
@@ -1918,6 +1919,7 @@ fn review_refs_follow_the_session_between_worktree_names() {
         &destination,
         &snapshot,
         Some("moving"),
+        false,
     )
     .unwrap();
     assert_eq!(
@@ -1951,6 +1953,7 @@ fn review_refs_follow_the_session_between_worktree_names() {
         &destination,
         &snapshot,
         Some("moving"),
+        true,
     )
     .unwrap_err();
     assert!(

@@ -2587,6 +2587,24 @@ fn raw_checkpoint_restores_review_refs_and_declares_the_new_schema() {
         fs::read(destination.join("README.md")).unwrap(),
         b"review baseline\n"
     );
+    // Move transports workspace files separately and disables repository
+    // restore. Its session handoff must still install durable review refs.
+    fs::write(source.join("README.md"), b"staged live work\n").unwrap();
+    git(&source, &["add", "README.md"]);
+    fs::write(source.join("README.md"), b"unstaged live work\n").unwrap();
+    let index = git(&source, &["ls-files", "--stage"]);
+    for name in [baseline, &start, &reviewed] {
+        git(&source, &["update-ref", "-d", name]);
+    }
+    restore_into(temp.path(), &spec, false);
+    for (name, object) in [(baseline, &point), (&start, &head), (&reviewed, &head)] {
+        assert_eq!(git(&source, &["rev-parse", name]), *object);
+    }
+    assert_eq!(git(&source, &["ls-files", "--stage"]), index);
+    assert_eq!(
+        fs::read(source.join("README.md")).unwrap(),
+        b"unstaged live work\n"
+    );
 }
 
 #[test]
