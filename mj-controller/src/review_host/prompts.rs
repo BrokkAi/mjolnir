@@ -33,19 +33,6 @@ pub(super) struct PromptHold {
     pub(super) delivery_command_id: Option<String>,
 }
 
-/// Fresh reviewer conversations need an identity unique across reviews and
-/// controller restarts, so use a random nonce.
-pub(crate) fn next_review_generation() -> Result<u64, String> {
-    let mut random = [0_u8; 8];
-    getrandom::fill(&mut random)
-        .map_err(|error| format!("generate reviewer generation: {error}"))?;
-    let generation = u64::from_le_bytes(random);
-    if generation == 0 {
-        return Err("generate reviewer generation: random nonce was zero".to_owned());
-    }
-    Ok(generation)
-}
-
 /// Whether a prompt for `session_id` must be refused, and why.
 #[must_use]
 pub fn prompt_refusal(session_id: &str) -> Option<&'static str> {

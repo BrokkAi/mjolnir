@@ -180,64 +180,19 @@ pub enum RelayRequest {
     CompleteSubagentRequest {
         result: crate::subagent::SubagentToolResult,
     },
-    /// Drive the turn-review reviewer that runs beside this session.
-    ///
-    /// The reviewer is a sidecar, not a session: it shares this worker's
-    /// target and working directory and owns nothing else. Its own durable
-    /// relay answers the attach, acknowledge, submit and status requests
-    /// nested here, so the reviewer's conversation is journaled and replayed
-    /// the same way the primary's is.
+    /// Capture repository changes or advance their review baseline.
     Reviewer {
-        /// Which isolated reviewing agent this is for. Absent means the
-        /// default role shared by plan and turn review. Named roles let
-        /// background work such as settings discovery avoid that reviewer.
-        /// The field is additive for older workers.
+        /// Legacy routing field retained for older workers; capture uses no role.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         role: Option<String>,
         request: ReviewerRequest,
     },
 }
 
-/// What a controller asks of the turn-review reviewer sidecar.
+/// Worker-owned repository operations used by the review host.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", content = "params", rename_all = "snake_case")]
 pub enum ReviewerRequest {
-    /// Start the reviewer, or report the running one when `config` matches it.
-    /// The reviewer's profile must already be staged under the worker root.
-    Start {
-        config: Box<crate::worker_launch::ReviewerLaunchConfig>,
-    },
-    /// Replay the reviewer's journal from a cursor, as `Attach` does for the
-    /// primary.
-    Attach {
-        after_ordinal: u64,
-        after_digest: String,
-    },
-    Acknowledge {
-        through_ordinal: u64,
-        through_digest: String,
-    },
-    Submit {
-        command_id: String,
-        command: RelayCommand,
-    },
-    Status,
-    /// Answer a form the reviewer's harness is waiting on.
-    ///
-    /// A reviewer that asks for permission and is never answered stalls the
-    /// whole review, so its forms travel the same connection-only path the
-    /// primary's do.
-    RespondElicitation {
-        elicitation_id: String,
-        response: ElicitationResponse,
-    },
-    /// Cancel any turn in flight and stop the reviewer's process group,
-    /// keeping its staged profile, native session and journal for next time.
-    Pause,
-    /// Stop only the preparation that owns this generation; stale cleanup must not stop its replacement.
-    PauseGeneration {
-        generation: u64,
-    },
     /// Report what changed in every workspace repository since `baselines`.
     ///
     /// A baseline is the `current_tree` id an earlier capture reported, keyed
@@ -317,13 +272,6 @@ pub struct FileLineChange {
 impl ReviewerRequest {
     pub const fn action_name(&self) -> &'static str {
         match self {
-            Self::Start { .. } => "reviewer_start",
-            Self::Attach { .. } => "reviewer_attach",
-            Self::Acknowledge { .. } => "reviewer_acknowledge",
-            Self::Submit { .. } => "reviewer_submit",
-            Self::Status => "reviewer_status",
-            Self::RespondElicitation { .. } => "reviewer_respond_elicitation",
-            Self::Pause | Self::PauseGeneration { .. } => "reviewer_pause",
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
         }
@@ -395,14 +343,6 @@ impl RelayRequest {
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
             Self::ReplaceProjectMemoryTree { .. } => super::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL,
             Self::Submit { command, .. } => command.minimum_protocol(),
-            Self::Reviewer {
-                request: ReviewerRequest::PauseGeneration { .. },
-                ..
-            } => 14,
-            Self::Reviewer {
-                request: ReviewerRequest::Start { config },
-                ..
-            } if config.fast_mode.is_some() => 14,
             Self::Reviewer { .. } => 6,
             _ => RELAY_MIN_PROTOCOL_VERSION,
         }
@@ -631,19 +571,6 @@ pub enum RelayResponsePayload {
         result: crate::history::HistoryResult,
     },
     HistoryRequestCompleted,
-    /// The reviewer sidecar is running under the requested configuration.
-    ReviewerStarted {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        native_session_id: Option<String>,
-        /// What the reviewer's harness advertises right now, which is what the
-        /// waterfall offers the user.
-        config_options: Vec<agent_client_protocol::schema::v1::SessionConfigOption>,
-        /// Whether this call reused an already-running reviewer.
-        reused: bool,
-        state: Box<RelayOperationalState>,
-    },
-    /// The reviewer's process group has been stopped; its files remain.
-    ReviewerPaused,
     /// What every workspace repository changed since the stored baselines.
     ReviewDelta {
         repositories: Vec<RepoDelta>,

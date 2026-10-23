@@ -219,7 +219,7 @@ impl ReviewEnvironment for ControllerEnvironment {
                 "turn review needs an enabled reviewer: [review] profile {profile:?} is disabled"
             ));
         }
-        validate_reviewer_assignment(
+        validate_review_profile(
             session_id,
             controller.state.sessions.get(session_id),
             profile,
@@ -279,7 +279,7 @@ impl ReviewEnvironment for ControllerEnvironment {
     }
 }
 
-pub(crate) fn validate_reviewer_assignment(
+pub(crate) fn validate_review_profile(
     session_id: &str,
     session: Option<&mj_core::state::SessionRecord>,
     _profile: &str,

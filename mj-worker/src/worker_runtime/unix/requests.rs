@@ -61,52 +61,29 @@ pub(crate) async fn handle_request(
     ))
 }
 
-pub(crate) async fn reviewer_response(
+pub(crate) async fn review_capture_response(
     envelope: RelayRequestEnvelope,
-    reviewer: Option<&Arc<ReviewerSidecar>>,
-    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    capture: Option<Arc<ReviewCapture>>,
 ) -> RelayResponseEnvelope {
-    let Some(reviewer) = reviewer else {
-        return RelayResponseEnvelope {
-            request_id: envelope.request_id,
-            protocol_version: envelope.protocol_version,
-            body: compaction_error(
-                RelayErrorCode::InvalidState,
-                "session is closed; no reviewer can run beside it",
-            ),
-        };
-    };
-    let RelayRequest::Reviewer { role, request } = envelope.request.clone() else {
-        unreachable!("reviewer_response only serves reviewer requests");
-    };
-    // Operations on one role are sequential by construction; operations on
-    // different roles are not, so a lane launching cannot block the controller
-    // reading the supervisor's journal.
-    reviewer
-        .handle_cancellable(
-            envelope,
-            role,
-            request,
-            wait_for_reviewer_disconnect(reader),
-        )
-        .await
-}
-
-/// Watches a review request's owning connection until it closes.
-///
-/// Do not consume input: cancellation of a line-reading future could discard
-/// half of the next frame. Buffered pipelined input is left for the ordinary
-/// request loop; only an idle input stream can signal EOF during this action.
-pub(crate) async fn wait_for_reviewer_disconnect(
-    reader: &mut (impl AsyncBufRead + Unpin),
-) -> ReviewerCancellation {
-    match reader.fill_buf().await {
-        Ok(bytes) if !bytes.is_empty() => std::future::pending().await,
-        Ok(_) => ReviewerCancellation::ClientDisconnected,
-        Err(error) => {
-            tracing::debug!(%error, "review client read failed during an in-flight operation");
-            ReviewerCancellation::ClientDisconnected
+    let body = match capture {
+        Some(capture) => {
+            let RelayRequest::Reviewer { request, .. } = envelope.request else {
+                unreachable!("review_capture_response only serves capture requests");
+            };
+            match capture.handle(request).await {
+                Ok(body) => body,
+                Err(error) => compaction_error(RelayErrorCode::InvalidState, &format!("{error:#}")),
+            }
         }
+        None => compaction_error(
+            RelayErrorCode::InvalidState,
+            "review capture is unavailable",
+        ),
+    };
+    RelayResponseEnvelope {
+        request_id: envelope.request_id,
+        protocol_version: envelope.protocol_version,
+        body,
     }
 }
 

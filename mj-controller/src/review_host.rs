@@ -42,9 +42,7 @@ use mj_review::driver::{
     PendingForward, Resolution, ReviewRequest, TurnReviewDriver, TurnReviewPhase, TurnReviewSeed,
 };
 
-pub use mj_client::review::{
-    ReviewerQuestion, RuntimeReviewView, VerdictKind, VerdictView, role_session_id,
-};
+pub use mj_client::review::{ReviewerQuestion, RuntimeReviewView, VerdictKind, VerdictView};
 
 mod prompts;
 pub use prompts::*;

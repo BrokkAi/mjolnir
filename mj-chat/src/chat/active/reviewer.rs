@@ -8,7 +8,6 @@ impl ActiveChat {
         elicitation_id: String,
         response: mj_core::elicitation::ElicitationResponse,
     ) {
-        let session = self.session.clone();
         let control = self.session_manager.clone();
         let child = match role.as_ref() {
             Some(child) => {
@@ -22,30 +21,17 @@ impl ActiveChat {
                     );
                     return;
                 }
-                Some(child.clone())
+                child.clone()
             }
-            None => None,
+            None => return,
         };
         let updates = self.chat_io_tx.clone();
         let answered_role = role.clone();
         let automatic = mj_core::acp::is_plan_review_id(&elicitation_id);
         tokio::spawn(async move {
-            let result = if let Some(child) = child {
-                match control.session(child).await {
-                    Ok(handle) => handle.respond_elicitation(elicitation_id, response).await,
-                    Err(error) => Err(error),
-                }
-            } else {
-                session
-                    .reviewer_as(
-                        role,
-                        ReviewerAction::RespondElicitation {
-                            elicitation_id,
-                            response,
-                        },
-                    )
-                    .await
-                    .map(|_| ())
+            let result = match control.session(child).await {
+                Ok(handle) => handle.respond_elicitation(elicitation_id, response).await,
+                Err(error) => Err(error),
             }
             .map_err(|error| format!("{error:#}"));
             let Some(update) = reviewer_answer_update(result, automatic) else {

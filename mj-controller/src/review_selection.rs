@@ -336,7 +336,6 @@ async fn resolve_candidate(
     }
     Ok(ResolvedReviewSettings {
         profile: candidate.id.clone(),
-        generation: crate::review_host::next_review_generation().map_err(anyhow::Error::msg)?,
         main,
         automatic,
         same_provider: false,
