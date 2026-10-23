@@ -1969,6 +1969,166 @@ fn a_managed_clone_moved_into_a_container_is_restored_where_it_was_cloned() {
     );
 }
 
+/// Runs a Move restore on this machine: Git with the fixture's network URL
+/// rewritten wherever it contacts a remote, every other command for real, and
+/// the Move worker in this process.
+#[cfg(unix)]
+struct LocalMoveRestore {
+    remote: PathBuf,
+}
+
+#[cfg(unix)]
+impl CommandExecutor for LocalMoveRestore {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        if command.program == "git" {
+            return crate::controller::test_support::FixtureRemoteExecutor {
+                remote: self.remote.clone(),
+            }
+            .execute(command);
+        }
+        ProcessExecutor.execute(command)
+    }
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn io::Read + Send),
+    ) -> Result<CommandOutput> {
+        assert_eq!(command.purpose, "prepare or verify Move workspace");
+        let request = serde_json::from_reader(input)?;
+        Ok(CommandOutput {
+            status: 0,
+            stdout: serde_json::to_vec(&mj_worker::move_workspace::execute(request)?)?,
+            stderr: Vec::new(),
+        })
+    }
+}
+
+// Hard-won: DSH campaign 2026-10-23 (C-1 reverse): a container session moved to a local checkout failed unless its repository was named project
+#[cfg(unix)]
+#[test]
+fn a_container_session_moved_to_a_local_checkout_is_restored_into_it() {
+    use crate::controller::test_support::test_git;
+    use crate::controller::worktree::{
+        PrimaryCheckoutRequirement, apply_workspace_to_raw, create_managed_worktree,
+    };
+    use mj_core::move_workspace::WorkspaceRepository;
+    let short = "a_container_session_moved_to_a_local_checkout_is_restored_into_it";
+    if !isolated_test_child(&test_name(short), "MJ_MOVE_CHECKOUT_DESTINATION_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (repository, _remote_parent, remote) = checkout_with_network_remote();
+    let executor = LocalMoveRestore {
+        remote: remote.clone(),
+    };
+    let session_id = MOVE_QUEUE_SESSION_ID;
+    // The bundle calls the repository after its remote (`repo`), not
+    // `project`, and keeps the local repository a checkout can be made from.
+    let (bundle_id, project) = crate::project_catalog::accept_directory(
+        &mj_core::config::TargetTemplate::LocalBare,
+        repository.path(),
+        &executor,
+    )
+    .unwrap();
+    let mut source = checkpoint_test_session(session_id);
+    source.bundle_id = bundle_id;
+    source.project = Some(project);
+    source.state = SessionState::Closing;
+    source.container_workspace =
+        Some(mj_core::targets::new_container_workspace(session_id).unwrap());
+    source.target = Some(TargetLocator::LocalPodman {
+        container_id: mj_core::targets::resource_name(session_id).unwrap(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    });
+    crate::database::save_session(&source).unwrap();
+    let mut controller = Controller {
+        config: resume_compatibility_config(),
+        state: State {
+            sessions: [(session_id.into(), source.clone())].into_iter().collect(),
+            ..State::default()
+        },
+    };
+
+    // The container's checkout and the work it carries, captured under the
+    // ids the source's layout gives, as the source's worker captures it.
+    let layout = controller
+        .session_export_layout(session_id, &executor)
+        .unwrap();
+    assert_eq!(layout.primary_repository, "repo");
+    let container = tempfile::tempdir().unwrap();
+    test_git(
+        container.path(),
+        &["clone", &remote.to_string_lossy(), "repo"],
+    );
+    let container_checkout = container.path().join("repo");
+    fs::write(
+        container_checkout.join("nested/file.txt"),
+        "edited in the container\n",
+    )
+    .unwrap();
+    fs::write(container_checkout.join("container-note.txt"), "untracked\n").unwrap();
+    let mut operation = source_recovery_operation(&source);
+    operation.selection.target_template_id = Some("local-bare".into());
+    operation.phase = MovePhase::ResumingDestination;
+    let transfer = controller
+        .new_workspace_transfer(
+            session_id,
+            &operation.operation_id,
+            Default::default(),
+            &executor,
+        )
+        .unwrap();
+    mj_worker::move_workspace::capture(
+        &layout
+            .repositories
+            .iter()
+            .map(|repository| WorkspaceRepository {
+                id: repository.id.clone(),
+                root: container_checkout.clone(),
+            })
+            .collect::<Vec<_>>(),
+        &Default::default(),
+        &transfer.controller_stage,
+    )
+    .unwrap();
+    operation.workspace_transfer = Some(transfer);
+    crate::database::save_move_operation(&operation).unwrap();
+
+    // Resume gives the session its checkout before the transfer fills it.
+    let conversion = controller
+        .plan_workspace_to_raw(&source, "local-bare", &executor)
+        .unwrap();
+    create_managed_worktree(
+        &executor,
+        &conversion.worktree,
+        None,
+        PrimaryCheckoutRequirement::Any,
+    )
+    .unwrap();
+    let record = controller.state.sessions.get_mut(session_id).unwrap();
+    record.target_template_id = "local-bare".into();
+    record.target_runtime = Some((&controller.config.targets["local-bare"]).into());
+    record.target = Some(TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir().join("workers").join(session_id),
+    });
+    apply_workspace_to_raw(record, &conversion);
+
+    controller
+        .restore_move_workspace(session_id, &executor)
+        .unwrap();
+
+    let checkout = &conversion.worktree.worktree_root;
+    assert_eq!(
+        fs::read_to_string(checkout.join("nested/file.txt")).unwrap(),
+        "edited in the container\n"
+    );
+    assert_eq!(
+        fs::read_to_string(checkout.join("container-note.txt")).unwrap(),
+        "untracked\n"
+    );
+}
+
 /// The rsync that ships with macOS answers `--version` but rejects
 /// `--protect-args`, which every Move transfer passes.
 struct RsyncWithoutProtectArgs(GitWithPodmanPreflightExecutor);
