@@ -2100,6 +2100,7 @@ impl ModalSurface for SetupDialog {
 
 impl DashboardState {
     pub(crate) fn begin_settings_section(&mut self, section: &str, entry: Option<&str>) {
+        self.profile_login_refresh = true;
         let mut dialog = SetupDialog::new(&self.config);
         dialog.path = vec![section.to_owned()];
         if let Some(entry) = entry
@@ -2112,6 +2113,7 @@ impl DashboardState {
     }
 
     pub fn begin_setup(&mut self) {
+        self.profile_login_refresh = true;
         self.mode = Mode::Setup(SetupDialog::new(&self.config));
     }
 
@@ -2157,6 +2159,26 @@ impl DashboardState {
         self.profile_capabilities = snapshot;
         self.take_setup_subagent_choices();
         self.take_subagent_discovery();
+    }
+
+    /// Replace the saved-profile sign-in statuses read off the loop.
+    pub fn set_profile_login_statuses(
+        &mut self,
+        statuses: std::collections::BTreeMap<String, mj_core::credentials::LoginStatus>,
+    ) {
+        self.profile_login_statuses = statuses;
+    }
+
+    pub(crate) fn profile_login_status(
+        &self,
+        profile_id: &str,
+    ) -> Option<&mj_core::credentials::LoginStatus> {
+        self.profile_login_statuses.get(profile_id)
+    }
+
+    /// Take the request to read saved-profile sign-in status off the loop.
+    pub fn take_profile_login_refresh(&mut self) -> bool {
+        std::mem::take(&mut self.profile_login_refresh)
     }
 
     pub(crate) fn take_profile_hydration(&mut self) -> Option<DashboardAction> {
@@ -2865,6 +2887,7 @@ impl DashboardState {
         profile_id: &str,
         result: Result<(), String>,
     ) {
+        self.profile_login_refresh = true;
         let message = match result {
             Ok(()) => format!(
                 "Signed in to {profile_id}. New and resumed sessions use the updated login."
@@ -3423,6 +3446,20 @@ pub(crate) fn render_setup(
             };
             let summary = if choice_editor && index == dialog.selected {
                 String::new()
+            } else {
+                summary
+            };
+            // Sign-in status is part of the profile list, not a detail hidden
+            // inside the profile page: a signed-out row is visible before a
+            // session is started.
+            let summary = if !choice_editor && dialog.path == ["profiles"] {
+                match dashboard.profile_login_status(key) {
+                    Some(status) => {
+                        let base = summary.strip_suffix("  ›").unwrap_or(&summary);
+                        format!("{base}  {}  ›", status.label())
+                    }
+                    None => summary,
+                }
             } else {
                 summary
             };

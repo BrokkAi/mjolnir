@@ -340,6 +340,34 @@ pub fn validate_credential_payload(_kind: HarnessKind, bytes: &[u8]) -> Result<(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginStatus {
+    /// A credential the harness can start from is present.
+    SignedIn,
+    /// A credential is present but its recorded expiry has passed. The harness
+    /// may still refresh it on the next turn.
+    Expired,
+    /// This profile uses a harness login and no credential is present.
+    SignedOut,
+    /// This profile authenticates without an interactive harness login.
+    NotRequired(String),
+    /// The status could not be read, or the harness keeps it somewhere this
+    /// process cannot inspect.
+    Unknown(String),
+}
+
+impl LoginStatus {
+    /// Short text for a settings row, without a trailing period.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::SignedIn => "signed in",
+            Self::Expired => "credential expired",
+            Self::SignedOut => "signed out",
+            Self::NotRequired(detail) | Self::Unknown(detail) => detail,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialSnapshot {
     pub present: bool,
     pub fingerprint: String,

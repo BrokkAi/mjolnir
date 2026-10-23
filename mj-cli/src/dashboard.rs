@@ -966,6 +966,15 @@ pub(crate) async fn run_dashboard_for_workspace(
             if let Some(check) = context.dashboard.take_machine_runtime_check() {
                 actions::apply_dashboard_action(&mut context, check).await?;
             }
+            // Settings shows whether each saved profile has a login. Reading
+            // those files belongs off the loop; this is the one place that
+            // starts it so every surface that opens Settings is covered.
+            if context.dashboard.take_profile_login_refresh() {
+                io::spawn_profile_login_statuses(
+                    context.controller.config.clone(),
+                    context.dashboard_io_tx.clone(),
+                );
+            }
             // The Sessions pane is a list of conversations, not a list of
             // things to go and open, so the transcript follows its selection.
             context.reconcile_conversation_attachments();

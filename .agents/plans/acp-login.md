@@ -24,6 +24,8 @@ using the pinned harness Mjolnir manages, with no ambient harness installation.
 - [x] Update the login documentation.
 - [x] Add a **Sign in** action to Settings → Profiles that hands the terminal
   to the same flow and resumes the dashboard.
+- [x] Show each saved profile's sign-in status in the profiles list, read off
+  the event loop when Settings opens and after a login.
 - [x] Run formatting, focused tests, full tests, and Clippy.
 
 ## Surprises & Discoveries
@@ -90,7 +92,10 @@ so a fresh machine can sign in before its first session.
 Settings → Profiles → **Sign in** runs the same flow for the selected saved
 profile. The dashboard releases the alternate screen and raw mode, drops its
 event stream so the child owns input, runs `mj login`, then re-enters and
-reports the result in the dialog.
+reports the result in the dialog. Each saved profile also shows its sign-in
+status (`signed in`, `signed out`, `credential expired`, or the API-key/no-login
+case); the status is read off the event loop when Settings opens and again
+after a login.
 
 Validation: six focused tests exercise a scripted ACP bridge (terminal command
 with the profile environment, `authenticate`, unknown-method listing, empty

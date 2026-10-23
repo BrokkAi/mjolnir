@@ -530,8 +530,11 @@ mj login --profile codex-work
 You can also sign in without leaving the dashboard: press the prefix, then `b`
 and `s` to open Settings, choose **Profiles**, select a profile, and choose
 **Sign in**. Mjolnir hands the terminal to the same login flow and resumes the
-dashboard when it finishes. The button is available for profiles that already
-exist in the saved configuration; save a newly added profile first.
+dashboard when it finishes. The profiles list shows each saved profile's status
+beside it — `signed in`, `signed out`, `credential expired`, or the API-key and
+no-login cases — so a signed-out profile is visible before a session fails. The
+button is available for profiles that already exist in the saved configuration;
+save a newly added profile first.
 
 When exactly one profile exists, `--profile` may be omitted. With several
 profiles it is required. Mjolnir sets the selected home variable and profile

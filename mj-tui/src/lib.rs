@@ -874,6 +874,12 @@ pub struct DashboardState {
     session_order: RefCell<session_view::SessionOrder>,
     pub(crate) config: Tracked<Config>,
     pub(crate) profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    /// Sign-in status of saved profiles, read off the loop when Settings opens
+    /// and after a login. Missing entries are drafts or not yet read.
+    pub(crate) profile_login_statuses: BTreeMap<String, mj_core::credentials::LoginStatus>,
+    /// A surface that shows sign-in status opened, or a login finished. The
+    /// dashboard loop reads the statuses off the loop when it takes this.
+    profile_login_refresh: bool,
     pub(crate) profile_hydration_requests: BTreeMap<String, BTreeSet<String>>,
     pub(crate) profile_hydration_errors: BTreeMap<String, String>,
     /// The resolved `[keys]` bindings, refreshed whenever configuration is
@@ -1209,6 +1215,8 @@ impl DashboardState {
             prefix_pending: false,
             resize_mode: false,
             profile_capabilities: Default::default(),
+            profile_login_statuses: Default::default(),
+            profile_login_refresh: false,
             profile_hydration_requests: Default::default(),
             profile_hydration_errors: Default::default(),
             config: config.into(),

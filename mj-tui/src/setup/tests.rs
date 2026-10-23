@@ -272,6 +272,33 @@ fn signing_in_to_the_selected_profile_is_a_settings_action() {
     assert_eq!(profile_id, "codex-1");
 }
 
+#[test]
+fn the_profiles_list_shows_each_profiles_sign_in_status() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.set_profile_login_statuses(std::collections::BTreeMap::from([
+        (
+            "codex-1".to_owned(),
+            mj_core::credentials::LoginStatus::SignedOut,
+        ),
+        (
+            "claude-1".to_owned(),
+            mj_core::credentials::LoginStatus::SignedIn,
+        ),
+    ]));
+    dashboard.begin_settings_section("profiles", None);
+    let lines = drawn(&mut dashboard, 140, 40);
+    let codex = lines
+        .iter()
+        .find(|line| line.contains("codex-1"))
+        .unwrap_or_else(|| panic!("missing codex row: {lines:#?}"));
+    assert!(codex.contains("signed out"), "{codex:?}");
+    let claude = lines
+        .iter()
+        .find(|line| line.contains("claude-1"))
+        .unwrap_or_else(|| panic!("missing claude row: {lines:#?}"));
+    assert!(claude.contains("signed in"), "{claude:?}");
+}
+
 fn choose(dashboard: &mut DashboardState, name: &str) -> DashboardAction {
     let Mode::Setup(dialog) = &mut dashboard.mode else {
         panic!("settings");
