@@ -104,3 +104,55 @@ pub(crate) fn managed_checkpoint_archive_name(
 pub(super) fn is_managed_checkpoint_archive_name(name: &OsStr) -> bool {
     managed_checkpoint_archive_name(name).is_some()
 }
+
+/// Remove every checkpoint archive that belongs to a session being destroyed:
+/// the one its record points at, and any other `<session_id>-<n>-archive-<hex>`
+/// file in `directory`, such as the handoff archive a Move wrote and the record
+/// no longer references. A file belongs to the session only when its parsed
+/// session ID equals `session_id`, so a session whose ID is a prefix of this
+/// one is never touched. Retained Move sources are workspaces and checkouts
+/// recorded in the database, not archive files, so they are not affected.
+pub(crate) fn remove_session_checkpoint_archives(
+    directory: &Path,
+    session_id: &str,
+    current: Option<&CheckpointMetadata>,
+) -> Result<()> {
+    if let Some(checkpoint) = current
+        && let Err(error) = std::fs::remove_file(&checkpoint.archive_path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error).with_context(|| {
+            format!(
+                "remove session recovery archive {}",
+                checkpoint.archive_path.display()
+            )
+        });
+    }
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("scan checkpoint directory {}", directory.display()));
+        }
+    };
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_file()
+            || managed_checkpoint_archive_name(&entry.file_name())
+                .is_none_or(|name| name.session_id != session_id)
+        {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("remove session recovery archive {}", entry.path().display())
+                });
+            }
+        }
+    }
+    Ok(())
+}

@@ -1920,6 +1920,60 @@ fn starting_close_persists_its_intent_before_checkpointing() {
     assert!(session.last_checkpoint_error.is_none());
 }
 
+// Hard-won: DSH campaign 2026-10-23 (B-5): destroy after a Move left the Move's checkpoint archive behind
+#[test]
+fn destroy_removes_every_archive_of_the_session_and_only_those() {
+    if !in_isolated_store("destroy_removes_every_archive_of_the_session_and_only_those") {
+        return;
+    }
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let other_id = "fedcba9876543210fedcba9876543210";
+    let sessions = mj_core::config::sessions_dir();
+    // The record points at the newest archive; the Move's handoff archive is
+    // an older file no record refers to.
+    std::fs::create_dir_all(&sessions).unwrap();
+    let managed = |id: &str, frontier: u64, nonce: char| {
+        let mut archive = write_checkpoint_gate_archive(&sessions, id, frontier);
+        let path = sessions.join(format!(
+            "{id}-{frontier}-archive-{}.hel.zip",
+            nonce.to_string().repeat(32)
+        ));
+        std::fs::rename(&archive.archive_path, &path).unwrap();
+        archive.archive_path = path;
+        archive
+    };
+    let move_handoff = managed(session_id, 317, 'a');
+    let current = managed(session_id, 400, 'b');
+    let other = managed(other_id, 317, 'c');
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Provisioning;
+    session.target = None;
+    session.checkpoint = Some(current.clone());
+    let mut controller = Controller {
+        config: Config::default(),
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+
+    controller
+        .force_destroy_session_with(
+            session_id,
+            &ProcessExecutor,
+            BranchDisposition::Delete,
+            |_| Ok(()),
+        )
+        .unwrap();
+
+    assert!(!move_handoff.archive_path.exists(), "Move archive remains");
+    assert!(!current.archive_path.exists(), "current archive remains");
+    assert!(
+        other.archive_path.exists(),
+        "another session's archive went"
+    );
+}
+
 #[test]
 fn force_destroy_without_a_target_or_archive_still_removes_the_record() {
     if !in_isolated_store("force_destroy_without_a_target_or_archive_still_removes_the_record") {
