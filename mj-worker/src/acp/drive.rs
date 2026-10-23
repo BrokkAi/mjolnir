@@ -104,6 +104,7 @@ where
     let managed_subagent = spec.managed_subagent;
     let permission_policy = spec.execution_policy;
     let permission_harness = spec.harness;
+    let permission_owned_mcp = OwnedMcpApprovals::for_launch(&spec);
     let plan_implementation_slot = PlanImplementationSlot::default();
     let permission_implementation_slot = plan_implementation_slot.clone();
     let terminals = TerminalRegistry::new()?;
@@ -373,7 +374,7 @@ where
                     && !plan_permission
                     && !claude_plan_approval
                 {
-                    let Some(response) = unconstrained_permission_response(&request) else {
+                    let Some(response) = allow_permission_response(&request) else {
                         let message = format!(
                             "{} requested tool permission in YOLO mode without offering an allow response (session {}, tool {}).",
                             permission_harness.display_name(), request.session_id, request.tool_call.tool_call_id,
@@ -394,6 +395,16 @@ where
                         tool_call_id = %request.tool_call.tool_call_id,
                         selected_option = ?response.outcome,
                         "automatically approved tool permission in YOLO mode"
+                    );
+                    return responder.respond(response);
+                }
+                if let Some(response) = permission_owned_mcp.response(&request) {
+                    tracing::debug!(
+                        harness = %permission_harness.display_name(),
+                        session_id = %request.session_id,
+                        tool_call_id = %request.tool_call.tool_call_id,
+                        selected_option = ?response.outcome,
+                        "automatically approved a Mjolnir-owned MCP tool"
                     );
                     return responder.respond(response);
                 }

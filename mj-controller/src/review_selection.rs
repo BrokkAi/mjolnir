@@ -1,4 +1,4 @@
-//! One resolver for turn review and plan second opinion.
+//! One resolver for turn review and plan turn review.
 use crate::controller::Controller;
 use crate::server_runtime::profile_catalog::ProfileCatalog;
 use crate::session_manager::ManagedSessionHandle;
@@ -336,7 +336,6 @@ async fn resolve_candidate(
     }
     Ok(ResolvedReviewSettings {
         profile: candidate.id.clone(),
-        generation: crate::review_host::next_review_generation().map_err(anyhow::Error::msg)?,
         main,
         automatic,
         same_provider: false,

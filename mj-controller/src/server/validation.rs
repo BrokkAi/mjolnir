@@ -434,7 +434,10 @@ fn validate_action_against(
             no_project_memory: _,
             no_github_events: _,
         } => {
-            if let Some(mj_core::config::SessionReview::On { model, effort, .. }) = review
+            if let Some(
+                mj_core::config::SessionReview::Turn { model, effort, .. }
+                | mj_core::config::SessionReview::Push { model, effort, .. },
+            ) = review
                 && [model, effort].into_iter().flatten().any(|value| {
                     value.trim().is_empty()
                         || value.len() > 256

@@ -112,18 +112,11 @@ pub fn record_startup_failure(root: &Path, step: &str, error: &str) {
 
 // The launch descriptions and MCP shapes both sides of the relay share live in
 // the foundation. The runtime and its submodules keep naming them here.
-use mj_core::worker_launch::WorkerLaunchConfig;
 #[cfg(unix)]
-use mj_core::worker_launch::{
-    ProjectMemoryLaunchConfig, REVIEWER_DIR, REVIEWER_PROFILE_DIR, ReviewerLaunchConfig,
-};
+use mj_core::worker_launch::ProjectMemoryLaunchConfig;
+use mj_core::worker_launch::WorkerLaunchConfig;
 
 pub(crate) const GITHUB_CLI_BIN_ENV: &str = "MJ_GITHUB_CLI_BIN";
-/// Per-role directories inside [`REVIEWER_DIR`], holding the role's private
-/// profile copy and relay journal.
-#[cfg(unix)]
-pub(crate) const REVIEWER_ROLES_DIR: &str = "roles";
-
 pub(crate) fn github_cli_login_shell_command(command: &str) -> String {
     format!(
         "if [ -n \"${{{GITHUB_CLI_BIN_ENV}:-}}\" ]; then PATH=\"${GITHUB_CLI_BIN_ENV}:$PATH\"; export PATH; fi; unset {GITHUB_CLI_BIN_ENV} GH_TOKEN GITHUB_TOKEN; {command}"
@@ -311,7 +304,10 @@ pub(crate) fn repin_bridge_selectors(
 #[cfg(unix)]
 mod discovery;
 #[cfg(unix)]
-pub(crate) mod harness;
+pub(crate) use mj_core::harness_install as harness;
+#[cfg(unix)]
+pub use mj_core::harness_install::ManagedHarness;
+
 #[cfg(unix)]
 mod harness_launch;
 #[cfg(unix)]
@@ -332,7 +328,7 @@ pub async fn discover_profile_config(
 #[cfg(unix)]
 mod history;
 #[cfg(unix)]
-pub(crate) mod reviewer;
+pub(crate) mod review_capture;
 #[cfg(unix)]
 pub(crate) mod subagents;
 #[cfg(unix)]
@@ -551,5 +547,3 @@ mod startup_record_tests {
 
 #[cfg(all(test, unix))]
 mod relay_tests;
-#[cfg(all(test, unix))]
-mod reviewer_tests;

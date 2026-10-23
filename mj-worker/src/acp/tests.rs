@@ -254,6 +254,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         (HarnessKind::Codex, false),
         (HarnessKind::Codex, true),
         (HarnessKind::Claude, true),
+        (HarnessKind::Dsh, false),
         (HarnessKind::Grok, false),
     ] {
         spec.harness = harness;
@@ -282,8 +283,29 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
 
 #[test]
 fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
+    use agent_client_protocol::schema::v1::{PermissionOption, ToolCallUpdateFields};
     use mj_core::worker_launch::ReviewMcpServer;
-    for harness in [HarnessKind::Codex, HarnessKind::Claude] {
+    // A DSH permission request, titled and offering options as dsh-acp 0.2.0
+    // does, and the option the worker selects for it without asking.
+    let dsh_answer = |approvals: &OwnedMcpApprovals, title: &str| {
+        let request = RequestPermissionRequest::new(
+            "native",
+            ToolCallUpdate::new("call", ToolCallUpdateFields::new().title(title)),
+            vec![
+                PermissionOption::new("allow_once", "Allow once", PermissionOptionKind::AllowOnce),
+                PermissionOption::new(
+                    "allow_always",
+                    "Allow for this session",
+                    PermissionOptionKind::AllowAlways,
+                ),
+                PermissionOption::new("reject_once", "Deny", PermissionOptionKind::RejectOnce),
+            ],
+        );
+        approvals
+            .response(&request)
+            .map(|response| serde_json::to_value(response).unwrap()["outcome"]["optionId"].clone())
+    };
+    for harness in [HarnessKind::Codex, HarnessKind::Claude, HarnessKind::Dsh] {
         for policy in [
             ExecutionPolicy::ConfiguredApprovals,
             ExecutionPolicy::Unconstrained,
@@ -295,7 +317,9 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
             ] {
                 let mut spec = reload_fallback_spec(harness);
                 spec.execution_policy = policy;
-                spec.subagent_mcp_socket = Some(worker_socket(role));
+                let mut socket = worker_socket(role);
+                socket.review_gate = role == SubagentMcpRole::Parent;
+                spec.subagent_mcp_socket = Some(socket);
                 spec.project_memory = Some(ProjectMemoryLaunchConfig {
                     history_socket: Some("/worker/history.sock".into()),
                     project_key: "project".into(),
@@ -331,7 +355,28 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
                         .unwrap(),
                 ] {
                     let servers = request["mcpServers"].as_array().unwrap();
-                    if harness == HarnessKind::Codex {
+                    if harness != HarnessKind::Claude {
+                        let delegation = servers
+                            .iter()
+                            .find(|server| server["name"] == "mj-agents")
+                            .unwrap();
+                        let args = delegation["args"].as_array().unwrap();
+                        assert_eq!(
+                            args.iter().any(|arg| arg == "--review-gate"),
+                            role == SubagentMcpRole::Parent,
+                            "{request}"
+                        );
+                    }
+                    if harness == HarnessKind::Dsh {
+                        // DSH has no approval setting to send; the worker
+                        // answers its permission requests instead (below).
+                        assert_eq!(servers.len(), 4);
+                        assert!(
+                            servers.iter().all(|server| server.get("_meta").is_none()),
+                            "{request}"
+                        );
+                        assert!(request.get("_meta").is_none(), "{request}");
+                    } else if harness == HarnessKind::Codex {
                         assert_eq!(servers.len(), 4);
                         for server in servers {
                             let expected = (guardian
@@ -360,6 +405,9 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
                                     .iter()
                                     .map(|tool| format!("mcp__mj-agents__{tool}")),
                             );
+                            if role == SubagentMcpRole::Parent {
+                                expected.push("mcp__mj-agents__request_review".into());
+                            }
                             assert_eq!(allowed, Some(&serde_json::json!(expected)), "{request}");
                         } else {
                             assert!(
@@ -369,7 +417,42 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
                         }
                     }
                 }
+                if harness == HarnessKind::Dsh {
+                    let approvals = OwnedMcpApprovals::for_launch(&spec);
+                    for (title, owned) in [
+                        ("mcp  mj-agents  spawn", true),
+                        ("mcp  mj-agents  list agents", true),
+                        ("mcp  mj-agents  request review", true),
+                        ("mcp  mj-agents  handback", true),
+                        ("mcp  mj-memory  trace file src/lib.rs", true),
+                        // A configured reviewer server is not Mjolnir's,
+                        // whatever its name.
+                        ("mcp  mj-tools  run", false),
+                        ("mcp  mj-third-party  scan", false),
+                        // `mj-agents_` only begins with an owned name.
+                        ("mcp  mj-agents   spawn", false),
+                        ("mcp  mj-agents  ", false),
+                        ("Run rm -rf build", false),
+                        ("write file mcp  mj-agents  spawn", false),
+                    ] {
+                        assert_eq!(
+                            dsh_answer(&approvals, title),
+                            (guardian && owned).then(|| serde_json::json!("allow_once")),
+                            "{policy:?} {role}: {title}"
+                        );
+                    }
+                }
                 spec.subagent_mcp_socket = None;
+                if harness == HarnessKind::Dsh {
+                    // Without the socket this launch registers no delegation
+                    // server, so nothing named after it is approved.
+                    let approvals = OwnedMcpApprovals::for_launch(&spec);
+                    assert_eq!(dsh_answer(&approvals, "mcp  mj-agents  spawn"), None);
+                    assert_eq!(
+                        dsh_answer(&approvals, "mcp  mj-memory  search sessions").is_some(),
+                        guardian
+                    );
+                }
                 spec.extra_mcp_servers.clear();
                 let without_memory =
                     serde_json::to_value(new_session_request(&spec, false)).unwrap();
@@ -865,6 +948,7 @@ fn worker_socket(role: SubagentMcpRole) -> SubagentMcpSocket {
         role,
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
+        review_gate: false,
         profile_registration: false,
     }
 }
@@ -1151,7 +1235,7 @@ fn unconstrained_permission_prefers_a_one_time_allow_and_never_cancels() {
         ],
     );
 
-    let response = unconstrained_permission_response(&request).unwrap();
+    let response = allow_permission_response(&request).unwrap();
     assert_eq!(
         serde_json::to_value(response).unwrap()["outcome"]["optionId"],
         "allow_once"
@@ -1166,7 +1250,7 @@ fn unconstrained_permission_prefers_a_one_time_allow_and_never_cancels() {
             PermissionOptionKind::RejectOnce,
         )],
     );
-    assert!(unconstrained_permission_response(&rejected_only).is_none());
+    assert!(allow_permission_response(&rejected_only).is_none());
 }
 
 #[tokio::test]
@@ -5018,6 +5102,7 @@ for line in sys.stdin:
             role: SubagentMcpRole::Parent,
             agent_mailboxes_enabled: true,
             subtle_subagents: true,
+            review_gate: false,
             profile_registration: false,
         }),
         clear_context_request: None,
@@ -6177,7 +6262,7 @@ async fn active_harness_turn_is_authoritative_even_after_prolonged_silence() {
                     let (started, release) = gate.take().unwrap();
                     started.send(()).unwrap();
                     release.await.unwrap();
-                    let update = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"scripted", "update":{"sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"Here is the requested second opinion."}}}});
+                    let update = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"scripted", "update":{"sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"Here is the requested turn review."}}}});
                     write
                         .write_all(format!("{update}\n").as_bytes())
                         .await
@@ -6221,8 +6306,8 @@ async fn active_harness_turn_is_authoritative_even_after_prolonged_silence() {
     });
     request_tx
         .send(CommandRequest::Prompt {
-            request_id: "prompt-second-opinion".into(),
-            prompt: vec![ContentBlock::from("fable, second opinion pls")],
+            request_id: "prompt-turn-review".into(),
+            prompt: vec![ContentBlock::from("fable, turn review pls")],
         })
         .await
         .unwrap();
@@ -6250,7 +6335,7 @@ async fn active_harness_turn_is_authoritative_even_after_prolonged_silence() {
         loop {
             match event_rx.recv().await.unwrap() {
                 RuntimeEvent::SessionUpdate { update }
-                    if update["content"]["text"] == "Here is the requested second opinion." =>
+                    if update["content"]["text"] == "Here is the requested turn review." =>
                 {
                     saw_reply = true
                 }
@@ -6260,7 +6345,7 @@ async fn active_harness_turn_is_authoritative_even_after_prolonged_silence() {
                     ..
                 } => {
                     assert!(saw_reply);
-                    assert_eq!(request_id, "prompt-second-opinion");
+                    assert_eq!(request_id, "prompt-turn-review");
                     assert_eq!(stop_reason, "EndTurn");
                     break;
                 }

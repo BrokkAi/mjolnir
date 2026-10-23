@@ -141,8 +141,7 @@ impl ChatState {
         if self.config_picker_active() {
             return true;
         }
-        self.second_opinion_handles_mouse(mouse.column, mouse.row)
-            || self.turn_review_handles_mouse(mouse.column, mouse.row)
+        self.turn_review_handles_mouse(mouse.column, mouse.row)
     }
 
     /// Whether a dialog of this conversation's own currently stands in for the
@@ -152,7 +151,6 @@ impl ChatState {
             || self.elicitation.is_some()
             || self.config_picker.is_some()
             || self.task_dialog_open
-            || matches!(self.second_opinion, Some(SecondOpinion::Setup { .. }))
     }
 
     /// Cancels any pointer gesture owned by a chat component.
@@ -163,7 +161,6 @@ impl ChatState {
         if let Some(dialog) = self.elicitation.as_ref() {
             dialog.cancel_component_pointer();
         }
-        self.cancel_second_opinion_pointer();
         self.cancel_turn_review_pointer();
     }
 
@@ -183,7 +180,6 @@ impl ChatState {
         if let Some(dialog) = self.elicitation.as_ref() {
             dialog.reset_component_geometry();
         }
-        self.reset_second_opinion_geometry();
         self.reset_turn_review_geometry();
     }
 
@@ -232,12 +228,6 @@ impl ChatState {
                     self.elicitation = None;
                     if std::mem::take(&mut self.elicitation_is_reviewers) {
                         return self.finish_reviewer_elicitation_response(request, response);
-                    }
-                    if let Some(proposal) =
-                        mj_core::acp::plan_review_second_opinion(&request, &response)
-                            .map(str::to_owned)
-                    {
-                        return ChatAction::StartSecondOpinion { request, proposal };
                     }
                     return ChatAction::RespondElicitation { request, response };
                 }
@@ -338,10 +328,6 @@ impl ChatState {
         {
             return ChatAction::OpenSubagents;
         }
-        if self.second_opinion_active() && !self.second_opinion_split() {
-            let (handled, action) = self.handle_second_opinion_mouse(mouse);
-            return if handled { action } else { ChatAction::None };
-        }
         if self.handle_transcript_scrollbar_mouse(mouse) {
             return ChatAction::None;
         }
@@ -368,13 +354,8 @@ impl ChatState {
         }
         // Hover decides which transcript scrolls while the split is up, so a
         // reviewer answer never moves the reader's place in the primary.
-        if self.second_opinion_split() || self.turn_review_split() {
-            let turn_review = self.turn_review_split();
-            let (component_handled, component_action) = if turn_review {
-                self.handle_turn_review_mouse(mouse)
-            } else {
-                self.handle_second_opinion_mouse(mouse)
-            };
+        if self.turn_review_split() {
+            let (component_handled, component_action) = self.handle_turn_review_mouse(mouse);
             if component_handled {
                 return component_action;
             }
@@ -384,18 +365,10 @@ impl ChatState {
             let rows = isize::try_from(MOUSE_SCROLL_ROWS).unwrap_or(1);
             match (mouse.kind, over_reviewer) {
                 (MouseEventKind::ScrollUp, true) => {
-                    if turn_review {
-                        self.scroll_turn_review(-rows);
-                    } else {
-                        self.scroll_second_opinion(-rows);
-                    }
+                    self.scroll_turn_review(-rows);
                 }
                 (MouseEventKind::ScrollDown, true) => {
-                    if turn_review {
-                        self.scroll_turn_review(rows);
-                    } else {
-                        self.scroll_second_opinion(rows);
-                    }
+                    self.scroll_turn_review(rows);
                 }
                 (MouseEventKind::ScrollUp, false) => {
                     self.scroll_history_up(MOUSE_SCROLL_ROWS);
@@ -404,11 +377,7 @@ impl ChatState {
                     self.scroll_history_down(MOUSE_SCROLL_ROWS);
                 }
                 (MouseEventKind::Down(MouseButton::Left), _) => {
-                    return if turn_review {
-                        self.click_turn_review_action(mouse.column, mouse.row)
-                    } else {
-                        self.click_split_action(mouse.column, mouse.row)
-                    };
+                    return self.click_turn_review_action(mouse.column, mouse.row);
                 }
                 _ => {}
             }
@@ -417,7 +386,7 @@ impl ChatState {
         // Setup modals do not enter the split branch above, but they still
         // own the pane and must not expose a stale prompt hitbox from the
         // preceding draw.
-        if self.second_opinion_active() || self.turn_review_active() {
+        if self.turn_review_active() {
             return ChatAction::None;
         }
         // The model and effort chips sit on the prompt border next to the

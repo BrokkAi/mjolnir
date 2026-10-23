@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 92;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 97;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1706,6 +1706,58 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
     }
 
+    // Breaking: older daemons still read and write the removed plan-review tables.
+    if version < 95 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             DROP TABLE IF EXISTS second_opinion_reviews;
+             DROP TABLE IF EXISTS second_opinion_defaults;
+             UPDATE schema_compatibility SET minimum_compatible_version = 95 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (95, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 95;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: older readers reject reviewer child records, and must never
+    // deliver a reviewer's private verdict as an ordinary child report.
+    if version < 96 {
+        let child_state = if super::legacy_schema::table_has_column(
+            connection,
+            "turn_review_state",
+            "child_session_id",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE turn_review_state ADD COLUMN child_session_id TEXT;
+             UPDATE subagent_sessions SET request_key = 'worker:' || request_key;"
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {child_state}
+             UPDATE schema_compatibility SET minimum_compatible_version = 96 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (96, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 96;
+             COMMIT;",
+        ))?;
+    }
+
+    // Breaking: older daemons cannot decode durable RequestReview delegation
+    // actions or ReviewVerdict mailbox bodies. Refuse their reads and writes
+    // before either new enum value can be stored.
+    if version < 97 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 97 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (97, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 97;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2162,6 +2214,77 @@ pub(super) fn restore_github_v84_schema(connection: &Connection) {
 #[cfg(test)]
 mod reader_tests {
     use super::*;
+
+    #[test]
+    fn removed_plan_review_tables_raise_the_floor_and_preserve_turn_reviews() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upgrade.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        create_baseline_schema(&connection).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER stop_before_removal BEFORE INSERT ON schema_migrations
+             WHEN NEW.version > 94 BEGIN SELECT RAISE(ABORT, 'fixture migration boundary'); END;",
+            )
+            .unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        if !connection.is_autocommit() {
+            connection.execute_batch("ROLLBACK").unwrap();
+        }
+        let released = read_schema_state(&connection).unwrap();
+        assert_eq!(released.revision, 94);
+        assert_eq!(released.minimum_compatible, Some(92));
+        connection.execute_batch(
+            "DROP TRIGGER stop_before_removal;
+             INSERT INTO session_contexts(session_id,bundle_id,created_at) VALUES ('kept','project','now');
+             INSERT INTO sessions(session_id,title,harness_kind,last_profile,target_template_id,state,updated_at)
+                 VALUES ('kept','Keep my work','codex','codex','local','error','now');
+             INSERT INTO turn_review_state(session_id,baselines,reviewed_through_ordinal)
+                 VALUES ('kept','{\"/repo\":\"tree\"}',42);",
+        ).unwrap();
+        migrate_schema(&connection).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, 97);
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        let revisions = connection
+            .prepare("SELECT version FROM schema_migrations WHERE version >= 93 ORDER BY version")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(revisions, [93, 94, 95, 96, 97]);
+        let fresh = Connection::open_in_memory().unwrap();
+        migrate_schema(&fresh).unwrap();
+        let schema = |database: &Connection| {
+            database
+                .prepare("SELECT name, sql FROM sqlite_schema WHERE type='table' ORDER BY name")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(schema(&connection), schema(&fresh));
+        assert!(state.ensure_supported_by(94).is_err());
+        assert!(state.ensure_supported_by(92).is_err());
+        // Both legacy tables have been removed, while the independent turn-review state remains.
+        let tables: Vec<String> = connection
+            .prepare("SELECT name FROM sqlite_schema WHERE type='table'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(!tables.iter().any(|name| name.starts_with("second_")));
+        let retained: (String, i64) = connection.query_row(
+            "SELECT baselines,reviewed_through_ordinal FROM turn_review_state WHERE session_id='kept'", [],
+            |row| Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        assert_eq!(retained, ("{\"/repo\":\"tree\"}".into(), 42));
+    }
 
     #[test]
     fn restart_intent_schema_matches_for_fresh_and_upgraded_stores() {
@@ -3235,9 +3358,13 @@ mod reader_tests {
         )
         .unwrap();
         drop(old);
-        let upgraded = open_writer(&path).unwrap();
+        let boundary = Connection::open(&path).unwrap();
+        boundary.execute_batch("CREATE TRIGGER released_boundary BEFORE INSERT ON schema_migrations WHEN NEW.version=95 BEGIN SELECT RAISE(ABORT,'released boundary'); END;").unwrap();
+        assert!(migrate_schema(&boundary).is_err());
+        boundary.execute_batch("ROLLBACK").unwrap();
+        let upgraded = boundary;
         let state = read_schema_state(&upgraded).unwrap();
-        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.revision, 94);
         state.ensure_supported_by(92).unwrap();
         // A revision-92 daemon names its columns and leaves the profile unknown.
         upgraded
@@ -3381,9 +3508,11 @@ mod reader_tests {
             .unwrap()
         );
         assert_eq!(read_schema_state(&connection).unwrap().revision, 93);
-        migrate_schema(&connection).unwrap();
+        connection.execute_batch("CREATE TRIGGER released_boundary BEFORE INSERT ON schema_migrations WHEN NEW.version=95 BEGIN SELECT RAISE(ABORT,'released boundary'); END;").unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        connection.execute_batch("ROLLBACK").unwrap();
         let state = read_schema_state(&connection).unwrap();
-        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.revision, 94);
         assert_eq!(state.minimum_compatible, Some(92));
         state.ensure_supported_by(92).unwrap();
         // The old writer names only the old projection columns. Its update

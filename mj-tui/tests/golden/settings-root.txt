@@ -309,7 +309,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
 
   ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
-  │☐ Automatic review                                                                            │
+  │Trigger   Off ▾                                                                               │
   │Profile   Auto ▾                                                                              │
   │Model     Auto policy ▾                                                                       │
   │Effort    Auto policy ▾                                                                       │
@@ -321,7 +321,6 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
   │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
   │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
-  │These settings also choose the plan second-opinion reviewer.                                  │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -331,7 +330,8 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
-  │Tab moves · Enter opens choices · Space toggles · Esc goes back                               │
+  │                                                                                              │
+  │Tab moves · Enter opens choices · Esc goes back                                               │
   │  Cancel     Back     Refresh choices     Save Settings                                       │
   ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
@@ -439,13 +439,13 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
   ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
   │ Settings › Agent Profiles                                                                    │
-  │ Add a profile for each agent you want to run, or use Detect profiles to find installed       │
-  │ agents.                                                                                      │
+  │ Add a profile, then choose Sign in. Detect profiles finds installed agents.                  │
+  │                                                                                              │
   │                                                                                              │
   │   claude-1                                               7 settings  ›     Add               │
   │   codex-1                                                7 settings  ›     Remove            │
   │   codex-2                                                7 settings  ›     Detect profiles   │
-  │                                                                                              │
+  │                                                                            Sign in           │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │

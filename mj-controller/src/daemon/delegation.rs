@@ -82,6 +82,7 @@ async fn run(
                                 SubagentToolAction::SendInput { .. }
                                     | SubagentToolAction::SendMessage { .. }
                                     | SubagentToolAction::Spawn { .. }
+                                    | SubagentToolAction::RequestReview {}
                             ) {
                                 None
                             } else {
@@ -251,6 +252,23 @@ async fn complete_child(
     let outcome = observation
         .outcome
         .context("child completion has no outcome")?;
+    if relation.kind == mj_core::subagent::SubagentKind::Reviewer {
+        let id = child_id.clone();
+        let command_id = outcome.command_id.clone();
+        let answer =
+            tokio::task::spawn_blocking(move || crate::database::load_subagent_report(&id))
+                .await??
+                .handback
+                .filter(|handback| handback.command_id == command_id)
+                .map(|handback| handback.message);
+        state
+            .review_host()
+            .reviewer_finished(relation.parent_session_id, child_id.clone(), answer)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        state.suspend_session(child_id).await?;
+        return Ok(ChildCompletion::Settled);
+    }
     if relation
         .noticed_turn
         .is_some_and(|turn| turn > outcome.completed_ordinal)

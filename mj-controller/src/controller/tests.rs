@@ -1689,6 +1689,8 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
 
     let child = controller
         .register_subagent(super::subagents::RegisterSubagentRequest {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             parent_session_id: parent_id.to_owned(),
             task_name: "Review calc.py".into(),
             profile_id: "codex".into(),
@@ -1812,6 +1814,8 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
 
     let child_id = controller
         .register_subagent(super::subagents::RegisterSubagentRequest {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             parent_session_id: opted_out_id.to_owned(),
             task_name: "Review calc.py".into(),
             profile_id: "codex".into(),
@@ -2115,6 +2119,8 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
     executor.execute(&command).unwrap();
     let child = controller
         .register_subagent(super::subagents::RegisterSubagentRequest {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             parent_session_id: id.clone(),
             task_name: "child".into(),
             profile_id: "codex".into(),
@@ -2490,5 +2496,154 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
             straightforward: None,
             subtle: None
         })
+    );
+}
+
+#[test]
+#[cfg_attr(windows, ignore = "local bare target fixture")]
+fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capacity() {
+    const MARKER: &str = "MJ_TEST_REVIEWER_CHILD_REGISTRATION";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capacity",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let project = tempfile::tempdir().unwrap();
+    let mut config = registration_config();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    config.subagents.max_concurrent = 0;
+    let profile = config.profiles["codex"].clone();
+    config.profiles.insert("resolved-reviewer".into(), profile);
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let mut parent = super::test_support::checkpoint_test_session(parent_id);
+    parent.target_template_id = "localhost".into();
+    parent.project_directory = Some(project.path().to_path_buf());
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
+    parent.target = Some(TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir().join("workers").join(parent_id),
+    });
+    let mut controller = Controller {
+        config,
+        state: Default::default(),
+    };
+    controller.state.sessions.insert(parent_id.into(), parent);
+    crate::database::save_state(&controller.state).unwrap();
+    let mut launch = controller
+        .reviewer_launch_config(parent_id, "resolved-reviewer", 0, &[])
+        .unwrap();
+    launch.model = Some("resolved-model".into());
+    launch.effort = Some("high".into());
+    launch.environment.insert(
+        mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV.into(),
+        "0".into(),
+    );
+    launch.environment.insert(
+        mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV.into(),
+        "1".into(),
+    );
+    launch.environment.insert(
+        mj_core::subagent::CHILD_REPORT_DIR_ENV.into(),
+        "/outside-the-child".into(),
+    );
+    let request = RegisterSubagentRequest {
+        kind: mj_core::subagent::SubagentKind::Reviewer,
+        reviewer_launch: Some(launch.clone()),
+        parent_session_id: parent_id.into(),
+        task_name: "review".into(),
+        profile_id: "resolved-reviewer".into(),
+        model: launch.model.clone(),
+        effort: launch.effort.clone(),
+        working_directory: Default::default(),
+        initial_prompt: "Review and hand back JSON".into(),
+        request_key: "same-request".into(),
+        report_root: None,
+    };
+    let child = controller.register_subagent(request.clone()).unwrap();
+    assert_eq!(
+        controller.register_subagent(request).unwrap(),
+        child,
+        "registration is idempotent"
+    );
+    assert_eq!(child.kind, mj_core::subagent::SubagentKind::Reviewer);
+    assert_eq!(child.profile_id, "resolved-reviewer");
+    assert_eq!(child.model.as_deref(), Some("resolved-model"));
+    assert!(child.handback_tool);
+    assert_eq!(
+        crate::database::load_subagent_report(&child.child_session_id)
+            .unwrap()
+            .report_dir,
+        None
+    );
+    let worker_root = mj_core::config::data_dir()
+        .join("workers")
+        .join(&child.child_session_id);
+    let worker_launch = controller
+        .current_worker_launch_config(
+            &child.child_session_id,
+            &targets::TargetLocator::LocalBare {
+                worker_root: worker_root.to_string_lossy().into_owned(),
+            },
+        )
+        .unwrap();
+    assert_eq!(worker_launch.reviewer_launch.as_ref(), Some(&launch));
+    assert_eq!(worker_launch.execution_policy, launch.execution_policy);
+    assert_eq!(worker_launch.initial_model, launch.model);
+    assert!(!worker_launch.review_capture);
+    assert_eq!(
+        worker_launch.subagent_mcp_role(),
+        Some(mj_core::subagent::SubagentMcpRole::Child)
+    );
+    assert!(
+        !worker_launch
+            .environment
+            .contains_key(mj_core::subagent::CHILD_REPORT_DIR_ENV)
+    );
+    assert!(
+        worker_launch
+            .harness_home
+            .to_string_lossy()
+            .contains(&child.child_session_id)
+    );
+    // The reviewer holds processes but consumes no ordinary delegation slot.
+    controller
+        .state
+        .sessions
+        .get_mut(&child.child_session_id)
+        .unwrap()
+        .state = SessionState::Running;
+    controller.config.subagents.max_concurrent = 1;
+    controller
+        .ensure_subagent_slot_available(parent_id, None)
+        .unwrap();
+    let parent = controller.state.sessions.get_mut(parent_id).unwrap();
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
+    let worker = controller
+        .register_subagent(RegisterSubagentRequest {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
+            parent_session_id: parent_id.into(),
+            task_name: "ordinary child".into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            working_directory: Default::default(),
+            initial_prompt: "work".into(),
+            request_key: "same-request".into(),
+            report_root: None,
+        })
+        .unwrap();
+    assert_ne!(
+        worker.child_session_id, child.child_session_id,
+        "kind belongs to the idempotent key"
     );
 }

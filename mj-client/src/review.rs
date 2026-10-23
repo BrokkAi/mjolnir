@@ -7,6 +7,8 @@ use mj_core::review::verdict::ReviewVerdict;
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeReviewView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_session_id: Option<String>,
     pub session_id: String,
     pub phase: TurnReviewPhase,
     pub roles: Vec<RoleStatus>,
@@ -15,12 +17,12 @@ pub struct RuntimeReviewView {
     /// Present once the review has reached a verdict the user must answer.
     pub verdict: Option<VerdictView>,
     /// Forms a reviewing harness is waiting for a person to answer. The
-    /// worker owns them; the host projects them from each role's journal.
+    /// child owns them; the host projects its session's pending requests.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub questions: Vec<ReviewerQuestion>,
 }
 
-/// One form a reviewing role asked, and the role that asked it.
+/// A form and the reviewer child session that owns it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewerQuestion {
@@ -110,15 +112,4 @@ pub enum VerdictKind {
     Clean,
     Findings,
     Failed,
-}
-
-/// The relay session id one reviewing role journals under. The default role
-/// keeps the plan reviewer's id, which is the one the worker uses.
-#[must_use]
-pub fn role_session_id(primary_session_id: &str, role: &str) -> String {
-    if role == mj_core::review::driver::REVIEWER_ROLE {
-        format!("{primary_session_id}-reviewer")
-    } else {
-        format!("{primary_session_id}-review-{role}")
-    }
 }

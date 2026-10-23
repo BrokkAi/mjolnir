@@ -402,7 +402,7 @@ impl SessionActivity {
 
     /// The rendering vocabulary for what the session is doing.
     ///
-    /// A mapping of the shared activity state, not a second opinion about it.
+    /// A mapping of the shared activity state.
     /// The one fact added here is the caller's own turn start, which comes
     /// from the materialized projection rather than from the relay: a turn
     /// the durable record knows about is a turn whatever the live state says.

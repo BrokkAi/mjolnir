@@ -82,17 +82,21 @@ def open_review_settings(tmux):
     tmux.wait_for("Code Review")
     click(tmux, "Code Review")
     tmux.send_key("Enter")
-    tmux.wait_for("Automatic review")
+    tmux.wait_for("Trigger")
 
 
 def save_review_settings(lab, tmux, evidence):
     original = lab.snapshot()["review_config"]
     open_review_settings(tmux)
-    expected = not original["enabled"]
-    click(tmux, "Automatic review")
+    expected = "turn" if original["trigger"] == "off" else "off"
+    click(tmux, "Trigger")
+    tmux.send_key("Home")
+    if expected == "turn":
+        tmux.send_key("Down")
+    tmux.send_key("Enter")
     click(tmux, "  Save Setup  ")
     absent(tmux, "× Setup")
-    lab.wait_snapshot(lambda value: value["review_config"]["enabled"] is expected, "review setting persisted")
+    lab.wait_snapshot(lambda value: value["review_config"]["trigger"] == expected, "review setting persisted")
     record(
         tmux,
         evidence,
@@ -101,7 +105,11 @@ def save_review_settings(lab, tmux, evidence):
         "settings close and automatic review setting changes",
     )
     open_review_settings(tmux)
-    click(tmux, "Automatic review")
+    click(tmux, "Trigger")
+    tmux.send_key("Home")
+    for _ in range({"off": 0, "turn": 1, "push": 2}[original["trigger"]]):
+        tmux.send_key("Down")
+    tmux.send_key("Enter")
     click(tmux, "  Save Setup  ")
     absent(tmux, "× Setup")
     lab.wait_snapshot(lambda value: value["review_config"] == original, "original review settings restored")

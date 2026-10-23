@@ -2026,11 +2026,11 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     );
 
     let package: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../mj-worker/assets/harnesses/claude/package.json"
+        "../../../../mj-core/assets/harnesses/claude/package.json"
     ))
     .unwrap();
     let lock: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../mj-worker/assets/harnesses/claude/package-lock.json"
+        "../../../../mj-core/assets/harnesses/claude/package-lock.json"
     ))
     .unwrap();
     for (name, version) in [
@@ -2046,11 +2046,11 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     }
 
     let package: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../mj-worker/assets/harnesses/mimo/package.json"
+        "../../../../mj-core/assets/harnesses/mimo/package.json"
     ))
     .unwrap();
     let lock: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../mj-worker/assets/harnesses/mimo/package-lock.json"
+        "../../../../mj-core/assets/harnesses/mimo/package-lock.json"
     ))
     .unwrap();
     assert_eq!(package["dependencies"]["@mimo-ai/cli"], MIMO_CLI_VERSION);
@@ -4418,12 +4418,14 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         commands: RefCell::new(Vec::new()),
     };
     let launch = WorkerLaunchConfig {
+        reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
         initial_model: None,
         review_capture: false,
+        review_trigger: Default::default(),
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -4543,6 +4545,7 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         borrowed_from: None,
     };
     let launch = WorkerLaunchConfig {
+        reviewer_launch: None,
         goal_resume_request: None,
         run_mode: Default::default(),
         session_id: session.id.clone(),
@@ -4552,6 +4555,7 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         subtle_subagents: true,
         initial_model: None,
         review_capture: false,
+        review_trigger: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: true,
         harness: HarnessKind::Codex,
@@ -4647,12 +4651,14 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         launch: RefCell::new(None),
     };
     let launch = WorkerLaunchConfig {
+        reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
         initial_model: None,
         review_capture: false,
+        review_trigger: Default::default(),
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -5844,7 +5850,7 @@ fn installed_digest_matches_bytes_on_linux_and_darwin_with_quoted_paths() {
 #[test]
 fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
     use mj_core::subagent::SubagentPolicy;
-    for harness in [HarnessKind::Claude, HarnessKind::Codex] {
+    for harness in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Dsh] {
         let home = tempfile::tempdir().unwrap();
         let source = home.path().join(harness.agent_instructions_file());
         std::fs::write(&source, "User instructions without final newline").unwrap();

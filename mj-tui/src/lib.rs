@@ -589,6 +589,12 @@ pub enum DashboardAction {
         original: String,
         updated: String,
     },
+    /// Hand the terminal to `mj login` for the selected profile, then resume
+    /// the dashboard. The generation anchors the result to the open dialog.
+    SetupLogin {
+        generation: u64,
+        profile_id: String,
+    },
     /// Discover the selectors advertised by the selected reviewer profile.
     /// The generation ties the response to the current dialog draft.
     DiscoverReviewSettings {
@@ -868,6 +874,14 @@ pub struct DashboardState {
     session_order: RefCell<session_view::SessionOrder>,
     pub(crate) config: Tracked<Config>,
     pub(crate) profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    /// Sign-in status of saved profiles, read off the loop when Settings opens
+    /// and after a login. Missing entries are drafts or not yet read.
+    pub(crate) profile_login_statuses: BTreeMap<String, mj_core::credentials::LoginStatus>,
+    /// A surface that shows sign-in status opened, or a login finished. The
+    /// dashboard loop reads the statuses off the loop when it takes this.
+    profile_login_refresh: bool,
+    /// Orders status reads so a slow earlier read cannot replace a newer one.
+    profile_login_generation: u64,
     pub(crate) profile_hydration_requests: BTreeMap<String, BTreeSet<String>>,
     pub(crate) profile_hydration_errors: BTreeMap<String, String>,
     /// The resolved `[keys]` bindings, refreshed whenever configuration is
@@ -889,11 +903,6 @@ pub struct DashboardState {
     /// as a whole whenever a runtime snapshot arrives, so removals clear
     /// stale row badges as well as closing the review pane.
     pub(crate) session_reviews: Tracked<BTreeMap<String, RuntimeReviewView>>,
-    /// Sessions with an attached plan-review second opinion. This is kept
-    /// separately from the controller's turn-review projection because the
-    /// chat owns this older reviewer workflow and its stop warning still
-    /// needs to follow the live chat state.
-    pub(crate) sessions_with_review: BTreeSet<String>,
     pub(crate) project_sources: Tracked<BTreeMap<String, ProjectSourceIdentity>>,
     pub(crate) checkpoint_archive_sizes: BTreeMap<String, Option<u64>>,
     /// Stopped records loaded one at a time: the row picked in the resume
@@ -1203,6 +1212,9 @@ impl DashboardState {
             prefix_pending: false,
             resize_mode: false,
             profile_capabilities: Default::default(),
+            profile_login_statuses: Default::default(),
+            profile_login_refresh: false,
+            profile_login_generation: 0,
             profile_hydration_requests: Default::default(),
             profile_hydration_errors: Default::default(),
             config: config.into(),
@@ -1212,7 +1224,6 @@ impl DashboardState {
             session_details: Default::default(),
             unreachable_sessions: Default::default(),
             session_reviews: Default::default(),
-            sessions_with_review: BTreeSet::new(),
             project_sources: Default::default(),
             session_facts: RefCell::default(),
             cpu_rollups: RefCell::default(),

@@ -407,23 +407,6 @@ impl ChatState {
         }
     }
 
-    /// The full text of the newest agent message recorded after `seq`.
-    ///
-    /// A review's context request is answered by the planner's next agent
-    /// message, so this is how the answer to a specific request is picked out
-    /// of the conversation rather than by taking whatever is last.
-    pub(crate) fn latest_agent_text_after(&self, seq: u64) -> Option<String> {
-        self.entries
-            .iter()
-            .rev()
-            .find(|entry| {
-                entry.role == ChatRole::Agent
-                    && entry.start_seq > seq
-                    && !entry.text.trim().is_empty()
-            })
-            .map(|entry| entry.text.clone())
-    }
-
     pub fn latest_seq(&self) -> u64 {
         self.latest_seq
     }

@@ -54,6 +54,7 @@ impl RuntimeState {
             .then(|| crate::database::subscribe_committed_state().ok())
             .flatten();
         let profile_catalog = crate::review_host::SharedProfileCatalog::default();
+        let reviewer_runtime = crate::review_host::SharedReviewerRuntime::default();
         let review_host = TurnReviewHost::spawn_notifying(
             session_manager.clone(),
             {
@@ -76,6 +77,7 @@ impl RuntimeState {
             revisions.notifier(),
             Some(recovery_observer.gate.clone()),
             Some(profile_catalog.clone()),
+            reviewer_runtime.clone(),
         );
         Self {
             attachments: Mutex::new(BTreeMap::new()),
@@ -108,6 +110,7 @@ impl RuntimeState {
             capacity: std::sync::OnceLock::new(),
             review_config,
             review_host,
+            reviewer_runtime,
             wiki: crate::sessionwiki::WikiIndexer::spawn(),
         }
     }

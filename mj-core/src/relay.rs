@@ -83,7 +83,9 @@ pub const RELAY_SUBAGENT_FINISHED_PROTOCOL: u32 = 41;
 /// 42 says in a review capture why the worker could not tell the turn's
 /// commits from other history, which a protocol-41 controller cannot decode.
 pub const RELAY_REVIEW_ATTRIBUTION_PROTOCOL: u32 = 42;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_REVIEW_ATTRIBUTION_PROTOCOL;
+/// 43 adds push-scoped review capture, reviewed-tree recording and verdict mailboxes.
+pub const RELAY_PUSH_REVIEW_PROTOCOL: u32 = 43;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_PUSH_REVIEW_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

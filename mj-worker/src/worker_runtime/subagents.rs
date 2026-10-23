@@ -52,6 +52,7 @@ pub(super) fn configure_claude_subagent_mcp(
     role: Option<mj_core::subagent::SubagentMcpRole>,
     agent_mailboxes_enabled: bool,
     subtle_subagents: bool,
+    review_gate: bool,
 ) -> Result<()> {
     use mj_core::subagent::{SUBAGENT_MCP_SERVER, SubagentMcpRole};
     anyhow::ensure!(
@@ -60,7 +61,7 @@ pub(super) fn configure_claude_subagent_mcp(
     );
     let config_path = home.join(".claude.json");
     let settings_path = home.join("settings.json");
-    if !(private_claude_home(root, session_id, home)
+    if !(private_staged_home(root, session_id, home)
         && regular_file_or_absent(&config_path)
         && regular_file_or_absent(&settings_path))
     {
@@ -80,7 +81,7 @@ pub(super) fn configure_claude_subagent_mcp(
         };
     }
 
-    edit_claude_json(&config_path, "staged Claude configuration", |config| {
+    edit_profile_json(&config_path, "staged Claude configuration", |config| {
         if role.is_none() && !config.contains_key("mcpServers") {
             return Ok(());
         }
@@ -111,6 +112,9 @@ pub(super) fn configure_claude_subagent_mcp(
             "--agent-mailboxes-enabled".to_owned(),
             agent_mailboxes_enabled.to_string(),
         ];
+        if review_gate && role == mj_core::subagent::SubagentMcpRole::Parent {
+            args.push("--review-gate".into());
+        }
         if !subtle_subagents {
             // Only the non-default value is written, as for Codex.
             args.extend(["--subtle-subagents".to_owned(), "false".to_owned()]);
@@ -134,7 +138,7 @@ pub(super) fn configure_claude_subagent_mcp(
     };
     // In any mode but Auto, Claude would otherwise ask a person before a
     // child's mandatory `handback` or a parent's `spawn` (R11-1).
-    edit_claude_json(&settings_path, "staged Claude settings", |settings| {
+    edit_profile_json(&settings_path, "staged Claude settings", |settings| {
         let allow = settings
             .entry("permissions")
             .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
@@ -154,7 +158,11 @@ pub(super) fn configure_claude_subagent_mcp(
                     settings_path.display()
                 )
             })?;
-        for tool in role.tool_names() {
+        let mut tools = role.tool_names().to_vec();
+        if review_gate && role == SubagentMcpRole::Parent {
+            tools.push("request_review");
+        }
+        for tool in tools {
             let rule = serde_json::Value::from(format!("mcp__{SUBAGENT_MCP_SERVER}__{tool}"));
             if !allow.contains(&rule) {
                 allow.push(rule);
@@ -164,10 +172,51 @@ pub(super) fn configure_claude_subagent_mcp(
     })
 }
 
-/// Rewrite one of the staged Claude JSON files through `edit`, writing it only
-/// when its content changes. A missing file starts as an empty object and is
-/// created only when `edit` adds something.
-fn edit_claude_json(
+/// Kimi binds stdio servers to a runtime through its private MCP profile.
+pub(super) fn configure_kimi_subagent_mcp(
+    root: &Path,
+    session_id: &str,
+    home: &Path,
+    role: mj_core::subagent::SubagentMcpRole,
+) -> Result<()> {
+    let path = home.join("mcp.json");
+    anyhow::ensure!(
+        root.is_absolute()
+            && private_staged_home(root, session_id, home)
+            && regular_file_or_absent(&path),
+        "cannot register the Kimi {} tools outside a private staged profile",
+        role.id(),
+    );
+    let command = root.join("hel");
+    let command = command
+        .to_str()
+        .context("Kimi MCP command path is not UTF-8")?;
+    let socket = root.join(SUBAGENT_SOCKET);
+    let socket = socket
+        .to_str()
+        .context("Kimi MCP socket path is not UTF-8")?;
+    edit_profile_json(&path, "staged Kimi MCP configuration", |config| {
+        let servers = config
+            .entry("mcpServers")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .context("Kimi mcpServers must be an object")?;
+        servers.insert(
+            mj_core::subagent::SUBAGENT_MCP_SERVER.into(),
+            serde_json::json!({
+                "transport": "stdio",
+                "command": command,
+                "args": ["worker", "subagent-mcp", "--socket", socket, "--harness", "kimi", "--role", role.id()],
+                "runtime_id": "local",
+            }),
+        );
+        Ok(())
+    })
+}
+
+/// Rewrite a staged profile's JSON file, writing only when its content changes.
+/// A missing file starts as an empty object.
+fn edit_profile_json(
     path: &Path,
     label: &str,
     edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<()>,
@@ -196,13 +245,13 @@ fn edit_claude_json(
     Ok(())
 }
 
-/// Whether `home` is a Claude profile this session staged for itself:
+/// Whether `home` is a profile this session staged for itself:
 /// `<root>/profile` on this machine, `profiles/<session>` in a container or
 /// under a remote login (the controller's `removable_profile_root`). An
 /// earlier local session's `<root>/profile` may link to the person's own home,
 /// so each directory is checked without following links; resolving both sides
 /// would accept that link.
-fn private_claude_home(root: &Path, session_id: &str, home: &Path) -> bool {
+fn private_staged_home(root: &Path, session_id: &str, home: &Path) -> bool {
     let staged_directories = if home == root.join("profile") {
         vec![root, home]
     } else if home.file_name() == Some(session_id.as_ref())
@@ -238,7 +287,7 @@ pub(super) fn configure_claude_mailbox_hook(
     session_id: &str,
     home: &Path,
 ) -> Result<bool> {
-    let private = private_claude_home(root, session_id, home)
+    let private = private_staged_home(root, session_id, home)
         && regular_file_or_absent(&home.join("settings.json"));
     if !private {
         tracing::warn!(path = %home.display(), "skipping Claude mailbox hook repair: settings are not in a private staged directory");
@@ -327,7 +376,7 @@ pub(super) fn configure_codex_mcp(
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
 ) -> Result<bool> {
-    configure_codex_mcp_with_mailboxes(root, home, role, policy, true, true)
+    configure_codex_mcp_with_mailboxes(root, home, role, policy, true, true, false)
 }
 
 fn configure_codex_mcp_with_mailboxes(
@@ -337,6 +386,7 @@ fn configure_codex_mcp_with_mailboxes(
     policy: mj_core::config::ExecutionPolicy,
     mailboxes_enabled: bool,
     subtle_subagents: bool,
+    review_gate: bool,
 ) -> Result<bool> {
     // Earlier local workers used the person's original profile, directly or
     // through <root>/profile as a symlink. Keep those on ACP until restaging;
@@ -387,6 +437,9 @@ fn configure_codex_mcp_with_mailboxes(
             "--agent-mailboxes-enabled".to_owned(),
             mailboxes_enabled.to_string(),
         ];
+        if review_gate && role == mj_core::subagent::SubagentMcpRole::Parent {
+            args.push("--review-gate".into());
+        }
         if !subtle_subagents {
             // Written only when off, so a launch offering both types keeps
             // the arguments an older worker accepts.
@@ -444,8 +497,7 @@ pub(super) fn configure_codex_profile(
     environment: &mut BTreeMap<String, String>,
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
-    mailboxes_enabled: bool,
-    subtle_subagents: bool,
+    options: crate::subagent_mcp::ParentTools,
 ) -> Result<bool> {
     configure_codex_mailbox_hook(root, environment)?;
     configure_codex_mcp_with_mailboxes(
@@ -453,8 +505,9 @@ pub(super) fn configure_codex_profile(
         home,
         role,
         policy,
-        mailboxes_enabled,
-        subtle_subagents,
+        options.agent_mailboxes_enabled,
+        options.subtle_subagents,
+        options.review_gate,
     )
 }
 
@@ -943,6 +996,56 @@ impl Drop for LiveWaiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_kimi_reviewer_registers_handback_in_its_private_runtime_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("profile");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(
+            home.join("mcp.json"),
+            br#"{"mcpServers":{"existing":{"command":"keep"}}}"#,
+        )
+        .unwrap();
+        configure_kimi_subagent_mcp(
+            root.path(),
+            "reviewer",
+            &home,
+            mj_core::subagent::SubagentMcpRole::Child,
+        )
+        .unwrap();
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join("mcp.json")).unwrap()).unwrap();
+        assert_eq!(config["mcpServers"]["existing"]["command"], "keep");
+        let server = &config["mcpServers"]["mj-agents"];
+        assert_eq!(server["runtime_id"], "local");
+        assert_eq!(server["transport"], "stdio");
+        assert_eq!(server["command"], root.path().join("hel").to_str().unwrap());
+        assert_eq!(
+            server["args"],
+            serde_json::json!([
+                "worker",
+                "subagent-mcp",
+                "--socket",
+                root.path().join(SUBAGENT_SOCKET),
+                "--harness",
+                "kimi",
+                "--role",
+                "child"
+            ])
+        );
+        let outside = tempfile::tempdir().unwrap();
+        assert!(
+            configure_kimi_subagent_mcp(
+                root.path(),
+                "reviewer",
+                outside.path(),
+                mj_core::subagent::SubagentMcpRole::Child
+            )
+            .is_err()
+        );
+    }
+
     use mj_core::subagent::SubagentToolAction;
 
     // Hard-won: 3c8973b87: the check expected <root>/profile/.claude, so it refused every real Claude home and steering was never offered.
@@ -1269,8 +1372,17 @@ print(sys.argv[sys.argv.index('--role') + 1])
             });
             let path = home.join(".claude.json");
             std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
-            let configure =
-                || configure_claude_subagent_mcp(&root, "session", &home, Some(role), true, true);
+            let configure = || {
+                configure_claude_subagent_mcp(
+                    &root,
+                    "session",
+                    &home,
+                    Some(role),
+                    true,
+                    true,
+                    false,
+                )
+            };
             configure().unwrap();
             let first = std::fs::read(&path).unwrap();
             configure().unwrap();
@@ -1334,6 +1446,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
             Some(SubagentMcpRole::MessageOnly),
             true,
             true,
+            false,
         )
         .unwrap();
         let config: serde_json::Value =
@@ -1352,7 +1465,8 @@ print(sys.argv[sys.argv.index('--role') + 1])
         );
 
         // Losing the role removes the server; the person's servers stay.
-        configure_claude_subagent_mcp(root.path(), "session", &home, None, true, true).unwrap();
+        configure_claude_subagent_mcp(root.path(), "session", &home, None, true, true, false)
+            .unwrap();
         let config: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert!(config["mcpServers"].get("mj-agents").is_none());
@@ -1362,7 +1476,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
         let bare = tempfile::tempdir().unwrap();
         let bare_home = bare.path().join("profile");
         std::fs::create_dir(&bare_home).unwrap();
-        configure_claude_subagent_mcp(bare.path(), "session", &bare_home, None, true, true)
+        configure_claude_subagent_mcp(bare.path(), "session", &bare_home, None, true, true, false)
             .unwrap();
         assert!(!bare_home.join(".claude.json").exists());
         assert!(!bare_home.join("settings.json").exists());
@@ -1384,8 +1498,16 @@ print(sys.argv[sys.argv.index('--role') + 1])
         };
         let configure = |root: &tempfile::TempDir, role, subtle| {
             let home = root.path().join("profile");
-            configure_claude_subagent_mcp(root.path(), "session", &home, Some(role), true, subtle)
-                .unwrap();
+            configure_claude_subagent_mcp(
+                root.path(),
+                "session",
+                &home,
+                Some(role),
+                true,
+                subtle,
+                false,
+            )
+            .unwrap();
             let settings: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(home.join("settings.json")).unwrap())
                     .unwrap();
@@ -1485,7 +1607,8 @@ print(sys.argv[sys.argv.index('--role') + 1])
                     &home,
                     Some(role),
                     true,
-                    true
+                    true,
+                    false
                 )
                 .is_err(),
                 "{role:?} cannot start without its tools"
@@ -1498,6 +1621,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
             Some(SubagentMcpRole::MessageOnly),
             true,
             true,
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -1520,6 +1644,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
                     Some(SubagentMcpRole::MessageOnly),
                     true,
                     true,
+                    false
                 )
                 .is_err()
             );
@@ -2355,4 +2480,79 @@ async fn write_reply(
     })
     .await
     .context("sub-agent response write timed out")?
+}
+
+#[cfg(test)]
+mod review_gate_tests {
+    use super::*;
+    use mj_core::subagent::SubagentMcpRole;
+
+    #[test]
+    fn private_profile_registration_passes_the_gate_only_to_parents() {
+        for role in [
+            SubagentMcpRole::Parent,
+            SubagentMcpRole::Child,
+            SubagentMcpRole::MessageOnly,
+        ] {
+            for gate in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let home = root.path().join("profile");
+                std::fs::create_dir(&home).unwrap();
+                configure_claude_subagent_mcp(
+                    root.path(),
+                    "session",
+                    &home,
+                    Some(role),
+                    true,
+                    true,
+                    gate,
+                )
+                .unwrap();
+                let config: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(home.join(".claude.json")).unwrap())
+                        .unwrap();
+                let expected = gate && role == SubagentMcpRole::Parent;
+                assert_eq!(
+                    config["mcpServers"]["mj-agents"]["args"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|value| value == "--review-gate"),
+                    expected
+                );
+                let settings: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(home.join("settings.json")).unwrap())
+                        .unwrap();
+                assert_eq!(
+                    settings["permissions"]["allow"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|value| value == "mcp__mj-agents__request_review"),
+                    expected
+                );
+                configure_codex_mcp_with_mailboxes(
+                    root.path(),
+                    &home,
+                    Some(role),
+                    mj_core::config::ExecutionPolicy::ConfiguredApprovals,
+                    true,
+                    true,
+                    gate,
+                )
+                .unwrap();
+                let config: toml::Table =
+                    toml::from_str(&std::fs::read_to_string(home.join("config.toml")).unwrap())
+                        .unwrap();
+                assert_eq!(
+                    config["mcp_servers"]["mj-agents"]["args"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|value| value.as_str() == Some("--review-gate")),
+                    expected
+                );
+            }
+        }
+    }
 }

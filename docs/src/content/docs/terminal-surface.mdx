@@ -379,8 +379,11 @@ section or edits a value. Fixed choices open in a compact menu over the page;
 free-text values open the full editor.
 The page's controls stack in a column at its right edge. **Add** and **Remove**
 manage entries, and on Projects **Create** makes a new project bundle.
-**Detect profiles** on **Agent Profiles** discovers the agents installed
-on this machine and usable local runtimes. The dashboard runs the same profile
+On **Agent Profiles**, each saved profile shows its sign-in status (`signed in`,
+`signed out`, `credential expired`, or the API-key/no-login case), and **Sign
+in** hands the terminal to the profile's login flow for the selected profile.
+**Detect profiles** discovers the agents installed on this machine and usable
+local runtimes. The dashboard runs the same profile
 detection on every plain `mj` launch (not `mj go`, `mj workspaces`, or the
 relaunch after an upgrade), so a removed profile for an installed agent returns;
 disable the profile instead to stop using it. Review settings are part of the same

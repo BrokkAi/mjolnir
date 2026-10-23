@@ -83,8 +83,10 @@ builds, and desktop dependencies.
 
 ## Quick start
 
-Mjolnir runs coding agents you already have, so install and sign in to at
-least one of them first. Then, from a project directory:
+Mjolnir can install a pinned coding harness when you sign in. Add a profile in
+Settings → Agent Profiles and choose **Sign in**, or install and sign in to an
+agent you already have and choose **Detect profiles**. Then, from a project
+directory:
 
 ```sh
 mj

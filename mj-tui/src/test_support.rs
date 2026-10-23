@@ -505,6 +505,8 @@ pub(crate) fn dashboard_with_one_subagent() -> (DashboardState, String) {
     let mut child = running_session();
     child.id = "child-session".into();
     let relation = mj_core::subagent::SubagentRecord {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        reviewer_launch: None,
         child_session_id: child.id.clone(),
         parent_session_id: parent.id.clone(),
         task_name: "Inspect parser".into(),

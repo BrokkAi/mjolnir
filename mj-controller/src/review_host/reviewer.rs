@@ -21,7 +21,7 @@ pub(super) fn prompt_command(prompt: String) -> RelayCommand {
 pub(super) async fn reviewer_action(
     control: &SessionManagerControl,
     session_id: &str,
-    role: Option<String>,
+    _role: Option<String>,
     action: ReviewerAction,
 ) -> Result<ReviewerOutcome, String> {
     let handle: ManagedSessionHandle = control
@@ -32,7 +32,7 @@ pub(super) async fn reviewer_action(
     let mut pause = LEASE_RETRY_PAUSE;
     loop {
         match handle
-            .reviewer_as(role.clone(), action.clone())
+            .reviewer(action.clone())
             .await
             .map_err(|error| format!("{error:#}"))
         {
@@ -61,42 +61,6 @@ pub(super) const LIFECYCLE_WAIT: std::time::Duration = std::time::Duration::from
 /// The longest pause between attempts while a running review waits.
 const LIFECYCLE_RETRY_PAUSE_MAX: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Stages the configured reviewer profile and starts one role under it.
-pub(super) async fn launch_role(
-    control: &SessionManagerControl,
-    environment: &Arc<dyn ReviewEnvironment>,
-    session_id: &str,
-    role: &str,
-    reviewer: &ReviewerIdentity,
-    generation: u64,
-) -> Result<(), String> {
-    let staged = {
-        let session_id = session_id.to_owned();
-        let profile = reviewer.profile.clone();
-        let environment = environment.clone();
-        tokio::task::spawn_blocking(move || environment.stage(&session_id, &profile, generation))
-            .await
-            .map_err(|error| format!("staging the reviewer stopped: {error}"))??
-    };
-    let mut config = staged;
-    config.model = reviewer.main.model.clone();
-    config.effort = reviewer.main.effort.clone();
-    config.fast_mode = reviewer.main.fast_mode.then_some(true);
-    match reviewer_action(
-        control,
-        session_id,
-        Some(role.to_owned()),
-        ReviewerAction::Start {
-            config: Box::new(config),
-        },
-    )
-    .await
-    {
-        Ok(ReviewerOutcome::Started(_)) => Ok(()),
-        other => Err(unexpected(other)),
-    }
-}
-
 /// Everything a review needs that only the database and the worker can answer.
 pub(super) async fn prepare(
     control: &SessionManagerControl,
@@ -105,6 +69,26 @@ pub(super) async fn prepare(
     config: ReviewConfig,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<Prepared, StartRefusal> {
+    prepare_scoped(
+        control,
+        environment,
+        session_id,
+        config,
+        cancelled,
+        mj_core::relay::CaptureScope::TurnDelta,
+    )
+    .await
+}
+
+pub(super) async fn prepare_scoped(
+    control: &SessionManagerControl,
+    environment: &Arc<dyn ReviewEnvironment>,
+    session_id: &str,
+    config: ReviewConfig,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    scope: mj_core::relay::CaptureScope,
+) -> Result<Prepared, StartRefusal> {
+    let push = scope == mj_core::relay::CaptureScope::PushableCommits;
     // A sub-agent's changes are reviewed through its parent's turn. Asking
     // its worker for reviewer state would also race the parent's lifecycle
     // operations on the child and surface their internal refusals.
@@ -118,35 +102,11 @@ pub(super) async fn prepare(
     if child {
         return Err(StartRefusal(SUBAGENT_REFUSAL.to_owned()));
     }
-    // Mutual exclusion on the default reviewer role, which a plan-review
-    // second opinion shares: the running prompt keeps the role. Checked
-    // against the worker rather than against any UI's state, because the
-    // worker is the only place that knows.
     let handle = control
         .session(session_id.to_owned())
         .await
         .map_err(|error| StartRefusal(format!("{error:#}")))?;
-    match handle.reviewer(ReviewerAction::Status).await {
-        Ok(ReviewerOutcome::Status(state)) => match &state.active_prompt {
-            // Preparation runs only while this host holds no review for the
-            // session, so a turn review's prompt here belongs to a review an
-            // earlier daemon started and no daemon can finish. Stop it, as
-            // the startup sweep does, and review in its place.
-            Some(prompt) if is_turn_review_command(&prompt.command_id) => {
-                stop_leftover_review(&handle).await.map_err(|error| {
-                    StartRefusal(format!(
-                        "the review left running when Mjolnir restarted could not be \
-                         stopped: {error}"
-                    ))
-                })?;
-            }
-            Some(prompt) => return Err(StartRefusal(busy_reviewer(&prompt.command_id))),
-            None => {}
-        },
-        Ok(_) => {}
-        Err(error) => return Err(StartRefusal(format!("{error:#}"))),
-    }
-    // Reviewer actions and primary prompt submissions are serialized by the
+    // Capture actions and primary prompt submissions are serialized by the
     // same session actor. Anything accepted before the admission hold is
     // reflected here; anything after it was refused by the actor.
     let view = handle.view();
@@ -158,15 +118,25 @@ pub(super) async fn prepare(
             "this session has no transcript yet".to_owned(),
         ));
     };
-    if !matches!(
-        snapshot.materialized.execution,
-        MaterializedExecutionState::Idle
-    ) {
+    if push
+        && snapshot.operational.relay_protocol_version.unwrap_or(0)
+            < mj_core::relay::RELAY_PUSH_REVIEW_PROTOCOL
+    {
+        return Err(StartRefusal(
+            "the session's worker predates push review; restart the session".into(),
+        ));
+    }
+    if !push
+        && !matches!(
+            snapshot.materialized.execution,
+            MaterializedExecutionState::Idle
+        )
+    {
         return Err(StartRefusal(
             "a review runs between turns; this one is still working".to_owned(),
         ));
     }
-    if !snapshot.materialized.queued_prompts.is_empty() {
+    if !push && !snapshot.materialized.queued_prompts.is_empty() {
         return Err(StartRefusal(
             "prompts are queued; the review waits for them".to_owned(),
         ));
@@ -200,6 +170,7 @@ pub(super) async fn prepare(
         after_background_work(session_id, deadline, &cancelled, move || async move {
             handle
                 .reviewer(ReviewerAction::CaptureDelta {
+                    scope,
                     baselines: baselines.clone(),
                 })
                 .await
@@ -208,6 +179,18 @@ pub(super) async fn prepare(
         .await
     };
     let captured = match captured {
+        Err(error) if push => return Err(StartRefusal(error)),
+        Ok(ReviewerOutcome::Delta { repositories })
+            if push
+                && (repositories.is_empty()
+                    || repositories
+                        .iter()
+                        .all(|delta| delta.base_commit == delta.head_commit)) =>
+        {
+            return Err(StartRefusal(
+                "nothing to review because base == HEAD".into(),
+            ));
+        }
         Ok(ReviewerOutcome::Delta { repositories }) => Some(repositories),
         _ => None,
     };
@@ -219,6 +202,7 @@ pub(super) async fn prepare(
         .is_some_and(|deltas| !mj_review::delta::has_changes(deltas))
     {
         return Ok(Prepared {
+            scope,
             state,
             // No reviewer process starts for a turn with nothing to review.
             reviewer: ReviewerIdentity::default(),
@@ -244,6 +228,7 @@ pub(super) async fn prepare(
         .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
         .map_err(StartRefusal)?;
     Ok(Prepared {
+        scope,
         state,
         reviewer: reviewer.clone(),
         materialized: Box::new(snapshot.materialized),
@@ -262,21 +247,17 @@ pub(super) async fn prepare_recovery(
     session_id: &str,
 ) -> Result<Option<Prepared>, String> {
     let session = session_id.to_owned();
-    let environment = environment.clone();
-    let state = tokio::task::spawn_blocking(move || environment.load_state(&session))
+    let load = environment.clone();
+    let state = tokio::task::spawn_blocking(move || load.load_state(&session))
         .await
         .map_err(|error| format!("loading the pending review handoff stopped: {error}"))??;
+    if let Some(child) = &state.child_session_id {
+        environment.close_child(child).await?;
+    }
     let handle = control
         .session(session_id.to_owned())
         .await
         .map_err(|error| format!("{error:#}"))?;
-    // The interrupted review's reviewers may still be running in the worker.
-    // Nothing will read them now, so they stop before anyone is told the
-    // review was cancelled. A failure is left to the next review's
-    // preparation, which meets the same leftover and stops it.
-    if let Err(error) = stop_leftover_review(&handle).await {
-        tracing::warn!(%session_id, %error, "could not stop the interrupted review's reviewers");
-    }
     let Some(pending) = state.pending_forward.clone() else {
         return Ok(None);
     };
@@ -297,6 +278,7 @@ pub(super) async fn prepare_recovery(
         return Err("prompts are queued; the pending handoff waits for them".to_owned());
     }
     Ok(Some(Prepared {
+        scope: Default::default(),
         state,
         // No reviewer process is started for a handoff-only recovery.
         reviewer: ReviewerIdentity::default(),
@@ -307,83 +289,6 @@ pub(super) async fn prepare_recovery(
         // worker held.
         background: None,
     }))
-}
-
-/// Why the default reviewing role cannot take a new review, from the id of
-/// a prompt it is running that is not a turn review's.
-fn busy_reviewer(command_id: &str) -> String {
-    if command_id.starts_with(mj_core::second_opinion::COMMAND_ID_PREFIX) {
-        "the reviewer is busy with a second opinion".to_owned()
-    } else {
-        "the reviewer is busy".to_owned()
-    }
-}
-
-fn is_turn_review_command(command_id: &str) -> bool {
-    command_id.starts_with(mj_core::review::driver::COMMAND_ID_PREFIX)
-}
-
-/// Removed turn-review roles may still run in a worker after a daemon restart.
-/// Keep their identities here until those workers have been replaced.
-const LEGACY_ROLES: [&str; 9] = [
-    "validator",
-    "intent",
-    "supervisor",
-    "control_flow",
-    "duplication",
-    "error_handling",
-    "dead_code",
-    "tests",
-    "contracts",
-];
-
-/// Stops, in the worker, every reviewing role a turn review left running
-/// when the daemon that drove it went away.
-///
-/// The worker keeps a reviewer's harness, journal and pending form across a
-/// daemon restart, but the review that would read its answer lived in that
-/// daemon's memory. Left alone, the prompt holds the default role, so every
-/// later review is refused, and its form waits on a question no surface can
-/// show. Stopping it makes the daemon's "cancelled" true in the worker too.
-///
-/// The default role is shared with a plan-review second opinion, so it is
-/// stopped only while it runs a turn review's prompt. The other roles belong
-/// to turn reviews alone; pausing one that is not running does nothing.
-pub(super) async fn stop_leftover_review(handle: &ManagedSessionHandle) -> Result<(), String> {
-    use mj_core::review::driver::REVIEWER_ROLE;
-    let mut roles = LEGACY_ROLES.to_vec();
-    let status = handle
-        .reviewer_as(Some(REVIEWER_ROLE.to_owned()), ReviewerAction::Status)
-        .await
-        .map_err(|error| format!("{error:#}"))?;
-    if let ReviewerOutcome::Status(state) = status
-        && state
-            .active_prompt
-            .as_ref()
-            .is_some_and(|prompt| is_turn_review_command(&prompt.command_id))
-    {
-        roles.insert(0, REVIEWER_ROLE);
-    }
-    let mut failures = Vec::new();
-    for role in roles {
-        if let Err(error) = handle
-            .reviewer_as(Some(role.to_owned()), ReviewerAction::Pause)
-            .await
-        {
-            // A worker that does not support named roles cannot have those
-            // legacy processes to stop. Workers with generic role support
-            // receive these requests and pause any live legacy roles.
-            if error.to_string().contains("no longer supported") {
-                continue;
-            }
-            failures.push(format!("{role}: {error:#}"));
-        }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures.join("; "))
-    }
 }
 
 /// A question's first line, quoted and kept short enough for a notice.

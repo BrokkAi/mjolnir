@@ -199,24 +199,6 @@ pub struct TranscriptRetention {
     pub remaining: bool,
 }
 
-/// A second-opinion review that was still open when the UI last stopped.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct StoredReview {
-    pub workflow: crate::second_opinion::ReviewWorkflow,
-    /// Reviewer lifetime this review belongs to. It is bumped when native
-    /// continuity is lost, so a resumed session starts a new conversation
-    /// rather than pretending to reload one that is gone.
-    pub generation: u64,
-    /// The primary's transcript frontier when the context request went out.
-    pub context_baseline: u64,
-    /// Whether the reviewer's native session is known to be gone.
-    pub native_lost: bool,
-    /// What the controller has read of the reviewer's conversation. The
-    /// reviewer's own journal is the source, but it dies with the target, so
-    /// this copy is what keeps a finished review readable afterwards.
-    pub reviewer_transcript: Vec<std::sync::Arc<crate::state::TranscriptItem>>,
-}
-
 /// How far this session has been reviewed.
 ///
 /// `baselines` are Git tree ids by repository root: the working tree as of the
@@ -224,6 +206,8 @@ pub struct StoredReview {
 /// what makes a cancelled review lossless -- the next one covers both turns.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TurnReviewState {
+    #[serde(default)]
+    pub child_session_id: Option<String>,
     pub baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
     pub reviewed_through_ordinal: u64,
     /// The last forwarded verdict, which turns the next review into a

@@ -33,12 +33,6 @@ impl ChatState {
         // wait for ever.
         let reviewing = !self.reviewer_elicitation_open();
 
-        // The second-opinion view owns the pane while it is up: the composer
-        // and the plan decision behind it are both part of what it is deciding.
-        if reviewing && self.second_opinion_active() {
-            return self.handle_second_opinion_event(key);
-        }
-
         // A turn review owns the pane on the same terms. Its actions are the
         // only input while it is unresolved, which is what holds the primary
         // agent still until the user has answered the findings.
@@ -62,15 +56,6 @@ impl ChatState {
                         elicitation_id: request.id,
                         response,
                     };
-                }
-                // A second opinion is Hel's own decision. Sending it to the
-                // harness would consume the plan review before the reviewer
-                // exists, so it never becomes an elicitation response.
-                if let Some(proposal) =
-                    mj_core::acp::plan_review_second_opinion(&request, &response)
-                {
-                    let proposal = proposal.to_owned();
-                    return ChatAction::StartSecondOpinion { request, proposal };
                 }
                 return ChatAction::RespondElicitation { request, response };
             }

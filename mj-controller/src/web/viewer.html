@@ -68,9 +68,12 @@
     </main>
 
     <main id="app" class="hidden">
-      <!-- The workspace strip scrolls sideways inside itself; the page never
-           does, however long a workspace is named. -->
-      <div id="workspaces" class="tabstrip scroll-x" role="tablist" aria-label="Workspaces"></div>
+      <!-- A select, not a row of tabs: workspace names are as long as people
+           make them, and a phone has no room to lay them side by side. -->
+      <div id="workspaces" class="workspace-bar">
+        <select id="workspace-select" aria-label="Workspace"></select>
+        <div id="subagent-workspace" class="virtual-workspace hidden"></div>
+      </div>
       <div id="launch-failures" aria-live="polite"></div>
 
       <section id="dashboard" class="page">

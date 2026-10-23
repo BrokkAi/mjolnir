@@ -22,7 +22,7 @@ impl RuntimeState {
             let mut controller = Controller::load()?;
             if let Some(existing) = crate::database::lookup_subagent_request(
                 &request.parent_session_id,
-                &request.request_key,
+                &request.kind.request_key(&request.request_key),
             )? {
                 let needs_provisioning = controller
                     .state
@@ -38,11 +38,13 @@ impl RuntimeState {
             // child's first prompt can name its own directory under it. A
             // request run again after a restart finds the same root.
             let executor = CancellableProcessExecutor::with_timeout(REPORT_ROOT_TIMEOUT);
-            request.report_root = Some(
-                controller
-                    .prepare_subagent_report_root(&request.parent_session_id, &executor)
-                    .context("create the sub-agent report directory")?,
-            );
+            if request.kind != mj_core::subagent::SubagentKind::Reviewer {
+                request.report_root = Some(
+                    controller
+                        .prepare_subagent_report_root(&request.parent_session_id, &executor)
+                        .context("create the sub-agent report directory")?,
+                );
+            }
             controller
                 .register_subagent(request)
                 .map(|relation| (relation, true))
@@ -121,6 +123,102 @@ impl RuntimeState {
         }
         self.reload_controller().await?;
         Ok(relation)
+    }
+
+    pub(crate) async fn start_reviewer_child(self: &Arc<Self>, child: &str) -> Result<()> {
+        let id = child.to_owned();
+        let relation = blocking(move || crate::database::load_subagent(&id))
+            .await?
+            .context("reviewer child is missing")?;
+        let launch = relation
+            .reviewer_launch
+            .as_ref()
+            .context("reviewer launch configuration is missing")?
+            .clone();
+        self.start_subagent_session(crate::controller::RegisterSubagentRequest {
+            kind: relation.kind,
+            reviewer_launch: relation.reviewer_launch.clone(),
+            parent_session_id: relation.parent_session_id.clone(),
+            task_name: relation.task_name.clone(),
+            profile_id: relation.profile_id.clone(),
+            model: relation.model.clone(),
+            effort: relation.effort.clone(),
+            working_directory: relation.working_directory.clone(),
+            initial_prompt: relation.initial_prompt.clone(),
+            request_key: relation.request_key.clone(),
+            report_root: None,
+        })
+        .await?;
+        let handle = self
+            .session_manager
+            .wait_for_session(child, Duration::from_secs(120))
+            .await?;
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                let view = handle.view();
+                if view.connected
+                    && view
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.operational.agent_capabilities.is_some())
+                {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                if let Some(error) = view.error {
+                    anyhow::bail!("{error:?}");
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .context("reviewer harness did not become ready")??;
+        if launch.harness != mj_core::config::HarnessKind::Muse {
+            let snapshot = handle
+                .view()
+                .snapshot
+                .context("reviewer snapshot is missing")?;
+            let mut surface = mj_core::acp::surface::AcpSessionSurface::default();
+            surface.set_harness_kind(launch.harness);
+            surface.set_config_options(&snapshot.operational.config_options);
+            surface.set_session_modes(snapshot.operational.modes.clone());
+            if let Ok(control) = surface.plan_control(true)
+                && let Err(error) = self
+                    .session_manager
+                    .client()
+                    .session(child)
+                    .await?
+                    .apply_plan_control(format!("{}-plan", relation.request_key), control)
+                    .await
+            {
+                tracing::warn!(child, %error, "reviewer harness refused plan mode");
+            }
+        }
+        use crate::server_runtime::api::ExportRuntime;
+        Arc::clone(self)
+            .queue_startup(
+                child.to_owned(),
+                relation.request_key.clone(),
+                crate::server::api::StartFollowup {
+                    model: relation.model,
+                    effort: relation.effort,
+                    fast_mode: launch.fast_mode.unwrap_or(false),
+                    prompt: Some(relation.initial_prompt),
+                },
+            )
+            .await?;
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                match self.startup_status(child.to_owned()).await? {
+                    Some(crate::server::api::StartStatus::Submitted { .. }) => return Ok(()),
+                    Some(crate::server::api::StartStatus::Failed { message }) => {
+                        anyhow::bail!("{message}")
+                    }
+                    _ => tokio::time::sleep(Duration::from_millis(100)).await,
+                }
+            }
+        })
+        .await
+        .context("reviewer first prompt did not start")?
     }
 
     pub async fn start_create_session_controlled(
@@ -455,6 +553,8 @@ mod delegation_replay_tests {
             let runtime = crate::daemon::tests::test_runtime_state();
             let replayed = runtime
                 .start_subagent_session(crate::controller::RegisterSubagentRequest {
+                    kind: mj_core::subagent::SubagentKind::Worker,
+                    reviewer_launch: None,
                     parent_session_id: "parent".into(),
                     task_name: "must reuse original".into(),
                     profile_id: "missing-profile".into(),

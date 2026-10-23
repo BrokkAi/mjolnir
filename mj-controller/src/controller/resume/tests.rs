@@ -59,6 +59,8 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
         worker_root: child_directory.path().join(&child.id),
     });
     let relation = mj_core::subagent::SubagentRecord {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        reviewer_launch: None,
         child_session_id: child.id.clone(),
         parent_session_id: parent_id.into(),
         task_name: "inspect current child state".into(),
@@ -560,6 +562,8 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
             .iter()
             .map(|repository| CheckpointRepositoryBundle {
                 metadata: mj_checkpoint::archive::RepositoryMetadata {
+                    review_baseline_ref: None,
+                    review_refs_metadata_only: false,
                     saved_refs: Default::default(),
                     stash_stack: Vec::new(),
                     git_operation: None,
@@ -632,6 +636,8 @@ fn repository_preflight_checks_declared_boundary_without_importing_delta_bundle(
     let head = "b".repeat(40);
     let archived = CheckpointRepositoryBundle {
         metadata: mj_checkpoint::archive::RepositoryMetadata {
+            review_baseline_ref: None,
+            review_refs_metadata_only: false,
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
             git_operation: None,

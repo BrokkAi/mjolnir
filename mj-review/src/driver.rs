@@ -1,10 +1,8 @@
 //! The turn review's state machine.
 //!
 //! This module owns the order a review happens in and the wording of every
-//! prompt it sends; the caller owns the transport. That split is the same one
-//! `mj_core::second_opinion::ReviewWorkflow` uses for plan review, and it is
-//! what makes the review's rules testable without a container, a harness, or a
-//! model: each step here is a pure function from an event to a list of
+//! prompt it sends; the caller owns the transport. Each step is a pure
+//! function from an event to a list of
 //! [`ReviewRequest`]s.
 //!
 //! The three invariants every test in this file defends:
@@ -92,6 +90,9 @@ impl TurnReviewDriver {
             .trees
             .iter()
             .map(|(root, current_tree)| RepoDelta {
+                base_commit: None,
+                head_commit: None,
+                base_kind: None,
                 root: root.clone(),
                 baseline_tree: seed.baselines.get(root).cloned(),
                 current_tree: current_tree.clone(),
@@ -145,12 +146,6 @@ impl TurnReviewDriver {
             .iter()
             .map(|(role, command)| (role.clone(), command.clone()))
             .collect()
-    }
-
-    /// Roles whose journals the caller should be reading.
-    #[must_use]
-    pub fn active_roles(&self) -> Vec<String> {
-        self.started_roles.iter().cloned().collect()
     }
 
     /// Whether the review has ended, which is when its pane closes and the
@@ -234,24 +229,11 @@ impl TurnReviewDriver {
         }
     }
 
-    /// Starts one role and remembers it, so cancelling reaps it.
-    fn start_role(&mut self, role: &str, fresh: bool) -> ReviewRequest {
-        self.started_roles.insert(role.to_string());
-        ReviewRequest::StartRole {
-            role: role.to_string(),
-            fresh,
-        }
-    }
-
-    /// Sends one prompt to a role and records the command it is answering.
+    /// Registers a reviewer child and records the command it is answering.
     fn prompt_role(&mut self, role: &str, purpose: &str, prompt: String) -> ReviewRequest {
         let command_id = self.next_command_id(purpose);
         self.awaited.insert(role.to_string(), command_id.clone());
-        ReviewRequest::PromptRole {
-            role: role.to_string(),
-            command_id,
-            prompt,
-        }
+        ReviewRequest::StartReviewer { command_id, prompt }
     }
 
     /// The capture landed. An empty capture ends the review before any agent
@@ -290,23 +272,7 @@ impl TurnReviewDriver {
         }
         self.phase = TurnReviewPhase::LaunchingReviewer;
         self.status = "starting the reviewer…".to_string();
-        vec![self.start_role(REVIEWER_ROLE, true)]
-    }
-
-    /// A role's harness is up. Sends it its prompt.
-    pub fn role_started(&mut self, role: &str) -> Vec<ReviewRequest> {
-        if self.finished() {
-            return Vec::new();
-        }
-        if role != REVIEWER_ROLE
-            || !matches!(
-                self.phase,
-                TurnReviewPhase::LaunchingReviewer | TurnReviewPhase::Running { .. }
-            )
-            || self.awaited.contains_key(REVIEWER_ROLE)
-        {
-            return Vec::new();
-        }
+        self.started_roles.insert(REVIEWER_ROLE.to_owned());
         let prompt = review_prompt(&self.job());
         self.mark_role(REVIEWER_ROLE, "Reviewer", RoleState::Running);
         self.status = "the reviewer is reading the change…".to_string();
@@ -382,7 +348,7 @@ impl TurnReviewDriver {
         self.awaited.clear();
         std::mem::take(&mut self.started_roles)
             .into_iter()
-            .map(|role| ReviewRequest::PauseRole { role })
+            .map(|_| ReviewRequest::CloseReviewer)
             .collect()
     }
 
