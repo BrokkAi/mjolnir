@@ -27,6 +27,10 @@ include = [
     # OpenCode provider environment embedded with `include_str!` by the
     # harness runtime config.
     "assets/opencode-provider-environment.txt",
+    # Pinned managed harness packages and verified runtime manifests.
+    "assets/harnesses/**",
+    "assets/muse/runtime.json",
+    "assets/opencode/runtime.json",
     "Cargo.toml",
     "Cargo.lock",
     "/README.md",

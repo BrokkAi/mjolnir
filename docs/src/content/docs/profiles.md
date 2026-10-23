@@ -548,23 +548,55 @@ Run:
 mj login --profile codex-work
 ```
 
+You can also sign in without leaving the dashboard: press `prefix+s` to open
+Settings, choose **Agent Profiles**, select a profile, and choose **Sign in**. Mjolnir
+hands the terminal to the same login flow and resumes the dashboard when it
+finishes. The Agent Profiles list shows each saved profile's status beside it —
+`signed in`, `signed out`, `credential expired`, or the API-key and no-login
+cases — so a signed-out profile is visible before a session fails. When Mjolnir
+cannot inspect a login, the row says why instead (for example, Claude Code's
+macOS Keychain item). `credential expired` means the harness recorded an
+access-token expiry that has passed;
+some harnesses refresh it automatically on the next turn. The status is a local
+credential probe, not a live provider check, so a token revoked by the provider
+still reads `signed in` until a turn fails. The button is
+available for profiles that already exist in the saved configuration and have no
+unsaved edits; save a new or changed profile first.
+
 When exactly one profile exists, `--profile` may be omitted. With several
 profiles it is required. Mjolnir sets the selected home variable and profile
-environment before starting the harness's interactive login:
+environment, installs the exact pinned harness under its own cache, and starts
+that harness as an ACP agent. It reads the methods the bridge advertises:
 
-| Harness | Command run by `mj login` |
+| Harness | What `mj login` does |
 | --- | --- |
-| Codex | `codex login` (not applicable to an API-key provider) |
-| Claude Code | `claude auth login` |
-| Kimi Code | `kimi login` |
-| Grok Build | `grok login` |
-| Muse Code | `muse login` |
-| OpenCode | `opencode auth login` |
-| MiMo Code | `mimo auth login` |
+| Codex | ACP `authenticate` for `chat-gpt` (browser) or `api-key` (environment key) |
+| Claude Code | No ACP methods; falls back to `claude auth login` when the Claude CLI is installed |
+| Kimi Code | Runs its advertised ACP method; falls back to `kimi login` only when the bridge cannot run |
+| Grok Build | Runs `grok login` for its `grok.com` method; falls back to the CLI when the bridge cannot run |
+| Muse Code | Runs the ACP `terminal` method `muse-acp login` |
+| OpenCode | Runs the pinned `opencode auth login --standalone` |
+| MiMo Code | Runs the pinned `mimo auth login` |
 | DSH | none; `mj login` refuses the profile, which authenticates with `DEEPSEEK_API_KEY` |
 
-The login command is always resolved from the controller's `PATH`. A profile
-selects credentials and environment, not another harness executable.
+Use `--method <id>` when a bridge advertises several methods. Use `--cli` to
+skip ACP and run the harness command found on `PATH`, which is the behavior of
+earlier releases. A bridge that advertises no usable method, or a pinned
+installation that cannot be prepared, also falls back to that command-line
+login. A failure inside a chosen ACP method is reported instead of silently
+trying a different flow.
+
+For harnesses with an ACP login, signing in installs or reuses the pinned
+harness, so the controller does not need a separate installation of that
+harness. Claude agent-acp advertises no login method, so Claude still uses an
+installed `claude` CLI (or the Mjolnir setup token). When a harness is installed
+on `PATH` it is also available through `--cli`, and it is used automatically as
+the fallback when ACP cannot run. A profile pointed at your own OpenCode, Muse, or MiMo
+home signs in through that installed harness's CLI instead: Mjolnir never runs
+the pinned binary against a login database it does not own. A profile with its
+own managed home gets the pinned ACP flow. API-key profiles, and profiles whose
+harness is configured for an API key rather than a native login, have no
+interactive login.
 
 On macOS, Claude Code keeps its login in one Keychain item rather than in the
 home ([anthropics/claude-code#20553](https://github.com/anthropics/claude-code/issues/20553)),
@@ -595,7 +627,8 @@ profiles/<profile-id>/claude-oauth-token
 New and resumed sessions receive it as `CLAUDE_CODE_OAUTH_TOKEN`. It covers
 model requests, not Claude Remote Control or claude.ai connectors. Remove that
 file to return the profile to its normal synced credentials. `--setup-token` is
-valid only for Claude profiles.
+valid only for Claude profiles and runs `claude` from `PATH`; it conflicts with
+`--method` and `--cli`.
 
 ## What a session's staged home holds
 

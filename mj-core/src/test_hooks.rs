@@ -77,14 +77,14 @@ pub fn reach_test_hook(name: &'static str) -> Result<()> {
 }
 
 /// The checked-in executable used by fake commands and worker fixtures.
-#[cfg(all(unix, feature = "test-hooks"))]
+#[cfg(all(unix, any(test, feature = "test-hooks")))]
 pub fn fake_command_dispatcher() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-command.sh")
 }
 
 /// A worker stand-in carrying the same build identity as this test process.
 /// Built before tests start, so executing it cannot race a test's writer.
-#[cfg(all(unix, feature = "test-hooks"))]
+#[cfg(all(unix, any(test, feature = "test-hooks")))]
 pub fn fake_worker_dispatcher() -> std::path::PathBuf {
     std::path::Path::new(env!("OUT_DIR")).join("fake-worker.sh")
 }
@@ -104,19 +104,19 @@ pub fn fake_worker_dispatcher() -> std::path::PathBuf {
 /// `mj-core/tests/fixtures/fake-command.sh`, which this process never
 /// opens for writing, and the behaviour goes in `<program>.script`, which only
 /// `/bin/sh` ever reads. Nothing execs a written file at any point.
-#[cfg(all(unix, feature = "test-hooks"))]
+#[cfg(all(unix, any(test, feature = "test-hooks")))]
 pub fn install_fake_command(directory: &std::path::Path, program: &str, script: &str) {
     install_fake_with_dispatcher(fake_command_dispatcher(), directory, program, script);
 }
 
 /// Install a worker stand-in, like [`install_fake_command`], that carries this
 /// build's worker stamp so the controller accepts it as a matching worker.
-#[cfg(all(unix, feature = "test-hooks"))]
+#[cfg(all(unix, any(test, feature = "test-hooks")))]
 pub fn install_fake_worker(directory: &std::path::Path, program: &str, script: &str) {
     install_fake_with_dispatcher(fake_worker_dispatcher(), directory, program, script);
 }
 
-#[cfg(all(unix, feature = "test-hooks"))]
+#[cfg(all(unix, any(test, feature = "test-hooks")))]
 fn install_fake_with_dispatcher(
     dispatcher: std::path::PathBuf,
     directory: &std::path::Path,

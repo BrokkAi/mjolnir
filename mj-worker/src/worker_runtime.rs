@@ -304,7 +304,10 @@ pub(crate) fn repin_bridge_selectors(
 #[cfg(unix)]
 mod discovery;
 #[cfg(unix)]
-pub(crate) mod harness;
+pub(crate) use mj_core::harness_install as harness;
+#[cfg(unix)]
+pub use mj_core::harness_install::ManagedHarness;
+
 #[cfg(unix)]
 mod harness_launch;
 #[cfg(unix)]

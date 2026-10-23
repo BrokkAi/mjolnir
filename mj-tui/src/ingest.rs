@@ -585,7 +585,11 @@ impl DashboardState {
         } else {
             config.keybinds()
         };
+        let profiles_changed = self.config.profiles != config.profiles;
         *self.config = config;
+        if profiles_changed {
+            self.invalidate_profile_login_statuses();
+        }
         // A background refresh must not dismiss a newer interaction. Forms
         // retain their drafts; command availability reads the current config.
         self.clamp_selections();

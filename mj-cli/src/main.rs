@@ -6,6 +6,8 @@
 //! feeds both of them read, and [`import`] session adoption.
 
 mod acp;
+#[cfg(unix)]
+mod acp_login;
 mod api_client;
 mod api_commands;
 mod daemon;
@@ -39,7 +41,6 @@ use mj_core::config::{Config, config_path};
 use mj_core::state::{MoveSelection, MoveSessionRequest, ResumeQueueDisposition};
 use std::io::{self, Write};
 
-use mj_controller::controller::Controller;
 use mj_controller::controller::update::StartupUpdateNotice;
 use mj_controller::setup::run_setup_command;
 #[cfg(test)]
@@ -138,7 +139,8 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Run a harness login for a profile so live sessions pick up fresh credentials.
+    /// Sign in a profile, installing its pinned harness when needed. Live
+    /// sessions pick up fresh credentials.
     Login(LoginArgs),
     /// Create a session through the API and print its id.
     New(api_commands::NewArgs),
@@ -366,8 +368,15 @@ struct LoginArgs {
     profile: Option<String>,
     /// Claude profiles only: mint a long-lived subscription token with
     /// `claude setup-token` and store it for every session of this profile.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["method", "cli"])]
     setup_token: bool,
+    /// ACP authentication method id. Sign-in normally picks an interactive
+    /// method itself; use this to choose one when a bridge offers several.
+    #[arg(long, value_name = "ID")]
+    method: Option<String>,
+    /// Use the harness command on PATH instead of the pinned ACP login.
+    #[arg(long, conflicts_with = "method")]
+    cli: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1861,39 +1870,57 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
 /// Hel never sees the credential contents; it compares fingerprints before and
 /// after so it can tell the operator whether anything changed.
 async fn login(args: LoginArgs) -> Result<()> {
-    let controller = Controller::load()?;
-    let profile_id = resolve_login_profile(&controller.config, args.profile.as_deref())?;
-    let profile = controller
-        .config
-        .profiles
-        .get(&profile_id)
-        .with_context(|| {
-            format!(
-                "unknown profile {profile_id:?}; configured profiles: {}",
-                profile_ids(&controller.config)
-            )
-        })?;
+    // Signing in only needs the configuration and the profile's own home. It
+    // must also work before the daemon or its database exists, which is the
+    // first thing a freshly configured machine does.
+    let config = Config::load()?;
+    let profile_id = resolve_login_profile(&config, args.profile.as_deref())?;
+    let profile = config.profiles.get(&profile_id).with_context(|| {
+        format!(
+            "unknown profile {profile_id:?}; configured profiles: {}",
+            profile_ids(&config)
+        )
+    })?;
     if args.setup_token {
         return store_claude_setup_token(&profile_id, profile).await;
     }
-    let (program, arguments) = mj_core::credentials::login_command(profile)
-        .with_context(|| format!("profile {profile_id:?}"))?;
     // OpenCode keeps its logins in its database, so its fingerprint is the
     // logins read from there, and a live session reloads to take them up.
     let stored = profile.auth_scheme() == mj_core::config::AuthScheme::NativeLoginStore;
-    let fingerprint = || -> Result<Option<String>> {
-        if stored {
-            return Ok(mj_controller::opencode_logins::profile_logins(profile)?
-                .map(|logins| mj_core::credentials::credential_fingerprint(&logins)));
-        }
-        let (snapshot, _) = mj_core::credentials::read_credential_file(
-            profile.kind,
-            &profile.authentication_marker(),
-        )?;
-        Ok(snapshot.present.then_some(snapshot.fingerprint))
-    };
-    let before = fingerprint()?;
+    let before = profile_credential_fingerprint(profile)?;
 
+    #[cfg(unix)]
+    if !args.cli {
+        match crate::acp_login::login(profile, args.method.as_deref()).await {
+            Ok(crate::acp_login::Outcome::SignedIn { method }) => {
+                println!("Signed in to profile {profile_id} through the ACP method {method}.");
+                report_login_change(&profile_id, profile, before, stored)?;
+                return Ok(());
+            }
+            Ok(crate::acp_login::Outcome::NoLogin(reason)) => bail!("{reason}"),
+            Ok(crate::acp_login::Outcome::Unavailable(reason)) => {
+                if args.method.is_some() {
+                    bail!("ACP sign-in was requested but is unavailable: {reason}");
+                }
+                eprintln!(
+                    "ACP sign-in is unavailable for {} ({reason}); using its command-line login.",
+                    profile.kind.display_name()
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = args.cli;
+    #[cfg(not(unix))]
+    if args.method.is_some() {
+        bail!("--method requires a Unix host");
+    }
+    #[cfg(unix)]
+    crate::acp_login::restore_default_sigint();
+
+    let (program, arguments) = mj_core::credentials::login_command(profile)
+        .with_context(|| format!("profile {profile_id:?}"))?;
     println!(
         "Running `{program} {}` against {}.",
         arguments.join(" "),
@@ -1918,7 +1945,33 @@ async fn login(args: LoginArgs) -> Result<()> {
             )
         })?;
 
-    let after = fingerprint()?;
+    report_login_change(&profile_id, profile, before, stored)?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+/// The credential fingerprint a login is expected to change.
+fn profile_credential_fingerprint(
+    profile: &mj_core::config::HarnessProfile,
+) -> Result<Option<String>> {
+    if profile.auth_scheme() == mj_core::config::AuthScheme::NativeLoginStore {
+        return Ok(mj_controller::opencode_logins::profile_logins(profile)?
+            .map(|logins| mj_core::credentials::credential_fingerprint(&logins)));
+    }
+    let (snapshot, _) =
+        mj_core::credentials::read_credential_file(profile.kind, &profile.authentication_marker())?;
+    Ok(snapshot.present.then_some(snapshot.fingerprint))
+}
+
+fn report_login_change(
+    profile_id: &str,
+    profile: &mj_core::config::HarnessProfile,
+    before: Option<String>,
+    stored: bool,
+) -> Result<()> {
+    let after = profile_credential_fingerprint(profile)?;
     if after.is_some() && after != before {
         if stored {
             println!(
@@ -1931,9 +1984,6 @@ async fn login(args: LoginArgs) -> Result<()> {
         }
     } else {
         println!("Credentials for profile {profile_id} are unchanged.");
-    }
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
     }
     Ok(())
 }
@@ -1998,7 +2048,23 @@ async fn store_claude_setup_token(
         }
     })
     .await
-    .context("run `claude setup-token`")??;
+    .context("run `claude setup-token`")?
+    .map_err(|error| {
+        if error.chain().any(|cause| {
+            cause
+                .downcast_ref::<io::Error>()
+                .is_some_and(|cause| cause.kind() == io::ErrorKind::NotFound)
+        }) {
+            login_spawn_error(
+                io::Error::from(io::ErrorKind::NotFound),
+                "claude",
+                mj_core::config::HarnessKind::Claude,
+                profile_id,
+            )
+        } else {
+            error
+        }
+    })?;
     if !output.status.success() {
         bail!(
             "`claude setup-token` exited with {} for profile {profile_id}",
@@ -2110,7 +2176,9 @@ fn resolve_login_profile(config: &Config, requested: Option<&str>) -> Result<Str
             "several profiles are configured; pass --profile with one of: {}",
             profile_ids(config)
         ),
-        (None, _) => bail!("no enabled agent profiles are configured; run `mj setup` first"),
+        (None, _) => bail!(
+            "no enabled agent profiles are configured; add one in Settings → Agent Profiles, or run `mj setup`"
+        ),
     }
 }
 
@@ -2254,6 +2322,9 @@ pub(crate) struct TerminalGuard {
     /// The window title last written, so it is only rewritten when it
     /// changes and cleared on exit only if it was ever set.
     title: Option<String>,
+    /// The primary screen and cooked input are active because a child command
+    /// has the terminal.
+    suspended: bool,
 }
 
 impl TerminalGuard {
@@ -2295,6 +2366,7 @@ impl TerminalGuard {
             terminal,
             keyboard_enhancement,
             title: None,
+            suspended: false,
         })
     }
 
@@ -2356,6 +2428,75 @@ impl TerminalGuard {
         )
         .context("copy selection to the terminal clipboard")
     }
+
+    /// Hand the terminal back for an interactive command the dashboard itself
+    /// starts, such as a harness sign-in, while keeping the process and its
+    /// state alive. [`Self::resume`] takes it back afterwards.
+    pub(crate) fn suspend(&mut self) -> Result<()> {
+        if self.suspended {
+            return Ok(());
+        }
+        self.suspended = true;
+        let result = (|| -> Result<()> {
+            execute!(
+                self.terminal.backend_mut(),
+                LeaveAlternateScreen,
+                DisableMouseCapture,
+                DisableBracketedPaste
+            )
+            .context("leave the dashboard screen")?;
+            if self.keyboard_enhancement {
+                execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags)
+                    .context("restore terminal keyboard reporting")?;
+            }
+            disable_raw_mode().context("restore terminal input mode")?;
+            self.terminal
+                .show_cursor()
+                .context("show the terminal cursor")?;
+            io::stdout().flush().context("flush the resumed terminal")?;
+            Ok(())
+        })();
+        if result.is_err() {
+            // A partly suspended terminal is worse than either state. Put it
+            // back before reporting the failure.
+            let _ = self.resume();
+        }
+        result
+    }
+
+    /// Take the terminal back after [`Self::suspend`].
+    pub(crate) fn resume(&mut self) -> Result<()> {
+        if !self.suspended {
+            return Ok(());
+        }
+        let result = (|| -> Result<()> {
+            enable_raw_mode().context("enable terminal raw mode")?;
+            if self.keyboard_enhancement {
+                execute!(
+                    self.terminal.backend_mut(),
+                    PushKeyboardEnhancementFlags(
+                        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    )
+                )
+                .context("enable unambiguous terminal key reporting")?;
+            }
+            execute!(
+                self.terminal.backend_mut(),
+                EnterAlternateScreen,
+                EnableMouseCapture,
+                EnableBracketedPaste
+            )
+            .context("re-enter the dashboard screen")?;
+            self.terminal
+                .autoresize()
+                .context("match the resumed dashboard to the terminal size")?;
+            self.terminal.clear().context("clear the resumed dashboard")
+        })();
+        if result.is_ok() {
+            self.suspended = false;
+        }
+        result
+    }
 }
 
 impl Drop for TerminalGuard {
@@ -2394,6 +2535,7 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mj_controller::controller::Controller;
     use mj_core::state::{SessionRecord, SessionState, State};
 
     // Hard-won: 0475c51230: Launch finding C-2 found large-transfer consent flags incorrectly added to every move refusal; this checks they appear only for that consent error.
