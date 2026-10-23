@@ -503,9 +503,11 @@ receives `AGENTS.md` in one environment variable, so the file must be UTF-8
 text of at most 131049 bytes, including the notes Mjolnir adds to describe a
 container or EC2 session's environment. Mjolnir refuses to start a session whose
 file breaks either rule and says which rule and by how much, and `mj doctor`
-reports the profile's own file the same way. With no login
-to create it, create the home directory yourself; `mj doctor` reports it
-missing until you do. DSH reads no
+reports the profile's own file the same way. Nothing creates the home
+automatically, and it is optional: a session stages its own home, which simply
+starts without an `AGENTS.md`. Create `~/.dsh` when you want to keep
+instructions there or move the profile; `mj doctor` reports it missing until
+you do. DSH reads no
 instruction file itself, so Mjolnir passes the staged `AGENTS.md` as dsh-acp's
 system prompt through `DSH_ACP_SYSTEM_PROMPT` on every launch. The staged file
 is the profile's own `AGENTS.md` plus any guidance Mjolnir adds for the
