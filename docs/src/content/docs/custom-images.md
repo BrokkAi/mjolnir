@@ -85,7 +85,7 @@ user's shell environment.
 Muse Code requires both `muse-acp` on `PATH` and the native `muse` executable.
 Set `MUSE_CLI` to the native binary's absolute path. Install the pinned
 `@brokkai/muse-acp` adapter from npm, or let npx fetch it at launch, and use
-`scripts/install-muse.py` with `mj-worker/assets/muse/runtime.json` to install
+`scripts/install-muse.py` with `mj-core/assets/muse/runtime.json` to install
 the matching checksum-verified native binary as managed workers do. Copy the
 manifest and script into your image build and run the installer with the
 manifest path and destination bin directory. It needs Python 3.11 or newer and
