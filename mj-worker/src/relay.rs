@@ -1262,6 +1262,13 @@ impl DurableRelay {
     /// turn.
     fn opens_harness_turn(&self, update: &SessionUpdate) -> bool {
         is_agent_output(update)
+            // A tool update refines a call the adapter already announced. When
+            // a cycle ends, the adapter fails its unfinished calls ("Claude
+            // stopped this tool call before it ran.") after the result, and no
+            // cycle would end a turn opened for that status. Checked against
+            // claude-agent-acp 0.94.0 `dist/tool-calls/renderer.js`
+            // (`unfinished`) on 2026-10-23.
+            && !matches!(update, SessionUpdate::ToolCallUpdate(_))
             && self.snapshot.active_prompt.is_none()
             && self.snapshot.harness_turn.is_none()
             && !self.session_setup
