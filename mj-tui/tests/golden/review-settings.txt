@@ -181,7 +181,7 @@ profile: Auto; model enabled: false; effort enabled: false; save enabled: true
   │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
   │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
   │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
-  │These settings also choose the plan second-opinion reviewer.                                  │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -213,7 +213,7 @@ profile: Auto; model enabled: false; effort enabled: false; save enabled: true
   │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
   │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
   │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
-  │These settings also choose the plan second-opinion reviewer.                                  │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
