@@ -749,11 +749,19 @@ impl Controller {
                 // text. Rebuilding it from the archive's repository layout loses a
                 // trailing separator, which Grok Build keys by, and cannot name
                 // the checkout a move put the session on. A session in a target
-                // workspace has no project directory, and the archive's layout
-                // names its directory under `/workspace`.
-                primary_repository_root: resumed_project_directory
-                    .as_ref()
-                    .map(|directory| target_path(&directory.to_string_lossy())),
+                // workspace launches in its accepted project's primary
+                // repository under the workspace. The archive need not name
+                // that folder: a Move from a host checkout records the
+                // checkout's own folder. A session with no accepted project
+                // keeps the archive's layout, as before.
+                primary_repository_root: match &resumed_project_directory {
+                    Some(directory) => Some(target_path(&directory.to_string_lossy())),
+                    None => self.state.sessions[session_id]
+                        .project
+                        .as_ref()
+                        .and_then(|project| project.bundle.primary())
+                        .map(|primary| target_path(&workspace_root).join(&primary.destination)),
+                },
                 queue_policy,
             };
             // Prepare the worker root before the worker binary is installed:
