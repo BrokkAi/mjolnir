@@ -184,8 +184,8 @@ pub fn collect_git_snapshot_with_progress(
 }
 
 /// Collect only enough Git identity to associate native harness state with an
-/// existing project, together with its durable review refs and their objects.
-/// The project itself remains the recovery source for working files.
+/// existing project, together with its durable review ref names and object IDs.
+/// The project remains the recovery source for objects and working files.
 pub fn collect_git_metadata_snapshot(
     runner: &dyn GitCommandRunner,
     repository: &Path,
@@ -195,19 +195,9 @@ pub fn collect_git_metadata_snapshot(
     validate_archive_relative_path(&spec.relative_destination)?;
     let identity = collect_git_identity(runner, repository, spec.origin_override.as_deref())?;
     let saved_refs = collect_review_refs(runner, repository)?;
-    let mut history = GitHistorySelection {
-        base_commit: identity.head_commit.clone(),
-        bundle_arguments: None,
-    };
-    include_review_history(&mut history, &saved_refs);
-    let committed_bundle = match history.bundle_arguments {
-        Some(arguments) => {
-            git_bytes_owned(runner, repository, &arguments, "bundle the review refs")?
-        }
-        None => Vec::new(),
-    };
     Ok(RepositorySnapshot {
         metadata: RepositoryMetadata {
+            review_refs_metadata_only: !saved_refs.is_empty(),
             review_baseline_ref: if saved_refs.is_empty() {
                 None
             } else {
@@ -226,7 +216,7 @@ pub fn collect_git_metadata_snapshot(
             head_commit: identity.head_commit,
             branch: identity.branch,
         },
-        committed_bundle,
+        committed_bundle: Vec::new(),
         staged_patch: Vec::new(),
         unstaged_patch: Vec::new(),
         untracked_tar: Vec::new(),
@@ -1855,6 +1845,7 @@ fn collect_git_contents(
     Ok(RepositorySnapshot {
         metadata: RepositoryMetadata {
             review_baseline_ref: None,
+            review_refs_metadata_only: false,
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
             git_operation: None,
@@ -1885,7 +1876,17 @@ fn relocated_review_refs(
     metadata: &RepositoryMetadata,
     session: Option<&str>,
 ) -> Result<BTreeMap<String, String>> {
-    let refs = &metadata.saved_refs;
+    let mut refs = BTreeMap::new();
+    for (name, oid) in &metadata.saved_refs {
+        if metadata.review_refs_metadata_only {
+            let object = run_git(runner, repository, ["cat-file", "-e", oid], &[])?;
+            if object.status != 0 {
+                tracing::debug!(reference = %name, object = %oid, repository = %repository.display(), "skip raw review ref whose object is unavailable");
+                continue;
+            }
+        }
+        refs.insert(name.clone(), oid.clone());
+    }
     let mut restored = refs.clone();
     let (Some(session), Some(source)) = (session, metadata.review_baseline_ref.as_deref()) else {
         return Ok(restored);
@@ -1894,20 +1895,6 @@ fn relocated_review_refs(
     if let Some(oid) = refs.get(source) {
         let owner = read_review_point(runner, repository, oid)?.session;
         if owner.as_deref().is_none_or(|owner| owner == session) {
-            let existing = run_git(
-                runner,
-                repository,
-                ["rev-parse", "--verify", "--quiet", &destination],
-                &[],
-            )?;
-            if existing.status == 0 {
-                let old = trim_output(&existing.stdout, "read destination baseline")?;
-                let owner = read_review_point(runner, repository, &old)?.session;
-                ensure!(
-                    old == *oid || owner.as_deref() == Some(session),
-                    "destination review baseline {destination} belongs to another session; restore into an unused checkout"
-                );
-            }
             restored.insert(destination.clone(), oid.clone());
         }
     }
@@ -1949,6 +1936,9 @@ pub(crate) fn restore_git_snapshot_for_session(
     session: Option<&str>,
     restore_contents: bool,
 ) -> Result<()> {
+    // Raw snapshots restore ref metadata only, even when the caller asks
+    // to restore repositories. Other sessions may be using this checkout.
+    let restore_contents = restore_contents && !snapshot.metadata.review_refs_metadata_only;
     if !restore_contents
         && !snapshot
             .metadata

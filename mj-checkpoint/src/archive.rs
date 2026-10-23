@@ -1445,7 +1445,8 @@ fn carries_checkout_subdirectory(repositories: &[RepositoryManifest]) -> bool {
 
 fn carries_review_refs(repositories: &[RepositoryManifest]) -> bool {
     repositories.iter().any(|repository| {
-        repository.metadata.review_baseline_ref.is_some()
+        repository.metadata.review_refs_metadata_only
+            || repository.metadata.review_baseline_ref.is_some()
             || repository
                 .metadata
                 .saved_refs

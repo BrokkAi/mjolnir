@@ -105,6 +105,10 @@ pub struct RepositoryMetadata {
     pub base_commit: String,
     pub head_commit: String,
     pub branch: Option<String>,
+    /// Only ref names and object IDs were captured. The raw checkout owns
+    /// the objects and working files; absent objects do not prevent resume.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub review_refs_metadata_only: bool,
     /// The source checkout's baseline name, used to relocate that checkout's
     /// review state without adopting pins belonging to other worktrees.
     #[serde(default, skip_serializing_if = "Option::is_none")]

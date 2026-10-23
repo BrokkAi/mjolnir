@@ -141,6 +141,7 @@ fn repository(id: &str) -> RepositorySnapshot {
     RepositorySnapshot {
         metadata: RepositoryMetadata {
             review_baseline_ref: None,
+            review_refs_metadata_only: false,
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
             git_operation: None,
@@ -166,6 +167,7 @@ fn checkpoint_bundle(head: &str, contents: impl Into<Vec<u8>>) -> CheckpointRepo
     CheckpointRepositoryBundle {
         metadata: RepositoryMetadata {
             review_baseline_ref: None,
+            review_refs_metadata_only: false,
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
             git_operation: None,
@@ -1817,8 +1819,15 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
                 collect_git_snapshot(&SystemGit, &source, &spec)
             }
             .unwrap();
-            assert!(!snapshot.committed_bundle.is_empty());
-            let destination = clone_repository(directory.path(), &origin, "restored");
+            assert_eq!(snapshot.committed_bundle.is_empty(), metadata_only);
+            let destination = if metadata_only {
+                for name in snapshot.metadata.saved_refs.keys() {
+                    git(&source, &["update-ref", "-d", name]);
+                }
+                source.clone()
+            } else {
+                clone_repository(directory.path(), &origin, "restored")
+            };
             restore_git_snapshot(&SystemGit, &destination, &snapshot).unwrap();
             for (name, object) in [
                 (reviewed.as_str(), &head),
@@ -1842,6 +1851,21 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
             git(&destination, &["update-ref", &start, &later]);
             let other_start = format!("refs/mj/session-start/{}/other", digest_bytes(b"other"));
             git(&destination, &["update-ref", &other_start, &later]);
+            if tagged {
+                let newer = record_review_point(
+                    &SystemGit,
+                    &destination,
+                    &ReviewPoint {
+                        tree: tree.clone(),
+                        head: Some(later.clone()),
+                        reflog: None,
+                        pending: Vec::new(),
+                        session: Some("moving".into()),
+                    },
+                )
+                .unwrap();
+                git(&destination, &["update-ref", REVIEW_BASELINE_REF, &newer]);
+            }
             let mut conflicting = snapshot.clone();
             conflicting
                 .metadata
@@ -1858,6 +1882,10 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
             assert_eq!(git_line(&destination, &["rev-parse", &reviewed]), later);
             assert_eq!(git_line(&destination, &["rev-parse", &start]), head);
             assert_eq!(git_line(&destination, &["rev-parse", &other_start]), later);
+            assert_eq!(
+                git_line(&destination, &["rev-parse", REVIEW_BASELINE_REF]),
+                point
+            );
         }
     }
 }
@@ -1948,18 +1976,14 @@ fn review_refs_follow_the_session_between_worktree_names() {
     )
     .unwrap();
     git(&destination, &["update-ref", REVIEW_BASELINE_REF, &foreign]);
-    let error = super::git::restore_git_snapshot_for_session(
+    super::git::restore_git_snapshot_for_session(
         &SystemGit,
         &destination,
         &snapshot,
         Some("moving"),
         true,
     )
-    .unwrap_err();
-    assert!(
-        error.to_string().contains("belongs to another session"),
-        "{error:#}"
-    );
+    .unwrap();
     assert_eq!(
         git_line(&destination, &["rev-parse", REVIEW_BASELINE_REF]),
         foreign

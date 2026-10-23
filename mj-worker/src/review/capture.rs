@@ -821,6 +821,14 @@ mod capture_tests {
         git(&root, &["update-ref", &legacy, &head]);
         git(&root, &["update-ref", "-d", &start]);
         std::fs::write(root.join("tracked"), "after\n").unwrap();
+        git(&root, &["commit", "-qam", "work after session start"]);
+        assert_ne!(git(&root, &["rev-parse", "HEAD"]), head);
+        // Worker startup calls this before the harness launches. It must find
+        // the original start through the legacy baseline-name hash.
+        assert_eq!(
+            ensure_session_start_head(&SystemGit, &root, "session").unwrap(),
+            Some(head.clone())
+        );
         let deltas = capture_repository_deltas(
             &SystemGit,
             std::slice::from_ref(&root),

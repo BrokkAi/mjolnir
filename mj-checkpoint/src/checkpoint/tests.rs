@@ -810,6 +810,7 @@ fn restore_rewrites_grok_cwd_key_and_session_summary_for_target_workspace() {
     let repositories = vec![crate::archive::RepositoryManifest {
         metadata: crate::archive::RepositoryMetadata {
             review_baseline_ref: None,
+            review_refs_metadata_only: false,
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
             git_operation: None,
@@ -1141,6 +1142,7 @@ fn restore_rewrites_claude_project_artifacts_for_target_workspace() {
     let repositories = vec![crate::archive::RepositoryManifest {
         metadata: crate::archive::RepositoryMetadata {
             review_baseline_ref: None,
+            review_refs_metadata_only: false,
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
             git_operation: None,
@@ -1187,6 +1189,7 @@ fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
     let repositories = vec![crate::archive::RepositoryManifest {
         metadata: crate::archive::RepositoryMetadata {
             review_baseline_ref: None,
+            review_refs_metadata_only: false,
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
             git_operation: None,
@@ -2533,7 +2536,7 @@ fn raw_project_export_keeps_git_metadata_without_git_contents() {
     }
 }
 
-// Hard-won: 0fefbee48: raw checkpoint identity omitted the review refs and their objects.
+// Hard-won: 32a2ba2bf: raw checkpoints bundled full history and blocked shared-checkout resumes.
 #[test]
 fn raw_checkpoint_restores_review_refs_and_declares_the_new_schema() {
     let temp = tempfile::tempdir().unwrap();
@@ -2572,21 +2575,42 @@ fn raw_checkpoint_restores_review_refs_and_declares_the_new_schema() {
         archive.manifest.schema_version,
         crate::archive::ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
     );
+    assert!(
+        archive
+            .payload_by_role(&PayloadRole::GitBundle {
+                repository_id: "app".into()
+            })
+            .unwrap()
+            .is_empty()
+    );
     let destination = temp.path().join("destination");
-    fs::create_dir(&destination).unwrap();
-    git(&destination, &["init", "-q"]);
+    git(
+        temp.path(),
+        &[
+            "clone",
+            "--no-local",
+            "--quiet",
+            source.to_str().unwrap(),
+            destination.to_str().unwrap(),
+        ],
+    );
+    let missing = SystemGit
+        .run(
+            &destination,
+            &GitCommand {
+                arguments: ["cat-file", "-e", &point].map(Into::into).to_vec(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_ne!(missing.status, 0);
+    // The raw archive imports no objects. Missing baseline objects are skipped,
+    // while commit refs whose objects remain locally available are recreated.
     restore_single_repository_into_checkout(&spec.output_path, &destination, &SystemGit).unwrap();
-    for (name, object) in [(baseline, &point), (&start, &head), (&reviewed, &head)] {
-        assert_eq!(git(&destination, &["rev-parse", name]), *object);
+    assert_eq!(git(&destination, &["for-each-ref", baseline]), "");
+    for name in [&start, &reviewed] {
+        assert_eq!(git(&destination, &["rev-parse", name]), head);
     }
-    assert_eq!(
-        git(&destination, &["show", &format!("{tree}:README.md")]),
-        "review baseline"
-    );
-    assert_ne!(
-        fs::read(destination.join("README.md")).unwrap(),
-        b"review baseline\n"
-    );
     // Move transports workspace files separately and disables repository
     // restore. Its session handoff must still install durable review refs.
     fs::write(source.join("README.md"), b"staged live work\n").unwrap();
@@ -2600,6 +2624,23 @@ fn raw_checkpoint_restores_review_refs_and_declares_the_new_schema() {
     for (name, object) in [(baseline, &point), (&start, &head), (&reviewed, &head)] {
         assert_eq!(git(&source, &["rev-parse", name]), *object);
     }
+    let foreign = crate::archive::record_review_point(
+        &SystemGit,
+        &source,
+        &crate::archive::ReviewPoint {
+            tree: git(&source, &["rev-parse", "HEAD^{tree}"]),
+            head: Some(head.clone()),
+            reflog: None,
+            pending: Vec::new(),
+            session: Some("other-session".into()),
+        },
+    )
+    .unwrap();
+    git(&source, &["update-ref", baseline, &foreign]);
+    // Ordinary raw resumes and Move handoffs can share the active checkout.
+    // Neither may refuse or replace another session's pin.
+    restore_into(&temp.path().join("shared-resume"), &spec, false);
+    assert_eq!(git(&source, &["rev-parse", baseline]), foreign);
     assert_eq!(git(&source, &["ls-files", "--stage"]), index);
     assert_eq!(
         fs::read(source.join("README.md")).unwrap(),
