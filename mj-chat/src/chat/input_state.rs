@@ -128,13 +128,9 @@ impl ChatState {
                 self.set_input_payload(payload);
                 if let Some(body) = draft.strip_prefix(CHAT_DRAFT_PREFIX) {
                     match serde_json::from_str::<SavedChatDraft>(body) {
-                        Ok(saved) => {
-                            self.unsent_prompts = saved.unsent;
-                            self.unanswered = saved.unanswered;
-                            self.restore_submissions(saved.pending);
-                        }
+                        Ok(saved) => self.restore_submissions(saved.pending),
                         Err(error) => {
-                            self.set_notice(format!("Could not restore unsent drafts: {error}"))
+                            self.set_notice(format!("Could not restore pending prompts: {error}"))
                         }
                     }
                 }
@@ -350,44 +346,17 @@ impl ChatState {
     }
 
     pub(crate) fn encoded_draft(&self) -> String {
-        if self.unsent_prompts.is_empty()
-            && self.pending_submissions.is_empty()
-            && self.unanswered == UnansweredNotice::default()
-        {
+        if self.pending_submissions.is_empty() {
             return self.draft_payload().encode_draft();
         }
         let saved = SavedChatDraft {
             composer: self.draft_payload(),
-            unsent: self.unsent_prompts.clone(),
             pending: self.pending_submissions.clone(),
-            unanswered: self.unanswered.clone(),
         };
         format!(
             "{CHAT_DRAFT_PREFIX}{}",
             serde_json::to_string(&saved).expect("chat draft serialization cannot fail")
         )
-    }
-
-    pub(crate) fn restore_latest_unsent_prompt(&mut self) {
-        if !self.input.is_empty() {
-            self.set_notice("Empty the composer before restoring an unsent prompt");
-            return;
-        }
-        let Some(unsent) = self.unsent_prompts.last().cloned() else {
-            self.set_notice("There are no unsent prompts to restore");
-            return;
-        };
-        let mut payload = unsent.payload;
-        if unsent.kind == UnsentKind::Shell {
-            attachments::replace_range(
-                &mut payload.text,
-                &mut payload.images,
-                0..0,
-                &PromptPayload::text("!"),
-            );
-        }
-        self.set_input_payload(payload);
-        self.set_notice("Unsent prompt restored · Enter to retry");
     }
 
     pub(crate) fn edit_latest_queued_prompt(&mut self) -> ChatAction {
@@ -420,41 +389,6 @@ impl ChatState {
             text: queued.text,
             kind: queued.kind,
         }
-    }
-
-    /// Keep a submit the relay refused, so the transcript still shows what was
-    /// lost once the notice has gone. Repeating the same failure replaces the
-    /// earlier record instead of stacking a second copy of it.
-    pub(super) fn record_unsent_prompt(
-        &mut self,
-        kind: UnsentKind,
-        text: String,
-        images: Vec<PromptImage>,
-        error: String,
-    ) {
-        self.unsent_prompts.retain(|unsent| {
-            unsent.kind != kind || unsent.payload.text != text || unsent.payload.images != images
-        });
-        self.unsent_prompts.push(UnsentPrompt {
-            kind,
-            payload: PromptPayload { text, images },
-            error,
-            recorded_at_ms: mj_core::clock::epoch_millis(),
-        });
-    }
-
-    /// Drop the record for a submit the relay has now accepted. Nothing else
-    /// clears one: a snapshot cannot, because the relay never saw the prompt,
-    /// and an unrelated prompt says nothing about this one.
-    pub(super) fn clear_unsent_prompt(
-        &mut self,
-        kind: UnsentKind,
-        text: &str,
-        images: &[PromptImage],
-    ) {
-        self.unsent_prompts.retain(|unsent| {
-            unsent.kind != kind || unsent.payload.text != text || unsent.payload.images != images
-        });
     }
 
     pub(crate) fn fail_queued_prompt_removal(

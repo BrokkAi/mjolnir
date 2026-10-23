@@ -6,6 +6,10 @@ pub(super) struct ConversationNotice {
     pub id: String,
     pub text: String,
     pub submitted: bool,
+    /// The journal ordinal this chat had applied when it last sent the notice.
+    pub sent_at: u64,
+    /// The relay refused the last send.
+    pub refused: bool,
     pub recorded_at_ms: i64,
 }
 
@@ -30,6 +34,8 @@ impl ChatState {
             submitted: id.is_empty(),
             id,
             text,
+            sent_at: 0,
+            refused: false,
             recorded_at_ms: mj_core::clock::epoch_millis(),
         });
         self.invalidate_render_cache();
@@ -42,6 +48,31 @@ impl ChatState {
                 .iter()
                 .any(|item| item.stable_id == format!("system:notice:{}", notice.id))
         });
+        self.resend_refused_notices(session.applied_event_ordinal);
+    }
+
+    /// The relay refuses every command while it clears context, notices
+    /// included. A refused notice is sent again once the journal has moved past
+    /// the point where it was sent, so it reaches the conversation when the
+    /// clear ends instead of staying a local row below every later turn.
+    pub(super) fn refuse_notice(&mut self, id: &str) {
+        if let Some(notice) = self
+            .conversation_notices
+            .iter_mut()
+            .find(|notice| notice.id == id)
+        {
+            notice.refused = true;
+        }
+        self.resend_refused_notices(self.latest_seq);
+    }
+
+    fn resend_refused_notices(&mut self, applied_ordinal: u64) {
+        for notice in &mut self.conversation_notices {
+            if notice.refused && applied_ordinal > notice.sent_at {
+                notice.refused = false;
+                notice.submitted = false;
+            }
+        }
     }
 
     pub(super) fn notice_entries(&self) -> impl Iterator<Item = ChatEntry> + '_ {

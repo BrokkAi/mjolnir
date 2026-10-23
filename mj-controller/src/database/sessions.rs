@@ -617,8 +617,8 @@ pub fn set_session_title_override(session_id: &str, title: &str, updated_at: &st
     })
 }
 
-/// Rewrite a configured profile id in every persisted session in one SQLite
-/// transaction. Configuration is stored separately, so the controller owns
+/// Rewrite a configured profile id in every persisted session and recorded
+/// turn in one SQLite transaction. Configuration is stored separately, so the controller owns
 /// coordinating this update with the matching config-map rename.
 pub fn rename_profile_references(old_id: &str, new_id: &str) -> Result<usize> {
     rename_session_reference("last_profile", old_id, new_id)
@@ -658,6 +658,13 @@ pub(super) fn rename_session_reference_at(
         &format!("UPDATE sessions SET {column} = ?2 WHERE {column} = ?1"),
         params![old_id, new_id],
     )?;
+    if column == "last_profile" {
+        // Usage stays with the renamed profile, including destroyed sessions'.
+        tx.execute(
+            "UPDATE session_turn_selections SET profile = ?2 WHERE profile = ?1",
+            params![old_id, new_id],
+        )?;
+    }
     tx.commit()?;
     Ok(changed)
 }
