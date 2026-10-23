@@ -596,6 +596,14 @@ pub(super) fn container_run_args(
             "0:0".to_owned(),
             "--env".to_owned(),
             "HOME=/home/hel".to_owned(),
+            // Host bind mounts carry the host's SELinux label (`cache_home_t`
+            // or `user_home_t`), which a `container_t` process is denied.
+            // Relabeling the shared mbx cache on every start would walk every
+            // object in it, and Docker targets already run without that
+            // separation; keep the rootless user namespace and drop only the
+            // SELinux layer that cannot see these mounts.
+            "--security-opt".to_owned(),
+            "label=disable".to_owned(),
         ]);
     }
     let temporary_volume = temporary_volume_argument(name, additional_mounts);
