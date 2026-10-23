@@ -172,15 +172,13 @@ Acceptance is: a store at revision 91 upgrades to 92 keeping its sessions, and a
 
 ## Idempotence and Recovery
 
-The managed install uses the existing content-addressed cache, staging directory, manifest receipt and lease; an interrupted install is removed on retry. The migration rebuilds the two tables in one transaction with foreign keys checked, and skips a table that already admits `'dsh'`. Live checks use an isolated instance only.
+Managed harnesses use the existing content-addressed cache, staging directory, manifest receipt and lease; an interrupted install is removed on retry. DSH has no install: a launch uses the target's own `dsh-acp` or the npx cache, and a failed fetch is retried on the next launch. The migration rebuilds the two tables in one transaction with foreign keys checked, and skips a table that already admits `'dsh'`. Live checks use an isolated instance only.
 
 ## Interfaces and Dependencies
 
     pub enum HarnessKind { ..., Mimo, Dsh }
     pub const fn api_key_variable(self) -> Option<&'static str>
-    pub const DSH_ACP_VERSION: &str = "0.2.0";
+    pub const DSH_ACP_VERSION: &str = "0.2.1";
+    pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
     pub fn dsh_acp_script() -> String
-
-`mj-worker/assets/dsh/runtime.json`:
-
-    {"version": "0.2.0", "platforms": {"linux-x86_64": {"target": "x86_64-unknown-linux-gnu", "sha256": "..."}, ...}}
+    pub fn dsh_acp_launch_script() -> String
