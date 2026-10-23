@@ -89,6 +89,7 @@ Doctor checks configuration compatibility, harness authentication, worker binari
 mj login
 mj login --profile <profile-id>
 mj login --profile <profile-id> --method <acp-method-id>
+mj login --profile <profile-id> --cli
 mj login --profile <claude-profile> --setup-token
 ```
 
@@ -98,12 +99,13 @@ asks it which authentication methods it advertises. It then runs a `terminal`
 method's command, uses a known terminal action for a bridge that describes one
 in text only (OpenCode and MiMo), or completes an agent method through ACP
 `authenticate` (Codex). Use `--method` to choose when several methods are
-offered. If the harness advertises no ACP login, Mjolnir falls back to the
-harness CLI's own login command. A profile that authenticates with an API key,
-such as a DSH profile or a Codex profile with a custom provider, has no login,
-and `mj login` refuses it. `--setup-token` is Claude-only: it mints and stores a
-long-lived subscription token so containers do not race the controller for a
-rotating OAuth refresh token.
+offered, or `--cli` to skip ACP and run the harness command found on `PATH`
+exactly as earlier releases did. If the harness advertises no ACP login, Mjolnir
+also falls back to that command-line login. A profile that authenticates with an
+API key, such as a DSH profile or a Codex profile with a custom provider, has no
+login, and `mj login` refuses it. `--setup-token` is Claude-only: it mints and
+stores a long-lived subscription token so containers do not race the controller
+for a rotating OAuth refresh token.
 
 See [profiles and harnesses](/profiles/) for home directories, credential handling, and runtime limitations.
 

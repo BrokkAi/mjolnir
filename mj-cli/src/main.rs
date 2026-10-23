@@ -373,6 +373,9 @@ struct LoginArgs {
     /// method itself; use this to choose one when a bridge offers several.
     #[arg(long, value_name = "ID")]
     method: Option<String>,
+    /// Use the harness command on PATH instead of the pinned ACP login.
+    #[arg(long, conflicts_with = "method")]
+    cli: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1886,7 +1889,7 @@ async fn login(args: LoginArgs) -> Result<()> {
     let before = profile_credential_fingerprint(profile)?;
 
     #[cfg(unix)]
-    {
+    if !args.cli {
         match crate::acp_login::login(profile, args.method.as_deref()).await {
             Ok(crate::acp_login::Outcome::SignedIn { method }) => {
                 println!("Signed in to profile {profile_id} through the ACP method {method}.");

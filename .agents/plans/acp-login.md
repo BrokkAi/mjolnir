@@ -61,7 +61,9 @@ using the pinned harness Mjolnir manages, with no ambient harness installation.
   two agent methods and needs a deterministic default.
 - Decision: fall back to the existing CLI login when the managed install fails,
   the bridge cannot start, or it advertises no methods. A failure inside a
-  chosen method is reported, not silently replaced by a different flow.
+  chosen method is reported, not silently replaced by a different flow. Keep
+  the old path directly available with `--cli`, which also avoids installing a
+  pin for a person who deliberately wants the command on `PATH`.
 - Decision: leave the existing credential verification in place. ACP login is a
   different way to write the same profile credential file or database.
 

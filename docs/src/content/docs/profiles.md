@@ -543,15 +543,19 @@ that harness as an ACP agent. It reads the methods the bridge advertises:
 | MiMo Code | Runs the pinned `mimo auth login` |
 | DSH | none; `mj login` refuses the profile, which authenticates with `DEEPSEEK_API_KEY` |
 
-Use `--method <id>` when a bridge advertises several methods. A bridge that
-advertises no usable method, or a pinned installation that cannot be prepared,
-falls back to the harness CLI's own login. A failure inside a chosen ACP method
-is reported instead of silently trying a different flow.
+Use `--method <id>` when a bridge advertises several methods. Use `--cli` to
+skip ACP and run the harness command found on `PATH`, which is the behavior of
+earlier releases. A bridge that advertises no usable method, or a pinned
+installation that cannot be prepared, also falls back to that command-line
+login. A failure inside a chosen ACP method is reported instead of silently
+trying a different flow.
 
 The pinned harness is the same version a session runs, so signing in never
-requires a separate installation of the harness on the controller. API-key
-profiles, and profiles whose harness is configured for an API key rather than a
-native login, have no interactive login.
+requires a separate installation of the harness on the controller. When a
+harness is installed on `PATH` it is still available through `--cli`, and it is
+used automatically as the fallback when ACP cannot run. API-key profiles, and
+profiles whose harness is configured for an API key rather than a native login,
+have no interactive login.
 
 On macOS, Claude Code keeps its login in one Keychain item rather than in the
 home ([anthropics/claude-code#20553](https://github.com/anthropics/claude-code/issues/20553)),
