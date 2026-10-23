@@ -2104,34 +2104,6 @@ fn busy_with(command_id: &str) -> RelayOperationalState {
     state
 }
 
-/// Answers the host's requests until it records a line in the conversation,
-/// and returns that line.
-async fn next_notice(manager: &mut FakeManager) -> String {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match manager.next().await {
-                RemoteSessionRequest::Submit {
-                    command: RelayCommand::RecordNotice { text },
-                    reply,
-                    ..
-                } => {
-                    let _ = reply.send(Ok(1));
-                    return text;
-                }
-                RemoteSessionRequest::Submit { reply, .. } => {
-                    let _ = reply.send(Ok(1));
-                }
-                RemoteSessionRequest::Reviewer { action, reply, .. } => {
-                    let _ = reply.send(answer_for(&action));
-                }
-                other => panic!("unexpected request {}", other.session_id()),
-            }
-        }
-    })
-    .await
-    .expect("the host records a notice")
-}
-
 /// What the host reached while [`serve_leftover_worker`] answered it.
 #[derive(Debug)]
 enum Reached {
@@ -2200,7 +2172,7 @@ async fn serve_leftover_worker(manager: &mut FakeManager, paused: &mut Vec<Strin
 /// RVC-3(b): after a daemon restart, the worker's reviewer was still waiting
 /// on the Fable decline form from the review the restart cut off, which no
 /// surface could show. Every later turn's review was refused with "the
-/// reviewer is busy with a second opinion". A review that meets such a
+/// reviewer is busy". A review that meets such a
 /// leftover prompt stops it, since no daemon can use its answer, and starts.
 // Hard-won: 8b6ab5b0: a leftover reviewer prompt made every later review refuse after restart
 #[tokio::test]
@@ -2289,35 +2261,6 @@ async fn a_review_cut_off_by_a_restart_stops_its_reviewer_before_saying_so() {
         "the next review starts: {reached:?}"
     );
     new.shutdown().await.unwrap();
-}
-
-/// The second-opinion wording stays for a real second opinion, which the
-/// terminal runs on the same reviewer.
-#[tokio::test]
-async fn a_review_refused_by_a_second_opinion_still_says_second_opinion() {
-    let session = session_id("secondopinion");
-    let session = session.as_str();
-    let mut manager = FakeManager::new(session).await;
-    let environment = FakeEnvironment::new();
-    let host = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment.clone(),
-    );
-    finish_a_turn(&manager, &host).await;
-    let (_, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
-        .await;
-    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(busy_with(&format!(
-        "{}critique-1",
-        mj_core::second_opinion::COMMAND_ID_PREFIX
-    ))))));
-    assert_eq!(
-        next_notice(&mut manager).await,
-        "Turn review did not start: the reviewer is busy with a second opinion. \
-         The next review covers these changes."
-    );
-    host.shutdown().await.expect("shutdown the host");
 }
 
 /// A review asked for while the open one waits on a person names that

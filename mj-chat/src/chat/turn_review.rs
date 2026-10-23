@@ -1,11 +1,8 @@
 //! The chat's turn-review view: the split pane a completed turn is reviewed in.
 //!
-//! This is the sibling of `second_opinion.rs`. Both put a reviewer's
-//! conversation beside the primary's and replace the composer with a row of
-//! actions; they differ in what starts them and what the actions mean. Plan
-//! review starts at a plan-approval decision mid-turn and ends by transferring
-//! a critique. Turn review starts when a turn *finishes* and ends by forwarding
-//! validated findings, dismissing them, or cancelling.
+//! The reviewer's conversation sits beside the primary's, with actions in
+//! place of the composer. A review ends by forwarding findings, dismissing
+//! them, or cancelling.
 //!
 //! The review itself runs in the controller daemon
 //! (`mj_core::review::host`), not here. This module is a projection of it:
@@ -30,7 +27,7 @@ use crate::components::{ButtonRow, ControlKind, Form, Interaction, TabStrip};
 use mj_client::review::{RuntimeReviewView, VerdictKind};
 use mj_core::review::driver::{Resolution, RoleState, TurnReviewPhase};
 
-use super::second_opinion::ReviewerPane;
+use super::reviewer_pane::ReviewerPane;
 use super::viewport::RowViewport;
 
 /// Which of the review's actions the keyboard is on.
@@ -444,6 +441,18 @@ pub enum TurnReviewIntent {
 }
 
 impl super::ChatState {
+    /// The text a selection in the reviewer's transcript covers.
+    pub fn reviewer_selection_text(
+        &self,
+        range: &crate::selection::SelectionRange,
+    ) -> Option<String> {
+        self.turn_review.as_ref().and_then(|review| {
+            (review.tab == ReviewTab::Transcript)
+                .then(|| review.pane.selection_text(range))
+                .flatten()
+        })
+    }
+
     /// Whether the turn-review view owns the screen. While it does, the
     /// composer is not accepting prompts for the primary agent.
     pub(super) fn turn_review_active(&self) -> bool {
@@ -727,7 +736,7 @@ pub(super) fn render_turn_review_pane(
             // competes with or hides the journal the reader is following.
             let transcript_status = "this reviewer has not written a transcript";
             let transcript_empty = review.pane_is_empty();
-            super::second_opinion::render_reviewer_titled(
+            super::reviewer_pane::render_reviewer_titled(
                 frame,
                 area,
                 review.pane(),
@@ -744,7 +753,7 @@ pub(super) fn render_turn_review_pane(
         if review.overview_selected() {
             render_review_overview(frame, area, review, &title, strip)
         } else {
-            super::second_opinion::render_reviewer_titled(
+            super::reviewer_pane::render_reviewer_titled(
                 frame,
                 area,
                 review.pane(),

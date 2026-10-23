@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 92;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 93;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1663,6 +1663,20 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             .context("migrate DSH harness constraints")?;
     }
 
+    // Breaking: older daemons still read and write the removed plan-review tables.
+    if version < 93 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             DROP TABLE IF EXISTS second_opinion_reviews;
+             DROP TABLE IF EXISTS second_opinion_defaults;
+             UPDATE schema_compatibility SET minimum_compatible_version = 93 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (93, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 93;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2119,6 +2133,50 @@ pub(super) fn restore_github_v84_schema(connection: &Connection) {
 #[cfg(test)]
 mod reader_tests {
     use super::*;
+
+    #[test]
+    fn removed_plan_review_tables_raise_the_floor_and_preserve_turn_reviews() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upgrade.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        create_baseline_schema(&connection).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER stop_before_removal BEFORE INSERT ON schema_migrations
+             WHEN NEW.version > 92 BEGIN SELECT RAISE(ABORT, 'fixture migration boundary'); END;",
+            )
+            .unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        if !connection.is_autocommit() {
+            connection.execute_batch("ROLLBACK").unwrap();
+        }
+        connection.execute_batch(
+            "DROP TRIGGER stop_before_removal;
+             INSERT INTO session_contexts(session_id,bundle_id,created_at) VALUES ('kept','project','now');
+             INSERT INTO sessions(session_id,title,harness_kind,last_profile,target_template_id,state,updated_at)
+                 VALUES ('kept','Keep my work','codex','codex','local','error','now');
+             INSERT INTO turn_review_state(session_id,baselines,reviewed_through_ordinal)
+                 VALUES ('kept','{\"/repo\":\"tree\"}',42);",
+        ).unwrap();
+        migrate_schema(&connection).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.minimum_compatible, Some(93));
+        assert!(state.ensure_supported_by(92).is_err());
+        // Both legacy tables have been removed, while the independent turn-review state remains.
+        let tables: Vec<String> = connection
+            .prepare("SELECT name FROM sqlite_schema WHERE type='table'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(!tables.iter().any(|name| name.starts_with("second_")));
+        let retained: (String, i64) = connection.query_row(
+            "SELECT baselines,reviewed_through_ordinal FROM turn_review_state WHERE session_id='kept'", [],
+            |row| Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        assert_eq!(retained, ("{\"/repo\":\"tree\"}".into(), 42));
+    }
 
     #[test]
     fn restart_intent_schema_matches_for_fresh_and_upgraded_stores() {

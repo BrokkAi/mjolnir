@@ -419,7 +419,7 @@ impl ReviewSettingsDialog {
             }
             // Refresh deliberately retains the current choices and knowledge
             // flags while removing the persisted cache entry. This keeps a
-            // draft saveable when the fresh discovery cannot reach a worker.
+            // draft saveable when the catalog choices are unavailable.
             ReviewSettingsDiscoveryKind::Refresh => {}
         }
         let Some(profile) = self.review.profile.clone() else {
@@ -556,7 +556,7 @@ impl ReviewSettingsDialog {
             Ok(ReviewSettingsDiscoveryResult::Unavailable) => {
                 self.cleanup_warning = None;
                 self.discovery_error =
-                    Some("A connected session is needed to refresh choices.".to_owned());
+                    Some("Review choices unavailable for this profile.".to_owned());
                 None
             }
             Err(error) => {
@@ -713,9 +713,7 @@ impl DashboardState {
         });
     }
 
-    /// Publish adapter choices while cleanup continues. Successful progress is
-    /// cached immediately so reopening the dialog can use it without waiting
-    /// for the final cleanup result.
+    /// Publish catalog choices while model-specific efforts are still loading.
     pub fn apply_review_settings_choices(
         &mut self,
         generation: u64,
@@ -839,7 +837,6 @@ pub(crate) fn render_review_settings(
             "Healthy quota before reserve/unknown; exhausted profiles are skipped.",
             "Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.",
             "Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.",
-            "These settings also choose the plan second-opinion reviewer.",
         ] {
             notes.push(Line::raw(line));
         }

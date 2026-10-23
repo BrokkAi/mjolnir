@@ -513,11 +513,6 @@ impl SessionHandleBackend for FakeSession {
     ) -> mj_client::session::BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
-    fn review_state(
-        &self,
-    ) -> mj_client::session::BoxFuture<'_, Result<mj_client::session::ReviewState>> {
-        Box::pin(async { Ok(Default::default()) })
-    }
 
     fn config_result(&self, _command_id: String) -> BoxFuture<'_, Result<Option<Option<String>>>> {
         Box::pin(async { Ok(Some(None)) })
@@ -868,9 +863,7 @@ impl SessionHandleBackend for ConfigSession {
     ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
         self.inner.search_prompts(bundle, scope, query)
     }
-    fn review_state(&self) -> BoxFuture<'_, Result<mj_client::session::ReviewState>> {
-        self.inner.review_state()
-    }
+
     fn config_result(&self, id: String) -> BoxFuture<'_, Result<Option<Option<String>>>> {
         self.inner.config_result(id)
     }
@@ -2005,9 +1998,7 @@ impl SessionHandleBackend for ScriptedSession {
     ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
         self.inner.search_prompts(bundle_id, scope, query)
     }
-    fn review_state(&self) -> BoxFuture<'_, Result<mj_client::session::ReviewState>> {
-        self.inner.review_state()
-    }
+
     fn config_result(&self, command_id: String) -> BoxFuture<'_, Result<Option<Option<String>>>> {
         self.inner.config_result(command_id)
     }

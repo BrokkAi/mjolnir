@@ -850,9 +850,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "repositories" => {
             "Set either a local repository directory or a GitHub source for each repository."
         }
-        "review" => {
-            "Used by turn review and plan second opinions. Auto picks another provider with quota."
-        }
+        "review" => "Used by turn review. Auto picks another provider with quota.",
         "continuation" => {
             "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
         }

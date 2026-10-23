@@ -222,10 +222,15 @@ pub fn prompt_blocks() -> Vec<agent_client_protocol::schema::v1::ContentBlock> {
     )]
 }
 
+/// Whether a harness note was authored by Mjolnir rather than a person.
+pub fn is_control_origin_prompt(text: &str) -> bool {
+    text.trim_start().starts_with("[HARNESS NOTE:")
+}
+
 /// These established producers author prompts on the user's behalf. Their
 /// text is never evidence of fresh user authorization or a renewed allowance.
 pub fn is_generated_prompt_text(text: &str) -> bool {
-    crate::second_opinion::is_control_origin_prompt(text) || text.trim() == PARENT_WAIT_PROMPT_TEXT
+    is_control_origin_prompt(text) || text.trim() == PARENT_WAIT_PROMPT_TEXT
 }
 
 pub fn is_generated_prompt(command_id: &str) -> bool {

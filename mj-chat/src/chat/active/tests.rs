@@ -285,36 +285,6 @@ fn capture_chat_preview() {
         .expect("write preview");
 }
 
-fn prepare_storage_test_chat() -> PreparedChat {
-    let fixture = mj_client::session::replacement_session_test_fixture("review-storage", 1);
-    ActiveChat::prepare_with_persistence(
-        fixture.stopped,
-        "bundle",
-        None,
-        fixture.control,
-        SessionHeaderIdentity::default(),
-        String::new(),
-        Notices::default(),
-        None,
-    )
-}
-
-#[tokio::test]
-async fn client_review_storage_failure_is_visible_without_preventing_chat_open() {
-    let mut chat = prepare_storage_test_chat()
-        .with_review_state(Err("database read failed".into()))
-        .open();
-    assert!(
-        chat.state
-            .notice()
-            .unwrap()
-            .contains("database read failed")
-    );
-    chat.state.set_input("still editable".into());
-    assert_eq!(chat.draft(), "still editable");
-    assert!(chat.state.second_opinion().is_none());
-}
-
 #[tokio::test]
 async fn replacement_chat_preserves_the_latest_same_session_draft_even_when_cleared() {
     fn prepare(id: &str, draft: &str) -> PreparedChat {
@@ -925,9 +895,6 @@ fn chat_context(
     ChatSessionContext {
         config: config_with_profiles(profiles),
         session: context_session_record(session_id, CONTEXT_TEST_WORKSPACE),
-        reviewer_stager: mj_client::session::ReviewerStager::unavailable(
-            "reviewer staging is unavailable in this chat test",
-        ),
     }
 }
 
@@ -1003,58 +970,6 @@ async fn a_recorded_checkpoint_error_reaches_the_notice_when_the_chat_opens() {
         chat.state.notice().as_deref(),
         Some("Recovery copy failed: the target ran out of disk")
     );
-}
-
-/// Late startup results cannot consume a replacement plan decision.
-#[tokio::test]
-async fn second_opinion_ignores_stale_preparation_and_uses_resolved_settings() {
-    use mj_core::review::settings::{ResolvedReviewSettings, ReviewModelSettings};
-    let fixture = mj_client::session::replacement_session_test_fixture("session-prepared", 86);
-    let mut chat = ActiveChat::open(
-        fixture.stopped,
-        "bundle-1",
-        Some(chat_context("session-prepared", &[])),
-        fixture.control,
-        SessionHeaderIdentity::default(),
-        String::new(),
-        Notices::default(),
-    );
-    let request = ElicitationRequest {
-        id: "new-plan".into(),
-        message: "Proceed?".into(),
-        title: None,
-        description: None,
-        fields: Vec::new(),
-        tool_permission: None,
-    };
-    chat.state.open_second_opinion(CapturedProposal {
-        request,
-        proposal: "the new plan".into(),
-    });
-    chat.reviewer_preparation_sequence = 2;
-    let resolved = ResolvedReviewSettings {
-        profile: "only-profile".into(),
-        generation: 42,
-        main: ReviewModelSettings {
-            model: Some("gpt-6-astra".into()),
-            effort: Some("medium".into()),
-            fast_mode: false,
-        },
-        automatic: true,
-        same_provider: true,
-    };
-    chat.apply_reviewer_prepared(1, Ok(resolved.clone()));
-    assert!(matches!(
-        chat.state.second_opinion(),
-        Some(SecondOpinion::Setup { .. })
-    ));
-    assert_ne!(chat.reviewer_generation, 42);
-    chat.apply_reviewer_prepared(2, Ok(resolved));
-    assert_eq!(chat.reviewer_generation, 42);
-    assert!(matches!(
-        chat.state.second_opinion(),
-        Some(SecondOpinion::Review(_))
-    ));
 }
 
 /// The chat snapshots the configuration when it opens, so a reload has to
@@ -2611,7 +2526,6 @@ fn active_golden_style(buffer: &ratatui::buffer::Buffer, x: u16, y: u16) -> Stri
 #[tokio::test]
 async fn golden_active_chat_render() {
     use mj_client::usage_format::SessionActivity;
-    use mj_core::config::HarnessKind;
     use mj_core::relay::WorkerPhase;
     use ratatui::backend::Backend as _;
     use ratatui::layout::Rect;
@@ -3150,51 +3064,6 @@ async fn golden_active_chat_render() {
         &[format!(
             "modal body=({},{},{},{})",
             task_body.x, task_body.y, task_body.width, task_body.height
-        )],
-    );
-
-    let fixture = mj_client::session::replacement_session_test_fixture("session-pane-modal", 91);
-    let mut reviewed = ActiveChat::open(
-        fixture.stopped,
-        "bundle-1",
-        Some(chat_context(
-            "session-pane-modal",
-            &[("claude-1", HarnessKind::Claude)],
-        )),
-        fixture.control,
-        SessionHeaderIdentity::default(),
-        String::new(),
-        Notices::default(),
-    );
-    reviewed.open_second_opinion(
-        ElicitationRequest {
-            id: "plan-pane".into(),
-            message: "may I run this plan?".into(),
-            title: None,
-            description: None,
-            fields: Vec::new(),
-            tool_permission: None,
-        },
-        "the plan".into(),
-    );
-    let mut terminal = Terminal::new(TestBackend::new(140, 40)).expect("review terminal");
-    terminal
-        .draw(|frame| reviewed.draw_in(frame, regions(), false, false))
-        .expect("draw reviewer setup in pane");
-    let review_buffer = terminal.backend().buffer().clone();
-    let review_body = reviewed
-        .state
-        .frame_surfaces()
-        .surface(SurfaceId::ModalBody)
-        .expect("review setup body is registered")
-        .rect;
-    append_active_golden_state(
-        &mut output,
-        "review setup stays in host overlay",
-        &review_buffer,
-        &[format!(
-            "modal body=({},{},{},{})",
-            review_body.x, review_body.y, review_body.width, review_body.height
         )],
     );
 

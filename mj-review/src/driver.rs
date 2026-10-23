@@ -1,10 +1,8 @@
 //! The turn review's state machine.
 //!
 //! This module owns the order a review happens in and the wording of every
-//! prompt it sends; the caller owns the transport. That split is the same one
-//! `mj_core::second_opinion::ReviewWorkflow` uses for plan review, and it is
-//! what makes the review's rules testable without a container, a harness, or a
-//! model: each step here is a pure function from an event to a list of
+//! prompt it sends; the caller owns the transport. Each step is a pure
+//! function from an event to a list of
 //! [`ReviewRequest`]s.
 //!
 //! The three invariants every test in this file defends:

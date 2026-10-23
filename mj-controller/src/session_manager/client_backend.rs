@@ -34,20 +34,6 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
             .context("history search task")?
         })
     }
-    fn review_state(
-        &self,
-    ) -> mj_client::session::BoxFuture<'_, Result<mj_client::session::ReviewState>> {
-        let session_id = self.0.session_id().to_owned();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                Ok(mj_client::session::ReviewState {
-                    review: crate::database::active_review(&session_id)?,
-                })
-            })
-            .await
-            .context("review restoration task")?
-        })
-    }
 
     fn resolve_review_settings(
         &self,

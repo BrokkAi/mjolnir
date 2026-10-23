@@ -1317,17 +1317,6 @@ impl DashboardState {
         self.session_reviews.get(session_id)
     }
 
-    /// Record whether the attached chat has a plan-review second opinion.
-    /// Turn reviews use [`Self::set_session_reviews`] and remain authoritative
-    /// even when no chat is attached.
-    pub fn set_session_review_open(&mut self, session_id: &str, open: bool) {
-        if open {
-            self.sessions_with_review.insert(session_id.to_owned());
-        } else {
-            self.sessions_with_review.remove(session_id);
-        }
-    }
-
     pub fn mark_transcript_unavailable(&mut self, session_id: &str) {
         let detail = self
             .session_details

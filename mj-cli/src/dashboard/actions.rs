@@ -534,10 +534,9 @@ pub(crate) async fn apply_dashboard_action(
             let request = ReviewDiscoveryRequest {
                 profile: profile_id,
                 model,
-                preferred_session: context.dashboard.selected_session_id().map(str::to_owned),
             };
             context.review_discovery_cancel = Some(spawn_review_settings_discovery(
-                context.worker_commands_tx.clone(),
+                context.review_capabilities.clone(),
                 request,
                 generation,
                 context.dashboard_io_tx.clone(),

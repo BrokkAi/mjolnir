@@ -14,7 +14,7 @@
   │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
   │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
   │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
-  │These settings also choose the plan second-opinion reviewer.                                  │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -81,7 +81,7 @@ Setup command available: true
   │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
   │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
   │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
-  │These settings also choose the plan second-opinion reviewer.                                  │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -148,7 +148,7 @@ saved global review: {"trigger":"off","profile":"claude-1"}
   │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
   │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
   │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
-  │These settings also choose the plan second-opinion reviewer.                                  │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
