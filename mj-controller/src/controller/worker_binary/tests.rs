@@ -1998,6 +1998,14 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
              bridge_launch() npx fallbacks have to stay in lockstep, otherwise a container \
              session and an npx session run different adapter versions."
     );
+    let muse_check = format!(
+        "require('/usr/local/lib/node_modules/{MUSE_ACP_PACKAGE}/package.json').version\")\" = \"{MUSE_ACP_VERSION}\" ]"
+    );
+    assert!(
+        CONTAINERFILE.contains(&muse_check),
+        "containers/Containerfile.agent-dev must check the installed adapter is \
+             {MUSE_ACP_VERSION}; a stale check fails only when the image is published"
+    );
     let mimo = format!("@mimo-ai/cli@{MIMO_CLI_VERSION}");
     assert!(
         CONTAINERFILE.contains(&mimo),
