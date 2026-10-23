@@ -219,6 +219,64 @@ fn an_installed_mimo_is_offered_before_its_first_login() {
     );
 }
 
+// Hard-won: dsh-acp harness detection keyed off the dsh-acp bridge and
+// ~/.dsh-acp, so a machine with DeepSeek's own CLI installed was never
+// detected: the bridge is installed on demand and proves nothing about a
+// DeepSeek installation.
+#[test]
+fn an_installed_dsh_is_offered_before_its_first_login() {
+    let directory = tempfile::tempdir().unwrap();
+    let executor = FakeExecutor {
+        commands: RefCell::new(Vec::new()),
+        statuses: vec![1, 1, 1, 1, 1, 1, 1, 0],
+    };
+    let mut homes = Vec::new();
+
+    discover_installed_harnesses(
+        Some(directory.path()),
+        &BTreeMap::new(),
+        &mut homes,
+        &executor,
+    );
+
+    assert_eq!(
+        homes,
+        [DiscoveredHome {
+            kind: HarnessKind::Dsh,
+            path: directory.path().join(".dsh"),
+            codex_profile: None,
+            authenticated: false,
+        }]
+    );
+    let commands = executor.commands.borrow();
+    let dsh_probes = commands
+        .iter()
+        .filter(|command| command.program == "dsh")
+        .count();
+    assert_eq!(dsh_probes, 1, "the probe keys off DeepSeek's own CLI");
+    assert!(
+        commands
+            .iter()
+            .all(|command| command.program != "dsh-acp"),
+        "the dsh-acp bridge is installed on demand and is not a detection signal"
+    );
+}
+
+#[test]
+fn a_dsh_home_is_discovered_in_deepseek_clis_conventional_location() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    let dsh = home.join(".dsh");
+    fs::create_dir_all(&dsh).unwrap();
+    let executor = FakeExecutor::succeeds();
+
+    let homes = discover_harness_homes_with_executor(Some(&home), [], &executor);
+
+    assert_eq!(homes.len(), 1);
+    assert_eq!(homes[0].kind, HarnessKind::Dsh);
+    assert_eq!(homes[0].path, dsh);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn claude_keychain_marks_the_default_home_authenticated_without_a_marker() {

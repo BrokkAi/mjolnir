@@ -1172,7 +1172,7 @@ Harness-home variables influence automatic first-run discovery and explicit
 | Muse Code | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` |
 | OpenCode | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` |
 | MiMo Code | `MIMOCODE_HOME` | `~/.mimocode` (the stock install keeps `config/` and `data/` in XDG) |
-| DSH | `DSH_ACP_DATA_DIR` | `~/.dsh-acp` |
+| DSH | `DSH_ACP_DATA_DIR` | `~/.dsh` |
 
 The release installer separately accepts `MJOLNIR_INSTALL_DIR` (preferred over
 `INSTALL_DIR`), `MJOLNIR_GITHUB_OWNER`, `MJOLNIR_VERSION`, `GITHUB_TOKEN`, and

@@ -64,7 +64,7 @@ marks models or counters that cannot be priced from the recorded information.
 | Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
 | OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db`, or a provider key in the environment | no |
 | MiMo Code | `mimo` | `MIMOCODE_HOME` | `~/.mimocode` (stock XDG config and login when unset) | `data/auth.json`, or `~/.local/share/mimocode/auth.json` for the stock install | no |
-| DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh-acp` | `DEEPSEEK_API_KEY` in the environment (no file) | no |
+| DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh` | `DEEPSEEK_API_KEY` in the environment (no file) | no |
 
 There are eight harness kinds. Codex can use its built-in Amazon Bedrock
 providers; see [Codex on Amazon Bedrock](#codex-on-amazon-bedrock). It can also
@@ -487,7 +487,7 @@ runtime on this machine. Do not override `MIMOCODE_HOME` in the profile
 environment.
 
 For DSH, configure `kind = "dsh"`, for example with
-`home = "/home/me/.dsh-acp"`. DSH runs BrokkAi's
+`home = "/home/me/.dsh"`. DSH runs BrokkAi's
 [dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.2.0, a DeepSeek coding agent
 that speaks ACP itself, so there is no separate bridge. It is not the DeepSeek
 harness earlier releases offered as `kind = "deepseek"`; that kind still fails
@@ -510,7 +510,7 @@ it, for example from `secrets.toml`:
 ```toml
 [profiles.dsh]
 kind = "dsh"
-home = "/home/me/.dsh-acp"
+home = "/home/me/.dsh"
 
 [profiles.dsh.environment]
 DEEPSEEK_API_KEY = { from_secret = "DEEPSEEK_API_KEY" }

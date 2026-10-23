@@ -511,7 +511,11 @@ impl HarnessKind {
             Self::Muse => ".config/muse",
             Self::OpenCode => ".config/opencode",
             Self::Mimo => ".mimocode",
-            Self::Dsh => ".dsh-acp",
+            // DeepSeek's own CLI, `dsh`, keeps its home here. Detection keys
+            // off the user's DeepSeek installation; the dsh-acp bridge that
+            // serves a session is installed on demand and proves nothing
+            // about one.
+            Self::Dsh => ".dsh",
         }
     }
 
@@ -611,7 +615,10 @@ impl HarnessKind {
             Self::Muse => "muse",
             Self::OpenCode => "opencode",
             Self::Mimo => "mimo",
-            Self::Dsh => "dsh-acp",
+            // DeepSeek's `dsh`, not the dsh-acp bridge Mjolnir installs to
+            // serve sessions: a machine carrying the bridge but no DeepSeek
+            // installation has nothing to detect.
+            Self::Dsh => "dsh",
         }
     }
 
