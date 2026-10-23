@@ -106,7 +106,7 @@ fn assess_network_checkpoint_inner(
         let meta = &repository.metadata;
         result.dirty |= checkpoint_has_file_changes(&manifest, repository);
         result.stashed |= !meta.stash_stack.is_empty();
-        commits.extend(meta.saved_refs.values().cloned());
+        commits.extend(meta.work_refs().map(|(_, oid)| oid.clone()));
         commits.insert(meta.head_commit.clone());
         let destinations = if meta.push_urls.is_empty() {
             (!meta.origin.is_empty())
@@ -120,7 +120,7 @@ fn assess_network_checkpoint_inner(
         if result.dirty || result.stashed {
             continue;
         }
-        if meta.saved_refs.is_empty() || meta.origin.is_empty() {
+        if meta.work_refs().next().is_none() || meta.origin.is_empty() {
             any_unverified = true;
             continue;
         }
@@ -217,8 +217,7 @@ fn assess_network_checkpoint_inner(
                 .map(|(oid, name)| (name.to_owned(), oid.to_owned()))
                 .collect::<BTreeMap<_, _>>();
             if meta
-                .saved_refs
-                .iter()
+                .work_refs()
                 .any(|(name, oid)| refs.get(name) != Some(oid))
                 || !refs
                     .iter()
@@ -295,8 +294,8 @@ fn refresh_stopped_clone_publication_inner(
     result.dirty = checkpoint_has_file_changes(&manifest, repository);
     result.stashed = !meta.stash_stack.is_empty();
     result.saved_commits = meta
-        .saved_refs
-        .values()
+        .work_refs()
+        .map(|(_, oid)| oid)
         .chain(std::iter::once(&meta.head_commit))
         .cloned()
         .collect::<BTreeSet<_>>()
@@ -358,7 +357,7 @@ fn refresh_stopped_clone_publication_inner(
         .filter(|(_, name)| !name.ends_with("^{}"))
         .map(|(oid, name)| (name.to_owned(), oid.to_owned()))
         .collect::<BTreeMap<_, _>>();
-    for (name, oid) in &meta.saved_refs {
+    for (name, oid) in meta.work_refs() {
         if remote_refs.get(name) != Some(oid) {
             result.reason = Some(format!(
                 "{name} is not an exact remote ref; ancestry is unverified"
@@ -401,8 +400,8 @@ fn assess_clone_checkpoint_inner(
     result.dirty = checkpoint_has_file_changes(&manifest, repository);
     result.stashed = !meta.stash_stack.is_empty();
     let commits = meta
-        .saved_refs
-        .values()
+        .work_refs()
+        .map(|(_, oid)| oid)
         .chain(std::iter::once(&meta.head_commit))
         .cloned()
         .collect::<BTreeSet<_>>();
@@ -429,8 +428,7 @@ fn assess_clone_checkpoint_inner(
         // remains unknown until a remote destination is configured.
         if meta.head_commit == meta.base_commit
             && meta
-                .saved_refs
-                .iter()
+                .work_refs()
                 .all(|(name, oid)| name.starts_with("refs/heads/") && oid == &meta.base_commit)
         {
             result.state = PublicationState::Published;
@@ -485,7 +483,7 @@ fn assess_clone_checkpoint_inner(
             .filter(|(name, _)| name.starts_with(&format!("{prefix}/heads/")))
             .map(|(_, oid)| oid.as_str())
             .collect::<Vec<_>>();
-        for (name, oid) in &meta.saved_refs {
+        for (name, oid) in meta.work_refs() {
             let destination = name.replacen("refs/", &format!("{prefix}/"), 1);
             if name.starts_with("refs/tags/") || name.starts_with("refs/notes/") {
                 if remote_refs.get(&destination) != Some(oid) {

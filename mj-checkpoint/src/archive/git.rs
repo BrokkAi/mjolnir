@@ -162,7 +162,7 @@ pub fn collect_git_snapshot_with_progress(
         if state
             .saved_refs
             .keys()
-            .any(|name| name.starts_with("refs/mj/"))
+            .any(|name| name.starts_with(mj_core::archive::MJOLNIR_REF_NAMESPACE))
         {
             snapshot.metadata.review_baseline_ref = Some(review_baseline_ref(runner, repository)?);
         }
@@ -1944,7 +1944,7 @@ pub(crate) fn restore_git_snapshot_for_session(
             .metadata
             .saved_refs
             .keys()
-            .any(|name| name.starts_with("refs/mj/"))
+            .any(|name| name.starts_with(mj_core::archive::MJOLNIR_REF_NAMESPACE))
     {
         return Ok(());
     }
@@ -2037,14 +2037,14 @@ pub(crate) fn restore_git_snapshot_for_session(
     // branch first leaves the old index and worktree staged against its new tip.
     if clone_refs {
         for (name, oid) in &saved_refs {
-            if !restore_contents && !name.starts_with("refs/mj/") {
+            if !restore_contents && !name.starts_with(mj_core::archive::MJOLNIR_REF_NAMESPACE) {
                 continue;
             }
             ensure!(
                 name.starts_with("refs/heads/")
                     || name.starts_with("refs/tags/")
                     || name.starts_with("refs/notes/")
-                    || name.starts_with("refs/mj/")
+                    || name.starts_with(mj_core::archive::MJOLNIR_REF_NAMESPACE)
                     || (operation.is_some()
                         && operation::OPERATION_REF_NAMESPACES
                             .iter()
@@ -2065,7 +2065,7 @@ pub(crate) fn restore_git_snapshot_for_session(
                 &[],
                 "verify saved Git ref object",
             )?;
-            if name.starts_with("refs/mj/") {
+            if name.starts_with(mj_core::archive::MJOLNIR_REF_NAMESPACE) {
                 let existing = run_git(
                     runner,
                     repository,
