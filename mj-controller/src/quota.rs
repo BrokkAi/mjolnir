@@ -100,9 +100,21 @@ impl QuotaRefreshRequest {
                 .expect("serializable profile"),
         );
         hash.update(self.source_home.as_os_str().as_encoded_bytes());
-        if let CodexQuotaSource::Provider(provider) = &self.codex_source {
-            hash.update(provider.host.as_bytes());
-            hash.update(provider.api_key.as_bytes());
+        // The ChatGPT login hashes nothing more, so its stored reports stay
+        // valid. Every other source gets its own key, so a report from a
+        // different source (including one read through the ChatGPT login
+        // before the source was decided correctly) is never reused.
+        match &self.codex_source {
+            CodexQuotaSource::ChatGptLogin => {}
+            CodexQuotaSource::Provider(provider) => {
+                hash.update(provider.host.as_bytes());
+                hash.update(provider.api_key.as_bytes());
+            }
+            CodexQuotaSource::UsagePriced { provider } => {
+                hash.update(b"usage-priced\0");
+                hash.update(provider.as_bytes());
+            }
+            CodexQuotaSource::Unreadable(_) => hash.update(b"unreadable\0"),
         }
         mj_core::hex::lower_hex(hash.finalize())
     }
@@ -219,9 +231,14 @@ impl QuotaManager {
         self.reports.insert(report.profile_id.clone(), report);
     }
 
-    /// Forget a profile's report, for a profile whose configuration changed.
-    pub fn forget(&mut self, profile_id: &str) {
+    /// Forget a profile's report and stop its cached client, for a profile
+    /// whose configuration changed. The client's `codex app-server` was
+    /// started with the old home and environment.
+    pub async fn forget(&mut self, profile_id: &str) {
         self.reports.remove(profile_id);
+        if let Some(client) = self.codex_clients.remove(profile_id) {
+            client.shutdown().await;
+        }
     }
 
     /// Keep only the profiles in `keep`: drop the reports of the others and
@@ -392,6 +409,13 @@ async fn refresh_profile_with_cache_root(
         }
         _ => harness_authentication_marker(request.harness, &request.source_home),
     };
+    // Only the ChatGPT login uses a Codex app-server. A client cached while
+    // the profile used it is stopped here rather than handed back.
+    if request.codex_source != CodexQuotaSource::ChatGptLogin
+        && let Some(client) = codex_client.take()
+    {
+        client.shutdown().await;
+    }
     let credential_before = credential_marker_fingerprint(&credential_path).await;
     let QuotaRefreshRequest {
         profile_id,
