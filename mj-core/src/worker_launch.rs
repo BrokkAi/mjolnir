@@ -2,7 +2,7 @@
 //!
 //! These are plain data types and the constants they name: the file layout of
 //! a worker root, the launch configuration for a primary session and for a
-//! reviewer beside it, and how a harness learns about its MCP servers. They
+//! reviewer child, and how a harness learns about its MCP servers. They
 //! carry no process, network, or worker-runtime behaviour, so both sides of
 //! the relay can depend on them without depending on each other.
 
@@ -49,30 +49,8 @@ pub fn installed_harness_home(launch_path: &Path) -> anyhow::Result<Option<PathB
         .map(|home| harness.home_from_environment(home)))
 }
 
-/// Directory inside the primary worker root that holds everything the reviewer owns.
-pub const REVIEWER_DIR: &str = "reviewer";
-/// Where the controller stages the chosen profile, inside [`REVIEWER_DIR`].
-pub const REVIEWER_PROFILE_DIR: &str = "profile";
-
-/// Return the immutable profile snapshot staged for one reviewer generation.
-/// Generation zero keeps the original path so an upgraded worker can read a
-/// profile staged by an older controller; later generations are isolated from
-/// one another so staging cannot replace a source another role is copying.
-#[must_use]
-pub fn reviewer_staging_profile_home(worker_root: &Path, generation: u64) -> PathBuf {
-    let profile = if generation == 0 {
-        REVIEWER_PROFILE_DIR.to_owned()
-    } else {
-        format!("{REVIEWER_PROFILE_DIR}-{generation}")
-    };
-    crate::target_path::join(worker_root, &Path::new(REVIEWER_DIR).join(profile))
-}
-
 /// Who owns the ACP adapter and harness executable selected by a worker.
-///
-/// Ambient launch preserves container behavior. Managed launch resolves the
-/// exact pin compiled into the worker and never falls back to an executable
-/// from `PATH`.
+/// Managed launch resolves the compiled pin; ambient launch uses the target's runtime.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HarnessRuntimePolicy {
@@ -321,11 +299,11 @@ impl ProjectMemoryMcpDelivery {
     }
 }
 
-/// How to launch the turn-review reviewer beside a primary session.
+/// Harness launch settings for a reviewer child.
 ///
 /// The reviewer shares the primary's target and working directory and nothing
 /// else: its harness home is a fresh copy of the chosen profile, staged under
-/// the primary worker root, and the worker sets that home itself so a
+/// its own worker root, and the worker sets that home itself so a
 /// controller can never point a reviewer at the primary's credentials.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -355,9 +333,7 @@ pub struct ReviewerLaunchConfig {
     /// Best-effort fast mode, applied only when the harness advertises it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_mode: Option<bool>,
-    /// Bumped whenever native continuity is lost, so a reviewer that outlived
-    /// its harness starts a visibly new conversation instead of pretending to
-    /// resume one.
+    /// Legacy launch field retained so saved worker configurations remain readable.
     #[serde(default)]
     pub generation: u64,
     /// Additional configured MCP servers this reviewer gets.
@@ -400,18 +376,6 @@ impl ReviewMcpDelivery {
             HarnessKind::Claude | HarnessKind::Kimi => Self::HarnessProfile,
             _ => Self::Acp,
         }
-    }
-}
-
-impl ReviewerLaunchConfig {
-    /// Whether a running reviewer launched from `self` can serve `other`
-    /// without being restarted. Model and effort are applied on the live
-    /// session, so they never force a restart; identity does.
-    #[must_use]
-    pub fn reusable_for(&self, other: &Self) -> bool {
-        self.profile_id == other.profile_id
-            && self.harness == other.harness
-            && self.generation == other.generation
     }
 }
 

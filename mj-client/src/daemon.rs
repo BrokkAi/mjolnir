@@ -665,17 +665,6 @@ pub enum DaemonAction {
         session_id: String,
         background_task_id: String,
     },
-    /// Drive a session's turn-review reviewer. The reviewer is a sidecar of
-    /// the session's worker, so it travels the session's own relay rather than
-    /// becoming a session of its own here.
-    ReviewerAction {
-        session_id: String,
-        /// Which reviewing role the action drives; absent means the default
-        /// one, which is what plan review uses.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        role: Option<String>,
-        action: crate::session::ReviewerAction,
-    },
     /// Review the turn this session just finished, on a surface's request.
     StartTurnReview {
         session_id: String,
@@ -822,7 +811,6 @@ pub enum DaemonReply {
     SessionTextMatches(Vec<SessionTextMatch>),
     WikiHits(Option<WikiHitTranscript>),
     WikiSession(Option<Box<WikiSessionInfo>>),
-    Reviewer(Box<crate::session::ReviewerOutcome>),
     /// Whether a queued startup prompt was withdrawn before delivery.
     PromptWithdrawn(bool),
     Done,
@@ -2092,25 +2080,6 @@ impl DaemonClient {
         {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected turn-review resolution reply {reply:?}"),
-        }
-    }
-
-    pub async fn reviewer_action(
-        &mut self,
-        session_id: String,
-        role: Option<String>,
-        action: crate::session::ReviewerAction,
-    ) -> Result<crate::session::ReviewerOutcome> {
-        match self
-            .request(DaemonAction::ReviewerAction {
-                session_id,
-                role,
-                action,
-            })
-            .await?
-        {
-            DaemonReply::Reviewer(outcome) => Ok(*outcome),
-            reply => bail!("unexpected reviewer reply {reply:?}"),
         }
     }
 

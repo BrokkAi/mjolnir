@@ -130,8 +130,8 @@ DSH sessions are not importable yet either.
 | `--allow-dirty` | Acknowledge that dirty Git roots will be archived in their complete current state. |
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
-| `--review-model <name>`, `--review-effort <name>`, `--review-tier quick\|extended` | Review every turn of the imported session with that model or effort. The deprecated tier flag still accepts either value and enables automatic review, but its value is ignored. |
-| `--no-review` | Do not review the imported session's turns automatically. |
+| `--review <off\|turn\|push>` | Set the imported session's review trigger, overriding `[review]`. |
+| `--review-model <name>`, `--review-effort <name>`, `--review-tier quick\|extended` | Set the reviewer model or effort. Without `--review`, these options select `turn`. The deprecated tier option still accepts either value but ignores it. |
 | `--workspace <name>` | Workspace to put the imported session in. Needed when the instance has more than one workspace. |
 
 Import never edits the harness's source transcript. It builds and verifies a Mjolnir recovery archive, creates a suspended session record, and makes that record available through `prefix+g`.
@@ -269,8 +269,8 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--model <name>] [--effort <name>] [--subagents native|mjolnir|none]
        [--subagent-straightforward <model>] [--subagent-straightforward-effort <effort>]
        [--subagent-subtle <model>] [--subagent-subtle-effort <effort>]
-       [--review-model <name>] [--review-effort <name>] [--review-tier quick|extended]
-       [--no-review] [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
+       [--review <off|turn|push>] [--review-model <name>] [--review-effort <name>]
+       [--review-tier quick|extended] [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--command-id <id>]
           [--timeout <seconds>] [--return-on-input] [--json]
@@ -339,13 +339,12 @@ cannot be combined with a session that runs directly in the selected directory.
   every child uses the straightforward choice, and the parent is told to
   delegate straightforward work.
   Mjolnir chooses an eligible profile offering its model and effort by quota.
-- `mj new --review-model <name>`, `--review-effort <name>` and
-  `--review-tier quick|extended` review every turn of the new session with
-  that model or effort, even when `[review]` is off. The deprecated tier flag
-  still accepts either value and enables automatic review, but its value is
-  ignored. `--no-review` turns off automatic review for the session, even when
-  `[review]` is on; `/review` still works. `mj import <harness>` takes the same
-  flags for the session it adopts. See
+- `mj new --review off|turn|push` sets the session's trigger, overriding
+  `[review]`. `mj import <harness>` takes the same option for the session it
+  adopts. `--review-model <name>` and `--review-effort <name>` set reviewer
+  choices; without `--review`, either option selects `turn`. The deprecated
+  `--review-tier quick|extended` also selects `turn` when used alone, but its
+  value is ignored. See
   [per-session settings](/turn-review/#per-session-settings).
 - `mj new --no-project-memory` starts the session with no project memory:
   nothing from the workspace's project memory is put in the agent's startup

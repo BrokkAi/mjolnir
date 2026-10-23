@@ -34,8 +34,7 @@ use mj_core::relay::{
     ReviewerRequest, validate_relay_event,
 };
 
-pub use mj_client::session::{RelayAttachment, StartedReviewer};
-use mj_core::worker_launch::ReviewerLaunchConfig;
+pub use mj_client::session::RelayAttachment;
 
 const RELAY_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const RELAY_SLOW_OPERATION_WARNING: Duration = Duration::from_secs(5);

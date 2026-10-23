@@ -18,22 +18,16 @@ impl HostState {
                     },
                 );
             }
-            ReviewRequest::StartRole { role, .. } => {
-                if let Some(slot) = self.reviews.get_mut(session_id) {
-                    let requests = slot.driver.role_started(&role);
-                    self.run(session_id, requests);
-                }
+            ReviewRequest::StartReviewer { command_id, prompt } => {
+                self.register_reviewer_child(session_id, command_id, prompt)
             }
-            ReviewRequest::PromptRole {
-                command_id, prompt, ..
-            } => self.register_reviewer_child(session_id, command_id, prompt),
             ReviewRequest::PromptPrimary { command_id, prompt } => {
                 // The review's own corrective prompt must not be held by the
                 // review's own lock, and by this point the review has
                 // resolved, so the lock is already released below.
                 self.prompt_primary(session_id, command_id, prompt);
             }
-            ReviewRequest::PauseRole { .. } => {
+            ReviewRequest::CloseReviewer => {
                 if self.reviews.get(session_id).is_some_and(|slot| {
                     matches!(
                         slot.driver.phase(),

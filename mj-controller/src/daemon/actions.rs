@@ -540,16 +540,6 @@ pub(super) async fn handle_action(
         DaemonAction::WithdrawStartupPrompt { session_id, text } => Ok(
             DaemonReply::PromptWithdrawn(state.withdraw_startup_prompt(&session_id, &text).await?),
         ),
-        DaemonAction::ReviewerAction {
-            session_id,
-            role,
-            action,
-        } => {
-            let session = state.session_manager.session(session_id).await?;
-            Ok(DaemonReply::Reviewer(Box::new(
-                session.reviewer_as(role, action).await?,
-            )))
-        }
         DaemonAction::StartTurnReview { session_id } => {
             state
                 .review_host()

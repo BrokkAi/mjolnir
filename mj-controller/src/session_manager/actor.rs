@@ -769,10 +769,8 @@ pub(super) async fn run_session_actor(
                             }
                             continue;
                         }
-                        // A slow harness startup or analysis must not occupy
-                        // the primary's relay or serialize independent roles.
-                        // Cache each role's connection so transcript polling
-                        // does not launch a new SSH/Podman proxy every time.
+                        // Git capture must not occupy the primary's relay.
+                        // Reuse its connection across captures and baseline updates.
                         let cached = reviewer_connections
                             .entry(role.clone())
                             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
@@ -1376,10 +1374,7 @@ pub(super) async fn submit_actor_command(
     bail!("relay command {command_id} failed after an idempotent reconnect: {detail}")
 }
 
-/// Perform one reviewer action on a synchronized relay connection.
-///
-/// The reviewer's own relay answers most of these, so the outcomes mirror the
-/// primary's: an attach page, an acknowledgement cursor, an accepted command.
+/// Perform one repository capture operation on an independent relay connection.
 pub(super) async fn run_reviewer_operation(
     target: RelaySessionTarget,
     role: Option<String>,
@@ -1389,10 +1384,6 @@ pub(super) async fn run_reviewer_operation(
     cancelled: tokio_util::sync::CancellationToken,
 ) {
     let operation = action.operation_name();
-    let keep_connection = !matches!(
-        &action,
-        ReviewerAction::Pause | ReviewerAction::PauseGeneration { .. }
-    );
     let result = tokio::select! {
         biased;
         _ = cancelled.cancelled() => Err(anyhow::anyhow!("reviewer operation cancelled for session lifecycle change")),
@@ -1407,7 +1398,7 @@ pub(super) async fn run_reviewer_operation(
                 None => RelayClient::connect(&target.spec, &target.session_id).await?,
             };
             let result = drive_reviewer(&mut client, role, action).await;
-            if keep_connection && (result.is_ok() || result.as_ref().is_err_and(is_final_rejection)) {
+            if result.is_ok() || result.as_ref().is_err_and(is_final_rejection) {
                 *cache = Some(client);
             }
             result
@@ -1431,51 +1422,6 @@ pub(super) async fn drive_reviewer(
 ) -> Result<ReviewerOutcome> {
     let role = role.as_deref();
     Ok(match action {
-        ReviewerAction::Start { config } => {
-            ReviewerOutcome::Started(Box::new(client.start_reviewer(role, *config).await?))
-        }
-        ReviewerAction::Submit {
-            command_id,
-            command,
-        } => ReviewerOutcome::Accepted {
-            ordinal: client.submit_to_reviewer(role, command_id, command).await?,
-        },
-        ReviewerAction::Attach {
-            after_ordinal,
-            after_digest,
-        } => ReviewerOutcome::Attached(Box::new(
-            client
-                .attach_reviewer(role, after_ordinal, after_digest)
-                .await?,
-        )),
-        ReviewerAction::Acknowledge {
-            through_ordinal,
-            through_digest,
-        } => ReviewerOutcome::Acknowledged(
-            client
-                .acknowledge_reviewer(role, through_ordinal, through_digest)
-                .await?,
-        ),
-        ReviewerAction::Status => {
-            ReviewerOutcome::Status(Box::new(client.reviewer_status(role).await?))
-        }
-        ReviewerAction::RespondElicitation {
-            elicitation_id,
-            response,
-        } => {
-            client
-                .respond_to_reviewer(role, elicitation_id, response)
-                .await?;
-            ReviewerOutcome::ElicitationResolved
-        }
-        ReviewerAction::PauseGeneration { generation } => {
-            client.pause_reviewer_generation(role, generation).await?;
-            ReviewerOutcome::Paused
-        }
-        ReviewerAction::Pause => {
-            client.pause_reviewer(role).await?;
-            ReviewerOutcome::Paused
-        }
         ReviewerAction::CaptureDelta { baselines, scope } => ReviewerOutcome::Delta {
             repositories: client.capture_review_delta(role, baselines, scope).await?,
         },

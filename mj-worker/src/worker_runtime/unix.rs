@@ -21,7 +21,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use super::reviewer::{ReviewerCancellation, ReviewerPlacement, ReviewerSidecar};
+use super::review_capture::ReviewCapture;
 use super::{
     AcpSupervisorSpec, CredentialEndpoint, REVIEW_UNTRACKED_FILE, WorkerLaunchConfig,
     acp_additional_directories, reviewer_workspace_directories,
@@ -66,7 +66,7 @@ impl PreparationSnapshot {
 #[derive(Clone)]
 struct PreparedConnectionServices {
     commands: mpsc::Sender<CommandRequest>,
-    reviewer: Arc<ReviewerSidecar>,
+    reviewer: Arc<ReviewCapture>,
     subagents: Option<super::subagents::SubagentEndpoint>,
 }
 
@@ -75,7 +75,7 @@ struct RunningHarness {
     event_task: tokio::task::JoinHandle<Result<()>>,
     acp_shutdown: CancellationToken,
     commands: mpsc::Sender<CommandRequest>,
-    reviewer: Arc<ReviewerSidecar>,
+    reviewer: Arc<ReviewCapture>,
     subagent_socket_guard: Option<super::subagents::SubagentSocketGuard>,
     subagents: Option<super::subagents::SubagentEndpoint>,
     harness_gc: Option<tokio::task::JoinHandle<()>>,
@@ -87,7 +87,7 @@ struct HarnessPreparationCompletion {
     idle_dispatch_wakes: Option<mpsc::Receiver<()>>,
 }
 
-type UntrackedReviewEntries =
+pub(super) type UntrackedReviewEntries =
     Arc<Mutex<std::collections::BTreeMap<PathBuf, Vec<crate::review::capture::UntrackedEntry>>>>;
 
 struct HarnessPreparationSetup {
@@ -154,7 +154,7 @@ struct PreparedAcpSetup {
     events_tx: mpsc::Sender<RuntimeEvent>,
     events_rx: mpsc::Receiver<RuntimeEvent>,
     user_shells: crate::user_shell::UserShellRegistry,
-    reviewer: Arc<ReviewerSidecar>,
+    reviewer: Arc<ReviewCapture>,
     subagents: Option<super::subagents::SubagentEndpoint>,
     subagent_socket_guard: Option<super::subagents::SubagentSocketGuard>,
     acp_spec: LaunchSpec,
@@ -169,7 +169,7 @@ struct StartedBridgeTasks {
     event_task: Option<tokio::task::JoinHandle<Result<()>>>,
     harness_gc: Option<tokio::task::JoinHandle<()>>,
     commands: Option<mpsc::Sender<CommandRequest>>,
-    reviewer: Option<Arc<ReviewerSidecar>>,
+    reviewer: Option<Arc<ReviewCapture>>,
     subagent_socket_guard: Option<super::subagents::SubagentSocketGuard>,
     subagents: Option<super::subagents::SubagentEndpoint>,
     shell_cleanup: Option<tokio_util::task::TaskTracker>,
@@ -248,22 +248,15 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
     supervisor_spec.write_spec(&supervisor_path)?;
     let review_gate = config.review_gate();
     let worker_executable = std::env::current_exe().context("locate Hel worker executable")?;
-    let mut reviewer_target_environment = config.target_environment.clone();
-    reviewer_target_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
-    let reviewer = Arc::new(ReviewerSidecar::new(
-        ReviewerPlacement {
-            target_environment: reviewer_target_environment,
-            worker_root: root.clone(),
-            session_id: config.session_id.clone(),
-            cwd: config.cwd.clone(),
-            additional_directories: reviewer_workspace_directories(&config),
-            worker_executable: worker_executable.clone(),
-            harness_runtime: config.harness_runtime,
-            review_capture: config.review_capture,
-            untracked_at_start,
-        },
-        relay.clone(),
-    ));
+    let reviewer = Arc::new(ReviewCapture {
+        session_id: config.session_id.clone(),
+        cwd: config.cwd.clone(),
+        additional_directories: reviewer_workspace_directories(&config),
+        review_capture: config.review_capture,
+        untracked_at_start,
+        primary_relay: relay.clone(),
+        operation: tokio::sync::Mutex::new(()),
+    });
     let (subagents, subagent_socket_guard) = if subagent_role.is_some() {
         let (endpoint, guard) =
             super::subagents::serve(&runtime, &root, relay.clone(), config.harness)?;
@@ -1075,7 +1068,6 @@ pub async fn run_daemon_owned(
         mut event_task,
         acp_shutdown,
         commands: acp_commands_tx,
-        reviewer,
         subagent_socket_guard,
         harness_gc,
         shell_cleanup,
@@ -1180,7 +1172,6 @@ pub async fn run_daemon_owned(
         == mj_core::relay::RelayExecutionState::Closed;
     shell_cleanup.close();
     shell_cleanup.wait().await;
-    reviewer.pause_all().await;
     drop(subagent_socket_guard);
     if let Some(task) = harness_gc {
         task.abort();
@@ -1845,7 +1836,6 @@ async fn shutdown_running_harness(mut running: RunningHarness) {
     }
     running.shell_cleanup.close();
     running.shell_cleanup.wait().await;
-    running.reviewer.pause_all().await;
     drop(running.subagent_socket_guard);
     if let Some(task) = running.harness_gc {
         task.abort();
@@ -1927,9 +1917,8 @@ pub(super) struct ConnectionRuntime {
     /// The ACP coordinator's command channel, or `None` once the session is
     /// sealed and no ACP runtime is left to serve scratch prompts.
     pub(super) commands: Option<mpsc::Sender<CommandRequest>>,
-    /// The turn-review reviewer, when this worker has an ACP runtime to run
-    /// one beside. A sealed session has none.
-    pub(super) reviewer: Option<Arc<ReviewerSidecar>>,
+    /// Capture state prepared with the primary harness. A sealed session has none.
+    pub(super) reviewer: Option<Arc<ReviewCapture>>,
     pub(super) subagents: Option<super::subagents::SubagentEndpoint>,
     pub(super) cpu: Option<tokio::sync::watch::Receiver<crate::cpu_usage::CpuRead>>,
     pub(super) preparation: Option<watch::Receiver<PreparationSnapshot>>,
@@ -1953,35 +1942,6 @@ pub(super) async fn serve_client(
         credentials,
         ConnectionRuntime {
             commands,
-            ..ConnectionRuntime::default()
-        },
-        fatal,
-    )
-    .await
-}
-
-/// Test-only relay entry point that exposes the worker's reviewer sidecar.
-/// The production daemon supplies the same `ConnectionRuntime` from its live
-/// ACP setup; keeping this seam beside `serve_client` lets socket tests drive
-/// the real reviewer cancellation path without opening a second journal.
-#[cfg(test)]
-pub(super) async fn serve_client_with_reviewer(
-    stream: UnixStream,
-    relay: Arc<Mutex<DurableRelay>>,
-    dispatch_wake: mpsc::Sender<()>,
-    credentials: std::result::Result<CredentialEndpoint, String>,
-    commands: Option<mpsc::Sender<CommandRequest>>,
-    reviewer: Arc<ReviewerSidecar>,
-    fatal: mpsc::Sender<anyhow::Error>,
-) -> Result<()> {
-    serve_client_with_memory(
-        stream,
-        relay,
-        dispatch_wake,
-        credentials,
-        ConnectionRuntime {
-            commands,
-            reviewer: Some(reviewer),
             ..ConnectionRuntime::default()
         },
         fatal,
@@ -2213,9 +2173,7 @@ pub(super) async fn serve_client_with_memory(
                 continue;
             }
             if let RelayRequest::Reviewer { .. } = &envelope.request {
-                // The reviewer is a sidecar with its own relay and its own
-                // harness process. Both live on this connection's worker, so
-                // the primary's relay never sees these.
+                // Capture operations never enter the conversation journal.
                 let operation = envelope.request.method_name();
                 let response = if let Some(message) =
                     preparation_error(&prep_snapshot, "reviewer requests")
@@ -2230,10 +2188,10 @@ pub(super) async fn serve_client_with_memory(
                 {
                     unavailable_request(
                         envelope,
-                        "session is closed; no reviewer can run beside it".into(),
+                        "session is closed; review capture is unavailable".into(),
                     )
                 } else {
-                    reviewer_response(envelope, request_reviewer.as_ref(), &mut reader).await
+                    review_capture_response(envelope, request_reviewer).await
                 };
                 write_logged_response(&mut writer, &response, &session_id, operation).await?;
                 continue;
@@ -2466,42 +2424,6 @@ pub(super) async fn serve_client_with_memory(
 }
 
 #[cfg(test)]
-mod reviewer_disconnect_tests {
-    use super::*;
-    use std::time::Duration;
-
-    #[tokio::test]
-    async fn finishing_an_operation_preserves_a_partially_buffered_next_frame() {
-        let (mut client, server) = tokio::io::duplex(4096);
-        let payload = "x".repeat(128 * 1024);
-        let expected = payload.clone();
-        let writer = tokio::spawn(async move {
-            client.write_all(payload.as_bytes()).await.unwrap();
-            client.write_all(b"\n").await.unwrap();
-        });
-        let mut reader = BufReader::new(server);
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(20),
-                wait_for_reviewer_disconnect(&mut reader)
-            )
-            .await
-            .is_err(),
-            "buffered input is not a disconnect"
-        );
-        assert_eq!(
-            read_bounded_line(&mut reader, 256 * 1024).await.unwrap(),
-            Some(expected)
-        );
-        writer.await.unwrap();
-        assert_eq!(
-            wait_for_reviewer_disconnect(&mut reader).await,
-            ReviewerCancellation::ClientDisconnected
-        );
-    }
-}
-
-#[cfg(test)]
 mod preparation_tests {
     use super::*;
     use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
@@ -2575,23 +2497,6 @@ mod preparation_tests {
         serde_json::from_str(&line).unwrap()
     }
 
-    fn reviewer(relay: Arc<Mutex<DurableRelay>>, root: &std::path::Path) -> Arc<ReviewerSidecar> {
-        Arc::new(ReviewerSidecar::new(
-            ReviewerPlacement {
-                target_environment: BTreeMap::new(),
-                worker_root: root.to_path_buf(),
-                session_id: "preparation-test".into(),
-                cwd: root.to_path_buf(),
-                additional_directories: Vec::new(),
-                worker_executable: PathBuf::from("/bin/true"),
-                harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
-                review_capture: false,
-                untracked_at_start: Arc::new(Mutex::new(BTreeMap::new())),
-            },
-            relay,
-        ))
-    }
-
     #[tokio::test]
     async fn hello_attach_and_prompt_queue_work_while_fake_preparation_is_blocked() {
         let temp = tempfile::tempdir().unwrap();
@@ -2605,7 +2510,15 @@ mod preparation_tests {
             state: Some(mj_core::relay::HarnessPreparation::Started),
             services: Some(Arc::new(PreparedConnectionServices {
                 commands: commands.clone(),
-                reviewer: reviewer(relay.clone(), root),
+                reviewer: Arc::new(ReviewCapture {
+                    session_id: "preparation-test".into(),
+                    cwd: root.into(),
+                    additional_directories: Vec::new(),
+                    review_capture: false,
+                    untracked_at_start: Arc::new(Mutex::new(BTreeMap::new())),
+                    primary_relay: relay.clone(),
+                    operation: tokio::sync::Mutex::new(()),
+                }),
                 subagents: None,
             })),
         };

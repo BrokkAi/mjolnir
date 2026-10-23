@@ -56,11 +56,9 @@ fn prompted(requests: &[ReviewRequest], role: &str) -> String {
     requests
         .iter()
         .find_map(|request| match request {
-            ReviewRequest::PromptRole {
-                role: prompted,
-                command_id,
-                ..
-            } if prompted == role => Some(command_id.clone()),
+            ReviewRequest::StartReviewer { command_id, .. } if role == REVIEWER_ROLE => {
+                Some(command_id.clone())
+            }
             _ => None,
         })
         .unwrap_or_else(|| panic!("{role} was not prompted in {requests:?}"))
@@ -70,11 +68,9 @@ fn prompt_text(requests: &[ReviewRequest], role: &str) -> String {
     requests
         .iter()
         .find_map(|request| match request {
-            ReviewRequest::PromptRole {
-                role: prompted,
-                prompt,
-                ..
-            } if prompted == role => Some(prompt.clone()),
+            ReviewRequest::StartReviewer { prompt, .. } if role == REVIEWER_ROLE => {
+                Some(prompt.clone())
+            }
             _ => None,
         })
         .unwrap_or_else(|| panic!("{role} was not prompted in {requests:?}"))
@@ -90,15 +86,6 @@ fn running() -> (TurnReviewDriver, String) {
         }]
     );
     let requests = driver.delta_captured(changed_delta());
-    assert_eq!(
-        requests,
-        vec![ReviewRequest::StartRole {
-            role: REVIEWER_ROLE.to_string(),
-            fresh: true
-        }],
-        "the review starts its one reviewer"
-    );
-    let requests = driver.role_started(REVIEWER_ROLE);
     let command_id = prompted(&requests, REVIEWER_ROLE);
     let prompt = prompt_text(&requests, REVIEWER_ROLE);
     assert!(prompt.contains("git -C /w/app diff --no-ext-diff base-tree new-tree"));
@@ -171,9 +158,7 @@ fn a_clean_review_runs_one_reviewer_and_advances_the_baseline_itself() {
     assert_eq!(
         requests,
         vec![
-            ReviewRequest::PauseRole {
-                role: REVIEWER_ROLE.to_string()
-            },
+            ReviewRequest::CloseReviewer,
             ReviewRequest::AdvanceBaseline {
                 trees: BTreeMap::from([(PathBuf::from("/w/app"), "new-tree".to_string())]),
                 reviewed_through_ordinal: 12,
@@ -197,9 +182,7 @@ fn findings_are_the_verdict_without_a_second_pass() {
         driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- unbounded retry loop");
     assert_eq!(
         requests,
-        vec![ReviewRequest::PauseRole {
-            role: REVIEWER_ROLE.to_string()
-        }],
+        vec![ReviewRequest::CloseReviewer],
         "findings reap the reviewer and start nothing else"
     );
     assert!(driver.can_forward());
@@ -269,12 +252,7 @@ fn cancelling_leaves_the_baseline_so_the_next_review_covers_both_turns() {
     let requests = driver.cancel();
     assert_eq!(
         requests,
-        vec![
-            ReviewRequest::PauseRole {
-                role: REVIEWER_ROLE.to_string()
-            },
-            ReviewRequest::Close
-        ]
+        vec![ReviewRequest::CloseReviewer, ReviewRequest::Close]
     );
     assert!(
         !requests
@@ -413,12 +391,7 @@ fn a_completion_for_another_command_is_ignored() {
 fn a_request_failure_ends_as_a_dismissable_failed_verdict() {
     let (mut driver, _) = running();
     let requests = driver.request_failed("the reviewer could not start");
-    assert_eq!(
-        requests,
-        vec![ReviewRequest::PauseRole {
-            role: REVIEWER_ROLE.to_string()
-        }]
-    );
+    assert_eq!(requests, vec![ReviewRequest::CloseReviewer]);
     assert!(matches!(
         driver.verdict(),
         Some(ReviewVerdict::Failed { .. })
@@ -436,8 +409,7 @@ fn a_verification_pass_consumes_the_prior_review_when_it_resolves() {
         evidence: ReviewPassEvidence::default(),
     });
     let (mut driver, _) = TurnReviewDriver::start(seed);
-    driver.delta_captured(changed_delta());
-    let requests = driver.role_started(REVIEWER_ROLE);
+    let requests = driver.delta_captured(changed_delta());
     let prompt = prompt_text(&requests, REVIEWER_ROLE);
     assert!(
         prompt.contains("This is a corrective pass"),

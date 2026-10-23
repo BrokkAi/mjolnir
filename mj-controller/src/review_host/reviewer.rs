@@ -21,7 +21,7 @@ pub(super) fn prompt_command(prompt: String) -> RelayCommand {
 pub(super) async fn reviewer_action(
     control: &SessionManagerControl,
     session_id: &str,
-    role: Option<String>,
+    _role: Option<String>,
     action: ReviewerAction,
 ) -> Result<ReviewerOutcome, String> {
     let handle: ManagedSessionHandle = control
@@ -32,7 +32,7 @@ pub(super) async fn reviewer_action(
     let mut pause = LEASE_RETRY_PAUSE;
     loop {
         match handle
-            .reviewer_as(role.clone(), action.clone())
+            .reviewer(action.clone())
             .await
             .map_err(|error| format!("{error:#}"))
         {
@@ -102,37 +102,11 @@ pub(super) async fn prepare_scoped(
     if child {
         return Err(StartRefusal(SUBAGENT_REFUSAL.to_owned()));
     }
-    // Mutual exclusion on the default reviewer role: the running prompt
-    // keeps the role. Checked
-    // against the worker rather than against any UI's state, because the
-    // worker is the only place that knows.
     let handle = control
         .session(session_id.to_owned())
         .await
         .map_err(|error| StartRefusal(format!("{error:#}")))?;
-    if !push {
-        match handle.reviewer(ReviewerAction::Status).await {
-            Ok(ReviewerOutcome::Status(state)) => match &state.active_prompt {
-                // Preparation runs only while this host holds no review for the
-                // session, so a turn review's prompt here belongs to a review an
-                // earlier daemon started and no daemon can finish. Stop it, as
-                // the startup sweep does, and review in its place.
-                Some(prompt) if is_turn_review_command(&prompt.command_id) => {
-                    stop_leftover_review(&handle).await.map_err(|error| {
-                        StartRefusal(format!(
-                            "the review left running when Mjolnir restarted could not be \
-                         stopped: {error}"
-                        ))
-                    })?;
-                }
-                Some(_) => return Err(StartRefusal("the reviewer is busy".to_owned())),
-                None => {}
-            },
-            Ok(_) => {}
-            Err(error) => return Err(StartRefusal(format!("{error:#}"))),
-        }
-    }
-    // Reviewer actions and primary prompt submissions are serialized by the
+    // Capture actions and primary prompt submissions are serialized by the
     // same session actor. Anything accepted before the admission hold is
     // reflected here; anything after it was refused by the actor.
     let view = handle.view();
@@ -284,13 +258,6 @@ pub(super) async fn prepare_recovery(
         .session(session_id.to_owned())
         .await
         .map_err(|error| format!("{error:#}"))?;
-    // The interrupted review's reviewers may still be running in the worker.
-    // Nothing will read them now, so they stop before anyone is told the
-    // review was cancelled. A failure is left to the next review's
-    // preparation, which meets the same leftover and stops it.
-    if let Err(error) = stop_leftover_review(&handle).await {
-        tracing::warn!(%session_id, %error, "could not stop the interrupted review's reviewers");
-    }
     let Some(pending) = state.pending_forward.clone() else {
         return Ok(None);
     };
@@ -322,72 +289,6 @@ pub(super) async fn prepare_recovery(
         // worker held.
         background: None,
     }))
-}
-
-fn is_turn_review_command(command_id: &str) -> bool {
-    command_id.starts_with(mj_core::review::driver::COMMAND_ID_PREFIX)
-}
-
-/// Removed turn-review roles may still run in a worker after a daemon restart.
-/// Keep their identities here until those workers have been replaced.
-const LEGACY_ROLES: [&str; 9] = [
-    "validator",
-    "intent",
-    "supervisor",
-    "control_flow",
-    "duplication",
-    "error_handling",
-    "dead_code",
-    "tests",
-    "contracts",
-];
-
-/// Stops, in the worker, every reviewing role a turn review left running
-/// when the daemon that drove it went away.
-///
-/// The worker keeps a reviewer's harness, journal and pending form across a
-/// daemon restart, but the review that would read its answer lived in that
-/// daemon's memory. Left alone, the prompt holds the default role, so every
-/// later review is refused, and its form waits on a question no surface can
-/// show. Stopping it makes the daemon's "cancelled" true in the worker too.
-///
-/// Stop the default role when it runs a turn review's prompt. Pausing a
-/// legacy role that is not running does nothing.
-pub(super) async fn stop_leftover_review(handle: &ManagedSessionHandle) -> Result<(), String> {
-    use mj_core::review::driver::REVIEWER_ROLE;
-    let mut roles = LEGACY_ROLES.to_vec();
-    let status = handle
-        .reviewer_as(Some(REVIEWER_ROLE.to_owned()), ReviewerAction::Status)
-        .await
-        .map_err(|error| format!("{error:#}"))?;
-    if let ReviewerOutcome::Status(state) = status
-        && state
-            .active_prompt
-            .as_ref()
-            .is_some_and(|prompt| is_turn_review_command(&prompt.command_id))
-    {
-        roles.insert(0, REVIEWER_ROLE);
-    }
-    let mut failures = Vec::new();
-    for role in roles {
-        if let Err(error) = handle
-            .reviewer_as(Some(role.to_owned()), ReviewerAction::Pause)
-            .await
-        {
-            // A worker that does not support named roles cannot have those
-            // legacy processes to stop. Workers with generic role support
-            // receive these requests and pause any live legacy roles.
-            if error.to_string().contains("no longer supported") {
-                continue;
-            }
-            failures.push(format!("{role}: {error:#}"));
-        }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures.join("; "))
-    }
 }
 
 /// A question's first line, quoted and kept short enough for a notice.

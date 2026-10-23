@@ -5493,7 +5493,11 @@ async fn a_worker_passes_the_excluded_variables_to_its_bridge() {
     let spec = AcpSupervisorSpec::read(&root.join("acp-supervisor.json")).unwrap();
     assert_eq!(
         spec.excluded_environment,
-        ["CODEX_API_KEY".to_owned(), "OPENAI_API_KEY".to_owned()]
+        [
+            "CODEX_API_KEY".to_owned(),
+            "OPENAI_API_KEY".to_owned(),
+            "MJ_REVIEW_GATE".to_owned()
+        ]
     );
     assert!(!spec.environment.contains_key("OPENAI_API_KEY"));
 }

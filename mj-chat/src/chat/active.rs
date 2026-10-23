@@ -26,7 +26,7 @@ use mj_core::state::{MaterializedSession, SessionRecord, TranscriptItem, config_
 use mj_core::storage::{HistoryScope, PromptHistoryEntry};
 
 use mj_client::session::{
-    ManagedSessionView, ReviewerAction, SessionControl as SessionManagerControl,
+    ManagedSessionView, SessionControl as SessionManagerControl,
     SessionHandle as ManagedSessionHandle, ViewError, new_command_id,
 };
 use mj_core::relay::WorkerPhase;

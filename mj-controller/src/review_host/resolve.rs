@@ -149,10 +149,7 @@ impl HostState {
         push.finishing = true;
         let deltas = push.deltas.clone();
         let epoch = slot.epoch;
-        let review_id = slot
-            .command_id
-            .clone()
-            .unwrap_or_else(|| format!("review-{epoch}"));
+        let review_id = new_command_id("push-review");
         if let ReviewVerdict::Findings {
             synthesis,
             evidence,
@@ -170,7 +167,7 @@ impl HostState {
             } => Some(*reviewed_through_ordinal),
             _ => None,
         });
-        let completion =
+        let completion = review_id.and_then(|review_id| {
             crate::upgrade::activity("push review verdict").map(|admission| PushCompletion {
                 session_id: session_id.to_owned(),
                 epoch,
@@ -181,7 +178,8 @@ impl HostState {
                 verdict,
                 _admission: admission,
                 reviewed_through_ordinal,
-            });
+            })
+        });
         let queued = completion.and_then(|completion| {
             self.persistence
                 .as_ref()

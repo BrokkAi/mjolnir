@@ -1095,7 +1095,10 @@ async fn in_process_reviewer_forwarding_stops_when_the_caller_goes_away() {
         RemoteSessionRequest::Reviewer {
             session_id: "session-1".into(),
             role: None,
-            action: crate::session_manager::ReviewerAction::Status,
+            action: crate::session_manager::ReviewerAction::CaptureDelta {
+                scope: Default::default(),
+                baselines: Default::default(),
+            },
             reply,
         },
         manager.control.clone(),
@@ -1112,115 +1115,6 @@ async fn in_process_reviewer_forwarding_stops_when_the_caller_goes_away() {
         .await
         .expect("in-process forwarding kept the actor reply alive");
     forwarding.await.expect("forwarding task panicked");
-}
-
-#[tokio::test]
-async fn daemon_drops_in_flight_reviewer_work_when_the_client_eof_arrives() {
-    let mut manager = TestRemoteManager::new().await;
-    let state = test_runtime_state_with_manager(&manager);
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        serve_client(
-            stream,
-            test_metadata(address),
-            state,
-            CancellationToken::new(),
-        )
-        .await
-    });
-    let mut stream = TcpStream::connect(address).await.unwrap();
-    write_frame(
-        &mut stream,
-        &RequestEnvelope {
-            protocol_version: PROTOCOL_VERSION,
-            request_id: 1,
-            token: "right-token".into(),
-            action: DaemonAction::ReviewerAction {
-                session_id: "session-1".into(),
-                role: None,
-                action: crate::session_manager::ReviewerAction::Status,
-            },
-        },
-    )
-    .await
-    .unwrap();
-    let request = tokio::time::timeout(Duration::from_secs(5), manager.requests.recv())
-        .await
-        .expect("reviewer request did not reach the manager")
-        .expect("manager request stream ended");
-    let RemoteSessionRequest::Reviewer { mut reply, .. } = request else {
-        panic!("expected a reviewer request")
-    };
-    drop(stream);
-    tokio::time::timeout(Duration::from_secs(5), reply.closed())
-        .await
-        .expect("daemon kept reviewer work alive after client EOF");
-    assert!(server.await.expect("daemon task panicked").is_ok());
-}
-
-#[tokio::test]
-async fn daemon_peek_keeps_a_pipelined_request_for_the_next_loop() {
-    let mut manager = TestRemoteManager::new().await;
-    let state = test_runtime_state_with_manager(&manager);
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        serve_client(
-            stream,
-            test_metadata(address),
-            state,
-            CancellationToken::new(),
-        )
-        .await
-    });
-    let mut stream = TcpStream::connect(address).await.unwrap();
-    for (request_id, action) in [
-        (
-            1,
-            DaemonAction::ReviewerAction {
-                session_id: "session-1".into(),
-                role: None,
-                action: crate::session_manager::ReviewerAction::Pause,
-            },
-        ),
-        (2, DaemonAction::Ping),
-    ] {
-        write_frame(
-            &mut stream,
-            &RequestEnvelope {
-                protocol_version: PROTOCOL_VERSION,
-                request_id,
-                token: "right-token".into(),
-                action,
-            },
-        )
-        .await
-        .unwrap();
-    }
-    let request = tokio::time::timeout(Duration::from_secs(5), manager.requests.recv())
-        .await
-        .expect("reviewer request did not reach the manager")
-        .expect("manager request stream ended");
-    let RemoteSessionRequest::Reviewer { reply, .. } = request else {
-        panic!("expected a reviewer request")
-    };
-    reply
-        .send(Ok(crate::session_manager::ReviewerOutcome::Paused))
-        .expect("daemon still awaits the reviewer reply");
-
-    let first: ResponseEnvelope = read_frame(&mut stream).await.unwrap();
-    assert!(matches!(
-        first.result,
-        Ok(DaemonReply::Reviewer(outcome))
-            if matches!(*outcome, crate::session_manager::ReviewerOutcome::Paused)
-    ));
-    let second: ResponseEnvelope = read_frame(&mut stream).await.unwrap();
-    assert!(matches!(second.result, Ok(DaemonReply::Pong)));
-    drop(stream);
-    let _ = server.await.expect("daemon task panicked");
 }
 
 #[tokio::test]

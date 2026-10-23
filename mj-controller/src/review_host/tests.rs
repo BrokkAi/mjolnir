@@ -5,8 +5,6 @@ use crate::session_manager::{
 use mj_core::state::{ManagedSessionSnapshot, MaterializedSession};
 use std::path::PathBuf;
 
-use mj_core::relay::RelayOperationalState;
-
 /// One session id per test. The prompt lock is process-wide -- there is
 /// one daemon per machine and one host in it -- so tests that shared a
 /// session id would release each other's locks.
@@ -87,9 +85,8 @@ fn seed_uses_the_latest_real_prompt_and_keeps_history_for_intent() {
     assert_eq!(corrective.user_messages.len(), 3);
 }
 
-/// An idle reviewer's operational state. Built through serde because the
-/// struct's own constructor belongs to the relay.
-fn operational() -> RelayOperationalState {
+/// An idle relay state for the primary session view.
+fn operational() -> mj_core::relay::RelayOperationalState {
     serde_json::from_value(serde_json::json!({
         "session_id": "reviewer",
         "execution": "idle",
@@ -172,21 +169,6 @@ impl FakeManager {
         manager
     }
 
-    /// The next request that is not a reviewer status check or pause, which
-    /// is how the host stops a review's leftover reviewers.
-    async fn next_past_reviewer_stops(&mut self) -> RemoteSessionRequest {
-        loop {
-            match self.next().await {
-                RemoteSessionRequest::Reviewer { action, reply, .. }
-                    if matches!(action, ReviewerAction::Status | ReviewerAction::Pause) =>
-                {
-                    let _ = reply.send(answer_for(&action));
-                }
-                other => return other,
-            }
-        }
-    }
-
     fn refuse_next_capture(&mut self, reason: &str) {
         self.capture_refusals.push_back(reason.to_owned());
     }
@@ -244,32 +226,11 @@ impl FakeManager {
 /// asserting on.
 fn answer_for(action: &ReviewerAction) -> Result<ReviewerOutcome, String> {
     match action {
-        ReviewerAction::Status => Ok(ReviewerOutcome::Status(Box::new(operational()))),
         ReviewerAction::CaptureDelta { .. } => Ok(ReviewerOutcome::Delta {
             repositories: Vec::new(),
         }),
         ReviewerAction::AdvanceBaseline { .. } | ReviewerAction::RecordReviewed { .. } => {
             Ok(ReviewerOutcome::BaselineAdvanced)
-        }
-        ReviewerAction::Attach { .. } => Ok(ReviewerOutcome::Attached(Box::new(
-            crate::worker_client::RelayAttachment {
-                state: operational(),
-                events: Vec::new(),
-                through_ordinal: 0,
-                through_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.to_owned(),
-            },
-        ))),
-        ReviewerAction::Pause | ReviewerAction::PauseGeneration { .. } => {
-            Ok(ReviewerOutcome::Paused)
-        }
-        ReviewerAction::Submit { .. } => Ok(ReviewerOutcome::Accepted { ordinal: 1 }),
-        ReviewerAction::Start { .. } => Err("no harness in this test".to_owned()),
-        ReviewerAction::RespondElicitation { .. } => Ok(ReviewerOutcome::ElicitationResolved),
-        ReviewerAction::Acknowledge { .. } => {
-            Ok(ReviewerOutcome::Acknowledged(mj_core::relay::RelayCursor {
-                ordinal: 0,
-                digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.to_owned(),
-            }))
         }
     }
 }
@@ -341,6 +302,7 @@ struct FakeEnvironment {
     owner: Mutex<Option<String>>,
     save_gate: Mutex<Option<Arc<SaveGate>>>,
     subagent: std::sync::atomic::AtomicBool,
+    classify_gate: Mutex<Option<Arc<SaveGate>>>,
     /// Refusals the next reviewer resolutions answer with, in order.
     resolve_refusals: Mutex<std::collections::VecDeque<String>>,
     /// How many background holds the host took on the session.
@@ -407,6 +369,7 @@ impl FakeEnvironment {
             owner: Mutex::new(None),
             save_gate: Mutex::new(None),
             subagent: std::sync::atomic::AtomicBool::new(false),
+            classify_gate: Mutex::new(None),
             resolve_refusals: Mutex::new(std::collections::VecDeque::new()),
             background_holds: std::sync::atomic::AtomicUsize::new(0),
             live_holds: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -506,6 +469,9 @@ impl ReviewEnvironment for FakeEnvironment {
     }
 
     fn is_subagent(&self, _session_id: &str) -> bool {
+        if let Some(gate) = self.classify_gate.lock().unwrap().clone() {
+            gate.wait();
+        }
         self.subagent.load(std::sync::atomic::Ordering::Acquire)
     }
 
@@ -631,10 +597,6 @@ async fn a_review_waits_for_the_recovery_copy_instead_of_giving_up() {
     );
 
     finish_a_turn(&manager, &host).await;
-    let (_, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
-        .await;
-    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
 
     // Preparation captures the change before it chooses a reviewer (I2-10).
     // Only a turn that changed something goes on to choose one.
@@ -699,10 +661,6 @@ async fn a_review_refused_for_another_reason_does_not_wait() {
         environment.clone(),
     );
     finish_a_turn(&manager, &host).await;
-    let (_, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
-        .await;
-    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
     // Preparation captures the change before it chooses a reviewer (I2-10).
     // Only a turn that changed something reaches the refused choice.
     let (_, _, reply) = manager
@@ -830,12 +788,14 @@ async fn auto_preparation_is_visible_and_can_be_cancelled() {
     let host = TurnReviewHost::spawn_in(manager.control.clone(), armed(None), environment);
     finish_a_turn(&manager, &host).await;
     let (_, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
         .await;
     assert!(host.view(&session).unwrap().status.contains("Preparing"));
     host.resolve(&session, Resolution::Cancelled).await.unwrap();
     assert!(!host.refuses_prompt(&session));
-    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
+    let _ = reply.send(Ok(ReviewerOutcome::Delta {
+        repositories: Vec::new(),
+    }));
     host.shutdown().await.unwrap();
 }
 
@@ -1111,6 +1071,8 @@ async fn preparation_rechecks_the_live_actor_after_installing_the_prompt_hold() 
     let session = session.as_str();
     let mut manager = FakeManager::new(session).await;
     let environment = FakeEnvironment::new();
+    let gate = SaveGate::new();
+    *environment.classify_gate.lock().unwrap() = Some(gate.clone());
     let host = TurnReviewHost::spawn_in(
         manager.control.clone(),
         armed(Some("reviewer")),
@@ -1118,9 +1080,9 @@ async fn preparation_rechecks_the_live_actor_after_installing_the_prompt_hold() 
     );
 
     finish_a_turn(&manager, &host).await;
-    let (_, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
-        .await;
+    tokio::time::timeout(Duration::from_secs(5), gate.entered())
+        .await
+        .unwrap();
     assert!(host.refuses_prompt(session));
 
     manager
@@ -1134,7 +1096,7 @@ async fn preparation_rechecks_the_live_actor_after_installing_the_prompt_hold() 
         )
         .await
         .expect("publish the command that won the admission race");
-    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
+    gate.release();
 
     tokio::time::timeout(Duration::from_secs(5), async {
         while host.refuses_prompt(session) {
@@ -1188,10 +1150,6 @@ async fn observation_bursts_do_not_drop_the_final_idle_edge() {
     let starting_host = host.clone();
     let session_owned = session.to_owned();
     let starting = tokio::spawn(async move { starting_host.start(&session_owned, true).await });
-    let (_, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
-        .await;
-    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
     // Preparation captures the change before the review opens (I2-10); a
     // turn with a change keeps the review open.
     let (_, _, reply) = manager
@@ -1238,10 +1196,6 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
     );
 
     finish_a_turn(&manager, &host).await;
-    let (_, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
-        .await;
-    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
     // Preparation captures the change before the review opens (I2-10).
     let (_, _, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
@@ -1357,10 +1311,6 @@ async fn a_review_open_at_a_restart_is_reported_by_the_next_daemon_and_keeps_its
     );
     finish_a_turn(&manager, &old).await;
     let (_, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
-        .await;
-    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
-    let (_, _, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
         .await;
     let _ = reply.send(Ok(ReviewerOutcome::Delta {
@@ -1447,7 +1397,7 @@ async fn a_review_still_preparing_at_a_restart_is_reported_by_the_next_daemon() 
     finish_a_turn(&manager, &old).await;
     // Preparation asks the reviewer for its status; leave it unanswered.
     let (_, _, _status_reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
         .await;
     assert!(old.view(session).is_some(), "the review is preparing");
 
@@ -1524,7 +1474,7 @@ async fn an_interrupted_handoff_retains_findings_until_acceptance_and_retries_th
         admission,
         reply,
         ..
-    } = manager.next_past_reviewer_stops().await
+    } = manager.next().await
     else {
         panic!("recovery submits the pending handoff directly, without starting a reviewer");
     };
@@ -1906,73 +1856,6 @@ async fn a_reviewers_question_is_published_with_its_review() {
     host.shutdown().await.expect("shutdown the host");
 }
 
-/// `mj respond`, the phone and the terminal's session answer all reach the
-/// session handle. An id from a reviewer's question goes back to the role
-/// that asked, the same reviewer action the terminal's review pane sends.
-// Hard-won: 8ab93dd3: review answers were routed without preserving the worker role
-#[tokio::test]
-async fn an_answer_to_a_reviewers_question_reaches_that_role() {
-    let session = session_id("reviewanswer");
-    let session = session.as_str();
-    let mut manager = FakeManager::new(session).await;
-    let handle = manager.control.session(session.to_owned()).await.unwrap();
-    let id = mj_client::review::ReviewerQuestion {
-        role: mj_core::review::driver::REVIEWER_ROLE.to_owned(),
-        request: mj_core::elicitation::ElicitationRequest {
-            id: "decline-1".into(),
-            message: "Retry?".into(),
-            title: None,
-            description: None,
-            fields: Vec::new(),
-            tool_permission: None,
-        },
-    }
-    .session_request()
-    .id;
-    let answer = tokio::spawn(async move {
-        handle
-            .respond_elicitation(id, mj_core::elicitation::ElicitationResponse::Decline)
-            .await
-    });
-    match manager.next().await {
-        RemoteSessionRequest::Reviewer {
-            role,
-            action:
-                ReviewerAction::RespondElicitation {
-                    elicitation_id,
-                    response,
-                },
-            reply,
-            ..
-        } => {
-            assert_eq!(
-                role.as_deref(),
-                Some(mj_core::review::driver::REVIEWER_ROLE)
-            );
-            assert_eq!(elicitation_id, "decline-1");
-            assert_eq!(response, mj_core::elicitation::ElicitationResponse::Decline);
-            let _ = reply.send(Ok(ReviewerOutcome::ElicitationResolved));
-        }
-        other => panic!(
-            "a reviewer's question is answered through the reviewer, not the primary: {}",
-            other.session_id()
-        ),
-    }
-    answer.await.unwrap().expect("the answer is delivered");
-}
-
-/// The reviewer's operational state while a prompt with this id runs.
-fn busy_with(command_id: &str) -> RelayOperationalState {
-    let mut state = operational();
-    state.execution = mj_core::relay::RelayExecutionState::Running;
-    state.active_prompt = Some(mj_core::relay::ActiveRelayPrompt {
-        command_id: command_id.to_owned(),
-        created_at_ms: 0,
-        started_at_ms: 0,
-    });
-    state
-}
-
 /// Answers the host's requests until it records a line in the conversation,
 /// and returns that line.
 async fn next_notice(manager: &mut FakeManager) -> String {
@@ -1999,165 +1882,6 @@ async fn next_notice(manager: &mut FakeManager) -> String {
     })
     .await
     .expect("the host records a notice")
-}
-
-/// What the host reached while [`serve_leftover_worker`] answered it.
-#[derive(Debug)]
-enum Reached {
-    Notice(String),
-    /// A new review asked for the capture, so it started.
-    Capture,
-}
-
-/// Plays a worker whose default reviewing role still runs a turn review's
-/// prompt, blocked on a form, until the host pauses that role; paused roles
-/// are recorded in `paused`. Answers the host until it records a notice or a
-/// new review asks for its capture.
-async fn serve_leftover_worker(manager: &mut FakeManager, paused: &mut Vec<String>) -> Reached {
-    let leftover = format!("{}reviewer-1", mj_core::review::driver::COMMAND_ID_PREFIX);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match manager.next().await {
-                RemoteSessionRequest::Submit {
-                    command: RelayCommand::RecordNotice { text },
-                    reply,
-                    ..
-                } => {
-                    let _ = reply.send(Ok(1));
-                    return Reached::Notice(text);
-                }
-                RemoteSessionRequest::Submit { reply, .. } => {
-                    let _ = reply.send(Ok(1));
-                }
-                RemoteSessionRequest::Reviewer {
-                    role,
-                    action,
-                    reply,
-                    ..
-                } => {
-                    let role =
-                        role.unwrap_or_else(|| mj_core::review::driver::REVIEWER_ROLE.to_owned());
-                    match action {
-                        ReviewerAction::CaptureDelta { .. } => return Reached::Capture,
-                        ReviewerAction::Status => {
-                            let state = if role == mj_core::review::driver::REVIEWER_ROLE
-                                && !paused.contains(&role)
-                            {
-                                busy_with(&leftover)
-                            } else {
-                                operational()
-                            };
-                            let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(state))));
-                        }
-                        ReviewerAction::Pause => {
-                            paused.push(role);
-                            let _ = reply.send(Ok(ReviewerOutcome::Paused));
-                        }
-                        other => {
-                            let _ = reply.send(answer_for(&other));
-                        }
-                    }
-                }
-                other => panic!("unexpected request {}", other.session_id()),
-            }
-        }
-    })
-    .await
-    .expect("the host reaches a notice or a new review")
-}
-
-/// RVC-3(b): after a daemon restart, the worker's reviewer was still waiting
-/// on the Fable decline form from the review the restart cut off, which no
-/// surface could show. Every later turn's review was refused with "the
-/// reviewer is busy". A review that meets such a
-/// leftover prompt stops it, since no daemon can use its answer, and starts.
-// Hard-won: 8b6ab5b0: a leftover reviewer prompt made every later review refuse after restart
-#[tokio::test]
-async fn a_review_that_meets_a_leftover_reviewer_stops_it_and_starts() {
-    let session = session_id("leftoverstop");
-    let session = session.as_str();
-    let mut manager = FakeManager::new(session).await;
-    let environment = FakeEnvironment::new();
-    let host = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment.clone(),
-    );
-    finish_a_turn(&manager, &host).await;
-    let mut paused = Vec::new();
-    let reached = serve_leftover_worker(&mut manager, &mut paused).await;
-    assert!(
-        matches!(reached, Reached::Capture),
-        "the review starts instead of being refused: {reached:?}"
-    );
-    assert!(
-        paused
-            .iter()
-            .any(|role| role == mj_core::review::driver::REVIEWER_ROLE),
-        "the leftover reviewer is stopped: {paused:?}"
-    );
-    host.shutdown().await.expect("shutdown the host");
-}
-
-/// RVC-3(c): the next daemon said the review was cancelled while the
-/// worker's reviewer kept running it and holding its form. The daemon now
-/// stops that reviewer before it says so, and the next review starts.
-// Hard-won: 8b6ab5b0: a restart left the reviewer question open, so every later review was refused
-#[tokio::test]
-async fn a_review_cut_off_by_a_restart_stops_its_reviewer_before_saying_so() {
-    let session = session_id("sweepstops");
-    let session = session.as_str();
-    let mut manager = FakeManager::new(session).await;
-    let environment = FakeEnvironment::new();
-    let old = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment.clone(),
-    );
-    let _poll = open_a_review_to_its_first_poll(&mut manager, &old, &environment).await;
-    old.shutdown().await.unwrap();
-
-    let new = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment.clone(),
-    );
-    new.observe(session, &view(session, MaterializedExecutionState::Idle));
-    let mut paused = Vec::new();
-    let reached = serve_leftover_worker(&mut manager, &mut paused).await;
-    let Reached::Notice(notice) = reached else {
-        panic!("the next daemon reports the cut-off review: {reached:?}");
-    };
-    assert_eq!(
-        notice,
-        "Turn review was cancelled when Mjolnir restarted; the next review covers the same changes"
-    );
-    for role in [
-        mj_core::review::driver::REVIEWER_ROLE,
-        // An older worker may still run roles removed from the turn review.
-        "validator",
-        "intent",
-        "supervisor",
-        "control_flow",
-        "duplication",
-        "error_handling",
-        "dead_code",
-        "tests",
-        "contracts",
-    ] {
-        assert!(
-            paused.iter().any(|paused| paused == role),
-            "{role} is stopped before the notice: {paused:?}"
-        );
-    }
-
-    finish_a_turn(&manager, &new).await;
-    let reached = serve_leftover_worker(&mut manager, &mut paused).await;
-    assert!(
-        matches!(reached, Reached::Capture),
-        "the next review starts: {reached:?}"
-    );
-    new.shutdown().await.unwrap();
 }
 
 /// A review asked for while the open one waits on a person names that
@@ -2705,5 +2429,54 @@ async fn cancelling_a_push_review_closes_the_child_and_leaves_the_gate_blocked()
     assert!(environment.mailbox.lock().unwrap().is_empty());
     assert!(environment.state().baselines.is_empty());
     assert!(!host.refuses_prompt(&session));
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: 32d96d199: repeated reviews reused driver IDs and lost later verdicts to mailbox deduplication.
+#[tokio::test]
+async fn repeated_push_reviews_keep_distinct_mailbox_keys_across_host_restart() {
+    let session = session_id("pushmailboxids");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let mut host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    for round in 0..3 {
+        let child = open_push(&mut manager, &host, &environment).await;
+        finish_child(
+            &host,
+            &environment,
+            &session,
+            &child,
+            Some("The parser still has a correctness defect."),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while host.view(&session).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        if round == 1 {
+            host.shutdown().await.unwrap();
+            host = TurnReviewHost::spawn_in(
+                manager.control.clone(),
+                push_config(),
+                environment.clone(),
+            );
+        }
+    }
+    {
+        let mailbox = environment.mailbox.lock().unwrap();
+        assert_eq!(mailbox.len(), 3);
+        assert_eq!(
+            mailbox
+                .iter()
+                .map(|event| event.key.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
+    }
     host.shutdown().await.unwrap();
 }
