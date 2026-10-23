@@ -43,6 +43,8 @@ pub struct LaunchSpec {
     pub extra_mcp_servers: Vec<ReviewerMcpServer>,
     /// Delegation policy independently controls native tool suppression.
     pub subagent_policy: mj_core::subagent::SubagentPolicy,
+    /// This session belongs to another Mjolnir session, independently of its MCP role.
+    pub managed_subagent: bool,
     /// Private Mjolnir socket: parent delegation or child handback.
     pub subagent_mcp_socket: Option<SubagentMcpSocket>,
     /// The supervisor spec the bridge command reads, when this launch has

@@ -431,14 +431,19 @@ pub fn resolve_subagent_mcp_role(
 }
 
 impl WorkerLaunchConfig {
+    /// Managed ownership is independent of the MCP role and historical handback tools.
+    pub fn is_managed_subagent(&self) -> bool {
+        self.environment
+            .get(SESSION_MANAGED_SUBAGENT_ENV)
+            .is_some_and(|value| value == "1")
+    }
+
     /// The `mj-agents` role is derived once from the launch's ownership and
     /// policy so Codex and Claude expose the same tools.
     pub fn subagent_mcp_role(&self) -> Option<crate::subagent::SubagentMcpRole> {
         resolve_subagent_mcp_role(
             &self.subagents,
-            self.environment
-                .get(SESSION_MANAGED_SUBAGENT_ENV)
-                .is_some_and(|value| value == "1"),
+            self.is_managed_subagent(),
             self.handback_tool,
             self.agent_mailboxes_enabled,
             self.environment

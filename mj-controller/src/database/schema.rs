@@ -1663,6 +1663,29 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             .context("migrate DSH harness constraints")?;
     }
 
+    // Compatible: the new frontier is projection bookkeeping. Older readers
+    // ignore it and older named-column upserts preserve it; the read/write
+    // floor stays at 92. Rebuilds must not publish old questions as new mail.
+    if version < 93 {
+        let add_column = if super::legacy_schema::table_has_column(
+            connection,
+            "materialized_sessions",
+            "input_required_event_frontier",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE materialized_sessions ADD COLUMN input_required_event_frontier INTEGER NOT NULL DEFAULT 0 CHECK(input_required_event_frontier >= 0);"
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_column}
+             UPDATE materialized_sessions SET input_required_event_frontier = max(input_required_event_frontier, applied_event_ordinal);
+             INSERT INTO schema_migrations(version, applied_at) VALUES (93, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 93;
+             COMMIT;"
+        ))?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2837,6 +2860,20 @@ mod reader_tests {
             restore_github_v84_schema(&connection);
         }
         // Historical fixtures must remove columns introduced by later revisions.
+        if version < 93
+            && legacy_schema::table_has_column(
+                &connection,
+                "materialized_sessions",
+                "input_required_event_frontier",
+            )
+            .unwrap()
+        {
+            connection
+                .execute_batch(
+                    "ALTER TABLE materialized_sessions DROP COLUMN input_required_event_frontier;",
+                )
+                .unwrap();
+        }
         if version < 89
             && legacy_schema::table_has_column(&connection, "session_restart_intents", "automatic")
                 .unwrap()
@@ -3238,6 +3275,46 @@ mod reader_tests {
     /// A store ahead of this build cannot be fixed by starting a daemon of
     /// this build, so the reader must not say so. This is the message the
     /// incident in #24 printed twice a second for an hour.
+    #[test]
+    fn question_frontier_migration_is_atomic_and_preserved_by_previous_writers() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("question-frontier.sqlite");
+        save_session_to(&path, &super::super::tests::session("child", "project")).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE materialized_sessions SET applied_event_ordinal=7 WHERE session_id='child'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        stamp_schema_version(&path, 92);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TRIGGER stop_question_migration BEFORE INSERT ON schema_migrations WHEN NEW.version=93 BEGIN SELECT RAISE(ABORT,'question frontier fixture'); END;").unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        connection
+            .execute_batch("ROLLBACK; DROP TRIGGER stop_question_migration;")
+            .unwrap();
+        assert!(
+            !legacy_schema::table_has_column(
+                &connection,
+                "materialized_sessions",
+                "input_required_event_frontier"
+            )
+            .unwrap()
+        );
+        assert_eq!(read_schema_state(&connection).unwrap().revision, 92);
+        migrate_schema(&connection).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, 93);
+        assert_eq!(state.minimum_compatible, Some(92));
+        state.ensure_supported_by(92).unwrap();
+        // The old writer names only the old projection columns. Its update
+        // must not erase the new build's already-delivered question frontier.
+        connection.execute("UPDATE materialized_sessions SET applied_event_ordinal=2, pending_elicitations_json='[]' WHERE session_id='child'", []).unwrap();
+        assert_eq!(connection.query_row("SELECT input_required_event_frontier FROM materialized_sessions WHERE session_id='child'", [], |row| row.get::<_,u64>(0)).unwrap(), 7);
+    }
+
     #[test]
     fn strict_reader_reports_a_newer_store_without_blaming_the_daemon() {
         let directory = tempfile::tempdir().unwrap();

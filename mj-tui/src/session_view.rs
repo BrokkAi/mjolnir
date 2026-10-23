@@ -15,7 +15,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
-use crate::dashboard_sessions::own_attention_level;
+use crate::dashboard_sessions::session_attention_level;
 
 /// Revisions come from one counter, so a replaced value never repeats a
 /// revision an earlier value had.
@@ -107,10 +107,7 @@ pub(crate) struct SessionFacts {
     /// the first derivation.
     inputs: Option<[u64; 5]>,
     /// The attention level of every session record from its own facts.
-    own: HashMap<String, AttentionLevel>,
-    /// For each parent, its first active Mjolnir sub-agent that is waiting
-    /// on a question.
-    waiting_child: HashMap<String, String>,
+    attention: HashMap<String, AttentionLevel>,
     /// Live records, and records an operation keeps on screen, by id.
     listed: Vec<String>,
     /// How many times the facts were derived, for tests to count.
@@ -122,27 +119,12 @@ impl SessionFacts {
     fn derive(dashboard: &DashboardState, inputs: [u64; 5]) -> Self {
         let mut index = dashboard.row_index.borrow_mut();
         index.synchronize(&dashboard.state);
-        let own = dashboard
+        let attention = dashboard
             .state
             .sessions
             .iter()
-            .map(|(id, session)| (id.clone(), own_attention_level(dashboard, id, session)))
+            .map(|(id, session)| (id.clone(), session_attention_level(dashboard, id, session)))
             .collect::<HashMap<_, _>>();
-        let waiting_child = index
-            .active_children
-            .iter()
-            .filter_map(|(parent, children)| {
-                let child = children.iter().find(|child| {
-                    own.get(*child) == Some(&AttentionLevel::Waiting)
-                        && dashboard.state.sessions.contains_key(*child)
-                        && dashboard
-                            .session_details
-                            .get(*child)
-                            .is_some_and(|detail| !detail.pending_elicitations.is_empty())
-                })?;
-                Some((parent.clone(), child.clone()))
-            })
-            .collect();
         let mut listed = index.live.clone();
         listed.extend(dashboard.session_operations.keys().cloned());
         let listed = listed
@@ -151,36 +133,18 @@ impl SessionFacts {
             .collect();
         Self {
             inputs: Some(inputs),
-            own,
-            waiting_child,
+            attention,
             listed,
             #[cfg(test)]
             derivations: 0,
         }
     }
 
-    pub(crate) fn own_attention_level(&self, session_id: &str) -> AttentionLevel {
-        self.own
+    pub(crate) fn attention_level(&self, session_id: &str) -> AttentionLevel {
+        self.attention
             .get(session_id)
             .copied()
             .unwrap_or(AttentionLevel::Inactive)
-    }
-
-    /// A parent whose Mjolnir sub-agent is waiting on a question reads as
-    /// waiting too. The child has no row outside the Sub-agents view, so
-    /// without this nothing a person normally looks at would show that the
-    /// child needs them (R11-1).
-    pub(crate) fn attention_level(&self, session_id: &str) -> AttentionLevel {
-        let own = self.own_attention_level(session_id);
-        if own < AttentionLevel::Waiting && self.waiting_child.contains_key(session_id) {
-            AttentionLevel::Waiting
-        } else {
-            own
-        }
-    }
-
-    pub(crate) fn waiting_child(&self, parent_id: &str) -> Option<&str> {
-        self.waiting_child.get(parent_id).map(String::as_str)
     }
 
     pub(crate) fn listed(&self) -> &[String] {

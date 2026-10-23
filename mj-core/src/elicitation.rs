@@ -41,6 +41,26 @@ pub struct ToolPermissionForm {
 }
 
 impl ElicitationRequest {
+    /// Render a question for an agent receiving it through its mailbox.
+    pub fn question_text(&self) -> String {
+        let mut lines = vec![self.message.clone()];
+        lines.extend(self.title.iter().cloned());
+        lines.extend(self.description.iter().cloned());
+        for field in &self.fields {
+            lines.push(format!("\n{}", field.title));
+            lines.extend(field.description.iter().cloned());
+            if let ElicitationFieldKind::SingleSelect { options, .. }
+            | ElicitationFieldKind::MultiSelect { options, .. } = &field.kind
+            {
+                for option in options {
+                    lines.push(format!("- {}", option.title));
+                    lines.extend(option.description.iter().cloned());
+                }
+            }
+        }
+        lines.join("\n")
+    }
+
     /// Whether the form offers Skip (the `decline` action). Every surface
     /// asks this, and [`Self::harness_response`] refuses a Skip it denies.
     #[must_use]

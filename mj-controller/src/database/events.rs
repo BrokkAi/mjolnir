@@ -82,6 +82,20 @@ pub(super) fn insert_api_event(
         "INSERT INTO api_events(session_id, recorded_at_ms, body) VALUES (?1, ?2, ?3)",
         params![session_id, recorded_at_ms, serde_json::to_string(event)?],
     )?;
+    let seq = tx.last_insert_rowid() as u64;
+    if let ApiEventData::InputRequired {
+        request: Some(request),
+        ..
+    } = event
+    {
+        super::subagent_questions::forward_subagent_question_with(
+            tx,
+            session_id,
+            seq,
+            recorded_at_ms,
+            request,
+        )?;
+    }
     Ok(())
 }
 
@@ -568,6 +582,200 @@ mod tests {
             load_api_events_from(&path, &ApiEventFilter::default(), Some(2), 100).unwrap();
         assert!(deleted.events.is_empty());
         assert_eq!(deleted.latest_seq, 2);
+    }
+
+    #[test]
+    fn child_question_outbox_survives_cancellation_replay_and_reused_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("questions.sqlite");
+        for id in ["session-1", "parent"] {
+            let mut record = super::super::tests::session(id, "project-1");
+            record.state = SessionState::Running;
+            save_session_to(&path, &record).unwrap();
+        }
+        let question = ElicitationRequest::from_acp_params("elicitation-1", serde_json::json!({
+            "mode":"form", "sessionId":"session-1", "message":"Which architecture?",
+            "requestedSchema":{"type":"object", "properties":{"choice":{"type":"string", "title":"Architecture", "enum":["Thin callers", "Thick callers"]}}}
+        })).unwrap();
+        let mut permission = question.clone();
+        permission.message = "May I run this command?".into();
+        permission.tool_permission = Some(mj_core::elicitation::ToolPermissionForm { skip: true });
+        let observations = || {
+            vec![
+                RelayObservation::ElicitationRequested {
+                    request: question.clone(),
+                },
+                RelayObservation::ElicitationResolved {
+                    elicitation_id: question.id.clone(),
+                    action: "cancel".into(),
+                    reply: None,
+                },
+                // A restarted harness may reuse the same question id.
+                RelayObservation::ElicitationRequested {
+                    request: permission.clone(),
+                },
+                RelayObservation::ElicitationResolved {
+                    elicitation_id: permission.id.clone(),
+                    action: "cancel".into(),
+                    reply: None,
+                },
+            ]
+        };
+        // A top-level form remains local.
+        page(&path, observations(), false).unwrap();
+        let connection = open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM mailbox_outbox", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+        connection.execute("INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES ('session-1','parent','session-1','{}')", []).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_question_mail BEFORE INSERT ON mailbox_outbox BEGIN SELECT RAISE(ABORT, 'question mail failed'); END;").unwrap();
+        assert!(
+            page(&path, observations(), false)
+                .unwrap_err()
+                .to_string()
+                .contains("question mail failed")
+        );
+        assert_eq!(
+            load_api_events_from(&path, &ApiEventFilter::default(), Some(0), 100)
+                .unwrap()
+                .events
+                .len(),
+            4,
+            "outbox failure rolls back its API events too"
+        );
+        connection
+            .execute_batch("DROP TRIGGER fail_question_mail")
+            .unwrap();
+        drop(connection);
+        page(&path, observations(), false).unwrap();
+        let current = load_materialized_session_from(&path, "session-1")
+            .unwrap()
+            .unwrap();
+        assert!(
+            current.pending_elicitations.is_empty(),
+            "both forms resolved in this same projection page"
+        );
+        apply_projection_event_to(
+            &path,
+            "session-1",
+            current.applied_event_ordinal,
+            "",
+            &current.applied_event_digest,
+            &MaterializedSessionMutation::default(),
+        )
+        .unwrap();
+        let mut connection = open(&path).unwrap();
+        let messages = connection
+            .prepare(
+                "SELECT target_session_id,event_json,wake FROM mailbox_outbox ORDER BY event_key",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, bool>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(messages.len(), 2);
+        let mut texts = Vec::new();
+        for (target, body, wake) in messages {
+            assert_eq!(
+                target, "parent",
+                "only the direct parent receives the question"
+            );
+            assert!(wake);
+            let event: mj_core::mailbox::MailboxEvent = serde_json::from_str(&body).unwrap();
+            let mj_core::mailbox::MailboxEventBody::SessionMessage {
+                from: mj_core::mailbox::Sender::Session { id, .. },
+                text,
+            } = event.body
+            else {
+                panic!("session message expected")
+            };
+            assert_eq!(id, "session-1");
+            assert!(text.contains("Architecture\n- Thin callers\n- Thick callers"));
+            assert!(text.contains("send_message to session_id session-1"));
+            texts.push(text);
+        }
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Which architecture?"))
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("May I run this command?"))
+        );
+        assert_eq!(
+            super::super::subagent_questions::reconcile_pending_subagent_questions_with(
+                &mut connection
+            )
+            .unwrap(),
+            0
+        );
+        // Projection repair can reset to genesis/checkpoint and replay the old
+        // relay observations with new API sequence numbers. Its durable input
+        // frontier survives replacement and suppresses historical questions.
+        drop(connection);
+        save_materialized_session_to(&path, &MaterializedSession::empty("session-1")).unwrap();
+        page(
+            &path,
+            observations().into_iter().chain(observations()).collect(),
+            false,
+        )
+        .unwrap();
+        let connection = open(&path).unwrap();
+        assert_eq!(connection.query_row("SELECT count(*) FROM api_events WHERE json_extract(body,'$.type')='input_required'", [], |r| r.get::<_,u64>(0)).unwrap(), 4);
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM mailbox_outbox", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            2
+        );
+        // A legacy worker leaves the next form pending. Simulate an older daemon
+        // which stored its input event without creating its outbox message.
+        page(
+            &path,
+            vec![RelayObservation::ElicitationRequested {
+                request: question.clone(),
+            }],
+            false,
+        )
+        .unwrap();
+        connection.execute("DELETE FROM mailbox_outbox WHERE event_key=(SELECT 'subagent-question-session-1-' || max(seq) FROM api_events)", []).unwrap();
+        drop(connection);
+        let mut reopened = open(&path).unwrap();
+        assert_eq!(
+            super::super::subagent_questions::reconcile_pending_subagent_questions_with(
+                &mut reopened
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            super::super::subagent_questions::reconcile_pending_subagent_questions_with(
+                &mut reopened
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            reopened
+                .query_row("SELECT count(*) FROM mailbox_outbox", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            3
+        );
     }
 
     #[test]

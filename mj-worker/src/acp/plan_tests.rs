@@ -342,6 +342,15 @@ impl PlanProbe {
     }
 
     async fn with_harness(policy: ExecutionPolicy, config: bool, harness: HarnessKind) -> Self {
+        Self::with_ownership(policy, config, harness, false).await
+    }
+
+    async fn with_ownership(
+        policy: ExecutionPolicy,
+        config: bool,
+        harness: HarnessKind,
+        managed_subagent: bool,
+    ) -> Self {
         let (client, agent) = tokio::io::duplex(4096);
         let (client_read, client_write) = tokio::io::split(client);
         let (agent_read, agent_write) = tokio::io::split(agent);
@@ -351,6 +360,7 @@ impl PlanProbe {
             imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
+            managed_subagent,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
@@ -1687,5 +1697,131 @@ async fn claude_plan_approval_form_selects_the_policy_mode_and_refuses_hidden_by
         assert_eq!(answer["id"], "exit-plan");
         assert_eq!(answer["result"]["outcome"]["optionId"], yes);
         probe.close().await;
+    }
+}
+
+/// Exercise the actual ACP callbacks, including the harness-specific plan
+/// envelopes, while keeping question ownership independent of harness kind.
+#[tokio::test]
+async fn managed_children_cancel_questions_and_permissions_at_the_original_responder() {
+    for harness in HarnessKind::ALL {
+        for policy in [
+            ExecutionPolicy::ConfiguredApprovals,
+            ExecutionPolicy::Unconstrained,
+        ] {
+            let mut probe = PlanProbe::with_ownership(policy, false, harness, true).await;
+            if harness == HarnessKind::Muse {
+                probe.send(json!({
+                    "jsonrpc":"2.0", "id":"route", "method":"elicitation/create", "params":{
+                        "sessionId":"plan-session", "mode":"form", "message":"Choose how to respond",
+                        "requestedSchema":{"type":"object", "properties":{"route":{"type":"string", "enum":["Answer questions", "Explain instead"]}}}
+                    }
+                })).await;
+                assert_eq!(
+                    probe.message().await["result"]["content"]["route"],
+                    "Answer questions",
+                    "internal Muse routing must still reach the actual question"
+                );
+            }
+            let question = json!({
+                "jsonrpc":"2.0", "id":"ask", "method":"elicitation/create", "params":{
+                    "sessionId":"plan-session", "mode":"form", "message":"Which file?",
+                    "requestedSchema":{"type":"object", "properties":{"token":{"type":"string", "title":"Secret token", "_meta":{"codex":{"isSecret":true}}}}}
+                }
+            });
+            let tool_ask = json!({
+                "jsonrpc":"2.0", "id":"permission", "method":"session/request_permission", "params":{
+                    "sessionId":"plan-session", "toolCall":{"toolCallId":"tool", "kind":"execute", "title":"Run command"},
+                    "options":[{"optionId":"allow", "name":"Allow once", "kind":"allow_once"}, {"optionId":"reject", "name":"Reject", "kind":"reject_once"}]
+                }
+            });
+            let plan = json!({"jsonrpc":"2.0", "id":"plan", "method":"session/request_permission", "params":permission("The proposed plan", &["bypassPermissions", "reject"])});
+            let mut asks = vec![question, plan];
+            if policy.is_unconstrained() {
+                probe.send(tool_ask).await;
+                let answer = probe.message().await;
+                assert_eq!(
+                    answer["result"]["outcome"]["optionId"], "allow",
+                    "full-access children retain automatic tool approval"
+                );
+                probe.send(json!({
+                    "jsonrpc":"2.0", "id":"no-allow", "method":"session/request_permission", "params":{
+                        "sessionId":"plan-session", "toolCall":{"toolCallId":"no-allow", "kind":"execute", "title":"Run command"},
+                        "options":[{"optionId":"reject", "name":"Reject", "kind":"reject_once"}]
+                    }
+                })).await;
+                assert!(
+                    probe.message().await["error"].is_object(),
+                    "an unanswerable full-access request keeps its original error path"
+                );
+                loop {
+                    match probe.event().await {
+                        RuntimeEvent::Warning { message } => {
+                            assert!(message.contains("without offering an allow response"));
+                            break;
+                        }
+                        RuntimeEvent::ElicitationRequested { .. } => {
+                            panic!("automatic approval must not publish a human form")
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                asks.push(tool_ask);
+            }
+            if harness == HarnessKind::Grok {
+                asks.push(json!({"jsonrpc":"2.0", "id":"grok-plan", "method":"x.ai/exit_plan_mode", "params":{"sessionId":"plan-session", "plan":"Proposed plan"}}));
+            }
+            for ask in asks {
+                let id = ask["id"].clone();
+                probe.send(ask.clone()).await;
+                let request = loop {
+                    match probe.event().await {
+                        RuntimeEvent::ElicitationRequested { request } => break request,
+                        RuntimeEvent::Warning { message } => panic!("{harness:?}: {message}"),
+                        _ => {}
+                    }
+                };
+                if id == "ask" {
+                    assert!(
+                        request.fields[0].secret,
+                        "secret questions follow the same routing policy"
+                    );
+                }
+                let answer = probe.message().await;
+                assert_eq!(
+                    answer["id"], id,
+                    "{harness:?}: answer belongs to the original request"
+                );
+                match ask["method"].as_str().unwrap() {
+                    "elicitation/create" => assert_eq!(answer["result"]["action"], "cancel"),
+                    "session/request_permission" => {
+                        assert_eq!(answer["result"]["outcome"]["outcome"], "cancelled")
+                    }
+                    _ => assert_eq!(answer["result"]["outcome"], "cancelled"),
+                }
+                loop {
+                    if let RuntimeEvent::ElicitationResolved {
+                        elicitation_id,
+                        action,
+                        reply,
+                    } = probe.event().await
+                    {
+                        assert_eq!(elicitation_id, request.id);
+                        assert_eq!(action, "cancel");
+                        assert!(reply.is_none(), "cancellation is not a parent answer");
+                        break;
+                    }
+                }
+                assert!(
+                    probe
+                        .answer_with(&request.id, ElicitationResponse::Cancel)
+                        .await
+                        .is_err(),
+                    "the form must no longer be externally answerable"
+                );
+            }
+            probe.close().await;
+        }
     }
 }
