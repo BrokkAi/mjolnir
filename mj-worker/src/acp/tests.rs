@@ -3791,32 +3791,6 @@ async fn unexpected_steering_delivery_is_held_without_cancellation() {
     exercise_image_steering(false, "startedNewTurn").await;
 }
 
-#[test]
-fn only_bridges_that_return_idle_steers_are_steered_automatically() {
-    let meta = |value: serde_json::Value| -> agent_client_protocol::schema::v1::Meta {
-        serde_json::from_value(value).unwrap()
-    };
-    let advertised = meta(serde_json::json!({
-        "steering": {"supported": true, "idleBehaviors": ["promptRequired"]}
-    }));
-    let plain = meta(serde_json::json!({"steering": {"supported": true}}));
-    assert!(steering_returns_idle_input(
-        Some(&advertised),
-        HarnessKind::Codex
-    ));
-    // Codex bridges before 1.13.2 start a turn of their own instead.
-    assert!(!steering_returns_idle_input(
-        Some(&plain),
-        HarnessKind::Codex
-    ));
-    // The pinned Claude bridge returns the steer without advertising it.
-    assert!(steering_returns_idle_input(
-        Some(&plain),
-        HarnessKind::Claude
-    ));
-    assert!(!steering_returns_idle_input(None, HarnessKind::Muse));
-}
-
 #[tokio::test]
 async fn returned_steering_leaves_the_prompt_to_mj_without_cancellation() {
     exercise_image_steering(false, "promptRequired").await;

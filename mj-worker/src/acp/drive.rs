@@ -1745,22 +1745,6 @@ pub(super) fn steering_supported_from_meta(
         .unwrap_or(false)
 }
 
-/// Whether the bridge returns a steer it cannot inject (`promptRequired`)
-/// instead of starting a turn of its own. Codex bridges advertise it; Claude
-/// ACP 0.94.0 does not. Claude steers are routed through PostToolBatch, so this
-/// compatibility fact enables automatic admission without sending ACP steering.
-pub(super) fn steering_returns_idle_input(
-    meta: Option<&agent_client_protocol::schema::v1::Meta>,
-    harness: HarnessKind,
-) -> bool {
-    let advertised = meta
-        .and_then(|meta| meta.get("steering"))
-        .and_then(|steering| steering.get("idleBehaviors"))
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|behaviors| behaviors.iter().any(|b| b == "promptRequired"));
-    advertised || harness == HarnessKind::Claude
-}
-
 pub(super) struct PendingSteer {
     pub(super) request_id: String,
     pub(super) queued_command_id: String,

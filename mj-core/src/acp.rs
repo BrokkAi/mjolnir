@@ -544,11 +544,6 @@ pub enum RuntimeEvent {
         agent_info: Option<Implementation>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         steering_supported: Option<bool>,
-        /// The bridge hands a steer back when no turn can take it, instead of
-        /// starting a turn of its own, so queued prompts may be steered
-        /// without the user asking.
-        #[serde(default)]
-        steering_returns_idle_input: bool,
     },
     ContextClearing {
         request_id: String,
