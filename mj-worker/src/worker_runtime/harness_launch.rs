@@ -185,9 +185,12 @@ async fn link_build_cache_configuration(environment: &BTreeMap<String, String>) 
         // the OS error rather than calling every failure "missing": a host file
         // the container cannot reach is a different problem from one that was
         // never published.
+        let directory = root.join("mbx");
+        let destination = directory.join("config.toml");
         match std::fs::metadata(&source) {
             Ok(metadata) if metadata.is_file() => {}
             Ok(_) => {
+                remove_stale_configuration_link(&destination, &source);
                 tracing::warn!(
                     configuration = %source.display(),
                     "shared machine mbx configuration is not a file; mbx uses its own defaults"
@@ -195,6 +198,7 @@ async fn link_build_cache_configuration(environment: &BTreeMap<String, String>) 
                 return Ok(());
             }
             Err(error) => {
+                remove_stale_configuration_link(&destination, &source);
                 tracing::warn!(
                     configuration = %source.display(),
                     %error,
@@ -203,9 +207,7 @@ async fn link_build_cache_configuration(environment: &BTreeMap<String, String>) 
                 return Ok(());
             }
         }
-        let directory = root.join("mbx");
         std::fs::create_dir_all(&directory).context("create mbx configuration lookup directory")?;
-        let destination = directory.join("config.toml");
         if std::fs::read_link(&destination).ok().as_ref() == Some(&source) {
             return Ok(());
         }
@@ -221,6 +223,22 @@ async fn link_build_cache_configuration(environment: &BTreeMap<String, String>) 
     })
     .await
     .context("mbx configuration link task failed")?
+}
+
+/// A policy that existed when the home was prepared can disappear, leaving a
+/// link to nothing. Remove only Mjolnir's own link; a real file belongs to the
+/// user.
+fn remove_stale_configuration_link(destination: &Path, source: &Path) {
+    if std::fs::read_link(destination).ok().as_deref() != Some(source) {
+        return;
+    }
+    if let Err(error) = std::fs::remove_file(destination) {
+        tracing::warn!(
+            configuration = %destination.display(),
+            %error,
+            "could not remove a stale shared mbx configuration link"
+        );
+    }
 }
 
 fn resolve_command(command: &Path, environment: &BTreeMap<String, String>) -> Result<PathBuf> {
@@ -305,17 +323,22 @@ mod tests {
     #[tokio::test]
     async fn a_missing_machine_policy_does_not_refuse_the_harness() {
         let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let missing = root.path().join("missing");
+        std::fs::create_dir_all(home.join("mbx")).unwrap();
+        std::os::unix::fs::symlink(missing.join("config.toml"), home.join("mbx/config.toml"))
+            .unwrap();
         let environment = BTreeMap::from([
             (
                 "MJ_MBX_CONFIG_DIR".into(),
-                root.path().join("missing").to_string_lossy().into_owned(),
+                missing.to_string_lossy().into_owned(),
             ),
             (
                 "XDG_CONFIG_HOME".into(),
-                root.path().join("home").to_string_lossy().into_owned(),
+                home.to_string_lossy().into_owned(),
             ),
         ]);
         link_build_cache_configuration(&environment).await.unwrap();
-        assert!(!root.path().join("home/mbx/config.toml").exists());
+        assert!(!home.join("mbx/config.toml").exists());
     }
 }
