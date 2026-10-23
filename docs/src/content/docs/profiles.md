@@ -557,8 +557,8 @@ that harness as an ACP agent. It reads the methods the bridge advertises:
 | --- | --- |
 | Codex | ACP `authenticate` for `chat-gpt` (browser) or `api-key` (environment key) |
 | Claude Code | No ACP methods; falls back to `claude auth login` when the Claude CLI is installed |
-| Kimi Code | Falls back to `kimi login` when the bridge advertises no terminal method |
-| Grok Build | Falls back to `grok login` when the bridge advertises no terminal method |
+| Kimi Code | Runs its advertised ACP method; falls back to `kimi login` only when the bridge cannot run |
+| Grok Build | Runs `grok login` for its `grok.com` method; falls back to the CLI when the bridge cannot run |
 | Muse Code | Runs the ACP `terminal` method `muse-acp login` |
 | OpenCode | Runs the pinned `opencode auth login --standalone` |
 | MiMo Code | Runs the pinned `mimo auth login` |

@@ -588,8 +588,7 @@ impl DashboardState {
         let profiles_changed = self.config.profiles != config.profiles;
         *self.config = config;
         if profiles_changed {
-            self.profile_login_statuses.clear();
-            self.profile_login_refresh = true;
+            self.invalidate_profile_login_statuses();
         }
         // A background refresh must not dismiss a newer interaction. Forms
         // retain their drafts; command availability reads the current config.

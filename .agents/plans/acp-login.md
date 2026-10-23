@@ -27,6 +27,8 @@ using the pinned harness Mjolnir manages, with no ambient harness installation.
 - [x] Show each saved profile's sign-in status in the profiles list, read off
   the event loop when Settings opens and after a login.
 - [x] Run formatting, focused tests, full tests, and Clippy.
+- [x] Review the branch in two independent rounds, fix the findings, re-merge
+  `origin/master`, and revalidate.
 
 ## Surprises & Discoveries
 
@@ -46,6 +48,16 @@ using the pinned harness Mjolnir manages, with no ambient harness installation.
   Claude CLI's.
 - DSH advertises only an API-key method; API-key and inline-key profiles have no
   interactive login.
+- A profile pointed at the person's own OpenCode or Muse home cannot use the
+  pinned bridge: the OpenCode ACP script requires `XDG_CONFIG_HOME`, which is
+  deliberately unset for an own home, and running the pinned binary against the
+  person's database can migrate it. Those profiles use the installed CLI.
+- ACP request ids are per direction. Checking `method` after the response id
+  would report success on a server request whose id collides with ours.
+- Crossterm's event-stream thread stops when the stream is dropped, so the
+  handoff must release the stream before the child owns stdin.
+- Headless Codex cannot show the browser for `chat-gpt`; it needs a clear
+  refusal or an exported API key.
 
 ## Decision Log
 
@@ -76,6 +88,20 @@ using the pinned harness Mjolnir manages, with no ambient harness installation.
   action is limited to profiles already in the saved configuration because
   `mj login --profile` reads that file. Rationale: the visual Settings surface
   is the primary way people manage profiles.
+- Decision: an own nested home (the person's `~/.config/opencode` or Muse home)
+  signs in through the installed CLI, not the pinned bridge. Rationale: the
+  pinned OpenCode needs `XDG_CONFIG_HOME` and could migrate a database Mjolnir
+  does not own.
+- Decision: run the interactive child on `spawn_blocking`, restore the terminal
+  on every path, and drop the event stream before the child. Rationale: the
+  dashboard must not be left cooked, on the primary screen, with no input
+  source when a spawn fails.
+- Decision: order status reads with a generation that config changes also bump;
+  reuse the setup authentication predicate so OpenCode environment keys, Claude
+  tokens and the macOS Keychain agree with doctor.
+- Decision: Sign in is enabled only for a saved, enabled, interactive profile
+  whose draft still matches disk. Rationale: `mj login` reads the saved file,
+  not the unsaved draft.
 
 ## Outcomes & Retrospective
 
@@ -97,20 +123,24 @@ status (`signed in`, `signed out`, `credential expired`, or the API-key/no-login
 case); the status is read off the event loop when Settings opens and again
 after a login.
 
-Validation: six focused tests exercise a scripted ACP bridge (terminal command
-with the profile environment, `authenticate`, unknown-method listing, empty
-methods, the OpenCode fallback, and selection). Isolated live runs with pinned
-harnesses confirmed both kinds of terminal method: OpenCode selected
-`opencode-login` and launched `opencode auth login --standalone` under a PTY,
-and Muse selected `muse-login`, ran the advertised `muse-acp login`, and printed
-the device URL and code from the pinned native `muse login`. `cargo test`,
-`cargo clippy --all-targets -- -D warnings`, and formatting pass.
+Validation: eight focused tests exercise a scripted ACP bridge (terminal command
+with the profile environment and method env, `authenticate`, a colliding server
+request, unknown-method listing, empty methods, the OpenCode fallback, API-key
+refusal, and selection); five controller tests cover sign-in status. Isolated
+live runs with pinned harnesses confirmed both kinds of terminal method:
+OpenCode selected `opencode-login` and launched `opencode auth login
+--standalone` under a PTY, and Muse selected `muse-login`, ran the advertised
+`muse-acp login`, and printed the device URL and code from the pinned native
+`muse login`. The focused ACP suite passed 20 repeated parallel runs. `cargo
+test`, `cargo clippy --all-targets -- -D warnings`, and formatting pass.
 
 Remaining limitation: Claude agent-acp 0.94.0 advertises no ACP methods, so its
-login still uses an installed `claude` CLI. Kimi and Grok were not installed in
-the validation environment, so their bridges' methods remain unverified; a
-terminal method they advertise is handled generically, and otherwise their CLI
-fallback is used.
+login still uses an installed `claude` CLI (or the Mjolnir setup token). Kimi
+and Grok were not installed in the validation environment; an advertised
+terminal method is handled generically, Grok's `grok.com` method runs `grok
+login`, and otherwise the harness CLI fallback applies. Sign-in status is a
+read-only local probe, not a live provider check; a revoked-but-present token
+still reads `signed in` until a turn fails.
 
 ## Context and Orientation
 

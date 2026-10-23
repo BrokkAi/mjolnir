@@ -50,15 +50,28 @@ pub fn status(
         AuthScheme::InlineApiKey => LoginStatus::NotRequired("inline API key".to_owned()),
         AuthScheme::AwsCredentialChain => LoginStatus::NotRequired("AWS credentials".to_owned()),
         AuthScheme::NoAuthentication => LoginStatus::NotRequired("no login required".to_owned()),
-        AuthScheme::NativeLoginStore => {
-            if crate::setup::harness_is_authenticated_with_executor(profile, executor) {
-                LoginStatus::SignedIn
-            } else {
-                LoginStatus::SignedOut
+        AuthScheme::NativeLoginStore => match crate::opencode_logins::profile_logins(profile) {
+            Ok(Some(_)) => LoginStatus::SignedIn,
+            Ok(None) if !profile.opencode_environment_logins().is_empty() => LoginStatus::SignedIn,
+            Ok(None) => LoginStatus::SignedOut,
+            Err(error) => {
+                LoginStatus::Unknown(format!("could not read OpenCode logins: {error:#}"))
             }
-        }
+        },
         AuthScheme::NativeLogin => {
-            if !crate::setup::harness_is_authenticated_with_executor(profile, executor) {
+            let authenticated =
+                crate::setup::harness_is_authenticated_with_executor(profile, executor);
+            #[cfg(target_os = "macos")]
+            if profile.kind == HarnessKind::Claude && !profile.authentication_marker().is_file() {
+                return if authenticated {
+                    LoginStatus::SignedIn
+                } else {
+                    LoginStatus::Unknown(
+                        "Claude Code keeps this login in the macOS Keychain".to_owned(),
+                    )
+                };
+            }
+            if !authenticated {
                 return LoginStatus::SignedOut;
             }
             // Authenticated, but a recorded access-token expiry is worth
@@ -73,8 +86,14 @@ pub fn status(
                             "the credential file is not valid JSON".to_owned(),
                         );
                     }
-                    let expired = credentials::credential_expiry(profile.kind, &bytes)
-                        .is_some_and(|expiry| expiry <= mj_core::clock::epoch_millis());
+                    let expiry =
+                        credentials::credential_expiry(profile.kind, &bytes).or_else(|| {
+                            matches!(profile.kind, HarnessKind::Grok | HarnessKind::Mimo)
+                                .then(|| credentials::credential_freshness(profile.kind, &bytes))
+                                .flatten()
+                        });
+                    let expired =
+                        expiry.is_some_and(|expiry| expiry <= mj_core::clock::epoch_millis());
                     if expired {
                         LoginStatus::Expired
                     } else {

@@ -2151,10 +2151,9 @@ async fn dispatch_restart(
 
 /// Run `mj login` for one profile with the dashboard's terminal handed over.
 ///
-/// This is deliberately synchronous: the person is looking at the login flow,
-/// not at the dashboard, and the child must own standard input for browser and
-/// device-code prompts. The event stream is dropped first so it cannot consume
-/// that input, and recreated afterwards.
+/// The interactive child must own standard input for browser and device-code
+/// prompts, so the event stream is dropped before the child starts and the
+/// terminal is restored on every path, including a failed spawn.
 async fn run_setup_login(context: &mut DashboardContext, profile_id: &str) -> Result<(), String> {
     let executable =
         std::env::current_exe().map_err(|error| format!("find the mj executable: {error}"))?;
@@ -2172,25 +2171,28 @@ async fn run_setup_login(context: &mut DashboardContext, profile_id: &str) -> Re
     // The interactive child cannot run on a runtime worker. The dashboard
     // waits for the handover, but the Tokio worker remains available for the
     // daemon's other tasks.
-    let status = tokio::task::spawn_blocking(move || {
+    let joined = tokio::task::spawn_blocking(move || {
         std::process::Command::new(executable)
             .args(["login", "--profile", &profile])
             .status()
     })
-    .await
-    .map_err(|error| format!("sign-in task failed: {error}"))?
-    .map_err(|error| format!("could not start `mj login --profile {profile_id}`: {error}"))?;
+    .await;
+    // Restore the terminal on every path: a failed spawn or a panicking child
+    // must not leave the dashboard on the primary screen with no input.
     let resumed = context.terminal.resume();
     context.events = Some(crossterm::event::EventStream::new());
     if let Err(error) = resumed {
         context.request_shutdown();
         return Err(format!("{error:#}"));
     }
+    let status = joined
+        .map_err(|error| format!("sign-in task failed: {error}"))?
+        .map_err(|error| format!("could not start `mj login --profile {profile_id}`: {error}"))?;
     if status.success() {
         Ok(())
     } else {
         Err(format!(
-            "`mj login --profile {profile_id}` exited with {status}; see the output above"
+            "`mj login --profile {profile_id}` exited with {status}; rerun it from a shell for the full output"
         ))
     }
 }

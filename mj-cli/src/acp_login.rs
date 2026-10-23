@@ -87,7 +87,9 @@ pub(crate) async fn login(
     // the account login shell and finally the profile's own overrides. The
     // old CLI login inherited this environment; env_clear here would drop
     // DISPLAY/BROWSER and exported provider keys.
-    let mut launch_environment: BTreeMap<String, String> = std::env::vars().collect();
+    let mut launch_environment: BTreeMap<String, String> = std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .collect();
     match mj_core::login_environment::with_overrides(&BTreeMap::new()).await {
         Ok(login) => launch_environment.extend(login),
         Err(error) => {
@@ -181,7 +183,14 @@ async fn sign_in(
         );
     }
     println!("Signing in with {} ({}).", method.name, method.id);
-    match method.terminal_command(kind, entrypoint)? {
+    let terminal = match method.terminal_command(kind, entrypoint) {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            session.shutdown().await;
+            return Err(error);
+        }
+    };
+    match terminal {
         Some(terminal) => {
             session.shutdown().await;
             let rendered = render_command(&terminal);
@@ -226,9 +235,15 @@ async fn sign_in(
                 }
             }
             let result =
-                tokio::time::timeout(AUTHENTICATE_TIMEOUT, session.authenticate(&method.id))
+                match tokio::time::timeout(AUTHENTICATE_TIMEOUT, session.authenticate(&method.id))
                     .await
-                    .context("the ACP sign-in flow timed out")?;
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        session.shutdown().await;
+                        bail!("the ACP sign-in flow timed out");
+                    }
+                };
             if let Err(error) = result {
                 session.shutdown().await;
                 return Err(error.context(format!(
@@ -598,6 +613,20 @@ impl AcpSession {
     }
 }
 
+impl Drop for AcpSession {
+    fn drop(&mut self) {
+        // Every early return above must still take the bridge's process group
+        // with it. `try_wait` distinguishes a live child from one already
+        // reaped, so a recycled pid is never signaled.
+        #[cfg(unix)]
+        if self.child.try_wait().ok().flatten().is_none()
+            && let Some(pid) = self.child.id()
+        {
+            mj_core::subprocess::terminate_process_group(pid as i32, libc::SIGKILL);
+        }
+    }
+}
+
 fn parse_methods(result: &Value) -> Vec<AuthMethod> {
     result
         .get("authMethods")
@@ -676,6 +705,10 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    /// Writing and executing a fixture script can race another test's fork
+    /// with `ETXTBSY`. These tests spawn real processes, so keep them serial.
+    static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn write_script(directory: &Path, name: &str, body: &str) -> PathBuf {
         let path = directory.join(name);
         std::fs::write(&path, body).unwrap();
@@ -731,6 +764,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_api_key_profile_reports_no_interactive_login() {
+        let _guard = TEST_LOCK.lock().await;
         let directory = tempfile::tempdir().unwrap();
         let mut profile = HarnessProfile {
             enabled: true,
@@ -751,6 +785,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_terminal_method_runs_the_advertised_command_with_the_profile_environment() {
+        let _guard = TEST_LOCK.lock().await;
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("terminal-ran");
         let login = write_script(
@@ -793,6 +828,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_agent_method_sends_authenticate() {
+        let _guard = TEST_LOCK.lock().await;
         let directory = tempfile::tempdir().unwrap();
         let methods = json!([{
             "id": "chat-gpt",
@@ -821,6 +857,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_requested_method_lists_the_available_ids() {
+        let _guard = TEST_LOCK.lock().await;
         let directory = tempfile::tempdir().unwrap();
         let methods = json!([
             { "id": "first", "name": "First" },
@@ -845,6 +882,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_bridge_without_methods_is_unavailable() {
+        let _guard = TEST_LOCK.lock().await;
         let directory = tempfile::tempdir().unwrap();
         let bridge = bridge(directory.path(), "[]");
         let outcome = sign_in(
@@ -865,6 +903,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_server_request_sharing_the_response_id_is_not_mistaken_for_a_login() {
+        let _guard = TEST_LOCK.lock().await;
         let directory = tempfile::tempdir().unwrap();
         let response = json!({
             "jsonrpc": "2.0",

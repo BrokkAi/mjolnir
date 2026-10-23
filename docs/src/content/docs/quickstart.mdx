@@ -56,23 +56,25 @@ the folder.
 
 ### If no coding agent is installed
 
-Mjolnir runs an agent you already use; it does not include one. If no agent is
-found, the welcome reports the missing profile. To fix this:
+Mjolnir can install the exact pinned harness for a profile when you sign in, but
+it needs a profile first. If no agent is found:
 
-1. Install one supported agent and sign in with it once, using that agent's
-   own instructions. For example, Claude Code: `npm install -g
-   @anthropic-ai/claude-code`, then run `claude`. Codex: `npm install -g
-   @openai/codex`, then run `codex login`. Signing in creates the agent's home
-   directory (`~/.claude`, `~/.codex`, `~/.kimi-code`, `~/.grok`,
-   `~/.config/muse`, `~/.config/opencode`, or a MiMo Code `MIMOCODE_HOME`).
-   DSH has no sign-in: it reads `DEEPSEEK_API_KEY` from the environment
-   Mjolnir starts with; see [Profiles](/profiles/).
-2. Open Settings (`prefix+s`), choose **Agent Profiles**, and choose **Detect
-   profiles**, or run `mj setup` again.
+1. Open Settings (`prefix+s`), choose **Agent Profiles**, choose **Add**, pick
+   the agent kind, point `home` at a directory for that profile, and save.
+2. Select the profile and choose **Sign in**. The first sign-in installs the
+   pinned harness under Mjolnir's cache; `mj login --profile <id>` does the same
+   from a shell.
 
-Codex, Claude Code, Muse Code, and MiMo Code sessions on this machine also need Node.js 22
-or newer and npm on `PATH`; Mjolnir launches its own pinned copy of each agent.
-DSH needs no Node.js, but on Linux it needs glibc 2.34 or newer.
+Alternatively, install an agent and sign in with its own CLI, then choose
+**Detect profiles** (or run `mj setup`). That is also the path for a profile
+pointed at your own agent home; `mj login --cli` always uses the command on
+`PATH`.
+
+Codex, Claude Code, Muse Code, and MiMo Code sessions on this machine also need
+Node.js 22 or newer and npm on `PATH`; Mjolnir launches its own pinned copy of
+each agent. OpenCode uses a verified download, and Kimi and Grok use their
+official installers. DSH needs no Node.js, but on Linux it needs glibc 2.34 or
+newer.
 
 The dashboard keeps its session list, Conversation and Prompt regions, target
 capacity, and profile quota visible together.

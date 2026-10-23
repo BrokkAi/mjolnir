@@ -176,6 +176,18 @@ struct SetupSize {
     height: u16,
 }
 
+/// A profile whose authentication obviously needs no interactive login,
+/// using only configuration already in memory. Codex custom providers are
+/// decided by the background status read because their provider file is I/O.
+fn obviously_no_interactive_login(profile: &mj_core::config::HarnessProfile) -> bool {
+    profile.kind.api_key_variable().is_some()
+        || (profile.kind == mj_core::config::HarnessKind::Claude
+            && profile
+                .environment
+                .get("CLAUDE_CODE_USE_BEDROCK")
+                .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE")))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SetupDialog {
     generation: u64,
@@ -891,6 +903,19 @@ impl SetupDialog {
                     .collect()
             })
             .unwrap_or_default();
+        // Start with the profiles that have no interactive login at all, so
+        // Sign in is not offered before the background status read lands.
+        let mut login_statuses = std::collections::BTreeMap::new();
+        for (id, profile) in &config.profiles {
+            if obviously_no_interactive_login(profile) {
+                login_statuses.insert(
+                    id.clone(),
+                    mj_core::credentials::LoginStatus::NotRequired(
+                        "no interactive login".to_owned(),
+                    ),
+                );
+            }
+        }
         static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let preferred = preferred_size(&draft);
         let mut dialog = Self {
@@ -908,7 +933,7 @@ impl SetupDialog {
             discovering: false,
             saved_profiles: config.profiles.keys().cloned().collect(),
             saved_profile_values,
-            login_statuses: std::collections::BTreeMap::new(),
+            login_statuses,
             notice: None,
             notice_anchor: None,
             build_cache_preview: None,
@@ -2158,6 +2183,9 @@ impl DashboardState {
     pub(crate) fn begin_settings_section(&mut self, section: &str, entry: Option<&str>) {
         self.profile_login_refresh = true;
         let mut dialog = SetupDialog::new(&self.config);
+        dialog
+            .login_statuses
+            .extend(self.profile_login_statuses.clone());
         dialog.path = vec![section.to_owned()];
         if let Some(entry) = entry
             && dialog.draft[section].get(entry).is_some()
@@ -2170,7 +2198,11 @@ impl DashboardState {
 
     pub fn begin_setup(&mut self) {
         self.profile_login_refresh = true;
-        self.mode = Mode::Setup(SetupDialog::new(&self.config));
+        let mut dialog = SetupDialog::new(&self.config);
+        dialog
+            .login_statuses
+            .extend(self.profile_login_statuses.clone());
+        self.mode = Mode::Setup(dialog);
     }
 
     fn dismiss_setup(&mut self, dialog: SetupDialog) -> DashboardAction {
@@ -2238,6 +2270,29 @@ impl DashboardState {
         profile_id: &str,
     ) -> Option<&mj_core::credentials::LoginStatus> {
         self.profile_login_statuses.get(profile_id)
+    }
+
+    /// Drop statuses and any read still in flight after the profile set
+    /// changes. The generation bump makes an older result unusable.
+    pub(crate) fn invalidate_profile_login_statuses(&mut self) {
+        self.profile_login_generation = self.profile_login_generation.wrapping_add(1);
+        self.profile_login_statuses.clear();
+        self.profile_login_refresh = true;
+        let mut statuses = std::collections::BTreeMap::new();
+        for (id, profile) in &self.config.profiles {
+            if obviously_no_interactive_login(profile) {
+                statuses.insert(
+                    id.clone(),
+                    mj_core::credentials::LoginStatus::NotRequired(
+                        "no interactive login".to_owned(),
+                    ),
+                );
+            }
+        }
+        self.profile_login_statuses = statuses;
+        if let Some(dialog) = setup_dialog_mut(&mut self.mode) {
+            dialog.login_statuses = self.profile_login_statuses.clone();
+        }
     }
 
     /// Take the request to read saved-profile sign-in status off the loop.
@@ -2986,14 +3041,16 @@ impl DashboardState {
             ),
             Err(error) => format!("Sign-in failed for {profile_id}: {error}"),
         };
-        let Some(dialog) = setup_dialog_mut(&mut self.mode) else {
+        let current =
+            setup_dialog_mut(&mut self.mode).is_some_and(|dialog| dialog.generation == generation);
+        if !current {
             self.set_notice(message);
             return;
-        };
-        if dialog.generation != generation {
-            return;
         }
-        dialog.notice = Some(message);
+        if let Some(dialog) = setup_dialog_mut(&mut self.mode) {
+            dialog.notice = Some(message);
+            dialog.prepare();
+        }
     }
 
     pub fn setup_saved(&mut self, generation: u64, result: Result<Config, String>) {
