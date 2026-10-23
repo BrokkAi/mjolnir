@@ -2912,8 +2912,8 @@ fn typed_acp_observations_are_journaled() {
     assert_eq!(reopened.operational_state().steering_supported, None);
 }
 
-// Muse advertises only `steering.supported` while implementing
-// `idleBehavior: promptRequired` and queueing the steer itself.
+// Hard-won: BrokkAi/muse-acp#382: Muse advertised only `steering.supported`,
+// so its queued prompts waited for the turn to end.
 #[test]
 fn advertised_steering_enables_automatic_steering() {
     let temp = tempfile::tempdir().unwrap();

@@ -17,6 +17,7 @@ To see it working: start a session in an isolated instance, send a prompt that m
 - [x] (2026-09-24) Milestone 2: a `promptRequired` reply becomes `RelayCommandOutcome::SteeringReturned` and resolves the steering operation quietly; `MaterializedTurn.steered_into` keeps the turn's identity through a steer, so waits finish and interrupted steered turns clear; migration 48 (breaking) records both. Tests: `a_returned_steer_keeps_the_prompt_queued_for_the_next_turn`, `returned_steering_leaves_the_prompt_to_mj_without_cancellation`, `a_steered_prompt_finishes_with_the_turn_it_joined`, `an_interrupted_steered_turn_clears_the_running_turn`, `a_returned_steer_leaves_the_prompt_queued_and_the_turn_running`, `steering_migration_refuses_builds_that_cannot_read_returned_steers`.
 - [x] (2026-09-24) Milestone 3: `RuntimeEvent::Connected.steering_returns_idle_input` (from `steering_returns_idle_input` in `mj-worker/src/acp/drive.rs`) enables `DurableRelay::set_automatic_steering`; `claim_pending_commands_up_to` calls `submit_automatic_steer`. Tests: `queued_prompts_are_steered_into_the_running_turn_one_at_a_time`, `automatic_steering_stops_for_a_turn_that_returned_a_steer`, `slash_commands_and_waiting_checkpoints_are_not_steered`, `bridges_that_start_their_own_turns_are_not_steered_automatically`, `a_path_is_a_message_and_a_command_name_is_not`, `only_bridges_that_return_idle_steers_are_steered_automatically`. Milestones 2 and 3 share files (`mj-core/src/acp.rs`, `mj-worker/src/acp/drive.rs`, `dispatch.rs`), so they are one commit.
 - [x] (2026-09-24) Milestone 4: validated live in the isolated instance `steer-1132` with Codex (`codex4`) and Claude (`claude2`); evidence under Artifacts and Notes. The full default Cargo suite, clippy with `-D warnings`, and formatting passed.
+- [x] (2026-10-23) Follow-up: automatic steering follows `steering.supported` alone, so Muse and every other bridge that advertises the extension auto-steer. Removed `RuntimeEvent::Connected.steering_returns_idle_input` and its negotiation helper. Test: `advertised_steering_enables_automatic_steering`. Filed BrokkAi/muse-acp#382 for Muse's missing `idleBehaviors` advertisement.
 
 ## Surprises & Discoveries
 
@@ -34,7 +35,7 @@ The `claude4` account was at its session limit during validation; the Claude run
 
 2026-09-24: The worker, not the clients, decides to steer. It owns the queue, the one-steer-at-a-time rule, and uncertain-delivery state, and it keeps running when no client is attached. A worker-generated `RelayCommand::Steer` with an `auto-steer-` command ID goes through `DurableRelay::submit_command`, so it is validated and journaled exactly like an Escape steer.
 
-2026-09-24: Steer automatically only when the harness advertises steering and returns idle input. Codex bridges advertise `_meta.steering.idleBehaviors` containing `promptRequired`. The pinned Claude bridge (`claude-agent-acp` 0.81.0) honors `promptRequired` in its `steer` method but does not advertise it, so Claude is treated as supporting it. Harnesses that advertise steering without returning idle input keep today's behavior: prompts queue and Escape steers.
+2026-09-24: Steer automatically only when the harness advertises steering and returns idle input. Codex bridges advertise `_meta.steering.idleBehaviors` containing `promptRequired`. The pinned Claude bridge (`claude-agent-acp` 0.81.0) honors `promptRequired` in its `steer` method but does not advertise it, so Claude is treated as supporting it. Harnesses that advertise steering without returning idle input keep today's behavior: prompts queue and Escape steers. Superseded by the 2026-10-23 entry below.
 
 2026-09-24: A `promptRequired` reply becomes a new outcome, `RelayCommandOutcome::SteeringReturned { queued_command_id }`. The steering operation becomes `Resolved`, the prompt stays at the head of the queue, and it runs as the next prompt. No dialog is shown, for Escape or automatic steering, because the turn it targeted has already ended. Reusing a rejection would have shown the "could not be steered" dialog for a normal race.
 
@@ -76,7 +77,7 @@ Milestone 1 changes the Codex pin to `@brokkai/codex-acp` 1.13.2 and Codex 0.156
 
 Milestone 2 adds `RelayCommandOutcome::SteeringReturned { queued_command_id }`. `settle_steer` emits a new `RuntimeEvent::SteerReturned` for a `promptRequired` reply; `dispatch.rs` records it as `CommandCompleted` with the new outcome; `apply.rs` marks the matching steering operation `Resolved` and leaves the queue alone. The transcript projection accepts the new outcome without changing the queue. `MaterializedTurn` gains `steered_into: Option<String>`; the `Steered` projection sets it to the running prompt's identity; prompt completion, rejection and interruption match the active turn by `command_id` or `steered_into`. Migration 48 records the breaking change.
 
-Milestone 3 adds automatic steering. `RuntimeEvent::Connected` carries whether the bridge returns idle input; `DurableRelay` keeps it next to `steering_supported`. At the start of `claim_pending_commands_up_to`, after stale controls are rejected, the relay submits a steer when every condition in the Decision Log holds and the queue head is a plain prompt in the `Queued` dispatch state.
+Milestone 3 adds automatic steering. `RuntimeEvent::Connected` carries whether the bridge advertises steering; `DurableRelay` keeps that next to `steering_supported`. At the start of `claim_pending_commands_up_to`, after stale controls are rejected, the relay submits a steer when every condition in the Decision Log holds and the queue head is a plain prompt in the `Queued` dispatch state.
 
 Milestone 4 validates in the isolated instance `steer-1132` with real Codex and Claude profiles and records evidence here.
 
@@ -121,7 +122,6 @@ New or changed interfaces, all in existing crates:
 
     mj_core::relay::RelayCommandOutcome::SteeringReturned { queued_command_id: String }
     mj_core::acp::RuntimeEvent::SteerReturned { request_id: String, queued_command_id: String }
-    mj_core::acp::RuntimeEvent::Connected { .., steering_returns_idle_input: bool }
     mj_core::state::MaterializedTurn { .., steered_into: Option<String> }
     mj_core::acp::prompt_is_slash_command(prompt: &[ContentBlock]) -> bool
 
