@@ -1084,3 +1084,44 @@ fn every_client_waiting_on_a_handoff_names_what_it_waits_for() {
     );
     assert!(old.0.wait().unwrap().success());
 }
+
+/// `mj review start` reports what the daemon decided. The daemon used to
+/// answer 202 as soon as it admitted the action, so the command printed
+/// "review started" and exited 0, and the review host's refusal reached only
+/// the daemon log. Here the refusal comes from the review host through the
+/// daemon's real action loop: a stopped session has no live session for a
+/// review to attach to.
+// Hard-won: DSH campaign 2026-10-23 (D-9): review start answered accepted before the daemon refused it
+#[test]
+fn review_start_fails_with_the_reason_the_daemon_refused_it() {
+    let storage = upgrade_storage();
+    fs::write(
+        storage.path().join("config/config.toml"),
+        "version = 1\n[phone]\nenabled = true\nbind = \"127.0.0.1:0\"\ntailscale_detect = false\n",
+    )
+    .unwrap();
+    let database = storage.path().join("data/mj.sqlite3");
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let workspace = mj_controller::database::create_workspace_at(&database, "Review").unwrap();
+    let session: mj_core::state::SessionRecord = serde_json::from_value(serde_json::json!({
+        "id": "stopped-session", "workspace_id": workspace.id,
+        "title": "Stopped session", "harness_kind": "codex",
+        "last_profile": "codex", "bundle_id": "review", "target_template_id": "localhost",
+        "state": "stopped", "created_at": "2026-10-23T00:00:00Z", "updated_at": "2026-10-23T00:00:00Z"
+    }))
+    .unwrap();
+    let mut state = mj_core::state::State::default();
+    state.sessions.insert(session.id.clone(), session);
+    mj_controller::database::save_state_to(&database, &state).unwrap();
+
+    let mut client = upgrade_command(&storage);
+    common::AgentIsolation::under(storage.path()).apply(&mut client);
+    client.args(["review", "start", "--session", "stopped-session"]);
+    let (status, log) = run_client_with_deadline(&mut client, &storage.path().join("review.log"));
+    assert!(!status.success(), "{log}");
+    assert!(
+        log.contains("409 Conflict: this session is not connected"),
+        "{log}"
+    );
+    assert!(!log.contains("review started"), "{log}");
+}

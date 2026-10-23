@@ -75,6 +75,9 @@ pub(super) struct PhoneActionStarted {
 /// admission: the phone has no session id until the provisional session is
 /// published. Correlated submissions wait for relay acceptance, and mode
 /// changes wait for completion so a follow-up prompt cannot race the change.
+/// Review starts and resolutions also wait for completion: the review host
+/// decides whether they apply, and the API promises 202 only once the review
+/// has opened (or the resolution applied) and 409 with the reason otherwise.
 /// Their callers show pending content immediately while awaiting this reply.
 #[derive(Default)]
 pub(super) struct PendingActionReplies(
@@ -92,6 +95,8 @@ impl PendingActionReplies {
             action,
             ControllerAction::New { .. }
                 | ControllerAction::SetPlanMode { .. }
+                | ControllerAction::StartReview { .. }
+                | ControllerAction::ResolveReview { .. }
                 | ControllerAction::Prompt {
                     command_id: Some(_),
                     ..
