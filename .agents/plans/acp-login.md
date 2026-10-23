@@ -79,10 +79,12 @@ first session.
 
 Validation: six focused tests exercise a scripted ACP bridge (terminal command
 with the profile environment, `authenticate`, unknown-method listing, empty
-methods, the OpenCode fallback, and selection). An isolated run with a pinned
-OpenCode installation printed the exact managed path, selected
-`opencode-login`, and launched `opencode auth login --standalone` under a PTY.
-`cargo test`, `cargo clippy --all-targets -- -D warnings`, and formatting pass.
+methods, the OpenCode fallback, and selection). Isolated live runs with pinned
+harnesses confirmed both kinds of terminal method: OpenCode selected
+`opencode-login` and launched `opencode auth login --standalone` under a PTY,
+and Muse selected `muse-login`, ran the advertised `muse-acp login`, and printed
+the device URL and code from the pinned native `muse login`. `cargo test`,
+`cargo clippy --all-targets -- -D warnings`, and formatting pass.
 
 Remaining limitation: Claude agent-acp 0.94.0 advertises no ACP methods, so its
 login still uses an installed `claude` CLI. Kimi and Grok were not installed in
