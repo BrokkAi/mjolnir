@@ -82,6 +82,7 @@ pub(crate) enum SetupControl {
     Apply,
     DetectProfiles,
     DetectRuntimes,
+    SignIn,
     InstallMbx,
     Save,
     Cancel,
@@ -189,6 +190,9 @@ pub(crate) struct SetupDialog {
     pub(crate) form: RefCell<Dialog<SetupControl>>,
     pub(crate) saving: bool,
     discovering: bool,
+    /// Profiles that already exist in the saved configuration. A profile added
+    /// in this draft has no entry on disk for `mj login --profile` to find.
+    saved_profiles: BTreeSet<String>,
     pub(crate) notice: Option<String>,
     /// Where the notice was first shown. A status line belongs to the page
     /// or prompt that set it and goes when the dialog is no longer there.
@@ -882,6 +886,7 @@ impl SetupDialog {
             form: RefCell::new(Dialog::default()),
             saving: false,
             discovering: false,
+            saved_profiles: config.profiles.keys().cloned().collect(),
             notice: None,
             notice_anchor: None,
             build_cache_preview: None,
@@ -969,6 +974,20 @@ impl SetupDialog {
                 control,
                 label,
                 interactive && !self.discovering && !self.saving,
+            ));
+        }
+        // Signing in applies to the selected row, so the button belongs to the
+        // profiles list rather than to every page. A profile added in this
+        // draft is not on disk yet and cannot be the target of `mj login`.
+        if self.path == ["profiles"] {
+            let saved = self
+                .keys()
+                .get(self.selected)
+                .is_some_and(|key| self.saved_profiles.contains(key));
+            actions.push((
+                SignIn,
+                "Sign in",
+                interactive && saved && !self.discovering && !self.saving,
             ));
         }
         if let Some((label, enabled)) = self.install_mbx_page_action() {
@@ -2534,6 +2553,21 @@ impl DashboardState {
                     }
                 }
             }
+            Some(Interaction::Activate(SignIn)) if dialog.path == ["profiles"] => {
+                match dialog.keys().get(dialog.selected) {
+                    Some(profile_id) if dialog.saved_profiles.contains(profile_id) => {
+                        action = DashboardAction::SetupLogin {
+                            generation: dialog.generation,
+                            profile_id: profile_id.clone(),
+                        };
+                    }
+                    Some(_) => {
+                        dialog.notice =
+                            Some("Save settings before signing in to a new profile.".into());
+                    }
+                    None => {}
+                }
+            }
             Some(Interaction::Activate(Save)) if dialog.editor.is_none() => {
                 action = dialog.save(&self.profile_capabilities);
             }
@@ -2820,6 +2854,31 @@ impl DashboardState {
             }
             Err(error) => dialog.notice = Some(error),
         }
+    }
+
+    /// Report the result of an interactive sign-in started from the profiles
+    /// page. A dialog that closed while the command ran reports on the
+    /// dashboard instead.
+    pub fn setup_login_finished(
+        &mut self,
+        generation: u64,
+        profile_id: &str,
+        result: Result<(), String>,
+    ) {
+        let message = match result {
+            Ok(()) => format!(
+                "Signed in to {profile_id}. New and resumed sessions use the updated login."
+            ),
+            Err(error) => format!("Sign-in failed for {profile_id}: {error}"),
+        };
+        let Some(dialog) = setup_dialog_mut(&mut self.mode) else {
+            self.set_notice(message);
+            return;
+        };
+        if dialog.generation != generation {
+            return;
+        }
+        dialog.notice = Some(message);
     }
 
     pub fn setup_saved(&mut self, generation: u64, result: Result<Config, String>) {

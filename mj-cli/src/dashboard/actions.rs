@@ -523,6 +523,15 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
             );
         }
+        DashboardAction::SetupLogin {
+            generation,
+            profile_id,
+        } => {
+            let result = run_setup_login(context, &profile_id);
+            context
+                .dashboard
+                .setup_login_finished(generation, &profile_id, result);
+        }
         DashboardAction::DiscoverReviewSettings {
             generation,
             profile_id,
@@ -2138,6 +2147,50 @@ async fn dispatch_restart(
     daemon
         .restart_session_with_ack(session_id, acknowledge_container_recreation)
         .await
+}
+
+/// Run `mj login` for one profile with the dashboard's terminal handed over.
+///
+/// This is deliberately synchronous: the person is looking at the login flow,
+/// not at the dashboard, and the child must own standard input for browser and
+/// device-code prompts. The event stream is dropped first so it cannot consume
+/// that input, and recreated afterwards.
+fn run_setup_login(context: &mut DashboardContext, profile_id: &str) -> Result<(), String> {
+    #[cfg(not(unix))]
+    {
+        let _ = context;
+        return Err("sign-in requires a Unix host".to_owned());
+    }
+    #[cfg(unix)]
+    {
+        let events = context.events.take();
+        if let Err(error) = context.terminal.suspend() {
+            context.events = events;
+            return Err(format!("{error:#}"));
+        }
+        let result = (|| -> Result<(), String> {
+            let executable = std::env::current_exe()
+                .map_err(|error| format!("find the mj executable: {error}"))?;
+            let status = std::process::Command::new(executable)
+                .args(["login", "--profile", profile_id])
+                .status()
+                .map_err(|error| {
+                    format!("could not start `mj login --profile {profile_id}`: {error}")
+                })?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "`mj login --profile {profile_id}` exited with {status}; see the output above"
+                ))
+            }
+        })();
+        let resumed = context.terminal.resume();
+        drop(events);
+        context.events = Some(crossterm::event::EventStream::new());
+        resumed.map_err(|error| format!("{error:#}"))?;
+        result
+    }
 }
 
 #[cfg(test)]

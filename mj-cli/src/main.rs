@@ -2400,6 +2400,52 @@ impl TerminalGuard {
         )
         .context("copy selection to the terminal clipboard")
     }
+
+    /// Hand the terminal back for an interactive command the dashboard itself
+    /// starts, such as a harness sign-in, while keeping the process and its
+    /// state alive. [`Self::resume`] takes it back afterwards.
+    pub(crate) fn suspend(&mut self) -> Result<()> {
+        execute!(
+            self.terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableBracketedPaste
+        )
+        .context("leave the dashboard screen")?;
+        if self.keyboard_enhancement {
+            execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags)
+                .context("restore terminal keyboard reporting")?;
+        }
+        disable_raw_mode().context("restore terminal input mode")?;
+        self.terminal
+            .show_cursor()
+            .context("show the terminal cursor")?;
+        io::stdout().flush().context("flush the resumed terminal")?;
+        Ok(())
+    }
+
+    /// Take the terminal back after [`Self::suspend`].
+    pub(crate) fn resume(&mut self) -> Result<()> {
+        enable_raw_mode().context("enable terminal raw mode")?;
+        if self.keyboard_enhancement {
+            execute!(
+                self.terminal.backend_mut(),
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            )
+            .context("enable unambiguous terminal key reporting")?;
+        }
+        execute!(
+            self.terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )
+        .context("re-enter the dashboard screen")?;
+        self.terminal
+            .autoresize()
+            .context("match the resumed dashboard to the terminal size")?;
+        self.terminal.clear().context("clear the resumed dashboard")
+    }
 }
 
 impl Drop for TerminalGuard {

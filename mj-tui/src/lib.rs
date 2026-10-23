@@ -589,6 +589,12 @@ pub enum DashboardAction {
         original: String,
         updated: String,
     },
+    /// Hand the terminal to `mj login` for the selected profile, then resume
+    /// the dashboard. The generation anchors the result to the open dialog.
+    SetupLogin {
+        generation: u64,
+        profile_id: String,
+    },
     /// Discover the selectors advertised by the selected reviewer profile.
     /// The generation ties the response to the current dialog draft.
     DiscoverReviewSettings {

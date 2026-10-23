@@ -22,6 +22,8 @@ using the pinned harness Mjolnir manages, with no ambient harness installation.
 - [x] Wire `mj login` to prefer ACP and fall back to the CLI.
 - [x] Cover discovery, method selection, terminal execution, and fallback with tests.
 - [x] Update the login documentation.
+- [x] Add a **Sign in** action to Settings → Profiles that hands the terminal
+  to the same flow and resumes the dashboard.
 - [x] Run formatting, focused tests, full tests, and Clippy.
 
 ## Surprises & Discoveries
@@ -66,6 +68,12 @@ using the pinned harness Mjolnir manages, with no ambient harness installation.
   pin for a person who deliberately wants the command on `PATH`.
 - Decision: leave the existing credential verification in place. ACP login is a
   different way to write the same profile credential file or database.
+- Decision: expose the same flow from Settings → Profiles as **Sign in**, not
+  only from the CLI. The dashboard hands the terminal to `mj login` for the
+  selected profile, then resumes and reports the result in the dialog. The
+  action is limited to profiles already in the saved configuration because
+  `mj login --profile` reads that file. Rationale: the visual Settings surface
+  is the primary way people manage profiles.
 
 ## Outcomes & Retrospective
 
@@ -73,11 +81,16 @@ using the pinned harness Mjolnir manages, with no ambient harness installation.
 starts it as an ACP agent, reads `authMethods`, and performs the selected login:
 a `terminal` method's advertised command, a known terminal action for OpenCode
 and MiMo, or ACP `authenticate` for Codex. `--method` chooses when a bridge
-offers several. Empty method lists, a failed installation, and a bridge that
-cannot start fall back to the existing harness CLI login; a failure inside a
-chosen method is reported. The command no longer needs the daemon or database;
-it loads configuration directly, so a fresh machine can sign in before its
-first session.
+offers several; `--cli` keeps the old command-on-`PATH` path. Empty method
+lists, a failed installation, and a bridge that cannot start fall back to the
+existing harness CLI login; a failure inside a chosen method is reported. The
+command no longer needs the daemon or database; it loads configuration directly,
+so a fresh machine can sign in before its first session.
+
+Settings → Profiles → **Sign in** runs the same flow for the selected saved
+profile. The dashboard releases the alternate screen and raw mode, drops its
+event stream so the child owns input, runs `mj login`, then re-enters and
+reports the result in the dialog.
 
 Validation: six focused tests exercise a scripted ACP bridge (terminal command
 with the profile environment, `authenticate`, unknown-method listing, empty

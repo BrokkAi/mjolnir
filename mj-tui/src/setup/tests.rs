@@ -246,6 +246,32 @@ fn clicking_a_checkbox_setting_label_toggles_once_without_keyboard_selection_tog
     assert_eq!(dialog.draft["profiles"]["codex-1"]["enabled"], true);
 }
 
+#[test]
+fn signing_in_to_the_selected_profile_is_a_settings_action() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("profiles", None);
+    let Mode::Setup(dialog) = &mut dashboard.mode else {
+        panic!("settings");
+    };
+    dialog.selected = dialog
+        .keys()
+        .iter()
+        .position(|key| key == "codex-1")
+        .expect("the test profile is listed");
+    dialog.prepare();
+    dialog.form.get_mut().focus(SetupControl::SignIn);
+    let generation = dialog.generation;
+    let DashboardAction::SetupLogin {
+        generation: anchored,
+        profile_id,
+    } = dashboard.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("Sign in starts a login for the selected profile");
+    };
+    assert_eq!(anchored, generation);
+    assert_eq!(profile_id, "codex-1");
+}
+
 fn choose(dashboard: &mut DashboardState, name: &str) -> DashboardAction {
     let Mode::Setup(dialog) = &mut dashboard.mode else {
         panic!("settings");
