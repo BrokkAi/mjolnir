@@ -1920,6 +1920,86 @@ fn a_launch_config_arms_the_review_capture_only_when_a_reviewer_is_configured() 
     );
 }
 
+/// The launch decides whether a session takes a review baseline, and the
+/// reviewer choice later decides whether a review can run. Both must judge
+/// the session's own review choice by the same rule.
+// Hard-won: DSH campaign 2026-10-23 (D-10): a session-named review model chose a reviewer the launch had given no baseline
+#[test]
+fn a_session_named_review_model_takes_a_baseline_for_the_reviewer_auto_will_choose() {
+    const MARKER: &str = "MJ_TEST_LAUNCH_NAMED_REVIEW_MODEL_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "a_session_named_review_model_takes_a_baseline_for_the_reviewer_auto_will_choose",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    // DSH is the only profile, and Auto has no model policy for it.
+    let mut config = registration_config();
+    let mut dsh = config.profiles.remove("codex").unwrap();
+    dsh.kind = HarnessKind::Dsh;
+    dsh.home = PathBuf::from("/home/dev/.dsh");
+    config.profiles.insert("dsh".into(), dsh);
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let mut register = |review| {
+        let mut options = launch_options(Vec::new());
+        options.review = review;
+        controller
+            .register_session_with_resources("dsh", "project", "podman", "reviewable", options)
+            .unwrap()
+    };
+    let named = register(Some(mj_core::config::SessionReview::Turn {
+        model: Some("deepseek-flash".into()),
+        effort: None,
+        tier: None,
+    }));
+    let unnamed = register(None);
+
+    let takes_baseline = |id: &str| {
+        let backend = crate::targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: crate::targets::resource_name(id).unwrap(),
+            workspace_storage: Default::default(),
+        };
+        controller
+            .current_worker_launch_config(id, &backend)
+            .unwrap()
+            .review_capture
+    };
+    let auto_candidates = |id: &str| {
+        let settings = controller
+            .config
+            .review
+            .for_session(controller.state.sessions[id].review.as_ref());
+        let (providers, mut reasons) =
+            crate::review_selection::inspect_providers(&controller.config);
+        let auto = crate::review_selection::auto_profiles(
+            &controller.config,
+            &providers,
+            &settings,
+            None,
+            &mut reasons,
+        );
+        assert!(reasons.is_empty(), "{reasons:?}");
+        auto.supported
+            .into_iter()
+            .map(|(profile, _)| profile.to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    assert!(takes_baseline(&named));
+    assert_eq!(auto_candidates(&named), ["dsh"]);
+    // Without a named model Auto cannot use DSH, so no baseline is spent.
+    assert!(!takes_baseline(&unnamed));
+    assert!(auto_candidates(&unnamed).is_empty());
+}
+
 fn durable_remote_template(host: &str) -> TargetTemplate {
     serde_json::from_value(serde_json::json!({
         "kind": "ssh-podman", "host": host, "user": "builder",

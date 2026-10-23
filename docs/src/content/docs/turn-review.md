@@ -24,7 +24,7 @@ Auto first tries profiles from a different provider, then other profiles from th
 | Claude | Fable / medium |
 | DeepSeek | Flash / max |
 | Kimi | Newest K-series / max |
-| Other review-capable providers | Manual selection only |
+| Other review-capable providers | Manual selection, or a session's `--review-model` |
 
 Model families resolve to the newest advertised matching model. DeepSeek through a Codex harness counts as DeepSeek, not OpenAI. Effort values must be supported exactly. Auto skips unusable candidates and explains why if none can run. A manually selected profile fails visibly instead of changing profiles.
 
@@ -41,8 +41,8 @@ profile = "reviewer"
 | --- | --- | --- |
 | `trigger` | `"off"` | `"off"` disables automatic review, `"turn"` reviews completed turns, and `"push"` reviews commits before push. |
 | `profile` | Auto | Omit for Auto or name an enabled review-capable profile. |
-| `model` | harness default for a named profile | Optional reviewer model override; unavailable in Auto. |
-| `effort` | harness default for a named profile | Optional reviewer effort override; unavailable in Auto. |
+| `model` | harness default for a named profile | Optional reviewer model override. `[review]` accepts it only with a named profile; a session's `--review-model` also works with Auto. |
+| `effort` | harness default for a named profile | Optional reviewer effort override. `[review]` accepts it only with a named profile; a session's `--review-effort` also works with Auto. |
 
 The old `tier` configuration field is deprecated and ignored. Existing
 `quick` and `extended` values remain readable for compatibility.
@@ -54,7 +54,7 @@ An older configuration with `enabled = true` still loads as `trigger = "turn"`; 
 `mj new` and `mj import <harness>` can override these settings for one session:
 
 - `--review off|turn|push` selects that session's trigger, overriding `[review]`.
-- `--review-model <model>` and `--review-effort <effort>` replace the reviewer model and effort for that session. If you omit `--review`, either option selects `turn`.
+- `--review-model <model>` and `--review-effort <effort>` replace the reviewer model and effort for that session. If you omit `--review`, either option selects `turn`. With Auto, a named model lets Auto choose any enabled profile that offers it, including a profile whose provider has no Auto policy, such as DSH.
 - `--review-tier quick|extended` is deprecated. It still accepts either value
   and selects `turn` when you omit `--review`, but the value has no effect.
 
@@ -133,7 +133,7 @@ Cancel is also available while review work is still running. It releases the pro
 
 ## Lifecycle behavior
 
-New eligible primary sessions capture a review baseline even when automatic review is off. A session started without a baseline must be resumed or restarted after configuring an eligible reviewer. Child sessions do not capture independent review baselines.
+New eligible primary sessions capture a review baseline even when automatic review is off. A session is eligible when its review settings, with its own per-session choice applied, name an enabled profile or let Auto choose one. A session started without a baseline must be resumed or restarted after configuring an eligible reviewer. Child sessions do not capture independent review baselines.
 
 Suspending a session while a review is open preserves its result for reference. The reviewer's worker cannot continue after the target is destroyed. A later review starts a new reviewer child session.
 

@@ -4,12 +4,14 @@ use crate::server_runtime::profile_catalog::ProfileCatalog;
 use crate::session_manager::ManagedSessionHandle;
 use crate::utility_llm::{UtilityLlmRuntime, UtilityQuotaClass, classify_quota};
 use anyhow::{Context, Result, bail, ensure};
-use mj_core::config::ReviewConfig;
+use mj_core::config::{Config, HarnessProfile, ReviewConfig};
+use mj_core::profile_capabilities::ProfileCapabilitiesSnapshot;
 use mj_core::review::settings::{
     ResolvedReviewSettings, ReviewModelSettings, ReviewProvider, model_matches_family,
     model_version_cmp,
 };
 use mj_core::worker_launch::ProfileConfig;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -65,6 +67,74 @@ fn catalog_verdict(
     }
 }
 
+/// Each enabled profile's review provider, and why any could not be
+/// inspected. This reads harness configuration, so call it off an actor loop.
+pub(crate) fn inspect_providers(
+    config: &Config,
+) -> (BTreeMap<String, ReviewProvider>, Vec<String>) {
+    let mut providers = BTreeMap::new();
+    let mut reasons = Vec::new();
+    for (id, profile) in config.enabled_profiles() {
+        match ReviewProvider::for_profile(profile) {
+            Ok(provider) => {
+                providers.insert(id.to_owned(), provider);
+            }
+            Err(error) => reasons.push(format!("{id}: could not inspect provider: {error:#}")),
+        }
+    }
+    (providers, reasons)
+}
+
+/// The enabled profiles Auto may try, before quota is read.
+#[derive(Debug, Default)]
+pub(crate) struct AutoProfiles<'a> {
+    /// In configuration order.
+    pub(crate) supported: Vec<(&'a str, &'a HarnessProfile)>,
+    /// Profiles the catalog confirms offer the named model.
+    pub(crate) advertised: BTreeSet<String>,
+    /// Enabled profiles Auto has no model policy for, while no model is named.
+    pub(crate) excluded: Vec<String>,
+}
+
+/// Judges each enabled profile by [`ReviewProvider::auto_eligible`], the
+/// rule the launch's review baseline also applies, and then by the catalog
+/// when a model is named. A named model can come from any enabled profile
+/// that offers it, not only from providers Auto has a policy for. A profile
+/// missing from `providers` could not be inspected, and its reason is
+/// already recorded.
+pub(crate) fn auto_profiles<'a>(
+    config: &'a Config,
+    providers: &BTreeMap<String, ReviewProvider>,
+    settings: &ReviewConfig,
+    offered: Option<&ProfileCapabilitiesSnapshot>,
+    reasons: &mut Vec<String>,
+) -> AutoProfiles<'a> {
+    let mut auto = AutoProfiles::default();
+    for (id, profile) in config.enabled_profiles() {
+        let Some(provider) = providers.get(id) else {
+            continue;
+        };
+        if !provider.auto_eligible(settings) {
+            auto.excluded.push(id.to_owned());
+            continue;
+        }
+        if let Some(model) = settings.model.as_deref() {
+            match catalog_verdict(offered, &profile.capabilities_key(id), model) {
+                CatalogVerdict::Offers => {
+                    auto.advertised.insert(id.to_owned());
+                }
+                CatalogVerdict::Lacks => {
+                    reasons.push(format!("{id}: does not advertise model {model}"));
+                    continue;
+                }
+                CatalogVerdict::Unknown => {}
+            }
+        }
+        auto.supported.push((id, profile));
+    }
+    auto
+}
+
 fn rank(candidates: &mut [Candidate]) {
     candidates.sort_by(|a, b| {
         a.group
@@ -103,23 +173,12 @@ pub(crate) async fn resolve(
                 .get(&primary)
                 .and_then(|profile| ReviewProvider::for_profile(profile).ok())
                 .unwrap_or(ReviewProvider::Other);
-            let mut providers = std::collections::BTreeMap::new();
-            let mut reasons = Vec::new();
-            for (id, profile) in config.enabled_profiles() {
-                match ReviewProvider::for_profile(profile) {
-                    Ok(provider) => {
-                        providers.insert(id.to_owned(), provider);
-                    }
-                    Err(error) => {
-                        reasons.push(format!("{id}: could not inspect provider: {error:#}"))
-                    }
-                }
-            }
+            let (providers, reasons) = inspect_providers(&config);
             (providers, primary_provider, primary, reasons)
         })
         .await?;
     let mut candidates = Vec::new();
-    if let Some(id) = &settings.profile {
+    let turned_away = if let Some(id) = &settings.profile {
         let provider = providers.get(id).with_context(|| {
             format!(
                 "reviewer profile {id:?} is missing, disabled, or unavailable: {}",
@@ -134,36 +193,19 @@ pub(crate) async fn resolve(
             score: 0,
             advertised: true,
         });
+        Vec::new()
     } else {
-        // A model named without a profile can come from any enabled profile
-        // that offers it, not only from providers Auto has a policy for.
-        let pinned_model = settings.model.is_some();
-        let mut advertised = std::collections::BTreeSet::new();
-        let supported = controller
-            .config
-            .enabled_profiles()
-            .filter(|(id, _)| {
-                providers
-                    .get(*id)
-                    .is_some_and(|p| pinned_model || p.main_policy().is_some())
-            })
-            .filter(|(id, profile)| {
-                let Some(model) = settings.model.as_deref() else {
-                    return true;
-                };
-                match catalog_verdict(offered.as_ref(), &profile.capabilities_key(id), model) {
-                    CatalogVerdict::Offers => {
-                        advertised.insert((*id).to_owned());
-                        true
-                    }
-                    CatalogVerdict::Lacks => {
-                        reasons.push(format!("{id}: does not advertise model {model}"));
-                        false
-                    }
-                    CatalogVerdict::Unknown => true,
-                }
-            })
-            .collect::<Vec<_>>();
+        let AutoProfiles {
+            supported,
+            advertised,
+            excluded,
+        } = auto_profiles(
+            &controller.config,
+            &providers,
+            &settings,
+            offered.as_ref(),
+            &mut reasons,
+        );
         let quotas = UtilityLlmRuntime::shared()
             .quotas(&controller.config, &supported)
             .await;
@@ -193,7 +235,8 @@ pub(crate) async fn resolve(
         rank(&mut candidates);
         // Profiles the catalog confirms come first; unknown ones only if they all fail.
         candidates.sort_by_key(|candidate| !candidate.advertised);
-    }
+        excluded
+    };
     for candidate in candidates {
         ensure!(
             !cancelled.load(Ordering::Acquire),
@@ -213,7 +256,15 @@ pub(crate) async fn resolve(
         }
     }
     if reasons.is_empty() {
-        reasons.push("Auto chooses only Codex, Claude, Kimi, or DeepSeek-through-Codex profiles; enable one, or select another profile, such as DSH, as the reviewer in Settings".into());
+        // Nothing qualified and nothing failed: every enabled profile, if
+        // any, lacks an Auto policy and the session named no model.
+        reasons.push(match turned_away.first() {
+            None => "Auto chooses only Codex, Claude, Kimi, or DeepSeek-through-Codex profiles; enable one, or select another profile, such as DSH, as the reviewer in Settings".into(),
+            Some(example) => format!(
+                "Auto chooses only Codex, Claude, Kimi, or DeepSeek-through-Codex profiles, and no enabled profile is one of those (enabled: {}); enable one, or select another profile, such as {example}, as the reviewer in Settings",
+                turned_away.join(", ")
+            ),
+        });
     }
     bail!("No usable Auto reviewer: {}", reasons.join("; "))
 }

@@ -347,8 +347,8 @@ profile = "reviewer"
 | `trigger` | string enum | no | `"off"` | `"off"` disables automatic review, `"turn"` reviews eligible completed turns after queued work drains, and `"push"` reviews commits before push. An unchanged turn delta resolves without a review prompt. |
 | `tier` | string | no | unset | Deprecated compatibility field. Existing `quick` or `extended` values are accepted but ignored. |
 | `profile` | string | no | Auto (unset) | Auto selects an eligible profile by provider and quota. A named enabled review-capable profile is honored, including the primary profile. |
-| `model` | string | no | unset (harness default) | Reviewer model override for a named profile. Auto uses fixed model-family defaults. |
-| `effort` | string | no | unset (harness default) | Reviewer effort override for a named profile. Auto does not accept manual overrides. Required effort is checked against the selected model. |
+| `model` | string | no | unset (harness default) | Reviewer model override for a named profile. `[review]` refuses it with Auto, which uses fixed model-family defaults; a session's `--review-model` still works with Auto. |
+| `effort` | string | no | unset (harness default) | Reviewer effort override for a named profile. `[review]` refuses it with Auto; a session's `--review-effort` still works with Auto. Required effort is checked against the selected model. |
 
 Auto prefers
 another provider, falling back to another profile or the primary profile when
@@ -366,7 +366,8 @@ writes `trigger`, not `enabled`.
 set the trigger for one session, overriding `[review]`. `--review-model <model>`
 and `--review-effort <effort>` set reviewer choices. Without `--review`, either
 option selects `turn`. In Auto, Mjolnir picks an enabled profile that offers
-the model. `/review` remains available when the trigger is `off`.
+the model, including a profile whose provider has no Auto policy, such as DSH.
+`/review` remains available when the trigger is `off`.
 
 The deprecated `mj new --review-tier quick|extended` option still accepts
 either value and selects `turn` when used without `--review`, but the value is
