@@ -428,23 +428,8 @@ pub(super) async fn forward_remote_session_request(request: RemoteSessionRequest
             .map_err(|error| format!("{error:#}"));
             let _ = reply.send(result);
         }
-        RemoteSessionRequest::Reviewer {
-            session_id,
-            role,
-            action,
-            mut reply,
-        } => {
-            let result = tokio::select! {
-                _ = reply.closed() => return,
-                result = async {
-                    mj_client::daemon::connect_existing()
-                        .await?
-                        .reviewer_action(session_id, role, action)
-                        .await
-                } => result,
-            }
-            .map_err(|error| format!("{error:#}"));
-            let _ = reply.send(result);
+        RemoteSessionRequest::Reviewer { reply, .. } => {
+            let _ = reply.send(Err("review capture is owned by the daemon".to_owned()));
         }
     }
 }

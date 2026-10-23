@@ -250,22 +250,6 @@ impl ManagedSessionHandle {
         elicitation_id: String,
         response: ElicitationResponse,
     ) -> Result<()> {
-        // Every surface answers through here. A reviewing role's form goes
-        // back to that role's harness in the worker, as the review pane's
-        // own answer does.
-        if let Some((role, elicitation_id)) =
-            mj_client::review::parse_reviewer_question_id(&elicitation_id)
-        {
-            self.reviewer_as(
-                Some(role.to_owned()),
-                ReviewerAction::RespondElicitation {
-                    elicitation_id: elicitation_id.to_owned(),
-                    response,
-                },
-            )
-            .await?;
-            return Ok(());
-        }
         let (reply, result) = oneshot::channel();
         self.commands
             .send(ActorCommand::RespondElicitation {
@@ -316,20 +300,10 @@ impl ManagedSessionHandle {
     /// queue behind the session's own and are refused while a lifecycle
     /// operation holds the connection.
     pub async fn reviewer(&self, action: ReviewerAction) -> Result<ReviewerOutcome> {
-        self.reviewer_as(None, action).await
-    }
-
-    /// Drive one isolated reviewer role. `None` selects the default role
-    /// shared by plan and turn review; settings discovery uses a named role.
-    pub async fn reviewer_as(
-        &self,
-        role: Option<String>,
-        action: ReviewerAction,
-    ) -> Result<ReviewerOutcome> {
         let (reply, result) = oneshot::channel();
         self.commands
             .send(ActorCommand::Reviewer {
-                role,
+                role: None,
                 action,
                 reply,
             })

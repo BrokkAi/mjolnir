@@ -22,7 +22,7 @@ pub struct RuntimeReviewView {
     pub questions: Vec<ReviewerQuestion>,
 }
 
-/// A form and the reviewer child session (or legacy sidecar role) that owns it.
+/// A form and the reviewer child session that owns it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewerQuestion {
@@ -112,15 +112,4 @@ pub enum VerdictKind {
     Clean,
     Findings,
     Failed,
-}
-
-/// The relay session id one reviewing role journals under. The default role
-/// keeps the plan reviewer's id, which is the one the worker uses.
-#[must_use]
-pub fn role_session_id(primary_session_id: &str, role: &str) -> String {
-    if role == mj_core::review::driver::REVIEWER_ROLE {
-        format!("{primary_session_id}-reviewer")
-    } else {
-        format!("{primary_session_id}-review-{role}")
-    }
 }

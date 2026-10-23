@@ -12,20 +12,12 @@ pub enum ReviewRequest {
     CaptureDelta {
         baselines: BTreeMap<PathBuf, String>,
     },
-    /// Start the reviewer harness for `role`, with a fresh session when
-    /// `fresh` is set: every role of a new review starts without another
-    /// role's context.
-    StartRole { role: String, fresh: bool },
-    /// Send `prompt` to `role` under `command_id`.
-    PromptRole {
-        role: String,
-        command_id: String,
-        prompt: String,
-    },
+    /// Register a fresh reviewer child with this initial prompt.
+    StartReviewer { command_id: String, prompt: String },
     /// Send `prompt` to the primary session under `command_id`.
     PromptPrimary { command_id: String, prompt: String },
-    /// Stop one role's process group, keeping its staged profile.
-    PauseRole { role: String },
+    /// Close the reviewer child.
+    CloseReviewer,
     /// Record these trees, and this transcript ordinal, as reviewed.
     AdvanceBaseline {
         trees: BTreeMap<PathBuf, String>,

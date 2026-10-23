@@ -55,7 +55,6 @@ pub struct ReviewModelSettings {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedReviewSettings {
     pub profile: String,
-    pub generation: u64,
     pub main: ReviewModelSettings,
     pub automatic: bool,
     pub same_provider: bool,
