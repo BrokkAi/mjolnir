@@ -49,17 +49,18 @@ pub(crate) async fn login(
     if !scheme.syncs_login() {
         return Ok(Outcome::NoLogin(describe_auth(&scheme)));
     }
-    // A person's own installation keeps its data outside the profile home
-    // (OpenCode/Muse XDG data, or MiMo's stock XDG data). Pointing the pinned
-    // harness at it could migrate a database Mjolnir does not own. Use their
-    // CLI for that case instead.
-    if !profile
+    // A person's own installation keeps its config in their own nested home
+    // (OpenCode/Muse), or its data outside a conventional profile home
+    // (MiMo's stock XDG data). Pointing the pinned harness at either could
+    // migrate a database Mjolnir does not own. Use their CLI for that case.
+    let own_nested = profile.kind.nested_home() && profile.kind.is_own_nested_home(&profile.home);
+    let own_data = !profile
         .kind
         .data_source(&profile.home)
-        .starts_with(&profile.home)
-    {
+        .starts_with(&profile.home);
+    if own_nested || own_data {
         return Ok(Outcome::Unavailable(format!(
-            "this profile uses your own {} data directory; Mjolnir signs in through that harness's installed CLI",
+            "this profile uses your own {} installation; Mjolnir signs in through that harness's installed CLI",
             profile.kind.display_name()
         )));
     }
