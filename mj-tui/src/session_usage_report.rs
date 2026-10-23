@@ -10,7 +10,7 @@ use mj_chat::{
     selection::FrameSurfaces,
     theme,
 };
-use mj_core::usage::{SessionUsageQuery, SessionUsageReport, UsagePeriod};
+use mj_core::usage::{CostUsdTicks, SessionUsageQuery, SessionUsageReport, UsagePeriod};
 use ratatui::{
     Frame,
     layout::{Margin, Rect},
@@ -161,11 +161,17 @@ impl DashboardState {
     }
 }
 
-fn dollars(ticks: u64) -> String {
+/// A cost, or `?` when it cannot be known. `+` marks a known cost that
+/// running or unreported turns may add to.
+fn dollars(cost: CostUsdTicks, partial: bool) -> String {
+    let Ok(ticks) = cost else {
+        return "?".into();
+    };
+    let plus = if partial { "+" } else { "" };
     if ticks > 0 && ticks < 10_000_000 {
-        return "<$0.001".into();
+        return format!("<$0.001{plus}");
     }
-    format!("${:.3}", ticks as f64 / 10_000_000_000.0)
+    format!("${:.3}{plus}", ticks as f64 / 10_000_000_000.0)
 }
 
 pub(crate) fn render(
@@ -263,9 +269,8 @@ pub(crate) fn render(
             let partial = report.sessions.iter().any(|s| s.is_partial());
             frame.render_widget(
                 Paragraph::new(format!(
-                    "Total {}{} · {window} · estimated API USD",
-                    dollars(report.cost_usd_ticks),
-                    if partial { "+" } else { "" }
+                    "Total {} · {window} · estimated API USD",
+                    dollars(report.cost_usd_ticks, partial),
                 )),
                 total_area,
             );
@@ -275,9 +280,8 @@ pub(crate) fn render(
             row_keys.clear();
             for session in &report.sessions {
                 let cost = format!(
-                    "{}{}{}",
-                    dollars(session.cost_usd_ticks),
-                    if session.is_partial() { "+" } else { "" },
+                    "{}{}",
+                    dollars(session.cost_usd_ticks, session.is_partial()),
                     if session.suspended {
                         " · suspended"
                     } else {
@@ -301,12 +305,7 @@ pub(crate) fn render(
                         || "tokens unknown".to_owned(),
                         |v| format!("{} tokens", v.tokens),
                     );
-                    let detail = format!(
-                        "{}  {tokens}",
-                        model
-                            .cost_usd_ticks
-                            .map_or_else(|| "unpriced".into(), dollars)
-                    );
+                    let detail = format!("{}  {tokens}", dollars(model.cost_usd_ticks, false));
                     let name = truncate_to_cells(
                         model.model.as_deref().unwrap_or("Unknown model"),
                         usize::from(inner.width).saturating_sub(detail.len() + 6),

@@ -583,17 +583,17 @@ Ent                                                                             
 │ C  │                                                                                                            │    │
 │he  │☐ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │
-│    │Total $7.205+ · last hour · estimated API USD                                                               │    │
+│    │Total ? · last hour · estimated API USD                                                                     │    │
 │    │                                                                                                            │    │
-│    │Investigate recovery [codex]  $7.205+                                                                       │    │
+│    │Write release notes [claude]  $6.200+                                                                       │    │
+│    │    claude-opus-5-5  $6.200  tokens unknown                                                                 │    │
+│    │    0 sub-agents · 3/5 turns reported                                                                       │    │
+│    │                                                                                                            │    │
+│    │Investigate recovery [codex]  ?                                                                             │    │
 │    │    claude-opus-5-5  $7.100  tokens unknown                                                                 │    │
 │    │    gpt-6-luna  $0.105  tokens unknown                                                                      │    │
-│    │    custom-model  unpriced  tokens unknown                                                                  │    │
-│    │    2 sub-agents · 3/5 turns reported                                                                       │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
+│    │    custom-model  ?  tokens unknown                                                                         │    │
+│    │    2 sub-agents · 4/4 turns reported                                                                       │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
@@ -621,17 +621,17 @@ Ent                                                                             
 │ C  │        ╭Profile───╮                                                                                        │    │
 │he  │☐ Includ│All       │sessions                                                                                │    │
 │›   │        │claude    │                                                                                        │    │
-│    │Total $7│claude-1  │ hour · estimated API USD                                                               │    │
+│    │Total ? │claude-1  │· estimated API USD                                                                     │    │
 │    │        │codex     │                                                                                        │    │
-│    │Investig│codex-1   │ [codex]  $7.205+                                                                       │    │
-│    │    clau│codex-2   │ $7.100  tokens unknown                                                                 │    │
-│    │    gpt-╰──────────╯05  tokens unknown                                                                      │    │
-│    │    custom-model  unpriced  tokens unknown                                                                  │    │
-│    │    2 sub-agents · 3/5 turns reported                                                                       │    │
+│    │Write re│codex-1   │[claude]  $6.200+                                                                       │    │
+│    │    clau│codex-2   │ $6.200  tokens unknown                                                                 │    │
+│    │    0 su╰──────────╯/5 turns reported                                                                       │    │
 │    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
+│    │Investigate recovery [codex]  ?                                                                             │    │
+│    │    claude-opus-5-5  $7.100  tokens unknown                                                                 │    │
+│    │    gpt-6-luna  $0.105  tokens unknown                                                                      │    │
+│    │    custom-model  ?  tokens unknown                                                                         │    │
+│    │    2 sub-agents · 4/4 turns reported                                                                       │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
@@ -697,17 +697,17 @@ Ent                                                                             
 │ C  │                                                                                                            │    │
 │he  │☐ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │
-│    │Total $7.205+ · last 24 hours · estimated API USD                                                           │    │
+│    │Total ? · last 24 hours · estimated API USD                                                                 │    │
 │    │                                                                                                            │    │
-│    │Investigate recovery [codex]  $7.205+                                                                       │    │
+│    │Write release notes [claude]  $6.200+                                                                       │    │
+│    │    claude-opus-5-5  $6.200  tokens unknown                                                                 │    │
+│    │    0 sub-agents · 3/5 turns reported                                                                       │    │
+│    │                                                                                                            │    │
+│    │Investigate recovery [codex]  ?                                                                             │    │
 │    │    claude-opus-5-5  $7.100  tokens unknown                                                                 │    │
 │    │    gpt-6-luna  $0.105  tokens unknown                                                                      │    │
-│    │    custom-model  unpriced  tokens unknown                                                                  │    │
-│    │    2 sub-agents · 3/5 turns reported                                                                       │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
+│    │    custom-model  ?  tokens unknown                                                                         │    │
+│    │    2 sub-agents · 4/4 turns reported                                                                       │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
@@ -735,17 +735,17 @@ Ent                                                                             
 │ C  │                                                                                                            │    │
 │he  │☒ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │
-│    │Total $7.205+ · last 7 days · estimated API USD                                                             │    │
+│    │Total ? · last 7 days · estimated API USD                                                                   │    │
 │    │                                                                                                            │    │
-│    │Investigate recovery [codex]  $7.205+ · suspended                                                           │    │
+│    │Write release notes [claude]  $6.200+ · suspended                                                           │    │
+│    │    claude-opus-5-5  $6.200  tokens unknown                                                                 │    │
+│    │    0 sub-agents · 3/5 turns reported                                                                       │    │
+│    │                                                                                                            │    │
+│    │Investigate recovery [codex]  ?                                                                             │    │
 │    │    claude-opus-5-5  $7.100  tokens unknown                                                                 │    │
 │    │    gpt-6-luna  $0.105  tokens unknown                                                                      │    │
-│    │    custom-model  unpriced  tokens unknown                                                                  │    │
-│    │    2 sub-agents · 3/5 turns reported                                                                       │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
+│    │    custom-model  ?  tokens unknown                                                                         │    │
+│    │    2 sub-agents · 4/4 turns reported                                                                       │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │

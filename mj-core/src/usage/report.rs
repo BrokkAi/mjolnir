@@ -46,15 +46,52 @@ pub struct SessionUsageQuery {
     pub include_suspended: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Recorded tokens that cannot be priced: the model has no known rate, or
+/// its counters do not say how many tokens of each kind it used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct UnknownCost;
+
+/// A token cost in 10^-10 USD, or why it cannot be known.
+pub type CostUsdTicks = Result<u64, UnknownCost>;
+
+/// Add `cost` to `total`; an unknown part makes the whole sum unknown.
+pub fn add_cost(total: CostUsdTicks, cost: CostUsdTicks) -> anyhow::Result<CostUsdTicks> {
+    Ok(match (total, cost) {
+        (Ok(a), Ok(b)) => Ok(a
+            .checked_add(b)
+            .ok_or_else(|| anyhow::anyhow!("cost overflow"))?),
+        _ => Err(UnknownCost),
+    })
+}
+
+/// Orders costs from highest to lowest, with unknown costs last.
+pub fn descending_cost(a: &CostUsdTicks, b: &CostUsdTicks) -> std::cmp::Ordering {
+    match (a, b) {
+        (Ok(a), Ok(b)) => b.cmp(a),
+        (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+        (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+        (Err(_), Err(_)) => std::cmp::Ordering::Equal,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelUsageEstimate {
     pub model: Option<String>,
     pub totals: BTreeMap<String, crate::storage::UsageCounterTotal>,
-    /// Known token cost, in 10^-10 USD. None means no known price.
-    pub cost_usd_ticks: Option<u64>,
+    pub cost_usd_ticks: CostUsdTicks,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+impl Default for ModelUsageEstimate {
+    fn default() -> Self {
+        Self {
+            model: None,
+            totals: BTreeMap::new(),
+            cost_usd_ticks: Ok(0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionUsageEstimate {
     pub session_id: String,
     pub title: String,
@@ -63,21 +100,35 @@ pub struct SessionUsageEstimate {
     pub subagent_count: usize,
     pub models: Vec<ModelUsageEstimate>,
     pub coverage: crate::storage::UsageCoverage,
-    /// Sum of priced models; unpriced models remain in `models`.
-    pub cost_usd_ticks: u64,
+    /// Sum of `models`; unknown when any model's cost is unknown.
+    pub cost_usd_ticks: CostUsdTicks,
+}
+
+impl Default for SessionUsageEstimate {
+    fn default() -> Self {
+        Self {
+            session_id: String::new(),
+            title: String::new(),
+            profile: String::new(),
+            suspended: false,
+            subagent_count: 0,
+            models: Vec::new(),
+            coverage: Default::default(),
+            cost_usd_ticks: Ok(0),
+        }
+    }
 }
 
 impl SessionUsageEstimate {
+    /// Some turns in the period are still running or reported no full usage,
+    /// so a known cost is a lower bound.
     pub fn is_partial(&self) -> bool {
-        self.models
-            .iter()
-            .any(|model| model.cost_usd_ticks.is_none())
-            || self.coverage.full_turn_reports < self.coverage.recorded_turns
+        self.coverage.full_turn_reports < self.coverage.recorded_turns
             || self.coverage.unfinished_turns > 0
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionUsageReport {
     pub since_ms: i64,
     pub until_ms: i64,
@@ -85,5 +136,18 @@ pub struct SessionUsageReport {
     /// configured.
     pub profiles: Vec<String>,
     pub sessions: Vec<SessionUsageEstimate>,
-    pub cost_usd_ticks: u64,
+    /// Sum of `sessions`; unknown when any session's cost is unknown.
+    pub cost_usd_ticks: CostUsdTicks,
+}
+
+impl Default for SessionUsageReport {
+    fn default() -> Self {
+        Self {
+            since_ms: 0,
+            until_ms: 0,
+            profiles: Vec::new(),
+            sessions: Vec::new(),
+            cost_usd_ticks: Ok(0),
+        }
+    }
 }

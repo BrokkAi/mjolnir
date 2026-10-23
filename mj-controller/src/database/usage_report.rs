@@ -1,9 +1,11 @@
 //! One consistent store snapshot of parent usage and retained descendants.
 use super::*;
 use mj_core::usage::{
-    ModelUsageEstimate, SessionUsageEstimate, SessionUsageQuery, SessionUsageReport, UsageScope,
+    ModelUsageEstimate, SessionUsageEstimate, SessionUsageQuery, SessionUsageReport, UnknownCost,
+    UsageScope, add_cost, descending_cost,
 };
 
+mod model_catalog;
 mod pricing;
 
 pub fn load_session_usage_report(query: &SessionUsageQuery) -> Result<SessionUsageReport> {
@@ -46,6 +48,7 @@ fn load_from(path: &Path, query: &SessionUsageQuery, now_ms: i64) -> Result<Sess
         profiles.insert(profile?);
     }
     report.profiles = profiles.into_iter().collect();
+    let catalogs = model_catalog::ModelCatalogs::load(&tx)?;
     let wanted = query.profile.as_deref();
     for (session_id, title, profile, state) in roots {
         let suspended = !SessionState::from_stored(&state)
@@ -71,7 +74,7 @@ fn load_from(path: &Path, query: &SessionUsageQuery, now_ms: i64) -> Result<Sess
         let mut groups: BTreeMap<Option<String>, ModelUsageEstimate> = BTreeMap::new();
         for member in members {
             let mut turns = tx.prepare(
-                "SELECT u.body, s.model, s.effort FROM session_turn_usage u
+                "SELECT u.body, s.model, s.effort, s.profile FROM session_turn_usage u
                 LEFT JOIN session_turn_selections s USING(session_id, command_id)
                 WHERE u.session_id=?1 AND json_extract(u.body, '$.completed_at_ms') >= ?2
                 AND json_extract(u.body, '$.completed_at_ms') <= ?3
@@ -84,10 +87,11 @@ fn load_from(path: &Path, query: &SessionUsageQuery, now_ms: i64) -> Result<Sess
                         model: row.get(1)?,
                         effort: row.get(2)?,
                     },
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })?;
             for row in rows {
-                let (body, selection) = row?;
+                let (body, selection, turn_profile) = row?;
                 let turn = deserialize_turn_outcome(&body)?;
                 estimate.coverage.recorded_turns += 1;
                 match turn.usage {
@@ -95,7 +99,10 @@ fn load_from(path: &Path, query: &SessionUsageQuery, now_ms: i64) -> Result<Sess
                         estimate.coverage.full_turn_reports += 1;
                         let mut attributed = BTreeMap::new();
                         super::usage::attribute(&usage, selection, &mut attributed)?;
-                        for (selection, totals) in attributed {
+                        for (mut selection, totals) in attributed {
+                            selection.model = selection
+                                .model
+                                .map(|model| catalogs.priced_model(turn_profile.as_deref(), model));
                             // An unattributed cache counter is unknown, not zero.
                             // Pricing the input as uncached would overstate its cost.
                             let caches_known = (usage.cached_read_tokens.is_none()
@@ -111,16 +118,12 @@ fn load_from(path: &Path, query: &SessionUsageQuery, now_ms: i64) -> Result<Sess
                                 groups.entry(selection.model.clone()).or_insert_with(|| {
                                     ModelUsageEstimate {
                                         model: selection.model,
-                                        cost_usd_ticks: Some(0),
                                         ..Default::default()
                                     }
                                 });
-                            group.cost_usd_ticks = match (group.cost_usd_ticks, cost) {
-                                (Some(a), Some(b)) => {
-                                    Some(a.checked_add(b).context("model cost overflow")?)
-                                }
-                                _ => None,
-                            };
+                            group.cost_usd_ticks =
+                                add_cost(group.cost_usd_ticks, cost.ok_or(UnknownCost))
+                                    .context("model cost overflow")?;
                             super::usage::merge_totals(&mut group.totals, &totals)?;
                         }
                     }
@@ -154,26 +157,20 @@ fn load_from(path: &Path, query: &SessionUsageQuery, now_ms: i64) -> Result<Sess
         }
         estimate.models = groups.into_values().collect();
         estimate.models.sort_by(|a, b| {
-            b.cost_usd_ticks
-                .cmp(&a.cost_usd_ticks)
+            descending_cost(&a.cost_usd_ticks, &b.cost_usd_ticks)
                 .then_with(|| a.model.cmp(&b.model))
         });
         estimate.cost_usd_ticks = estimate
             .models
             .iter()
-            .filter_map(|model| model.cost_usd_ticks)
-            .try_fold(0u64, |total, cost| {
-                total.checked_add(cost).context("session cost overflow")
-            })?;
-        report.cost_usd_ticks = report
-            .cost_usd_ticks
-            .checked_add(estimate.cost_usd_ticks)
+            .try_fold(Ok(0), |total, model| add_cost(total, model.cost_usd_ticks))
+            .context("session cost overflow")?;
+        report.cost_usd_ticks = add_cost(report.cost_usd_ticks, estimate.cost_usd_ticks)
             .context("report cost overflow")?;
         report.sessions.push(estimate);
     }
     report.sessions.sort_by(|a, b| {
-        b.cost_usd_ticks
-            .cmp(&a.cost_usd_ticks)
+        descending_cost(&a.cost_usd_ticks, &b.cost_usd_ticks)
             .then_with(|| a.session_id.cmp(&b.session_id))
     });
     Ok(report)
@@ -309,11 +306,21 @@ mod tests {
         delete_session_from(&path, "grandchild")?;
         delete_session_from(&path, "child")?;
 
+        // The known part of a cost that the unpriced models make unknown.
+        let priced = |session: &SessionUsageEstimate| -> u64 {
+            session
+                .models
+                .iter()
+                .filter_map(|model| model.cost_usd_ticks.ok())
+                .sum()
+        };
         let hourly = load_from(&path, &SessionUsageQuery::default(), now)?;
         assert_eq!(hourly.sessions.len(), 1);
         let root = &hourly.sessions[0];
         assert_eq!(root.subagent_count, 2);
-        assert_eq!(root.cost_usd_ticks, 72_050_000_000); // $7.10 + $0.105, with caches counted once.
+        // Custom-model has no rate, and gpt-6.1-sol's cache counters are unknown.
+        assert_eq!(root.cost_usd_ticks, Err(UnknownCost));
+        assert_eq!(priced(root), 72_050_000_000); // $7.10 + $0.105, with caches counted once.
         assert_eq!(root.models.len(), 5);
         assert!(
             root.models
@@ -321,16 +328,16 @@ mod tests {
                 .find(|m| m.model.as_deref() == Some("gpt-6.1-sol"))
                 .unwrap()
                 .cost_usd_ticks
-                .is_none()
+                .is_err()
         );
-        assert!(root.models.last().unwrap().cost_usd_ticks.is_none());
+        assert!(root.models.last().unwrap().cost_usd_ticks.is_err());
         assert_eq!(root.coverage.full_turn_reports, 4);
         assert_eq!(root.coverage.last_request_reports, 1);
         assert_eq!(root.coverage.missing_reports, 1);
         assert!(root.is_partial());
         assert_eq!(root.coverage.unfinished_turns, 1);
         assert_eq!(hourly.profiles, ["claude", "codex", "codex2"]);
-        assert_eq!(hourly.cost_usd_ticks, root.cost_usd_ticks);
+        assert_eq!(hourly.cost_usd_ticks, Err(UnknownCost));
 
         // A profile counts the turns recorded on it anywhere in the tree, by
         // the profile at turn start, after the children are destroyed.
@@ -353,14 +360,12 @@ mod tests {
             ("root", "codex")
         );
         assert_eq!(tree.subagent_count, 2);
-        assert_eq!(tree.cost_usd_ticks, 71_000_000_000);
+        assert_eq!(tree.cost_usd_ticks, Err(UnknownCost));
+        assert_eq!(priced(tree), 71_000_000_000);
         assert_eq!(tree.coverage.recorded_turns, 2);
         assert_eq!(tree.coverage.unfinished_turns, 0);
         let codex = on("codex", UsagePeriod::Hourly)?;
-        assert_eq!(
-            codex.sessions[0].cost_usd_ticks + tree.cost_usd_ticks,
-            root.cost_usd_ticks
-        );
+        assert_eq!(priced(&codex.sessions[0]) + priced(tree), priced(root));
         assert_eq!(codex.sessions[0].coverage.recorded_turns, 4);
         assert_eq!(codex.sessions[0].coverage.unfinished_turns, 1);
 
@@ -375,10 +380,13 @@ mod tests {
         )?;
         assert_eq!(daily.since_ms, now - 86_400_000);
         assert_eq!(daily.sessions.len(), 2);
-        assert_eq!(daily.sessions[0].session_id, "root");
-        assert_eq!(daily.cost_usd_ticks, 93_050_000_000);
-        assert_eq!(daily.sessions[1].session_id, "suspended");
-        assert_eq!(daily.sessions[1].coverage.recorded_turns, 0);
+        // An unknown cost sorts after every known one, even $0.
+        assert_eq!(daily.sessions[0].session_id, "suspended");
+        assert_eq!(daily.sessions[0].coverage.recorded_turns, 0);
+        assert_eq!(daily.sessions[0].cost_usd_ticks, Ok(0));
+        assert_eq!(daily.sessions[1].session_id, "root");
+        assert_eq!(priced(&daily.sessions[1]), 93_050_000_000);
+        assert_eq!(daily.cost_usd_ticks, Err(UnknownCost));
 
         let weekly_query = SessionUsageQuery {
             period: UsagePeriod::Weekly,
@@ -389,13 +397,13 @@ mod tests {
         assert_eq!(weekly.sessions.len(), 2);
         // Cache-discounted Astra: $5 + $0.50 + $5 = $10.50, greater than root.
         assert_eq!(weekly.sessions[0].session_id, "suspended");
-        assert_eq!(weekly.sessions[0].cost_usd_ticks, 105_000_000_000);
+        assert_eq!(weekly.sessions[0].cost_usd_ticks, Ok(105_000_000_000));
         assert!(weekly.sessions[0].suspended);
-        assert_eq!(weekly.sessions[1].cost_usd_ticks, 93_050_000_000);
-        assert_eq!(weekly.cost_usd_ticks, 198_050_000_000);
+        assert_eq!(priced(&weekly.sessions[1]), 93_050_000_000);
+        assert_eq!(weekly.cost_usd_ticks, Err(UnknownCost));
         let filtered = on("codex", UsagePeriod::Weekly)?;
         assert_eq!(filtered.sessions.len(), 1);
-        assert_eq!(filtered.sessions[0].cost_usd_ticks, 22_050_000_000);
+        assert_eq!(priced(&filtered.sessions[0]), 22_050_000_000);
         let monthly = load_from(
             &path,
             &SessionUsageQuery {
@@ -407,7 +415,8 @@ mod tests {
         )?;
         // Root ran no turns on claude, so only the claude parent remains.
         assert_eq!(monthly.sessions.len(), 1);
-        assert_eq!(monthly.sessions[0].cost_usd_ticks, 126_000_000_000);
+        assert_eq!(monthly.sessions[0].cost_usd_ticks, Ok(126_000_000_000));
+        assert_eq!(monthly.cost_usd_ticks, Ok(126_000_000_000));
         assert_eq!(monthly.sessions[0].coverage.recorded_turns, 2);
 
         // Renaming a profile carries destroyed children's turns with it.
@@ -421,6 +430,95 @@ mod tests {
             on("codex-two", UsagePeriod::Hourly)?.sessions,
             codex2.sessions
         );
+        Ok(())
+    }
+
+    // Store integration: Claude records the alias a turn selected; the
+    // profile's discovered model list says which model that alias runs.
+    #[test]
+    fn usage_report_prices_claude_aliases_through_the_profile_catalog() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage-report.sqlite");
+        let now = 86_400_000;
+        let mut state = State::default();
+        for id in ["aliases", "unresolved"] {
+            let mut session = super::super::tests::session(id, "project");
+            session.last_profile = "claude4".into();
+            session.state = SessionState::Running;
+            state.sessions.insert(id.into(), session);
+        }
+        save_state_to(&path, &state)?;
+        let connection = open(&path)?;
+        let catalog = serde_json::json!({"model":null,"observed_at":0,"efforts":[],"models":[
+            {"value":"default","name":"Default (recommended)","description":"Sonnet"},
+            {"value":"opus","name":"Opus 5.5","description":null},
+            {"value":"claude-fable-5-1[1m]","name":"Fable 5.1","description":null},
+            {"value":"claude-opus-5","name":"Opus 5","description":null}]});
+        super::super::profile_cache::save_profile_config_cache_with(
+            &connection,
+            "claude4",
+            "",
+            "fingerprint",
+            &catalog.to_string(),
+        )?;
+        // A provider catalog body shares the table and is not a model list.
+        super::super::profile_cache::save_profile_config_cache_with(
+            &connection,
+            "claude4",
+            "catalog:https://example.invalid",
+            "catalog:https://example.invalid",
+            "[]",
+        )?;
+        // Claude reports uncached input; caches are separate tallies.
+        let usage = serde_json::json!({"scope":"turn","total_tokens":2_100_000,"input_tokens":1_000_000,
+            "output_tokens":100_000,"cached_read_tokens":1_000_000,"cached_write_tokens":0});
+        for (seq, (session, model)) in [
+            ("aliases", "opus"),
+            ("aliases", "fable"),
+            ("unresolved", "default"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let command = format!("command-{seq}");
+            let body = serde_json::json!({"command_id":command,"completed_ordinal":seq,"completed_at_ms":now,
+                "outcome":{"kind":"completed","stop_reason":"EndTurn"},"usage":usage});
+            let turn: MaterializedTurnOutcome = serde_json::from_value(body)?;
+            connection.execute("INSERT INTO session_turn_usage(session_id,command_id,completed_ordinal,body) VALUES (?1,?2,?3,?4)", params![session, command, seq, serialize_turn_outcome(&turn)?])?;
+            let configuration = serde_json::from_value(serde_json::json!({"model":model}))?;
+            super::super::usage::record_turn_selection(
+                &connection,
+                session,
+                &command,
+                &configuration,
+            )?;
+        }
+        drop(connection);
+
+        let report = load_from(&path, &SessionUsageQuery::default(), now)?;
+        let [aliases, unresolved] = &report.sessions[..] else {
+            panic!("expected two sessions: {:?}", report.sessions);
+        };
+        assert_eq!(aliases.session_id, "aliases");
+        let models = aliases
+            .models
+            .iter()
+            .map(|model| (model.model.as_deref().unwrap(), model.cost_usd_ticks))
+            .collect::<Vec<_>>();
+        // `opus` is the listed Opus 5.5, not the older Opus 5 also listed;
+        // `fable` matches the listed Fable 5.1 the way the bridge does.
+        assert_eq!(
+            models,
+            [
+                ("claude-fable-5-1", Ok(152_500_000_000)), // $10 + $5 + $0.25
+                ("claude-opus-5-5", Ok(62_000_000_000)),   // $4 + $2 + $0.20
+            ]
+        );
+        assert_eq!(aliases.cost_usd_ticks, Ok(214_500_000_000));
+        // `default` names no versioned model, so its cost is unknown.
+        assert_eq!(unresolved.models[0].model.as_deref(), Some("default"));
+        assert_eq!(unresolved.cost_usd_ticks, Err(UnknownCost));
+        assert_eq!(report.cost_usd_ticks, Err(UnknownCost));
         Ok(())
     }
 }
