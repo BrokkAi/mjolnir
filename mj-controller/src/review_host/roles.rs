@@ -6,7 +6,10 @@ impl HostState {
             ReviewRequest::CaptureDelta { baselines } => {
                 self.review_step(
                     session_id,
-                    ReviewerAction::CaptureDelta { baselines },
+                    ReviewerAction::CaptureDelta {
+                        baselines,
+                        scope: Default::default(),
+                    },
                     |outcome| {
                         ReviewStep::Delta(match outcome {
                             Ok(ReviewerOutcome::Delta { repositories }) => Ok(repositories),

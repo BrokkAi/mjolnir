@@ -6981,3 +6981,42 @@ fn hookless_mid_turn_mailbox_event_starts_a_wake_turn_after_completion() {
             .contains_key(&event.key)
     );
 }
+
+#[test]
+fn push_review_requests_require_protocol_43_and_old_turn_captures_still_decode() {
+    use mj_core::relay::{CaptureScope, ReviewerRequest};
+    for request in [
+        ReviewerRequest::CaptureDelta {
+            baselines: Default::default(),
+            scope: CaptureScope::PushableCommits,
+        },
+        ReviewerRequest::RecordReviewed {
+            trees: Default::default(),
+        },
+    ] {
+        let request = mj_core::relay::RelayRequest::Reviewer {
+            role: None,
+            request,
+        };
+        assert!(!request.supported_at(42));
+        assert!(request.supported_at(43));
+    }
+    let old: ReviewerRequest = serde_json::from_value(
+        serde_json::json!({"action":"capture_delta","params":{"baselines":{}}}),
+    )
+    .unwrap();
+    assert!(matches!(
+        old,
+        ReviewerRequest::CaptureDelta {
+            scope: CaptureScope::TurnDelta,
+            ..
+        }
+    ));
+    assert!(
+        mj_core::relay::RelayRequest::Reviewer {
+            role: None,
+            request: old
+        }
+        .supported_at(42)
+    );
+}

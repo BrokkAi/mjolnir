@@ -69,6 +69,26 @@ pub(super) async fn prepare(
     config: ReviewConfig,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<Prepared, StartRefusal> {
+    prepare_scoped(
+        control,
+        environment,
+        session_id,
+        config,
+        cancelled,
+        mj_core::relay::CaptureScope::TurnDelta,
+    )
+    .await
+}
+
+pub(super) async fn prepare_scoped(
+    control: &SessionManagerControl,
+    environment: &Arc<dyn ReviewEnvironment>,
+    session_id: &str,
+    config: ReviewConfig,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    scope: mj_core::relay::CaptureScope,
+) -> Result<Prepared, StartRefusal> {
+    let push = scope == mj_core::relay::CaptureScope::PushableCommits;
     // A sub-agent's changes are reviewed through its parent's turn. Asking
     // its worker for reviewer state would also race the parent's lifecycle
     // operations on the child and surface their internal refusals.
@@ -98,15 +118,25 @@ pub(super) async fn prepare(
             "this session has no transcript yet".to_owned(),
         ));
     };
-    if !matches!(
-        snapshot.materialized.execution,
-        MaterializedExecutionState::Idle
-    ) {
+    if push
+        && snapshot.operational.relay_protocol_version.unwrap_or(0)
+            < mj_core::relay::RELAY_PUSH_REVIEW_PROTOCOL
+    {
+        return Err(StartRefusal(
+            "the session's worker predates push review; restart the session".into(),
+        ));
+    }
+    if !push
+        && !matches!(
+            snapshot.materialized.execution,
+            MaterializedExecutionState::Idle
+        )
+    {
         return Err(StartRefusal(
             "a review runs between turns; this one is still working".to_owned(),
         ));
     }
-    if !snapshot.materialized.queued_prompts.is_empty() {
+    if !push && !snapshot.materialized.queued_prompts.is_empty() {
         return Err(StartRefusal(
             "prompts are queued; the review waits for them".to_owned(),
         ));
@@ -140,6 +170,7 @@ pub(super) async fn prepare(
         after_background_work(session_id, deadline, &cancelled, move || async move {
             handle
                 .reviewer(ReviewerAction::CaptureDelta {
+                    scope,
                     baselines: baselines.clone(),
                 })
                 .await
@@ -148,6 +179,18 @@ pub(super) async fn prepare(
         .await
     };
     let captured = match captured {
+        Err(error) if push => return Err(StartRefusal(error)),
+        Ok(ReviewerOutcome::Delta { repositories })
+            if push
+                && (repositories.is_empty()
+                    || repositories
+                        .iter()
+                        .all(|delta| delta.base_commit == delta.head_commit)) =>
+        {
+            return Err(StartRefusal(
+                "nothing to review because base == HEAD".into(),
+            ));
+        }
         Ok(ReviewerOutcome::Delta { repositories }) => Some(repositories),
         _ => None,
     };
@@ -159,6 +202,7 @@ pub(super) async fn prepare(
         .is_some_and(|deltas| !mj_review::delta::has_changes(deltas))
     {
         return Ok(Prepared {
+            scope,
             state,
             // No reviewer process starts for a turn with nothing to review.
             reviewer: ReviewerIdentity::default(),
@@ -184,6 +228,7 @@ pub(super) async fn prepare(
         .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
         .map_err(StartRefusal)?;
     Ok(Prepared {
+        scope,
         state,
         reviewer: reviewer.clone(),
         materialized: Box::new(snapshot.materialized),
@@ -233,6 +278,7 @@ pub(super) async fn prepare_recovery(
         return Err("prompts are queued; the pending handoff waits for them".to_owned());
     }
     Ok(Some(Prepared {
+        scope: Default::default(),
         state,
         // No reviewer process is started for a handoff-only recovery.
         reviewer: ReviewerIdentity::default(),

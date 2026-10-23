@@ -51,7 +51,12 @@ pub struct RelayAttachment {
 #[serde(rename_all = "snake_case")]
 pub enum ReviewerAction {
     CaptureDelta {
+        #[serde(default)]
+        scope: mj_core::relay::CaptureScope,
         baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
+    },
+    RecordReviewed {
+        trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
     },
     AdvanceBaseline {
         trees: std::collections::BTreeMap<std::path::PathBuf, String>,
@@ -63,6 +68,7 @@ impl ReviewerAction {
         match self {
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
+            Self::RecordReviewed { .. } => "reviewer_record_reviewed",
         }
     }
 }

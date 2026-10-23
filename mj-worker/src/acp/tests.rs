@@ -861,6 +861,7 @@ fn worker_socket(role: SubagentMcpRole) -> SubagentMcpSocket {
         role,
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
+        review_gate: false,
         profile_registration: false,
     }
 }
@@ -5025,6 +5026,7 @@ for line in sys.stdin:
             role: SubagentMcpRole::Parent,
             agent_mailboxes_enabled: true,
             subtle_subagents: true,
+            review_gate: false,
             profile_registration: false,
         }),
         clear_context_request: None,

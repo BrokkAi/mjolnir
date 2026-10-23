@@ -347,6 +347,7 @@ pub struct SubagentToolRequest {
 )]
 pub enum SubagentToolAction {
     ListProfiles,
+    RequestReview {},
     Spawn {
         task_name: String,
         instructions: String,
@@ -405,6 +406,7 @@ pub enum SubagentToolAction {
 )]
 enum SubagentToolActionWire {
     ListProfiles,
+    RequestReview {},
     Spawn {
         task_name: String,
         instructions: String,
@@ -459,6 +461,7 @@ impl SubagentToolAction {
         matches!(
             self,
             Self::Spawn { .. }
+                | Self::RequestReview {}
                 | Self::SendInput { .. }
                 | Self::SendMessage { .. }
                 | Self::LegacyInterruptAgent { .. }
@@ -500,6 +503,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
             serde_json::from_value::<SubagentToolActionWire>(value).map_err(D::Error::custom)?;
         Ok(match wire {
             SubagentToolActionWire::ListProfiles => Self::ListProfiles,
+            SubagentToolActionWire::RequestReview {} => Self::RequestReview {},
             SubagentToolActionWire::Spawn {
                 task_name,
                 instructions,

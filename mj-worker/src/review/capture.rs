@@ -154,7 +154,6 @@ pub fn capture_repository_deltas(
     Ok(deltas)
 }
 
-#[allow(dead_code)] // Runtime callers are added in the next integration step.
 #[derive(Debug)]
 pub struct PushCapture {
     pub delta: RepoDelta,
@@ -162,7 +161,6 @@ pub struct PushCapture {
     pub head_commit: String,
 }
 
-#[allow(dead_code)] // Runtime callers are added in the next integration step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PushBase {
     ReviewPoint {
@@ -177,7 +175,6 @@ pub enum PushBase {
     },
 }
 
-#[allow(dead_code)] // Runtime callers are added in the next integration step.
 impl PushBase {
     pub fn commit(&self) -> &str {
         match self {
@@ -188,7 +185,6 @@ impl PushBase {
     }
 }
 
-#[allow(dead_code)] // Runtime callers are added in the next integration step.
 #[derive(Debug)]
 pub enum PushCaptureRefusal {
     DirtyTracked { files: Vec<PathBuf> },
@@ -205,10 +201,13 @@ impl From<anyhow::Error> for PushCaptureRefusal {
 impl std::fmt::Display for PushCaptureRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::DirtyTracked { files } => write!(
-                formatter,
-                "commit or stash these tracked changes first: {files:?}"
-            ),
+            Self::DirtyTracked { files } => {
+                formatter.write_str("commit or stash these tracked changes first:")?;
+                for file in files {
+                    write!(formatter, "\n  {}", file.display())?;
+                }
+                Ok(())
+            }
             Self::NoHead => formatter.write_str("the repository has no HEAD commit"),
             Self::Git(error) => write!(formatter, "{error:#}"),
         }
@@ -226,7 +225,6 @@ impl std::error::Error for PushCaptureRefusal {
 
 /// Captures committed work only, using the last reviewed commit within the
 /// branch's current merge-base boundary.
-#[allow(dead_code)] // Runtime callers are added in the next integration step.
 pub fn capture_pushable_commits(
     runner: &dyn GitCommandRunner,
     root: &Path,
@@ -301,7 +299,7 @@ pub fn capture_pushable_commits(
         &["rev-parse", "--verify", &format!("{head}^{{tree}}")],
     )?;
     let (patch, files) = capture_diff(runner, root, &baseline, &current)?;
-    let delta = build_delta(
+    let mut delta = build_delta(
         root,
         Some(baseline),
         current,
@@ -310,6 +308,13 @@ pub fn capture_pushable_commits(
         Vec::new(),
         None,
     );
+    delta.base_commit = Some(base.commit().to_owned());
+    delta.head_commit = Some(head.clone());
+    delta.base_kind = Some(match &base {
+        PushBase::ReviewPoint { .. } => "review point".into(),
+        PushBase::MergeBase { default_branch, .. } => format!("merge base with {default_branch}"),
+        PushBase::SessionStart { .. } => "session start".into(),
+    });
     Ok(PushCapture {
         delta,
         base,
@@ -401,6 +406,9 @@ fn build_delta(
 ) -> RepoDelta {
     let summary = RawDiffSummary::from_patch(&patch);
     RepoDelta {
+        base_commit: None,
+        head_commit: None,
+        base_kind: None,
         root: root.to_path_buf(),
         baseline_tree,
         current_tree,

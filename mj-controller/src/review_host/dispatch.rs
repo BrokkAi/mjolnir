@@ -11,6 +11,7 @@ impl HostState {
                 prompt_driven,
             } => self.observe(session_id, snapshot, prompt_driven).await,
             HostEvent::Retain { live } => self.retain_sessions(&live),
+            HostEvent::StartPush { session_id, reply } => self.begin_push(session_id, reply),
             HostEvent::Start {
                 session_id,
                 manual,
@@ -82,6 +83,14 @@ impl HostState {
             return;
         }
         match step {
+            ReviewStep::PushDelivered(result) => {
+                match result {
+                    Ok(state) => if let Some(slot) = self.reviews.get_mut(&session_id) { slot.state = *state; },
+                    Err(error) => self.record_notice(&session_id, format!("Before-push review verdict delivery failed: {error}; the push stays blocked until a review is clean.")),
+                }
+                self.close_reviewer_child(&session_id);
+                self.run_one(&session_id, ReviewRequest::Close);
+            }
             ReviewStep::Failed(error) => {
                 if self.reviews.get(&session_id).is_some_and(|slot| {
                     matches!(slot.driver.phase(), TurnReviewPhase::Running { .. })

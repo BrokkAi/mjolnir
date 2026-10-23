@@ -177,6 +177,9 @@ impl HostState {
         // clearing it here made the restart silent. The baseline has not
         // advanced, so the next review covers the same changes.
         for (session_id, slot) in &self.reviews {
+            if slot.push.as_ref().is_some_and(|push| push.finishing) {
+                continue;
+            }
             let queued = lane
                 .as_ref()
                 .ok_or_else(|| "the review persistence lane stopped".to_owned())

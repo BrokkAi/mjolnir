@@ -90,6 +90,9 @@ impl TurnReviewDriver {
             .trees
             .iter()
             .map(|(root, current_tree)| RepoDelta {
+                base_commit: None,
+                head_commit: None,
+                base_kind: None,
                 root: root.clone(),
                 baseline_tree: seed.baselines.get(root).cloned(),
                 current_tree: current_tree.clone(),

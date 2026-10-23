@@ -506,8 +506,18 @@ impl Controller {
         // configuration has an eligible reviewer, and that is not a child. A child
         // works in its parent's tree, and reviewing it would report the
         // parent's work as the child's.
-        launch.review_capture =
-            mj_core::review::settings::can_review(&self.config) && subagent.is_none();
+        launch.review_trigger = if subagent.is_none() {
+            self.config
+                .review
+                .for_session(session.review.as_ref())
+                .trigger
+        } else {
+            Default::default()
+        };
+        launch.review_capture = mj_core::review::settings::can_review(&self.config)
+            && subagent.is_none()
+            && (launch.review_trigger != mj_core::config::ReviewTrigger::Push
+                || launch.review_gate());
         if let Some(subagent) = &subagent {
             let parent = self
                 .state
@@ -976,6 +986,7 @@ pub(super) fn worker_launch_config_with_checkout(
             subtle_subagents: true,
             initial_model: None,
             review_capture: false,
+            review_trigger: Default::default(),
             harness: profile.kind,
             harness_home: PathBuf::from(&target_profile_home),
             // The staged home mirrors the profile home, so the marker's path
