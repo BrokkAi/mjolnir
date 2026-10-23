@@ -22,6 +22,8 @@ pub mod go;
 pub mod goal;
 #[cfg(feature = "golden")]
 pub mod golden;
+#[cfg(unix)]
+pub mod harness_install;
 pub mod harness_runtime;
 pub mod help_search;
 pub mod hex;

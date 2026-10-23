@@ -2018,11 +2018,11 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     );
 
     let package: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../mj-worker/assets/harnesses/claude/package.json"
+        "../../../../mj-core/assets/harnesses/claude/package.json"
     ))
     .unwrap();
     let lock: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../mj-worker/assets/harnesses/claude/package-lock.json"
+        "../../../../mj-core/assets/harnesses/claude/package-lock.json"
     ))
     .unwrap();
     for (name, version) in [
@@ -2038,11 +2038,11 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     }
 
     let package: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../mj-worker/assets/harnesses/mimo/package.json"
+        "../../../../mj-core/assets/harnesses/mimo/package.json"
     ))
     .unwrap();
     let lock: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../mj-worker/assets/harnesses/mimo/package-lock.json"
+        "../../../../mj-core/assets/harnesses/mimo/package-lock.json"
     ))
     .unwrap();
     assert_eq!(package["dependencies"]["@mimo-ai/cli"], MIMO_CLI_VERSION);

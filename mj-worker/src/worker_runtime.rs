@@ -311,28 +311,9 @@ pub(crate) fn repin_bridge_selectors(
 #[cfg(unix)]
 mod discovery;
 #[cfg(unix)]
-pub(crate) mod harness;
+pub(crate) use mj_core::harness_install as harness;
 #[cfg(unix)]
-pub use harness::ManagedHarness;
-
-/// Install or reuse the exact managed harness for `kind` and return the ACP
-/// bridge command, its environment, and the installation lease.
-///
-/// The lease stays open for as long as the returned value is alive, so garbage
-/// collection cannot remove the installation while a caller (such as `mj
-/// login`) is running it.
-#[cfg(unix)]
-pub async fn managed_harness(
-    kind: HarnessKind,
-    environment: &std::collections::BTreeMap<String, String>,
-) -> Result<ManagedHarness> {
-    harness::resolve_with_environment(
-        kind,
-        mj_core::config::ExecutionPolicy::ConfiguredApprovals,
-        environment,
-    )
-    .await
-}
+pub use mj_core::harness_install::ManagedHarness;
 
 #[cfg(unix)]
 mod harness_launch;

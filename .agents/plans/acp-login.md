@@ -19,7 +19,8 @@ ACP-capable harnesses.
 
 ## Progress
 
-- [x] Expose the worker's managed harness resolver to the CLI.
+- [x] Expose the managed harness resolver to the CLI by moving the shared
+  installer into `mj-core` (the crate boundary forbids `mj-cli` → `mj-worker`).
 - [x] Add the ACP auth client and terminal-method runner.
 - [x] Wire `mj login` to prefer ACP and fall back to the CLI.
 - [x] Cover discovery, method selection, terminal execution, and fallback with tests.
@@ -67,12 +68,13 @@ ACP-capable harnesses.
   runs in the person's terminal, which is where an interactive terminal-auth
   command must run, and the command must be able to use inherited stdio.
   Rationale: no new relay protocol or PTY transport is required.
-- Decision: make the existing managed-harness resolver available from
-  `brokk-mj-worker` and depend on it from `mj-cli` only on unix. The installer,
-  its pins, its checksums, its leases and its garbage collection stay in one
-  place.
-  Rationale: duplicating the installer or moving its assets would create a
-  second source of truth for pinned harnesses.
+- Decision: move the managed-harness installer from `mj-worker` into
+  `mj-core`, and have the worker re-export it. The installer, its pins, its
+  checksums, its leases, its assets and its garbage collection stay in one
+  place, and `mj-cli` reaches them without depending on the worker crate (the
+  crate-ownership gate forbids that edge).
+  Rationale: duplicating the installer would create a second source of truth
+  for pinned harnesses.
 - Decision: prefer a terminal method, then a method whose id names an
   interactive login, then the first method. `--method <id>` overrides.
   Rationale: Muse and OpenCode expose one usable terminal action; Codex exposes
@@ -148,10 +150,11 @@ still reads `signed in` until a turn fails.
 ## Context and Orientation
 
 `mj-cli/src/main.rs::login` currently resolves `mj_core::credentials::login_command`
-and runs the harness CLI with the profile environment. `mj-worker` already owns
-the pinned installer in `mj-worker/src/worker_runtime/harness.rs`, including
-`resolve`, which installs or reuses an exact version and returns the ACP bridge
-command, arguments, extra environment and an install lease. The bridge commands
+and runs the harness CLI with the profile environment. `mj-core` now owns
+the pinned installer in `mj-core/src/harness_install.rs`, including `resolve`,
+which installs or reuses an exact version and returns the ACP bridge command,
+arguments, extra environment and an install lease. `mj-worker` re-exports the
+same module for its target-side use. The bridge commands
 and auth methods are pinned in `mj-core/src/harness_runtime.rs`.
 
 The ACP initialize response carries `authMethods`. A method may be a terminal
@@ -195,7 +198,7 @@ No live credentials were read or written while probing.
 
 ## Interfaces and Dependencies
 
-`mj-worker` gains a public unix-only `managed_harness` resolver returning the
-command, arguments, environment, entrypoint and lease. `mj-cli` gains a
-terminal-side `acp_login` module. No new crate is introduced. `mj-cli` depends
-on `brokk-mj-worker` for unix targets only.
+`mj-core` gains a public unix-only `harness_install` module returning the
+command, arguments, environment, entrypoint and lease; `mj-worker` re-exports
+it. `mj-cli` gains a terminal-side `acp_login` module and depends only on
+`mj-core`. No new crate is introduced.

@@ -933,7 +933,6 @@ dependencies = [
  "brokk-mj-controller",
  "brokk-mj-core",
  "brokk-mj-tui",
- "brokk-mj-worker",
  "chrono",
  "clap",
  "crossterm",

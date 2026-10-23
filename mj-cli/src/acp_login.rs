@@ -105,16 +105,21 @@ pub(crate) async fn login(
         }
     }
     launch_environment.extend(environment.clone());
-    let managed =
-        match mj_worker::worker_runtime::managed_harness(profile.kind, &launch_environment).await {
-            Ok(managed) => managed,
-            Err(error) => {
-                return Ok(Outcome::Unavailable(format!(
-                    "the pinned {} could not be prepared: {error:#}",
-                    profile.kind.display_name()
-                )));
-            }
-        };
+    let managed = match mj_core::harness_install::resolve_with_environment(
+        profile.kind,
+        mj_core::config::ExecutionPolicy::ConfiguredApprovals,
+        &launch_environment,
+    )
+    .await
+    {
+        Ok(managed) => managed,
+        Err(error) => {
+            return Ok(Outcome::Unavailable(format!(
+                "the pinned {} could not be prepared: {error:#}",
+                profile.kind.display_name()
+            )));
+        }
+    };
     launch_environment.extend(managed.environment.clone());
     println!(
         "Using the pinned {} at {}.",
