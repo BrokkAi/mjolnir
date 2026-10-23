@@ -70,6 +70,10 @@ pub struct SessionExportLayout {
     pub managed_worktree: Option<mj_core::state::ManagedWorktree>,
 }
 
+/// The id a host checkout's layout gives its one repository, whatever the
+/// session's bundle calls that repository.
+pub const HOST_CHECKOUT_REPOSITORY: &str = "project";
+
 /// How long an idle relay may fail to admit a barrier before its worker is
 /// treated as wedged. Busy recovery checkpoints defer immediately. A close
 /// sends a non-steering turn cancellation and gives the worker this same

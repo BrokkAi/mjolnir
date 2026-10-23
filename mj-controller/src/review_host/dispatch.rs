@@ -11,6 +11,7 @@ impl HostState {
                 prompt_driven,
             } => self.observe(session_id, snapshot, prompt_driven).await,
             HostEvent::Retain { live } => self.retain_sessions(&live),
+            HostEvent::StartPush { session_id, reply } => self.begin_push(session_id, reply),
             HostEvent::Start {
                 session_id,
                 manual,
@@ -31,6 +32,17 @@ impl HostState {
                 completion,
                 result,
             } => self.state_saved(session_id, completion, result),
+            HostEvent::ChildRegistered {
+                session_id,
+                epoch,
+                result,
+            } => self.child_registered(session_id, epoch, result),
+            HostEvent::ReviewerFinished {
+                session_id,
+                child_session_id,
+                answer,
+                reply,
+            } => self.reviewer_finished(session_id, child_session_id, answer, reply),
             HostEvent::Resolve {
                 session_id,
                 resolution,
@@ -71,6 +83,22 @@ impl HostState {
             return;
         }
         match step {
+            ReviewStep::PushDelivered(result) => {
+                match result {
+                    Ok(state) => if let Some(slot) = self.reviews.get_mut(&session_id) { slot.state = *state; },
+                    Err(error) => self.record_notice(&session_id, format!("Before-push review verdict delivery failed: {error}; the push stays blocked until a review is clean.")),
+                }
+                self.close_reviewer_child(&session_id);
+                self.run_one(&session_id, ReviewRequest::Close);
+            }
+            ReviewStep::Failed(error) => {
+                if self.reviews.get(&session_id).is_some_and(|slot| {
+                    matches!(slot.driver.phase(), TurnReviewPhase::Running { .. })
+                }) {
+                    self.fail(&session_id, error);
+                    self.close_failed_reviewer_after_persistence(&session_id);
+                }
+            }
             ReviewStep::Delta(result) => {
                 let requests = match result {
                     Ok(deltas) => self
@@ -88,55 +116,6 @@ impl HostState {
                 };
                 self.run(&session_id, requests);
             }
-            ReviewStep::RoleStarted { role, result } => {
-                let requests = match self.reviews.get_mut(&session_id) {
-                    Some(slot) => match result {
-                        Ok(()) => slot.driver.role_started(&role),
-                        Err(error)
-                            if matches!(
-                                slot.driver.phase(),
-                                TurnReviewPhase::Forwarding { .. }
-                            ) =>
-                        {
-                            tracing::debug!(
-                                session_id = %session_id,
-                                role = %role,
-                                %error,
-                                "ignoring a late reviewer start result during primary handoff"
-                            );
-                            return;
-                        }
-                        Err(error) => {
-                            self.fail(&session_id, error);
-                            return;
-                        }
-                    },
-                    None => return,
-                };
-                self.run(&session_id, requests);
-            }
-            ReviewStep::RolePrompted { role, result } => {
-                if let Err(error) = result {
-                    if self.reviews.get(&session_id).is_some_and(|slot| {
-                        matches!(slot.driver.phase(), TurnReviewPhase::Forwarding { .. })
-                    }) {
-                        // Role cleanup can report after the primary handoff
-                        // has begun. It is unrelated to that handoff and must
-                        // not release its prompt hold or replace its findings.
-                        tracing::debug!(
-                            session_id = %session_id,
-                            role = %role,
-                            %error,
-                            "ignoring a late reviewer-role result during primary handoff"
-                        );
-                        return;
-                    }
-                    self.fail(
-                        &session_id,
-                        format!("reviewing role {role:?} could not be prompted: {error}"),
-                    );
-                }
-            }
             ReviewStep::PrimaryPrompted(result) => {
                 let requests = match result {
                     Ok(()) => self
@@ -152,7 +131,6 @@ impl HostState {
                 };
                 self.run(&session_id, requests);
             }
-            ReviewStep::RoleEvents { role, result } => self.role_events(session_id, role, result),
         }
     }
 

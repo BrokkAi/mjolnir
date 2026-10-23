@@ -8,14 +8,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
-use mj_core::config::{ExecutionPolicy, HarnessKind};
-use mj_core::harness_runtime::{
+use crate::config::{ExecutionPolicy, HarnessKind};
+use crate::harness_runtime::{
     GROK_VERSION, HarnessPin, KIMI_VERSION, LEASE_FILE, MANIFEST_FILE, ManagedHarnessManifest,
     managed_harness_cache_root, managed_harness_install_dir, managed_harness_manifest_matches,
     npm_bridge, pin,
 };
-use mj_core::worker_launch::HarnessRuntimePolicy;
+use crate::worker_launch::HarnessRuntimePolicy;
+use anyhow::{Context, Result, anyhow, bail};
 
 const INSTALL_LOCK_FILE: &str = ".install.lock";
 const INSTALL_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -23,25 +23,28 @@ const HARNESS_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MANAGED_INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MAX_INSTALLER_BYTES: usize = 8 * 1024 * 1024;
 
-const CODEX_PACKAGE_JSON: &[u8] = include_bytes!("../../assets/harnesses/codex/package.json");
-const CODEX_PACKAGE_LOCK: &[u8] = include_bytes!("../../assets/harnesses/codex/package-lock.json");
-const CLAUDE_PACKAGE_JSON: &[u8] = include_bytes!("../../assets/harnesses/claude/package.json");
-const CLAUDE_PACKAGE_LOCK: &[u8] =
-    include_bytes!("../../assets/harnesses/claude/package-lock.json");
-const MIMO_PACKAGE_JSON: &[u8] = include_bytes!("../../assets/harnesses/mimo/package.json");
-const MIMO_PACKAGE_LOCK: &[u8] = include_bytes!("../../assets/harnesses/mimo/package-lock.json");
+const CODEX_PACKAGE_JSON: &[u8] = include_bytes!("../assets/harnesses/codex/package.json");
+const CODEX_PACKAGE_LOCK: &[u8] = include_bytes!("../assets/harnesses/codex/package-lock.json");
+const CLAUDE_PACKAGE_JSON: &[u8] = include_bytes!("../assets/harnesses/claude/package.json");
+const CLAUDE_PACKAGE_LOCK: &[u8] = include_bytes!("../assets/harnesses/claude/package-lock.json");
+const MIMO_PACKAGE_JSON: &[u8] = include_bytes!("../assets/harnesses/mimo/package.json");
+const MIMO_PACKAGE_LOCK: &[u8] = include_bytes!("../assets/harnesses/mimo/package-lock.json");
 
 #[derive(Debug)]
-pub(crate) struct ManagedHarness {
+pub struct ManagedHarness {
     pub command: PathBuf,
     pub args: Vec<String>,
     pub environment: BTreeMap<String, String>,
+    /// The installed harness executable itself. For an adapter that is launched
+    /// through a shell bootstrap, this is the native harness or ACP binary the
+    /// bootstrap would exec; login fallbacks use it directly.
+    pub entrypoint: PathBuf,
     pub lease_path: PathBuf,
     pub cache_root: PathBuf,
     _lease: File,
 }
 
-pub(crate) fn spawn_gc_on(
+pub fn spawn_gc_on(
     runtime: &tokio::runtime::Handle,
     root: PathBuf,
     harness: HarnessKind,
@@ -70,7 +73,7 @@ pub(crate) fn spawn_gc_on(
     })
 }
 
-pub(crate) async fn resolve(
+pub async fn resolve(
     runtime: HarnessRuntimePolicy,
     harness: HarnessKind,
     execution_policy: ExecutionPolicy,
@@ -79,7 +82,14 @@ pub(crate) async fn resolve(
     if runtime == HarnessRuntimePolicy::Ambient {
         return Ok(None);
     }
-    let environment = mj_core::login_environment::with_overrides(environment).await?;
+    // DSH has no managed installation: the npm package bundles the same
+    // release binaries, so the launch description the controller already
+    // provides resolves the target's own `dsh-acp` or fetches the pinned
+    // package through npx.
+    if harness == HarnessKind::Dsh {
+        return Ok(None);
+    }
+    let environment = crate::login_environment::with_overrides(environment).await?;
     let root = managed_harness_cache_root(
         environment.get("XDG_CACHE_HOME").map(OsStr::new),
         environment.get("HOME").map(OsStr::new),
@@ -87,6 +97,24 @@ pub(crate) async fn resolve(
     resolve_at_async(&root, harness, execution_policy, &environment)
         .await
         .map(Some)
+}
+
+/// Launch description for a harness [`resolve`] does not manage, for call
+/// sites the controller's bridge launch does not reach (the model discovery
+/// probe). Only DSH: [`crate::harness_runtime::dsh_acp_launch_script`]
+/// resolves the target's own `dsh-acp` or the pinned npm package, so there is
+/// no install to lease and nothing to cache.
+pub fn unmanaged_launch(harness: HarnessKind) -> Option<(PathBuf, Vec<String>)> {
+    match harness {
+        HarnessKind::Dsh => Some((
+            PathBuf::from("sh"),
+            vec![
+                "-c".to_owned(),
+                crate::harness_runtime::dsh_acp_launch_script(),
+            ],
+        )),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -106,6 +134,31 @@ fn resolve_at(
             execution_policy,
             environment,
         ))
+}
+
+/// Install or reuse the exact managed harness for `kind` from a fully
+/// resolved environment.
+///
+/// Unlike [`resolve`], this does not start the account's login shell. Callers
+/// that already hold a resolved environment (notably `mj login`, which may run
+/// before any daemon and under a shell that cannot be started non-interactively)
+/// use this directly.
+pub async fn resolve_with_environment(
+    harness: HarnessKind,
+    execution_policy: ExecutionPolicy,
+    environment: &BTreeMap<String, String>,
+) -> Result<ManagedHarness> {
+    if harness == HarnessKind::Dsh {
+        bail!(
+            "{} has no managed installation; launch it through its npx script",
+            harness.display_name()
+        );
+    }
+    let root = managed_harness_cache_root(
+        environment.get("XDG_CACHE_HOME").map(OsStr::new),
+        environment.get("HOME").map(OsStr::new),
+    )?;
+    resolve_at_async(&root, harness, execution_policy, environment).await
 }
 
 async fn resolve_at_async(
@@ -193,21 +246,6 @@ async fn resolve_at_async(
             PathBuf::from("sh"),
             vec!["-c".to_owned(), bridge.bootstrap_script()],
         )
-    } else if harness == HarnessKind::Dsh {
-        // dsh-acp takes the session's staged instructions as its system
-        // prompt; the script replaces itself with the pinned executable.
-        (
-            PathBuf::from("sh"),
-            vec![
-                "-c".to_owned(),
-                mj_core::harness_runtime::dsh_acp_script(),
-                "mj-dsh".to_owned(),
-                install
-                    .join(selected.entrypoint)
-                    .to_string_lossy()
-                    .into_owned(),
-            ],
-        )
     } else if harness == HarnessKind::OpenCode {
         // OpenCode imports the session's staged logins before its ACP server
         // starts; the script replaces itself with the pinned executable.
@@ -217,7 +255,7 @@ async fn resolve_at_async(
                 "-c".to_owned(),
                 format!(
                     "opencode=\"$1\"; {}",
-                    mj_core::harness_runtime::opencode_acp_script()
+                    crate::harness_runtime::opencode_acp_script()
                 ),
                 "mj-opencode".to_owned(),
                 install
@@ -240,6 +278,7 @@ async fn resolve_at_async(
         command,
         args,
         environment: launch_environment,
+        entrypoint: install.join(selected.entrypoint),
         lease_path,
         cache_root: root.to_path_buf(),
         _lease: lease,
@@ -338,7 +377,9 @@ async fn install_into(
             )
             .await?
         }
-        HarnessKind::Dsh => install_dsh(staging.path(), environment).await?,
+        HarnessKind::Dsh => {
+            unreachable!("DSH has no managed installation; resolve returns before installing")
+        }
     }
     relativize_internal_links(staging.path(), staging.path())?;
     validate_entrypoint(staging.path(), selected, harness)?;
@@ -350,7 +391,7 @@ async fn install_into(
         Ok(()) => {
             validate_entrypoint(final_path, selected, harness)
                 .context("validate relocated managed harness")?;
-            mj_core::config::atomic_write(&final_path.join(MANIFEST_FILE), &body)
+            crate::config::atomic_write(&final_path.join(MANIFEST_FILE), &body)
         }
         Err(error) if final_path.exists() => {
             std::fs::remove_dir_all(&staging_path).with_context(|| {
@@ -441,10 +482,9 @@ async fn verify_install_scripts_ran(
         .current_dir(staging)
         .env_clear()
         .envs(environment);
-    let output =
-        mj_core::subprocess::run_bounded(&mut command, 1024 * 1024, HARNESS_COMMAND_TIMEOUT)
-            .await
-            .context("read managed harness install-script status")?;
+    let output = crate::subprocess::run_bounded(&mut command, 1024 * 1024, HARNESS_COMMAND_TIMEOUT)
+        .await
+        .context("read managed harness install-script status")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
@@ -465,7 +505,7 @@ async fn verify_install_scripts_ran(
     bail!(
         "managed {} harness install skipped install scripts for {}. npm gates dependency install \
          scripts, so add each package to allowScripts in \
-         mj-worker/assets/harnesses/{}/package.json and reinstall.",
+         mj-core/assets/harnesses/{}/package.json and reinstall.",
         harness.display_name(),
         pending.join(", "),
         harness.id()
@@ -506,9 +546,9 @@ fn pending_install_scripts(stdout: &str) -> Result<Vec<String>> {
 /// carries the adapter only; the `muse` executable it drives keeps its own
 /// verified download.
 async fn install_muse_native(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
-    use mj_core::harness_runtime::MUSE_VERSION;
+    use crate::harness_runtime::MUSE_VERSION;
     let metadata: serde_json::Value =
-        serde_json::from_str(include_str!("../../assets/muse/runtime.json"))?;
+        serde_json::from_str(include_str!("../assets/muse/runtime.json"))?;
     anyhow::ensure!(
         metadata["muse_version"] == MUSE_VERSION,
         "Muse download metadata does not match the managed runtime pin"
@@ -540,9 +580,9 @@ async fn install_muse_native(staging: &Path, environment: &BTreeMap<String, Stri
 /// `@opencode/cli-<target>` tarball holds the executable at
 /// `package/bin/opencode`.
 async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
-    use mj_core::harness_runtime::OPENCODE_VERSION;
+    use crate::harness_runtime::OPENCODE_VERSION;
     let metadata: serde_json::Value =
-        serde_json::from_str(include_str!("../../assets/opencode/runtime.json"))?;
+        serde_json::from_str(include_str!("../assets/opencode/runtime.json"))?;
     anyhow::ensure!(
         metadata["version"] == OPENCODE_VERSION,
         "OpenCode download metadata does not match the managed runtime pin"
@@ -585,66 +625,6 @@ async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>
     Ok(())
 }
 
-/// Install the pinned dsh-acp release binary. Each GitHub release archive
-/// holds the executable at `dsh-acp-v<version>-<target>/dsh-acp`.
-async fn install_dsh(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
-    use mj_core::harness_runtime::DSH_ACP_VERSION;
-    let metadata: serde_json::Value =
-        serde_json::from_str(include_str!("../../assets/dsh/runtime.json"))?;
-    anyhow::ensure!(
-        metadata["version"] == DSH_ACP_VERSION,
-        "dsh-acp download metadata does not match the managed runtime pin"
-    );
-    let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-    let platform = metadata["platforms"]
-        .get(&key)
-        .with_context(|| format!("dsh-acp does not have a managed runtime for {key}"))?;
-    let field = |name: &str| {
-        platform[name]
-            .as_str()
-            .with_context(|| format!("missing dsh-acp artifact field {name}"))
-    };
-    let directory = format!("dsh-acp-v{DSH_ACP_VERSION}-{}", field("target")?);
-    let file = format!("{directory}.tar.gz");
-    let url =
-        format!("https://github.com/BrokkAi/dsh-acp/releases/download/v{DSH_ACP_VERSION}/{file}");
-    let archive = staging.join(&file);
-    download_verified_async(&url, &archive, field("sha256")?, environment).await?;
-    let packaged = format!("{directory}/dsh-acp");
-    let mut tar = tokio::process::Command::new("tar");
-    tar.arg("-xzf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(staging)
-        .arg(&packaged)
-        .env_clear()
-        .envs(environment);
-    run_bounded_checked(
-        &mut tar,
-        "extract verified dsh-acp archive",
-        HARNESS_COMMAND_TIMEOUT,
-    )
-    .await?;
-    std::fs::remove_file(&archive)?;
-    let entrypoint = staging.join("dsh-acp");
-    std::fs::rename(staging.join(&packaged), &entrypoint)
-        .context("move the dsh-acp executable out of its release archive")?;
-    std::fs::remove_dir_all(staging.join(&directory))?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&entrypoint, std::fs::Permissions::from_mode(0o755))?;
-    // The Linux binaries need glibc 2.34 or newer. Running the binary here
-    // fails the install with the loader's reason on a target that cannot run
-    // it, rather than leaving the bridge to exit at launch.
-    let mut version = tokio::process::Command::new(&entrypoint);
-    version.arg("--version").env_clear().envs(environment);
-    run_bounded_checked(
-        &mut version,
-        "run the installed dsh-acp, whose Linux build needs glibc 2.34 or newer,",
-        HARNESS_COMMAND_TIMEOUT,
-    )
-    .await
-}
-
 async fn download_verified_async(
     url: &str,
     destination: &Path,
@@ -673,7 +653,7 @@ async fn download_verified_async(
         HARNESS_COMMAND_TIMEOUT,
     )
     .await?;
-    let actual = mj_core::worker_launch::worker_executable_digest(destination)?;
+    let actual = crate::worker_launch::worker_executable_digest(destination)?;
     anyhow::ensure!(
         actual == expected,
         "harness runtime checksum mismatch for {}: expected {expected}, got {actual}",
@@ -766,7 +746,7 @@ async fn download_installer(
         .env_clear()
         .envs(environment);
     let output =
-        mj_core::subprocess::run_bounded(&mut curl, MAX_INSTALLER_BYTES, HARNESS_COMMAND_TIMEOUT)
+        crate::subprocess::run_bounded(&mut curl, MAX_INSTALLER_BYTES, HARNESS_COMMAND_TIMEOUT)
             .await
             .with_context(|| operation.to_owned())?;
     if !output.status.success() {
@@ -783,7 +763,7 @@ async fn run_bounded_checked(
     operation: &str,
     timeout: Duration,
 ) -> Result<()> {
-    let output = mj_core::subprocess::run_bounded(command, 4 * 1024 * 1024, timeout)
+    let output = crate::subprocess::run_bounded(command, 4 * 1024 * 1024, timeout)
         .await
         .with_context(|| operation.to_owned())?;
     if output.status.success() {
@@ -800,7 +780,7 @@ async fn run_bounded_with_input_checked(
     timeout: Duration,
 ) -> Result<()> {
     let output =
-        mj_core::subprocess::run_bounded_with_input(command, input, 4 * 1024 * 1024, timeout)
+        crate::subprocess::run_bounded_with_input(command, input, 4 * 1024 * 1024, timeout)
             .await
             .with_context(|| operation.to_owned())?;
     if output.status.success() {
@@ -856,7 +836,7 @@ fn apply_environment(command: &mut Command, environment: &BTreeMap<String, Strin
 #[cfg(test)]
 fn run_checked(command: &mut Command, operation: &str) -> Result<()> {
     let output =
-        mj_core::subprocess::run_with_input(command, &[]).with_context(|| operation.to_owned())?;
+        crate::subprocess::run_with_input(command, &[]).with_context(|| operation.to_owned())?;
     if output.status.success() {
         Ok(())
     } else {
@@ -885,7 +865,7 @@ fn validate_entrypoint(path: &Path, selected: HarnessPin, harness: HarnessKind) 
     Ok(())
 }
 
-pub(super) fn entrypoint_is_executable(path: &Path) -> bool {
+pub fn entrypoint_is_executable(path: &Path) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
         return false;
     };
@@ -938,7 +918,7 @@ fn gc_harness_root(root: &Path, keep_install_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn acquire_supervisor_lease(path: &Path) -> Result<File> {
+pub fn acquire_supervisor_lease(path: &Path) -> Result<File> {
     let lease = open_lock(path)?;
     lease
         .lock_shared()
@@ -959,7 +939,7 @@ mod tests {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/grok-install-validation");
         std::fs::create_dir_all(&parent).unwrap();
         let temp = tempfile::tempdir_in(parent).unwrap();
-        let environment = mj_core::login_environment::discover().unwrap();
+        let environment = crate::login_environment::discover().unwrap();
         let managed = resolve_at(
             temp.path(),
             HarnessKind::Grok,
@@ -1027,7 +1007,7 @@ INSTALLER
                 let path = install.join("bin").join(launcher);
                 assert!(!std::fs::read_link(&path).unwrap().is_absolute());
                 let output =
-                    mj_core::subprocess::run_with_input(&mut Command::new(path), &[]).unwrap();
+                    crate::subprocess::run_with_input(&mut Command::new(path), &[]).unwrap();
                 assert!(output.status.success());
                 assert_eq!(output.stdout, b"grok-fixture\n");
             }
@@ -1106,12 +1086,12 @@ INSTALLER
 
     #[test]
     fn muse_pin_matches_runtime_metadata() {
-        use mj_core::harness_runtime::{MUSE_ACP_PACKAGE, MUSE_ACP_VERSION, MUSE_VERSION};
+        use crate::harness_runtime::{MUSE_ACP_PACKAGE, MUSE_ACP_VERSION, MUSE_VERSION};
         let metadata: serde_json::Value =
-            serde_json::from_str(include_str!("../../assets/muse/runtime.json"))
+            serde_json::from_str(include_str!("../assets/muse/runtime.json"))
                 .expect("parse Muse runtime metadata");
         assert_eq!(metadata["muse_version"], MUSE_VERSION);
-        let bridge = mj_core::harness_runtime::npm_bridge(HarnessKind::Muse)
+        let bridge = crate::harness_runtime::npm_bridge(HarnessKind::Muse)
             .expect("Muse installs its adapter from npm");
         assert_eq!(bridge.package, MUSE_ACP_PACKAGE);
         assert_eq!(bridge.version, MUSE_ACP_VERSION);
@@ -1204,7 +1184,7 @@ INSTALLER
     fn executable(path: &Path, body: &str) {
         let parent = path.parent().unwrap();
         std::fs::create_dir_all(parent).unwrap();
-        mj_core::test_hooks::install_fake_command(
+        crate::test_hooks::install_fake_command(
             parent,
             path.file_name().unwrap().to_str().unwrap(),
             body,
@@ -1219,7 +1199,7 @@ INSTALLER
         let body =
             serde_json::to_vec_pretty(&ManagedHarnessManifest::for_install(harness, install_id))
                 .unwrap();
-        mj_core::config::atomic_write(&install.join(MANIFEST_FILE), &body).unwrap();
+        crate::config::atomic_write(&install.join(MANIFEST_FILE), &body).unwrap();
     }
 
     fn fake_node_tools(root: &Path, installs: &Path) -> BTreeMap<String, String> {

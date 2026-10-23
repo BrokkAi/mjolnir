@@ -98,7 +98,9 @@ pub fn discover_profiles(executor: &impl CommandExecutor) -> Vec<DiscoveredHome>
         .collect::<BTreeMap<_, _>>();
     let mut homes =
         discover_harness_homes_with_executor(home.as_deref(), overrides.clone(), executor);
-    discover_installed_harnesses(home.as_deref(), &overrides, &mut homes, executor);
+    discover_installed_harnesses(home.as_deref(), &overrides, &mut homes, executor, |key| {
+        std::env::var(key).is_ok_and(|value| !value.trim().is_empty())
+    });
     homes
 }
 
@@ -161,13 +163,16 @@ pub fn ssh_config_aliases(contents: &str) -> Vec<String> {
     aliases
 }
 
-/// A newly installed CLI may not create its profile directory until login.
+/// A newly installed CLI may not create its profile directory until login,
+/// and a harness that authenticates with an API key needs no CLI at all: the
+/// key in the environment Mjolnir started with is its installation signal.
 /// Run these probes through setup's bounded, cancellable executor.
 fn discover_installed_harnesses(
     user_home: Option<&Path>,
     overrides: &BTreeMap<HarnessKind, PathBuf>,
     homes: &mut Vec<DiscoveredHome>,
     executor: &impl CommandExecutor,
+    api_key_is_set: impl Fn(&str) -> bool,
 ) {
     for kind in HarnessKind::ALL {
         if homes.iter().any(|home| home.kind == kind) {
@@ -180,6 +185,17 @@ fn discover_installed_harnesses(
         else {
             continue;
         };
+        if let Some(env_key) = kind.api_key_variable()
+            && api_key_is_set(env_key)
+        {
+            homes.push(DiscoveredHome {
+                kind,
+                path: home,
+                codex_profile: None,
+                authenticated: true,
+            });
+            continue;
+        }
         let probe = CommandSpec::new(kind.cli_binary_name(), ["--version"])
             .purpose("detect installed harness before first login");
         match executor.execute(&probe) {

@@ -727,6 +727,8 @@ fn startup_cleanup_fixture() -> (Controller, String) {
     crate::database::save_subagent_session(
         &child,
         &mj_core::subagent::SubagentRecord {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             child_session_id: child_id.into(),
             parent_session_id: PROVISIONED_SESSION.into(),
             task_name: "failed child".into(),

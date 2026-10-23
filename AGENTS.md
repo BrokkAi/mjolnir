@@ -242,14 +242,17 @@ container sessions run the same harness versions as managed bare workers:
 
 - Codex and Claude bridges: update the `npm install --global` line in
   `containers/Containerfile.agent-dev`, as well as the package files in
-  `mj-worker/assets/harnesses/`. The test
+  `mj-core/assets/harnesses/`. The test
   `bridge_fallback_pins_match_the_agent_dev_containerfile` fails if the
   Containerfile and the pins disagree.
-- Muse: update `mj-worker/assets/muse/runtime.json`. The image installs Muse
+- Muse: update `mj-core/assets/muse/runtime.json`. The image installs Muse
   from that file.
-- dsh-acp: update `DSH_ACP_VERSION` and `mj-worker/assets/dsh/runtime.json`,
-  taking each platform's SHA-256 from the release's `.sha256` files. The image
-  installs dsh-acp from that file.
+- dsh-acp: update `DSH_ACP_VERSION` in `mj-core/src/harness_runtime.rs`. DSH
+  has no managed installation and is not in the image; sessions and the model
+  discovery probe launch it through `npx -y @brokkai/dsh-acp@<version>`, so
+  the version in `dsh_acp_launch_script()` is the whole pin. The test
+  `bridge_fallback_pins_match_the_agent_dev_containerfile` asserts the launch
+  names the pinned version.
 - OpenCode: regenerate `mj-core/assets/opencode-provider-environment.txt`
   with `scripts/generate-opencode-provider-environment.py` from a checkout of
   the new tag. The test

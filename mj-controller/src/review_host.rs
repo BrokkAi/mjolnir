@@ -14,13 +14,14 @@
 //! owns any part of the review.
 //!
 //! Shape: one task owns all review state and processes [`HostEvent`]s in
-//! order. Everything slow -- capturing a delta, staging a reviewer profile,
-//! reading a role's journal -- happens in a spawned task that sends its result
+//! order. Everything slow -- capturing a delta, registering a child,
+//! starting its worker -- happens in a spawned task that sends its result
 //! back as another event. Nothing here holds a lock across an await, and no
 //! two reviews can interleave their state.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, LazyLock, Mutex};
+#[cfg(test)]
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
@@ -33,7 +34,7 @@ use crate::session_manager::{
 use mj_core::config::ReviewConfig;
 use mj_core::state::{MaterializedExecutionState, MaterializedSession};
 
-use mj_core::relay::{RelayCommand, RelayEvent, RelayObservation};
+use mj_core::relay::RelayCommand;
 
 use mj_core::review::lanes::UserMessage;
 use mj_core::review::verdict::ReviewVerdict;
@@ -41,13 +42,12 @@ use mj_review::driver::{
     PendingForward, Resolution, ReviewRequest, TurnReviewDriver, TurnReviewPhase, TurnReviewSeed,
 };
 
-pub use mj_client::review::{
-    ReviewerQuestion, RuntimeReviewView, VerdictKind, VerdictView, role_session_id,
-};
+pub use mj_client::review::{ReviewerQuestion, RuntimeReviewView, VerdictKind, VerdictView};
 
 mod prompts;
 pub use prompts::*;
 mod environment;
+pub(crate) use environment::SharedReviewerRuntime;
 pub use environment::*;
 mod host;
 pub use host::*;
@@ -62,6 +62,7 @@ mod roles;
 mod slots;
 use slots::*;
 mod reviewer;
+mod reviewer_child;
 pub use reviewer::*;
 
 #[cfg(test)]

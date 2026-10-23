@@ -757,6 +757,8 @@ fn failed_subagent_controller(worker_root: &std::path::Path, session_id: &str) -
         worker_root: worker_root.to_owned(),
     });
     let relation = mj_core::subagent::SubagentRecord {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        reviewer_launch: None,
         child_session_id: session_id.into(),
         parent_session_id: "parent-1".into(),
         task_name: "count lines".into(),

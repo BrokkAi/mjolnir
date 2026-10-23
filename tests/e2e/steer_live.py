@@ -450,7 +450,7 @@ class SteerLab:
             "new", "--workspace", self.workspace,
             "--profile", harness, "--target", "localhost",
             "--project-directory", str(self.project),
-            "--no-review", "--title", title, "--json",
+            "--review", "off", "--title", title, "--json",
             *delegation_args,
             timeout=max(self.args.timeout, 300), case=title,
         )

@@ -20,7 +20,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"mode":"terminal","bell":true,"delay_seconds":2,"title":true})
         }
         "review" => {
-            json!({"enabled":false,"profile":null,"model":null,"effort":null})
+            json!({"trigger":"off","profile":null,"model":null,"effort":null})
         }
         "continuation" => json!({"enabled":true}),
         "github" if path.len() == 1 => json!({"watch":{}}),
@@ -256,6 +256,7 @@ pub(super) fn label(key: &str) -> String {
         "machine" => "Machine",
         "bundles" => "Projects",
         "enabled" => "Enabled",
+        "trigger" => "Trigger",
         "profile" => "Agent profile",
         "kind" => "Type",
         "home" => "Account directory",
@@ -459,7 +460,10 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             }
         }
         "review" => {
-            if section["enabled"] != Value::Bool(true) {
+            if section["trigger"].as_str() == Some("push") {
+                return Some("Before push".to_owned());
+            }
+            if section["trigger"].as_str().unwrap_or("off") == "off" {
                 "Off".to_owned()
             } else {
                 match section["profile"].as_str() {
@@ -573,6 +577,15 @@ pub(super) fn choice_label(path: &[String], value: &Value, draft: &Value) -> Str
             value.to_string()
         };
     };
+    if path == ["review", "trigger"] {
+        return match value {
+            "off" => "Off",
+            "turn" => "End of turn",
+            "push" => "Before push",
+            _ => value,
+        }
+        .to_owned();
+    }
     // Only the theme field: `auto` is also an image pull policy.
     if super::storage_path(path) == ["theme"]
         && let Ok(choice) =
@@ -650,6 +663,7 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         return choices;
     }
     let values: &[&str] = match key {
+        "trigger" if path == ["review", "trigger"] => &["off", "turn", "push"],
         "sessions_side" => &["left", "right"],
         "session_order" => &["project", "priority"],
         "symbols" => &["unicode", "ascii"],
@@ -785,12 +799,8 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "theme" => {
             "Auto matches the terminal's background. Terminal Dark and Light use its own colors. Applies after saving."
         }
-        "profiles" => {
-            "Add a profile for each agent you want to run, or use Detect profiles to find installed agents."
-        }
-        "home" => {
-            "The agent's account directory, such as ~/.codex. Sign in with the agent's own login command."
-        }
+        "profiles" => "Add a profile, then choose Sign in. Detect profiles finds installed agents.",
+        "home" => "The agent's account directory, such as ~/.codex. Save, then choose Sign in.",
         "machines" => {
             "Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its build cache settings."
         }
@@ -836,9 +846,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "repositories" => {
             "Set either a local repository directory or a GitHub source for each repository."
         }
-        "review" => {
-            "Used by turn review and plan second opinions. Auto picks another provider with quota."
-        }
+        "review" => "Used by turn review. Auto picks another provider with quota.",
         "continuation" => {
             "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
         }
@@ -857,7 +865,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward."
         }
         "eligible_profiles" => {
-            "Check profiles that Claude and Codex parents may use in addition to their own profile."
+            "Check profiles that Claude, Codex, and DSH parents may use in addition to their own profile."
         }
         "build_cache" => {
             "Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and Bazel."

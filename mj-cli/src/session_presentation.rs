@@ -385,6 +385,8 @@ mod tests {
         state.subagents.insert(
             child.id.clone(),
             mj_core::subagent::SubagentRecord {
+                kind: mj_core::subagent::SubagentKind::Worker,
+                reviewer_launch: None,
                 child_session_id: child.id.clone(),
                 parent_session_id: "session-1".into(),
                 task_name: "Inspect parser".into(),

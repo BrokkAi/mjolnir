@@ -511,7 +511,11 @@ impl HarnessKind {
             Self::Muse => ".config/muse",
             Self::OpenCode => ".config/opencode",
             Self::Mimo => ".mimocode",
-            Self::Dsh => ".dsh-acp",
+            // DeepSeek's own CLI, `dsh`, keeps its home here. Detection keys
+            // off the user's DeepSeek installation; the dsh-acp bridge that
+            // serves a session is installed on demand and proves nothing
+            // about one.
+            Self::Dsh => ".dsh",
         }
     }
 
@@ -611,7 +615,10 @@ impl HarnessKind {
             Self::Muse => "muse",
             Self::OpenCode => "opencode",
             Self::Mimo => "mimo",
-            Self::Dsh => "dsh-acp",
+            // DeepSeek's `dsh`, not the dsh-acp bridge Mjolnir installs to
+            // serve sessions: a machine carrying the bridge but no DeepSeek
+            // installation has nothing to detect.
+            Self::Dsh => "dsh",
         }
     }
 
@@ -1013,10 +1020,13 @@ impl HarnessKind {
         }
     }
 
-    /// Whether this harness receives Mjolnir's delegation tools, and so gets
-    /// the subagent choice in the wizards.
+    /// Whether this harness receives Mjolnir's delegation tools: a parent's
+    /// `spawn` and related tools, and a child's `handback`. Such a harness
+    /// gets the subagent choice in the wizards. Claude reads the tools from
+    /// its staged profile; Codex and DSH take them over ACP, and DSH reads
+    /// the delegation policy from its staged `AGENTS.md`.
     pub const fn supports_delegation_tools(self) -> bool {
-        matches!(self, Self::Claude | Self::Codex)
+        matches!(self, Self::Claude | Self::Codex | Self::Dsh)
     }
 
     /// The harness-home-relative directories that hold its native session

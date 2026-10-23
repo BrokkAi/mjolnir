@@ -108,6 +108,7 @@ pub const MUSE_VERSION: &str = "1.4.11-R6667.1";
 pub const OPENCODE_VERSION: &str = "2.1.2";
 pub const MIMO_CLI_VERSION: &str = "0.1.15";
 pub const DSH_ACP_VERSION: &str = "0.2.1";
+pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
 
 /// The shell commands that start OpenCode's ACP server with the executable
 /// named by `$opencode`, for the managed install and the container fallback
@@ -219,6 +220,22 @@ pub fn dsh_acp_script() -> String {
         instructions = kind.agent_instructions_file(),
         limit = DSH_ACP_INSTRUCTIONS_LIMIT,
         awk = UTF8_CHECK_AWK,
+    )
+}
+
+/// The shell commands that start dsh-acp on any target: the target's own
+/// `dsh-acp` when one is on `PATH`, otherwise the pinned npm package through
+/// `npx`, running [`dsh_acp_script`] with the resolved command as its
+/// positional arguments. DSH has no managed installation — the npm package
+/// bundles the same release binaries — so this one script is the whole
+/// launch path for bare and container targets alike, and for the model
+/// discovery probe.
+pub fn dsh_acp_launch_script() -> String {
+    format!(
+        "if command -v dsh-acp >/dev/null 2>&1; then set -- dsh-acp; elif command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then set -- npx -y {package}@{version}; else echo 'Mjolnir needs dsh-acp or Node.js, npm, and npx on PATH; install one in the target environment' >&2; exit 127; fi; {script}",
+        package = DSH_ACP_PACKAGE,
+        version = DSH_ACP_VERSION,
+        script = dsh_acp_script(),
     )
 }
 

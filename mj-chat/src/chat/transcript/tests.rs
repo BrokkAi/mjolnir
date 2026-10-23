@@ -243,7 +243,7 @@ fn a_generated_review_prompt_renders_as_hels_own_line() {
         body: TranscriptBody::User {
             content: vec![serde_json::json!({
                 "type": "text",
-                "text": mj_core::second_opinion::PRIMARY_CONTEXT_REQUEST,
+                "text": "[HARNESS NOTE: wait for the delegated work to finish.]",
             })],
         },
     });
@@ -3940,6 +3940,7 @@ fn golden_conversation_title() {
 
     draw("idle", &mut chat);
     let mut view = RuntimeReviewView {
+        child_session_id: None,
         session_id: "session".to_owned(),
         questions: Vec::new(),
         phase: TurnReviewPhase::LaunchingReviewer,

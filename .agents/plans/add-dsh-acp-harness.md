@@ -8,7 +8,7 @@ This document must be maintained in accordance with `.agents/PLANS.md`.
 
 After this change a person can configure a profile with `kind = "dsh"`, give it a DeepSeek API key, and run Mjolnir sessions on DeepSeek models through BrokkAi's `dsh-acp`, a DeepSeek coding agent that speaks the Agent Client Protocol (ACP) itself. ACP is JSON-RPC over standard input and output: Mjolnir's worker sends prompts, model and mode selections, permission answers and cancellation, and receives streamed messages, thoughts, tool calls and usage. On a bare target the worker installs the exact pinned `dsh-acp` release binary, verified by SHA-256, with no Node.js needed; the reference container image carries the same binary. Sessions stream through the existing TUI, the Plan toggle works, writes and commands ask for approval on raw targets and run freely inside containers, the session survives suspend, checkpoint restore at a different workspace path, and resume, and token usage is priced.
 
-To see it working: put `DEEPSEEK_API_KEY` in the environment Mjolnir starts with (or in `secrets.toml` and reference it from the profile), run `mj setup` or add `[profiles.dsh] kind = "dsh" home = "~/.dsh-acp"`, start a session on `localhost`, and prompt it.
+To see it working: put `DEEPSEEK_API_KEY` in the environment Mjolnir starts with (or in `secrets.toml` and reference it from the profile), run `mj setup` or add `[profiles.dsh] kind = "dsh" home = "~/.dsh"`, start a session on `localhost`, and prompt it.
 
 The source project is https://github.com/BrokkAi/dsh-acp. Version 0.2.0 is the first release published to GitHub Releases (six platform archives with `.sha256` files and an embedded `release.json`) and to npm as `@brokkai/dsh-acp` (all six binaries behind a Node launcher).
 
@@ -110,6 +110,18 @@ The source project is https://github.com/BrokkAi/dsh-acp. Version 0.2.0 is the f
   Rationale: only `mj-tui` shows it (true for Kimi Code before this change); `mj new`, `/api/preflight/new` and the web viewer have no warning. Showing or requiring acknowledgement on every client is a cross-client product change proposed to the user rather than folded into this harness.
   Date/Author: 2026-10-22 / Claude
 
+- Decision (review follow-up): detection keys off DeepSeek's own CLI, not the dsh-acp bridge: the conventional home leaf is `.dsh` (DeepSeek's `dsh` keeps its home there) and the installed-harness probe runs `dsh --version`, not `dsh-acp --version`.
+  Rationale: dsh-acp is Mjolnir's own bridge, installed on demand into the managed cache or via npx; a machine carrying it has no DeepSeek installation necessarily, so probing it detected nothing meaningful — the same error as looking for a `~/.dsh-acp` home nothing creates. The profile home remains a `DSH_ACP_DATA_DIR` root and the launch path is unchanged; only setup discovery and `mj doctor`'s "create it" advice follow the user's real `dsh` installation. Detection now finds a user with DeepSeek's CLI but no key configured as a profile that is present and not authenticated, prompting them to supply `DEEPSEEK_API_KEY`.
+  Date/Author: 2026-10-23 / Kimi
+
+- Decision (review follow-up): detection also treats `DEEPSEEK_API_KEY` in the environment Mjolnir started with as an installation signal, so an API-key-only setup needs no CLI, no home, and no hand-added profile.
+  Rationale: DSH's only prerequisite is the key, and Mjolnir fetches dsh-acp on demand. Requiring DeepSeek's own CLI or `~/.dsh` arbitrarily excluded the common case of a key configured for API access. A key set only in `secrets.toml` still needs the profile that references it, so those users add the profile once.
+  Date/Author: 2026-10-23 / OpenCode
+
+- Decision (review follow-up): DSH has no managed installation. The managed release-archive download (`install_dsh`, `mj-worker/assets/dsh/runtime.json`), the agent-dev image layer, and `scripts/install-dsh-acp.py` are gone; every launch — bare, container, and the model discovery probe — resolves the target's own `dsh-acp` on PATH or runs `npx -y @brokkai/dsh-acp@<DSH_ACP_VERSION>` through the one `dsh_acp_launch_script()` in `mj-core`, which composes the npm bootstrap with `dsh_acp_script()`. The worker's `resolve` returns `None` for DSH and the discovery probe falls back to `unmanaged_launch`.
+  Rationale: the npm package bundles the same release binaries the archives carried, so installing them ahead of time bought nothing but machinery — a second pin file, a containerfile layer, an install script, a glibc check at install time — and Node.js 22+ is already the bare-target prerequisite for Codex, Claude, and MiMo. The npx cache still makes subsequent launches local. What is lost: a clear pre-install failure on glibc < 2.34 targets, now surfaced by the bridge failing to start, same as any other harness whose runtime prerequisites are missing.
+  Date/Author: 2026-10-23 / Kimi
+
 ## Outcomes & Retrospective
 
 The harness is implemented and was exercised live in an isolated instance (`--instance dsh-live`) with a local bare target and a scripted DeepSeek-compatible server reached through `DEEPSEEK_BASE_URL`. Model discovery installed the pinned binary from the verified GitHub archive into the managed cache and listed `deepseek-flash` and `deepseek-v4-pro`. A session streamed a reply; the upstream request carried the profile key as a bearer token and a system prompt holding the profile's staged `AGENTS.md`, and Mjolnir's `mj-agents` and `mj-memory` MCP servers appeared as dsh-acp tools. A command under configured approvals stopped at "DSH requests permission: Run touch dsh-proof.txt" and ran in the session clone only after approval. The native record lived in the staged home, never in the repository. After setting `permission_mode` to `allow` by hand, suspending, restarting the daemon and resuming, the same native session came back from the checkpoint with all of its messages and the history reached the model, and `permission_mode` was `ask` again.
@@ -128,7 +140,7 @@ Remaining limitation: DSH token usage is recorded but not totalled or priced unt
 
 ## Plan of Work
 
-Core identity: add `Dsh` to `HarnessKind` and `ALL`, with `DSH_ACP_DATA_DIR`, `.dsh-acp`, `auth.json` (documented as never written), `dsh-acp`, `AGENTS.md`, `skills`, no harness-owned skills, id `dsh`, display `DSH`, install advice naming the npm package and the release archives, native session directory `sessions`, empty bridge arguments, no guardian, no MCP config file. Add `HarnessKind::api_key_variable` (`DEEPSEEK_API_KEY` for DSH) and route `auth_scheme`, `inherit_provider_key`, `ensure_ready` and setup's authentication check through it. Add the reserved-variable check to `HarnessProfile::validate`. Execution enforcement: `ask` and `allow` through `acp_setting` on `permission_mode`. Plan control: DSH's normal mode is `agent`, set through the `mode` config option. Missing-session detection stays `false`.
+Core identity: add `Dsh` to `HarnessKind` and `ALL`, with `DSH_ACP_DATA_DIR`, `.dsh`, `auth.json` (documented as never written), `dsh` (DeepSeek's own CLI, used only for setup detection), `AGENTS.md`, `skills`, no harness-owned skills, id `dsh`, display `DSH`, install advice naming the npm package and the release archives, native session directory `sessions`, empty bridge arguments, no guardian, no MCP config file. Add `HarnessKind::api_key_variable` (`DEEPSEEK_API_KEY` for DSH) and route `auth_scheme`, `inherit_provider_key`, `ensure_ready` and setup's authentication check through it. Add the reserved-variable check to `HarnessProfile::validate`. Execution enforcement: `ask` and `allow` through `acp_setting` on `permission_mode`. Plan control: DSH's normal mode is `agent`, set through the `mode` config option. Missing-session detection stays `false`.
 
 Runtime: `DSH_ACP_VERSION = "0.2.0"`, pin `dsh-acp-0.2.0` with entrypoint `dsh-acp`, `dsh_acp_script()`. Worker: `install_dsh` downloads `https://github.com/BrokkAi/dsh-acp/releases/download/v<version>/dsh-acp-v<version>-<target>.tar.gz`, verifies the SHA-256 from `runtime.json`, extracts `dsh-acp-v<version>-<target>/dsh-acp`, moves it to the install root, and runs `--version`; launch is `sh -c '<script>' mj-dsh <install>/dsh-acp`.
 
@@ -164,15 +176,13 @@ Acceptance is: a store at revision 91 upgrades to 92 keeping its sessions, and a
 
 ## Idempotence and Recovery
 
-The managed install uses the existing content-addressed cache, staging directory, manifest receipt and lease; an interrupted install is removed on retry. The migration rebuilds the two tables in one transaction with foreign keys checked, and skips a table that already admits `'dsh'`. Live checks use an isolated instance only.
+Managed harnesses use the existing content-addressed cache, staging directory, manifest receipt and lease; an interrupted install is removed on retry. DSH has no install: a launch uses the target's own `dsh-acp` or the npx cache, and a failed fetch is retried on the next launch. The migration rebuilds the two tables in one transaction with foreign keys checked, and skips a table that already admits `'dsh'`. Live checks use an isolated instance only.
 
 ## Interfaces and Dependencies
 
     pub enum HarnessKind { ..., Mimo, Dsh }
     pub const fn api_key_variable(self) -> Option<&'static str>
-    pub const DSH_ACP_VERSION: &str = "0.2.0";
+    pub const DSH_ACP_VERSION: &str = "0.2.1";
+    pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
     pub fn dsh_acp_script() -> String
-
-`mj-worker/assets/dsh/runtime.json`:
-
-    {"version": "0.2.0", "platforms": {"linux-x86_64": {"target": "x86_64-unknown-linux-gnu", "sha256": "..."}, ...}}
+    pub fn dsh_acp_launch_script() -> String

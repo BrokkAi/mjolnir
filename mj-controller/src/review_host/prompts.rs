@@ -1,10 +1,5 @@
 use super::*;
 
-/// How long the reviewer waits before reading its journal again when idle. An
-/// attach answers immediately even when nothing has been journaled, so without
-/// this the review would spin on empty pages.
-pub(super) const ROLE_POLL_IDLE_INTERVAL: Duration = Duration::from_millis(200);
-
 /// Why a review could not start. Every variant is something a person can act
 /// on, which is why they carry their own sentences rather than a code.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,19 +31,6 @@ pub(super) static PROMPT_LOCK: LazyLock<Mutex<BTreeMap<String, PromptHold>>> =
 pub(super) struct PromptHold {
     pub(super) delivery_epoch: Option<u64>,
     pub(super) delivery_command_id: Option<String>,
-}
-
-/// Fresh reviewer conversations need an identity unique across reviews and
-/// controller restarts, so use a random nonce.
-pub(crate) fn next_review_generation() -> Result<u64, String> {
-    let mut random = [0_u8; 8];
-    getrandom::fill(&mut random)
-        .map_err(|error| format!("generate reviewer generation: {error}"))?;
-    let generation = u64::from_le_bytes(random);
-    if generation == 0 {
-        return Err("generate reviewer generation: random nonce was zero".to_owned());
-    }
-    Ok(generation)
 }
 
 /// Whether a prompt for `session_id` must be refused, and why.

@@ -9,6 +9,7 @@ pub struct SubagentMcpSocket {
     pub agent_mailboxes_enabled: bool,
     /// Whether a parent's spawn tool offers the subtle task type.
     pub subtle_subagents: bool,
+    pub review_gate: bool,
     /// False for legacy shared Codex homes, which must retain ACP delivery.
     pub profile_registration: bool,
 }
@@ -221,6 +222,11 @@ pub(super) fn session_request_meta(
                     .map(|tool| format!("mcp__{}__{tool}", mj_core::subagent::SUBAGENT_MCP_SERVER)),
             );
         }
+        if spec.subagent_mcp_socket.as_ref().is_some_and(|socket| {
+            socket.review_gate && socket.role == mj_core::subagent::SubagentMcpRole::Parent
+        }) {
+            allowed.push("mcp__mj-agents__request_review".into());
+        }
         if !allowed.is_empty() {
             options.insert("allowedTools".to_owned(), serde_json::json!(allowed));
         }
@@ -251,37 +257,61 @@ pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
     } else {
         Vec::new()
     };
-    // The worker decides delivery after checking profile ownership. Legacy
-    // shared Codex homes keep ACP delivery until the controller restages them.
-    if spec.harness != HarnessKind::Claude
-        && let Some(socket) = &spec.subagent_mcp_socket
-        && !socket.profile_registration
-    {
-        let worker = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("hel"));
-        let mut args = vec![
-            "worker".into(),
-            "subagent-mcp".into(),
-            "--socket".into(),
-            socket.path.to_string_lossy().into_owned(),
-            // The server bounds a `wait` by what this harness's own MCP
-            // client will hold open.
-            "--harness".into(),
-            spec.harness.id().to_owned(),
-            "--role".into(),
-            socket.role.id().to_owned(),
-            "--agent-mailboxes-enabled".into(),
-            socket.agent_mailboxes_enabled.to_string(),
-        ];
-        if !socket.subtle_subagents {
-            // Only the non-default value is passed, for older workers.
-            args.extend(["--subtle-subagents".into(), "false".into()]);
-        }
-        servers.push(McpServer::Stdio(approve_owned_mcp(
-            spec,
-            McpServerStdio::new(mj_core::subagent::SUBAGENT_MCP_SERVER, worker).args(args),
-        )));
-    }
+    servers.extend(subagent_acp_mcp(spec));
     servers
+}
+
+/// The `mj-agents` server, when this launch delivers it over ACP. The worker
+/// decides delivery after checking profile ownership. Legacy shared Codex
+/// homes keep ACP delivery until the controller restages them.
+fn subagent_acp_mcp(spec: &LaunchSpec) -> Option<McpServer> {
+    if spec.harness == HarnessKind::Claude {
+        return None;
+    }
+    let socket = spec.subagent_mcp_socket.as_ref()?;
+    if socket.profile_registration {
+        return None;
+    }
+    let worker = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("hel"));
+    let mut args = vec![
+        "worker".into(),
+        "subagent-mcp".into(),
+        "--socket".into(),
+        socket.path.to_string_lossy().into_owned(),
+        // The server bounds a `wait` by what this harness's own MCP
+        // client will hold open.
+        "--harness".into(),
+        spec.harness.id().to_owned(),
+        "--role".into(),
+        socket.role.id().to_owned(),
+        "--agent-mailboxes-enabled".into(),
+        socket.agent_mailboxes_enabled.to_string(),
+    ];
+    if socket.review_gate && socket.role == mj_core::subagent::SubagentMcpRole::Parent {
+        args.push("--review-gate".into());
+    }
+    if !socket.subtle_subagents {
+        // Only the non-default value is passed, for older workers.
+        args.extend(["--subtle-subagents".into(), "false".into()]);
+    }
+    Some(McpServer::Stdio(approve_owned_mcp(
+        spec,
+        McpServerStdio::new(mj_core::subagent::SUBAGENT_MCP_SERVER, worker).args(args),
+    )))
+}
+
+/// The names of the Mjolnir-owned MCP servers this launch registers over
+/// ACP: project history and delegation. Reviewer servers a person configured
+/// are not Mjolnir's, so they are never in this list.
+pub(super) fn owned_acp_mcp_server_names(spec: &LaunchSpec) -> Vec<String> {
+    project_history_mcp(spec)
+        .into_iter()
+        .chain(subagent_acp_mcp(spec))
+        .filter_map(|server| match server {
+            McpServer::Stdio(server) => Some(server.name),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Only owned registrations opt in; yolo and other harnesses stay unchanged.

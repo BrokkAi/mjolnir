@@ -316,28 +316,6 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
     }
 }
 
-/// A relay coordinator for a session that runs no user shells.
-///
-/// The reviewer sidecar is one: `!` commands belong to the person driving the
-/// primary session, and are never routed to the agent reviewing its plan.
-pub(crate) async fn run_relay_coordinator(
-    relay: Arc<Mutex<DurableRelay>>,
-    events: mpsc::Receiver<RuntimeEvent>,
-    dispatch_wakes: mpsc::Receiver<()>,
-    commands: mpsc::Sender<CommandRequest>,
-) -> Result<()> {
-    // The registry is inert without a live event sink, so its working
-    // directory only has to exist.
-    let (shell_events, _shell_events_rx) = mpsc::channel(1);
-    let user_shells = crate::user_shell::UserShellRegistry::new(
-        std::env::current_dir()?,
-        BTreeMap::new(),
-        shell_events,
-    );
-    run_relay_coordinator_with_shells(relay, events, dispatch_wakes, commands, user_shells, None)
-        .await
-}
-
 /// Record the complete batch already emitted by the ACP runtime before
 /// admitting a checkpoint barrier. A command event may itself materialize
 /// several durable observations, and queued notification events belong to

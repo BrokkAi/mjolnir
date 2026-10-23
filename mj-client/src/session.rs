@@ -6,14 +6,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::schema::v1::SessionConfigOption;
 use anyhow::{Context, Result, ensure};
-use mj_core::config::Config;
 use mj_core::elicitation::ElicitationResponse;
-use mj_core::state::{ManagedSessionSnapshot, SessionRecord};
+use mj_core::state::ManagedSessionSnapshot;
 
-use mj_core::relay::{RelayCommand, RelayCursor, RelayEvent, RelayOperationalState, RepoDelta};
-use mj_core::worker_launch::ReviewerLaunchConfig;
+use mj_core::relay::{RelayCommand, RelayEvent, RelayOperationalState, RepoDelta};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -51,43 +48,15 @@ pub struct RelayAttachment {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct StartedReviewer {
-    pub native_session_id: Option<String>,
-    pub config_options: Vec<SessionConfigOption>,
-    pub reused: bool,
-    pub state: RelayOperationalState,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewerAction {
-    Start {
-        config: Box<ReviewerLaunchConfig>,
-    },
-    Submit {
-        command_id: String,
-        command: RelayCommand,
-    },
-    Attach {
-        after_ordinal: u64,
-        after_digest: String,
-    },
-    Acknowledge {
-        through_ordinal: u64,
-        through_digest: String,
-    },
-    Status,
-    RespondElicitation {
-        elicitation_id: String,
-        response: ElicitationResponse,
-    },
-    Pause,
-    /// Stop only the preparation that owns this generation; stale cleanup must not stop its replacement.
-    PauseGeneration {
-        generation: u64,
-    },
     CaptureDelta {
+        #[serde(default)]
+        scope: mj_core::relay::CaptureScope,
         baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
+    },
+    RecordReviewed {
+        trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
     },
     AdvanceBaseline {
         trees: std::collections::BTreeMap<std::path::PathBuf, String>,
@@ -97,15 +66,9 @@ pub enum ReviewerAction {
 impl ReviewerAction {
     pub const fn operation_name(&self) -> &'static str {
         match self {
-            Self::Start { .. } => "reviewer_start",
-            Self::Submit { .. } => "reviewer_submit",
-            Self::Attach { .. } => "reviewer_attach",
-            Self::Acknowledge { .. } => "reviewer_acknowledge",
-            Self::Status => "reviewer_status",
-            Self::RespondElicitation { .. } => "reviewer_respond_elicitation",
-            Self::Pause | Self::PauseGeneration { .. } => "reviewer_pause",
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
+            Self::RecordReviewed { .. } => "reviewer_record_reviewed",
         }
     }
 }
@@ -113,13 +76,6 @@ impl ReviewerAction {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewerOutcome {
-    Started(Box<StartedReviewer>),
-    Accepted { ordinal: u64 },
-    Attached(Box<RelayAttachment>),
-    Acknowledged(RelayCursor),
-    Status(Box<RelayOperationalState>),
-    ElicitationResolved,
-    Paused,
     Delta { repositories: Vec<RepoDelta> },
     BaselineAdvanced,
 }
@@ -198,11 +154,6 @@ impl PendingRelaySync {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct ReviewState {
-    pub review: Option<mj_core::storage::StoredReview>,
-}
-
 pub trait SessionHandleBackend: Send + Sync {
     fn transcript_history(
         &self,
@@ -216,7 +167,6 @@ pub trait SessionHandleBackend: Send + Sync {
         scope: mj_core::storage::HistoryScope,
         query: String,
     ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>>;
-    fn review_state(&self) -> BoxFuture<'_, Result<ReviewState>>;
     fn resolve_review_settings(
         &self,
         cancelled: Arc<std::sync::atomic::AtomicBool>,
@@ -276,9 +226,6 @@ impl SessionHandle {
         query: String,
     ) -> Result<Vec<mj_core::storage::PromptHistoryEntry>> {
         self.backend.search_prompts(bundle_id, scope, query).await
-    }
-    pub async fn review_state(&self) -> Result<ReviewState> {
-        self.backend.review_state().await
     }
 
     pub async fn resolve_review_settings(
@@ -447,15 +394,7 @@ impl SessionHandle {
     }
 
     pub async fn reviewer(&self, action: ReviewerAction) -> Result<ReviewerOutcome> {
-        self.reviewer_as(None, action).await
-    }
-
-    pub async fn reviewer_as(
-        &self,
-        role: Option<String>,
-        action: ReviewerAction,
-    ) -> Result<ReviewerOutcome> {
-        self.backend.reviewer(role, action).await
+        self.backend.reviewer(None, action).await
     }
 }
 
@@ -477,6 +416,20 @@ impl fmt::Debug for SessionHandle {
 }
 
 pub trait SessionControlBackend: Send + Sync {
+    fn snapshot(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<mj_core::state::MaterializedSession>> {
+        Box::pin(async move {
+            let handle = self.session(session_id).await?;
+            handle.sync_now().await?;
+            handle
+                .view()
+                .snapshot
+                .map(|snapshot| snapshot.materialized)
+                .context("session has no transcript yet")
+        })
+    }
     fn session(&self, session_id: String) -> BoxFuture<'_, Result<SessionHandle>>;
 }
 
@@ -486,6 +439,12 @@ pub struct SessionControl {
 }
 
 impl SessionControl {
+    pub async fn snapshot(
+        &self,
+        session_id: String,
+    ) -> Result<mj_core::state::MaterializedSession> {
+        self.backend.snapshot(session_id).await
+    }
     pub fn new(backend: impl SessionControlBackend + 'static) -> Self {
         Self {
             backend: Arc::new(backend),
@@ -525,68 +484,6 @@ impl SessionControl {
 impl fmt::Debug for SessionControl {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("SessionControl(..)")
-    }
-}
-
-pub trait ReviewerStagerBackend: Send + Sync {
-    fn stage(
-        &self,
-        config: Config,
-        session: SessionRecord,
-        profile_id: String,
-        generation: u64,
-        cancelled: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<ReviewerLaunchConfig>;
-}
-
-#[derive(Clone)]
-pub struct ReviewerStager {
-    backend: Arc<dyn ReviewerStagerBackend>,
-}
-
-impl ReviewerStager {
-    pub fn new(backend: impl ReviewerStagerBackend + 'static) -> Self {
-        Self {
-            backend: Arc::new(backend),
-        }
-    }
-
-    pub fn stage(
-        &self,
-        config: Config,
-        session: SessionRecord,
-        profile_id: String,
-        generation: u64,
-        cancelled: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<ReviewerLaunchConfig> {
-        self.backend
-            .stage(config, session, profile_id, generation, cancelled)
-    }
-
-    #[doc(hidden)]
-    pub fn unavailable(message: impl Into<String>) -> Self {
-        Self::new(UnavailableReviewerStager(message.into()))
-    }
-}
-
-impl fmt::Debug for ReviewerStager {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ReviewerStager(..)")
-    }
-}
-
-struct UnavailableReviewerStager(String);
-
-impl ReviewerStagerBackend for UnavailableReviewerStager {
-    fn stage(
-        &self,
-        _config: Config,
-        _session: SessionRecord,
-        _profile_id: String,
-        _generation: u64,
-        _cancelled: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<ReviewerLaunchConfig> {
-        anyhow::bail!(self.0.clone())
     }
 }
 
@@ -646,9 +543,6 @@ impl SessionHandleBackend for ReplacementTestSession {
             });
         }
         Box::pin(async { Ok(Vec::new()) })
-    }
-    fn review_state(&self) -> BoxFuture<'_, Result<ReviewState>> {
-        Box::pin(async { Ok(ReviewState::default()) })
     }
 
     fn config_result(&self, _command_id: String) -> BoxFuture<'_, Result<Option<Option<String>>>> {

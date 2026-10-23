@@ -1,212 +1,18 @@
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::Path;
-use std::sync::atomic::AtomicBool;
-
-use agent_client_protocol::schema::v1::{
-    SessionConfigOption, SessionConfigSelectOption, SessionConfigSelectOptions,
-};
-use mj_core::config::{Config, HarnessKind, HarnessProfile, TargetTemplate};
-use mj_core::state::{SessionRecord, SessionState, State, TargetLocator};
-
-use crate::targets::CommandSpec;
-use mj_core::relay::{RelayExecutionState, RelayOperationalState};
-
-use tokio::sync::watch;
-
 use super::*;
-use crate::session_manager::{
-    ManagedSessionView, RelaySessionTarget, RemoteSessionPublisher, RemoteSessionRequest,
-    RemoteSessionRequests, SessionManagerShutdown, spawn_remote_session_manager,
-};
+use mj_core::config::{HarnessKind, HarnessProfile};
+use mj_core::profile_capabilities::ProfileCapabilities;
+use mj_core::worker_launch::ProfileConfig;
 
-const SESSION: &str = "0123456789abcdef0123456789abcdef";
-
-struct FakeManager {
-    control: SessionManagerControl,
-    requests: RemoteSessionRequests,
-    publisher: RemoteSessionPublisher,
-    _shutdown: SessionManagerShutdown,
-    _targets: watch::Sender<Vec<RelaySessionTarget>>,
-}
-
-impl FakeManager {
-    async fn new(session_ids: &[&str]) -> Self {
-        let channels = spawn_remote_session_manager().expect("remote manager");
-        channels.targets.send_replace(
-            session_ids
-                .iter()
-                .map(|session_id| RelaySessionTarget {
-                    session_id: (*session_id).to_owned(),
-                    spec: CommandSpec::new("true", Vec::<String>::new()),
-                    worker_recovery: None,
-                    project_memory: None,
-                })
-                .collect(),
-        );
-        let manager = Self {
-            control: channels.control,
-            requests: channels.requests,
-            publisher: channels.publisher,
-            _shutdown: channels.shutdown,
-            _targets: channels.targets,
-        };
-        for session_id in session_ids {
-            manager
-                .publisher
-                .publish(
-                    (*session_id).to_owned(),
-                    ManagedSessionView {
-                        connected: true,
-                        ..ManagedSessionView::default()
-                    },
-                )
-                .await
-                .expect("publish the managed session view");
-        }
-        for session_id in session_ids {
-            manager.wait_connected(session_id, true).await;
-        }
-        manager
-    }
-
-    async fn wait_connected(&self, session_id: &str, connected: bool) {
-        let mut handle = self.handle(session_id).await;
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while handle.view().connected != connected {
-                handle.changed().await.expect("published view");
-            }
-        })
-        .await
-        .expect("connection update applied");
-    }
-
-    async fn handle(&self, session_id: &str) -> ManagedSessionHandle {
-        self.control
-            .wait_for_session(session_id, Duration::from_secs(5))
-            .await
-            .expect("the fake manager manages the session")
-    }
-
-    async fn next(&mut self) -> RemoteSessionRequest {
-        tokio::time::timeout(Duration::from_secs(5), self.requests.recv())
-            .await
-            .expect("the discovery makes a request")
-            .expect("the remote manager remains alive")
-    }
-}
-
-fn option(key: &str, values: &[&str]) -> SessionConfigOption {
-    SessionConfigOption::select(
-        key.to_owned(),
-        key.to_owned(),
-        values[0].to_owned(),
-        SessionConfigSelectOptions::Ungrouped(
-            values
-                .iter()
-                .map(|value| {
-                    SessionConfigSelectOption::new((*value).to_owned(), (*value).to_owned())
-                })
-                .collect(),
-        ),
-    )
-}
-
-fn advertised(models: &[&str], efforts: &[&str]) -> Vec<SessionConfigOption> {
-    let mut choices = Vec::new();
-    if !models.is_empty() {
-        choices.push(option("model", models));
-    }
-    if !efforts.is_empty() {
-        choices.push(option("effort", efforts));
-    }
-    choices
-}
-
-fn operational(session_id: &str) -> RelayOperationalState {
-    RelayOperationalState {
-        assessment: None,
-        assessment_context: None,
-        turn_completion: None,
-        continuation: Default::default(),
-        relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
-        native_agents: Vec::new(),
-        steering: None,
-        cancelling_prompt_id: None,
-        clear_context: false,
-        clear_context_started_at_ms: None,
-        native_agent_count: 0,
-        expected_continuation: None,
-        inferred_idle_since_ms: None,
-        task_settled_at_ms: None,
-        background_needed: None,
-        goal: Default::default(),
-        capacity_retry: None,
-        retry_assessment_pending: false,
-        store_id: None,
-        idle_since_ms: None,
-        session_id: session_id.to_owned(),
-        execution: RelayExecutionState::Idle,
-        latest_ordinal: 0,
-        latest_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.to_owned(),
-        acknowledged_through: 0,
-        acknowledged_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.to_owned(),
-        recovery_floor_ordinal: 0,
-        recovery_floor_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.to_owned(),
-        native_session_id: Some(session_id.to_owned()),
-        native_continuity_lost: false,
-        replaced_unused_native_session_id: None,
-        checkpoint_only: false,
-        acp_ready: None,
-        harness_preparation: None,
-        agent_capabilities: None,
-        agent_info: None,
-        runtime: None,
-        steering_supported: None,
-        turn_controls: None,
-        config_options: Vec::new(),
-        modes: None,
-        available_commands: Vec::new(),
-        config: BTreeMap::new(),
-        active_prompt: None,
-        queued_prompts: Vec::new(),
-        active_user_shells: Vec::new(),
-        active_agent_terminals: Vec::new(),
-        checkpoint_barrier: None,
-        checkpoint_ready: None,
-        last_acp_activity_at_ms: None,
-        activity_turn_started_at_ms: None,
-        current_step_started_at_ms: None,
-        foreground_tool_started_at_ms: None,
-        tools_in_flight: Vec::new(),
-        activity: None,
-        harness_turn: None,
-        last_harness_turn_started_ordinal: None,
-        background_commands: Vec::new(),
-        background_work_known: None,
-    }
-}
-
-fn started(options: Vec<SessionConfigOption>) -> Result<ReviewerOutcome, String> {
-    Ok(ReviewerOutcome::Started(Box::new(StartedReviewer {
-        native_session_id: Some("native-settings-test".to_owned()),
-        config_options: options,
-        reused: false,
-        state: operational("native-settings-test"),
-    })))
-}
-
-fn controller_fixture(directory: &Path, session_ids: &[&str]) -> Controller {
-    let profile_home = directory.join("reviewer");
-    fs::create_dir_all(&profile_home).expect("profile home");
-    fs::write(profile_home.join("settings.json"), b"{}").expect("profile settings");
+// Catalog publications cross the daemon/client boundary independently of Settings.
+#[tokio::test]
+async fn settings_wait_for_selected_model_efforts_and_ignore_other_profile_identities() {
     let mut config = Config::default();
     config.profiles.insert(
-        "reviewer".to_owned(),
+        "reviewer".into(),
         HarnessProfile {
+            home: "/reviewer".into(),
             enabled: true,
-            kind: HarnessKind::Claude,
-            home: profile_home,
+            kind: HarnessKind::Codex,
             environment: Default::default(),
             context_window_bytes: None,
             legacy_subagents: Default::default(),
@@ -214,279 +20,110 @@ fn controller_fixture(directory: &Path, session_ids: &[&str]) -> Controller {
             codex_profile: None,
         },
     );
-    config
-        .targets
-        .insert("local".to_owned(), TargetTemplate::LocalBare);
-    let sessions = session_ids
-        .iter()
-        .map(|session_id| {
-            let worker_root = directory.join(session_id);
-            fs::create_dir_all(&worker_root).expect("worker root");
-            (
-                (*session_id).to_owned(),
-                SessionRecord {
-                    project: None,
-                    target_runtime: None,
-                    launch_base: None,
-                    launch_branch: None,
-                    checkout: None,
-                    publication: None,
-                    build_cache: None,
-                    container_workspace: None,
-                    subagents: None,
-                    create_managed_worktree: None,
-                    id: (*session_id).to_owned(),
-                    workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
-                    title: "review settings test".to_owned(),
-                    harness_kind: HarnessKind::Codex,
-                    last_profile: "primary".to_owned(),
-                    bundle_id: "project".to_owned(),
-                    project_directory: None,
-                    managed_worktree: None,
-                    review: None,
-                    no_project_memory: false,
-                    no_github_events: false,
-                    target_template_id: "local".to_owned(),
-                    resource_allocation: None,
-                    additional_mounts: Vec::new(),
-                    container_cpus: None,
-                    container_memory: None,
-                    state: SessionState::Running,
-                    archived: false,
-                    target: Some(TargetLocator::LocalBare { worker_root }),
-                    native_session_id: Some("native-primary".to_owned()),
-                    acp_session_title: None,
-                    session_title_override: None,
-                    created_at: "2026-08-12T00:00:00Z".to_owned(),
-                    updated_at: "2026-08-12T00:00:00Z".to_owned(),
-                    viewed_through_event_ordinal: 0,
-                    draft_input: String::new(),
-                    last_error: None,
-                    last_checkpoint_error: None,
-                    checkpoint: None,
-                },
-            )
+    let identity = config.profiles["reviewer"].capabilities_key("reviewer");
+    let choice = |value: &str| SessionConfigChoice {
+        value: value.into(),
+        name: value.into(),
+        description: None,
+    };
+    let models = vec![choice("first"), choice("selected")];
+    let mut entry = ProfileCapabilities {
+        choices: CapabilityState::Ready(ProfileConfig {
+            model: Some("first".into()),
+            models: models.clone(),
+            efforts: vec![choice("wrong")],
+            observed_at: 0,
+        }),
+        ..ProfileCapabilities::default()
+    };
+    let (publisher, mut catalog) = watch::channel(ProfileCapabilitiesSnapshot::default());
+    let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let request = ReviewDiscoveryRequest {
+        profile: "reviewer".into(),
+        model: Some("selected".into()),
+    };
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let operation = {
+        let flag = cancelled.clone();
+        tokio::spawn(async move {
+            discover_from_catalog(&config, &mut catalog, &request, &flag, &progress).await
         })
-        .collect();
-    Controller {
-        config,
-        state: State {
-            sessions,
-            ..State::default()
-        },
-    }
-}
-
-#[tokio::test]
-async fn settings_discovery_skips_a_preferred_worker_removed_from_the_manager() {
-    let directory = tempfile::tempdir().expect("fixture directory");
-    let manager = FakeManager::new(&["worker-b"]).await;
-    let controller = controller_fixture(directory.path(), &["worker-a", "worker-b"]);
-    let cancelled = AtomicBool::new(false);
-
-    let (session_id, handle) =
-        select_worker(&manager.control, &controller, Some("worker-a"), &cancelled)
-            .await
-            .expect("worker selection")
-            .expect("remaining active worker");
-
-    assert_eq!(session_id, "worker-b");
-    assert!(handle.view().connected);
-}
-
-fn start_request(
-    request: RemoteSessionRequest,
-) -> (
-    Box<ReviewerLaunchConfig>,
-    tokio::sync::oneshot::Sender<Result<ReviewerOutcome, String>>,
-) {
-    let RemoteSessionRequest::Reviewer {
-        action: ReviewerAction::Start { config },
-        reply,
-        ..
-    } = request
-    else {
-        panic!("discovery must use reviewer Start");
     };
-    (config, reply)
-}
-
-fn pause_request(
-    request: RemoteSessionRequest,
-) -> tokio::sync::oneshot::Sender<Result<ReviewerOutcome, String>> {
-    let RemoteSessionRequest::Reviewer {
-        action: ReviewerAction::Pause,
-        reply,
-        ..
-    } = request
-    else {
-        panic!("discovery cleanup must use reviewer Pause");
-    };
-    reply
-}
-
-fn request(model: Option<&str>) -> ReviewDiscoveryRequest {
-    ReviewDiscoveryRequest {
-        profile: "reviewer".to_owned(),
-        model: model.map(str::to_owned),
-        preferred_session: Some(SESSION.to_owned()),
-    }
-}
-
-async fn discover_for_test(
-    controller: Arc<Controller>,
-    handle: ManagedSessionHandle,
-    request: ReviewDiscoveryRequest,
-    cancelled: Arc<AtomicBool>,
-    progress: UnboundedSender<ReviewCapabilityChoices>,
-) -> Result<ReviewDiscoveryOutcome, String> {
-    discover_selected_worker(
-        controller,
-        SESSION.to_owned(),
-        1,
-        handle,
-        &request,
-        &cancelled,
-        &progress,
-    )
-    .await
-}
-
-#[tokio::test]
-#[cfg_attr(windows, ignore = "#1300: fails on a Windows controller")]
-async fn unsupported_model_keeps_models_without_claiming_efforts() {
-    let directory = tempfile::tempdir().expect("fixture directory");
-    let mut manager = FakeManager::new(&[SESSION]).await;
-    let handle = manager.handle(SESSION).await;
-    let controller = Arc::new(controller_fixture(directory.path(), &[SESSION]));
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let (progress, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
-    let task = tokio::spawn(discover_for_test(
-        controller,
-        handle,
-        request(Some("missing")),
-        cancelled,
-        progress,
-    ));
-
-    let (_, reply) = start_request(manager.next().await);
-    reply
-        .send(started(advertised(&["fast", "deep"], &["low", "high"])))
-        .expect("startup reply");
-    let choices = progress_rx.recv().await.expect("progress");
-    assert_eq!(choices.model_choices.len(), 2);
-    assert!(choices.effort_choices.is_empty());
-    assert!(!choices.effort_capabilities_discovered);
-    // Pause must be the very next request: no attempt applies the
-    // unsupported model or its effort before cleanup.
-    let reply = pause_request(manager.next().await);
-    reply
-        .send(Ok(ReviewerOutcome::Paused))
-        .expect("cleanup reply");
-    task.await.expect("discovery task").expect("choices");
-}
-
-#[tokio::test]
-#[cfg_attr(windows, ignore = "#1300: fails on a Windows controller")]
-async fn cleanup_failure_keeps_choices_as_a_warning() {
-    let directory = tempfile::tempdir().expect("fixture directory");
-    let mut manager = FakeManager::new(&[SESSION]).await;
-    let handle = manager.handle(SESSION).await;
-    let controller = Arc::new(controller_fixture(directory.path(), &[SESSION]));
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let (progress, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
-    let task = tokio::spawn(discover_for_test(
-        controller,
-        handle,
-        request(None),
-        cancelled,
-        progress,
-    ));
-    let (_, reply) = start_request(manager.next().await);
-    reply
-        .send(started(advertised(&["fast"], &["low"])))
-        .expect("startup reply");
-    progress_rx.recv().await.expect("choices before cleanup");
-    let reply = pause_request(manager.next().await);
-    reply
-        .send(Err("worker vanished".to_owned()))
-        .expect("cleanup reply");
-    let outcome = task.await.expect("discovery task").expect("outcome");
-    let ReviewDiscoveryOutcome::Available {
-        choices,
-        cleanup_warning,
-    } = outcome
-    else {
-        panic!("choices remain available after cleanup failure");
-    };
-    assert_eq!(choices.model_choices.len(), 1);
-    assert!(cleanup_warning.unwrap().contains("worker vanished"));
-}
-
-#[tokio::test]
-#[cfg_attr(windows, ignore = "#1300: fails on a Windows controller")]
-async fn cancellation_and_start_error_still_pause_without_progress() {
-    let directory = tempfile::tempdir().expect("fixture directory");
-    let mut manager = FakeManager::new(&[SESSION]).await;
-    let handle = manager.handle(SESSION).await;
-    let controller = Arc::new(controller_fixture(directory.path(), &[SESSION]));
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let (progress, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
-    let task = tokio::spawn(discover_for_test(
-        controller,
-        handle,
-        request(None),
-        cancelled.clone(),
-        progress,
-    ));
-    let (_, reply) = start_request(manager.next().await);
-    cancelled.store(true, Ordering::Release);
-    drop(reply);
-    let reply = pause_request(manager.next().await);
-    reply
-        .send(Ok(ReviewerOutcome::Paused))
-        .expect("cleanup reply");
-    assert!(task.await.expect("discovery task").is_err());
-    assert!(progress_rx.try_recv().is_err());
-
-    let directory = tempfile::tempdir().expect("fixture directory");
-    let mut manager = FakeManager::new(&[SESSION]).await;
-    let handle = manager.handle(SESSION).await;
-    let controller = Arc::new(controller_fixture(directory.path(), &[SESSION]));
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let (progress, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
-    let task = tokio::spawn(discover_for_test(
-        controller,
-        handle,
-        request(None),
-        cancelled,
-        progress,
-    ));
-    let (_, reply) = start_request(manager.next().await);
-    reply
-        .send(Err("adapter failed".to_owned()))
-        .expect("startup reply");
-    let reply = pause_request(manager.next().await);
-    reply
-        .send(Ok(ReviewerOutcome::Paused))
-        .expect("cleanup reply");
-    assert!(task.await.expect("discovery task").is_err());
-    assert!(progress_rx.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn cleanup_is_bounded_when_the_worker_never_replies() {
-    let mut manager = FakeManager::new(&[SESSION]).await;
-    let handle = manager.handle(SESSION).await;
-    let task = tokio::spawn(async move { cleanup_worker(&handle, "settings-test").await });
-    let reply = pause_request(manager.next().await);
-    tokio::time::pause();
-    tokio::time::advance(REVIEW_DISCOVERY_CLEANUP_TIMEOUT + Duration::from_secs(1)).await;
-    assert!(
-        task.await
-            .unwrap()
-            .unwrap_err()
-            .contains("within 15 seconds")
+    publisher
+        .send(ProfileCapabilitiesSnapshot {
+            profiles: [("old identity".into(), entry.clone())].into(),
+        })
+        .unwrap();
+    tokio::task::yield_now().await;
+    assert!(updates.try_recv().is_err());
+    publisher
+        .send(ProfileCapabilitiesSnapshot {
+            profiles: [(identity.clone(), entry.clone())].into(),
+        })
+        .unwrap();
+    let initial = tokio::time::timeout(Duration::from_secs(5), updates.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(initial.model_choices, models);
+    assert!(!initial.effort_capabilities_discovered);
+    assert!(initial.effort_choices.is_empty());
+    assert!(!operation.is_finished());
+    entry.efforts.insert(
+        "selected".into(),
+        CapabilityState::Ready(vec![choice("high")]),
     );
-    assert!(reply.is_closed());
+    publisher
+        .send(ProfileCapabilitiesSnapshot {
+            profiles: [(identity, entry)].into(),
+        })
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), operation)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let ReviewDiscoveryOutcome::Available { choices, .. } = result else {
+        panic!("selected profile is ready")
+    };
+    assert_eq!(choices.effort_choices, vec![choice("high")]);
+    assert!(choices.effort_capabilities_discovered);
+}
+
+#[tokio::test]
+async fn cancelling_a_pending_catalog_read_does_not_wait_for_another_publication() {
+    let mut config = Config::default();
+    config.profiles.insert(
+        "reviewer".into(),
+        HarnessProfile {
+            home: "/reviewer".into(),
+            enabled: true,
+            kind: HarnessKind::Codex,
+            environment: Default::default(),
+            context_window_bytes: None,
+            legacy_subagents: Default::default(),
+            guardian_review_model: None,
+            codex_profile: None,
+        },
+    );
+    let (_publisher, mut catalog) = watch::channel(ProfileCapabilitiesSnapshot::default());
+    let (progress, _updates) = tokio::sync::mpsc::unbounded_channel();
+    let request = ReviewDiscoveryRequest {
+        profile: "reviewer".into(),
+        model: None,
+    };
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let operation = {
+        let flag = cancelled.clone();
+        tokio::spawn(async move {
+            discover_from_catalog(&config, &mut catalog, &request, &flag, &progress).await
+        })
+    };
+    tokio::task::yield_now().await;
+    cancelled.store(true, Ordering::Release);
+    let result = tokio::time::timeout(Duration::from_secs(5), operation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.unwrap_err().contains("cancelled"));
 }

@@ -733,7 +733,6 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
         Some(mj_chat::chat::ChatSessionContext {
             config: controller.config.clone(),
             session: record.clone(),
-            reviewer_stager: mj_controller::controller::reviewer_stager(),
         }),
         fixture.control,
         SessionHeaderIdentity {

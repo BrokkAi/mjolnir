@@ -129,7 +129,7 @@ impl PhoneConfig {
     }
 }
 
-/// Automatic cross-harness review of every completed coding turn.
+/// Automatic cross-harness review and its trigger.
 ///
 /// Review is armed here, in the one file that belongs to the machine rather
 /// than to any surface: a session driven from a phone is reviewed on the same
@@ -138,13 +138,10 @@ impl PhoneConfig {
 /// -- or Auto when absent. A reviewer always has its own conversation, even
 /// when it uses the primary session's profile.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "ReviewConfigInput")]
 pub struct ReviewConfig {
-    /// Whether every completed turn is reviewed automatically. A one-off
-    /// `/review` works whether or not this is set, as long as `profile` names
-    /// a reviewer.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub enabled: bool,
+    #[serde(default)]
+    pub trigger: ReviewTrigger,
     /// Deprecated review tier. Accepted for old configurations and ignored.
     #[serde(default, skip_serializing)]
     pub tier: Option<String>,
@@ -158,7 +155,59 @@ pub struct ReviewConfig {
     pub effort: Option<String>,
 }
 
-/// One session's turn-review choice, made when the session is created. It
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewTrigger {
+    #[default]
+    Off,
+    Turn,
+    Push,
+}
+
+impl std::fmt::Display for ReviewTrigger {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Off => "off",
+            Self::Turn => "turn",
+            Self::Push => "push",
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewConfigInput {
+    #[serde(default)]
+    trigger: Option<ReviewTrigger>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    tier: Option<String>,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+}
+
+impl From<ReviewConfigInput> for ReviewConfig {
+    fn from(input: ReviewConfigInput) -> Self {
+        Self {
+            trigger: input.trigger.unwrap_or(if input.enabled == Some(true) {
+                ReviewTrigger::Turn
+            } else {
+                ReviewTrigger::Off
+            }),
+            tier: input.tier,
+            profile: input.profile,
+            model: input.model,
+            effort: input.effort,
+        }
+    }
+}
+
+/// One session's review choice, made when the session is created. It
 /// overrides `[review]` for that session only; a session without one follows
 /// `[review]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,7 +218,18 @@ pub enum SessionReview {
     /// Review every turn. A field left empty keeps the `[review]` value; a
     /// model without a `[review]` profile makes Auto pick a profile that
     /// offers it.
-    On {
+    #[serde(alias = "on")]
+    Turn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+        /// Deprecated review tier. Accepted in old session records and API
+        /// requests, ignored, and omitted from newly serialized values.
+        #[serde(default, skip_serializing)]
+        tier: Option<String>,
+    },
+    Push {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -181,16 +241,37 @@ pub enum SessionReview {
     },
 }
 
+impl SessionReview {
+    pub fn trigger(&self) -> ReviewTrigger {
+        match self {
+            Self::Off => ReviewTrigger::Off,
+            Self::Turn { .. } => ReviewTrigger::Turn,
+            Self::Push { .. } => ReviewTrigger::Push,
+        }
+    }
+}
+
 impl ReviewConfig {
+    pub fn arms_turn_review(&self) -> bool {
+        self.trigger == ReviewTrigger::Turn
+    }
+
+    pub fn is_push(&self) -> bool {
+        self.trigger == ReviewTrigger::Push
+    }
+
     /// This configuration as it applies to a session with `session`'s choice.
     #[must_use]
     pub fn for_session(&self, session: Option<&SessionReview>) -> Self {
         let mut config = self.clone();
         match session {
             None => {}
-            Some(SessionReview::Off) => config.enabled = false,
-            Some(SessionReview::On { model, effort, .. }) => {
-                config.enabled = true;
+            Some(SessionReview::Off) => config.trigger = ReviewTrigger::Off,
+            Some(
+                choice @ (SessionReview::Turn { model, effort, .. }
+                | SessionReview::Push { model, effort, .. }),
+            ) => {
+                config.trigger = choice.trigger();
                 if model.is_some() {
                     config.model.clone_from(model);
                 }

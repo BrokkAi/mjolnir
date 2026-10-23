@@ -1,4 +1,4 @@
-//! Mjolnir-owned delegation tools for Claude and Codex parent sessions.
+//! Mjolnir-owned delegation tools for Claude, Codex, and DSH sessions.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -42,6 +42,8 @@ static CHILD_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
         mj_core::subagent::HANDBACK_REPORT_RULES
     )
 });
+
+const REVIEW_GATE_INSTRUCTIONS: &str = "Before `git push` or `gh pr create`, commit your work and call `request_review`. It answers at once whether a review started; the verdict arrives later as a Mjolnir message. The repository's pre-push hook refuses a push of commits that have not been reviewed clean.";
 
 /// A child's advice when Mjolnir has not confirmed its report. Calling again
 /// is safe: a report that did arrive is refused as already delivered.
@@ -244,6 +246,7 @@ pub struct ParentTools {
     /// Whether `spawn` offers the subtle task type. Without it, `spawn` has
     /// no `task_type` and every child uses the straightforward choice.
     pub subtle_subagents: bool,
+    pub review_gate: bool,
 }
 
 impl Default for ParentTools {
@@ -251,6 +254,7 @@ impl Default for ParentTools {
         Self {
             agent_mailboxes_enabled: true,
             subtle_subagents: true,
+            review_gate: false,
         }
     }
 }
@@ -402,6 +406,38 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
         Some(HarnessKind::Codex) => CODEX_SERVER_INSTRUCTIONS.as_str(),
         _ => SERVER_INSTRUCTIONS.as_str(),
     };
+    static PUSH_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
+        format!(
+            "{REVIEW_GATE_INSTRUCTIONS} {DELEGATION_ROUTING}{MAILBOX_ROUTING}{NOTIFICATION_ROUTING}"
+        )
+    });
+    static CODEX_PUSH_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
+        format!(
+            "{} {}",
+            PUSH_INSTRUCTIONS.as_str(),
+            "Call mj-agents tools directly. If these tools are not visible, find mj-agents in the tool catalog."
+        )
+    });
+    let parent_instructions = if options.review_gate {
+        if harness == Some(HarnessKind::Codex) {
+            CODEX_PUSH_INSTRUCTIONS.as_str()
+        } else {
+            PUSH_INSTRUCTIONS.as_str()
+        }
+    } else {
+        parent_instructions
+    };
+    let reviewer = std::fs::read(socket.with_file_name("launch.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|launch| !launch["reviewer_launch"].is_null());
+    static REVIEWER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
+        format!(
+            "You are a Mjolnir reviewer child. Call handback once as your last action with the complete rubric JSON. Your report may contain up to {} characters.",
+            mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS
+        )
+    });
+    let reviewer_instructions = REVIEWER_INSTRUCTIONS.as_str();
     let (instructions, tools) = match role {
         SubagentMcpRole::Parent => (
             parent_instructions,
@@ -414,7 +450,19 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
                 let description = tools[0]["description"].as_str().unwrap();
                 tools[0]["description"] = json!(format!("{description} {}", budget.note()));
             }
-            (CHILD_INSTRUCTIONS.as_str(), tools)
+            if reviewer {
+                tools[0]["description"] = json!(&reviewer_instructions);
+                tools[0]["inputSchema"]["properties"]["message"]["description"] =
+                    json!("Complete reviewer rubric JSON");
+            }
+            (
+                if reviewer {
+                    reviewer_instructions
+                } else {
+                    CHILD_INSTRUCTIONS.as_str()
+                },
+                tools,
+            )
         }
     };
     crate::mcp_stdio::serve(
@@ -543,7 +591,9 @@ fn call_with_budget_and_options(
 ) -> Result<(Value, bool)> {
     let params: CallParams = serde_json::from_value(params.cloned().context("missing params")?)?;
     let legacy_alias = params.name == "send_input" && role != SubagentMcpRole::Child;
-    if !role.tool_names().contains(&params.name.as_str()) && !legacy_alias {
+    let push_review =
+        params.name == "request_review" && role == SubagentMcpRole::Parent && options.review_gate;
+    if !role.tool_names().contains(&params.name.as_str()) && !legacy_alias && !push_review {
         bail!("unknown sub-agent tool {:?} for {role}", params.name);
     }
     let action = match params.name.as_str() {
@@ -580,6 +630,7 @@ fn call_with_budget_and_options(
                 files: Vec::new(),
             }
         }
+        "request_review" => SubagentToolAction::RequestReview {},
         "list_agents" => SubagentToolAction::ListAgents,
         "send_message" => {
             if params.arguments.get("child_session_id").is_some() {
@@ -775,7 +826,7 @@ fn tool_definitions_with_options(
     options: ParentTools,
 ) -> Vec<Value> {
     let child = json!({"type":"object","properties":{"child_session_id":{"type":"string"}},"required":["child_session_id"],"additionalProperties":false});
-    vec![
+    let mut tools = vec![
         spawn_tool(options.subtle_subagents),
         read_only(tool(
             "list_agents",
@@ -788,7 +839,11 @@ fn tool_definitions_with_options(
             "Stop one child session and retain its conversation. Closing a child deletes its report directory, so read the files you need first. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, use list_agents after close and confirm the closing child is stopped before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
             child,
         ),
-    ]
+    ];
+    if options.review_gate {
+        tools.push(tool("request_review", "Request review of committed work before pushing. The verdict arrives later as a Mjolnir message.", json!({"type":"object","properties":{},"additionalProperties":false})));
+    }
+    tools
 }
 
 fn send_message_tool() -> Value {
@@ -836,11 +891,13 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     const MAILBOXES_DISABLED: ParentTools = ParentTools {
+        review_gate: false,
         agent_mailboxes_enabled: false,
         subtle_subagents: true,
     };
 
     const STRAIGHTFORWARD_ONLY: ParentTools = ParentTools {
+        review_gate: false,
         agent_mailboxes_enabled: true,
         subtle_subagents: false,
     };
@@ -1008,6 +1065,103 @@ mod tests {
         assert_eq!(reply["report"], expected);
     }
 
+    #[test]
+    fn review_gate_is_offered_only_to_flagged_parents() {
+        for role in [
+            SubagentMcpRole::Parent,
+            SubagentMcpRole::Child,
+            SubagentMcpRole::MessageOnly,
+        ] {
+            for review_gate in [false, true] {
+                let input = format!(
+                    "{}\n{}\n",
+                    json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+                    json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
+                );
+                let output = Arc::new(Mutex::new(Vec::new()));
+                run_with_options(
+                    input.as_bytes(),
+                    ContractWriter(output.clone()),
+                    Path::new("unused.sock"),
+                    Some(HarnessKind::Claude),
+                    role,
+                    ParentTools {
+                        review_gate,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let output = output.lock().unwrap();
+                let replies: Vec<Value> = std::str::from_utf8(&output)
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                let expected = role == SubagentMcpRole::Parent && review_gate;
+                let tools = replies.iter().find(|r| r["id"] == 2).unwrap()["result"]["tools"]
+                    .as_array()
+                    .unwrap();
+                assert_eq!(
+                    tools.iter().any(|tool| tool["name"] == "request_review"),
+                    expected
+                );
+                let instructions =
+                    replies.iter().find(|r| r["id"] == 1).unwrap()["result"]["instructions"]
+                        .as_str()
+                        .unwrap();
+                assert_eq!(instructions.contains(REVIEW_GATE_INSTRUCTIONS), expected);
+                if expected {
+                    assert!(instructions.chars().count() <= 2048);
+                }
+                if !expected {
+                    assert!(
+                        call_with_budget_and_options(
+                            Path::new("unused.sock"),
+                            None,
+                            role,
+                            Some(&json!({"name":"request_review"})),
+                            &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
+                            |_| Duration::from_millis(1),
+                            ParentTools {
+                                review_gate,
+                                ..Default::default()
+                            }
+                        )
+                        .is_err()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reviewer_mcp_instructions_preserve_the_full_rubric_budget() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("launch.json"),
+            br#"{"reviewer_launch":{},"environment":{}}"#,
+        )
+        .unwrap();
+        let input = format!(
+            "{}\n{}\n",
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
+        );
+        let output = Arc::new(Mutex::new(Vec::new()));
+        run(
+            input.as_bytes(),
+            ContractWriter(output.clone()),
+            &root.path().join("subagents.sock"),
+            Some(HarnessKind::Claude),
+            SubagentMcpRole::Child,
+        )
+        .unwrap();
+        let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(output.contains(&mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS.to_string()));
+        assert!(!output.contains("4,000"));
+        assert!(output.contains("complete rubric JSON"));
+    }
+
     struct ContractWriter(Arc<Mutex<Vec<u8>>>);
 
     impl Write for ContractWriter {
@@ -1028,7 +1182,7 @@ mod tests {
             SubagentMcpRole::MessageOnly,
             SubagentMcpRole::Child,
         ] {
-            for harness in [HarnessKind::Claude, HarnessKind::Codex] {
+            for harness in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Dsh] {
                 let input = format!(
                     "{}\n{}\n",
                     json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),

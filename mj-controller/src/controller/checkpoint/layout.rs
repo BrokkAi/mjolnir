@@ -61,9 +61,9 @@ impl Controller {
                     .context("bare project directory cannot be the filesystem root")?;
                 (
                     parent.to_string_lossy().into_owned(),
-                    "project".to_owned(),
+                    HOST_CHECKOUT_REPOSITORY.to_owned(),
                     vec![CheckpointRepositorySpec {
-                        id: "project".into(),
+                        id: HOST_CHECKOUT_REPOSITORY.into(),
                         relative_destination: PathBuf::from(destination),
                         // Managed worktrees are retired on Stop, so their
                         // dirty/untracked state must travel in the archive.

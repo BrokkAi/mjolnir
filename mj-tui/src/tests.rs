@@ -923,6 +923,8 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
     child.session_title_override = Some("Inspect parser".into());
     child.state = SessionState::Stopped;
     let relation = mj_core::subagent::SubagentRecord {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        reviewer_launch: None,
         child_session_id: child.id.clone(),
         parent_session_id: parent.id.clone(),
         task_name: "Inspect parser".into(),
@@ -1024,6 +1026,8 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
     first_child.id = "first-child".into();
     first_child.state = SessionState::Running;
     let first_relation = mj_core::subagent::SubagentRecord {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        reviewer_launch: None,
         child_session_id: first_child.id.clone(),
         parent_session_id: parent.id.clone(),
         task_name: "First task".into(),
@@ -1062,6 +1066,8 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
     second_child.id = "second-child".into();
     second_child.state = SessionState::Running;
     let second_relation = mj_core::subagent::SubagentRecord {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        reviewer_launch: None,
         child_session_id: second_child.id.clone(),
         parent_session_id: parent.id.clone(),
         task_name: "Second task".into(),
@@ -2070,6 +2076,7 @@ fn golden_attention_navigation() {
     let mut urgent = dashboard_with_attention_mix();
     urgent.set_active_workspace(Some("default".into()));
     urgent.set_session_reviews([mj_client::review::RuntimeReviewView {
+        child_session_id: None,
         session_id: "asks".into(),
         questions: Vec::new(),
         phase: mj_core::review::driver::TurnReviewPhase::Verdict(
@@ -3065,6 +3072,8 @@ fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
     dashboard.state.subagents.insert(
         parent.id.clone(),
         mj_core::subagent::SubagentRecord {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             child_session_id: parent.id.clone(),
             parent_session_id: ancestor.id.clone(),
             task_name: "managed owner".into(),

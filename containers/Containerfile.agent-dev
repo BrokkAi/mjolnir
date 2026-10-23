@@ -149,8 +149,8 @@ COPY --from=ghcr.io/astral-sh/uv:0.12.20 /uv /uvx /usr/local/bin/
 RUN uv --version && uvx --version && python3-config --embed --ldflags
 
 # Keep these in lockstep with mj-core/src/harness_runtime.rs (see "Harness
-# pins" in AGENTS.md). Kimi and Grok are not in the image; they install on
-# demand. Muse and dsh-acp install below from their runtime.json files.
+# pins" in AGENTS.md). Kimi, Grok, and dsh-acp are not in the image; they
+# install on demand. Muse installs below from its runtime.json file.
 RUN npm install --global --no-audit --no-fund \
         @brokkai/codex-acp@1.13.7 \
         @agentclientprotocol/claude-agent-acp@0.94.0 \
@@ -277,16 +277,10 @@ RUN printf '%s\n' \
         > /etc/profile.d/10-cargo-path.sh \
     && bash -lc 'command -v cargo && command -v samply'
 
-COPY mj-worker/assets/muse/runtime.json /opt/mjolnir/muse-runtime.json
+COPY mj-core/assets/muse/runtime.json /opt/mjolnir/muse-runtime.json
 COPY scripts/install-muse.py /opt/mjolnir/install-muse.py
 RUN python3 /opt/mjolnir/install-muse.py /opt/mjolnir/muse-runtime.json /usr/local/bin
 ENV MUSE_CLI=/usr/local/bin/muse
-
-# dsh-acp installs from the same verified release metadata as managed workers.
-COPY mj-worker/assets/dsh/runtime.json /opt/mjolnir/dsh-acp-runtime.json
-COPY scripts/install-dsh-acp.py /opt/mjolnir/install-dsh-acp.py
-RUN python3 /opt/mjolnir/install-dsh-acp.py /opt/mjolnir/dsh-acp-runtime.json /usr/local/bin \
-    && dsh-acp --version
 
 # Session workers construct a clean login environment instead of inheriting
 # the container exec environment. Keep image tool settings in that login too.

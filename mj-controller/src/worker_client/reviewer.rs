@@ -1,227 +1,42 @@
 use super::*;
 
 impl RelayClient {
-    /// Start the second-opinion reviewer beside this session, or report the
-    /// running one when it already matches `config`.
-    ///
-    /// The reviewer's profile must already be staged on the target. Starting
-    /// can take as long as opening any harness session, so this uses the
-    /// handshake deadline rather than the bookkeeping one.
-    pub async fn start_reviewer(
-        &mut self,
-        role: Option<&str>,
-        config: ReviewerLaunchConfig,
-    ) -> Result<StartedReviewer> {
-        let request = self.reviewer_request(
-            role,
-            ReviewerRequest::Start {
-                config: Box::new(config),
-            },
-        )?;
-        match self
-            .call_with_timeout(request, RELAY_HANDSHAKE_TIMEOUT)
-            .await?
-        {
-            RelayResponsePayload::ReviewerStarted {
-                native_session_id,
-                config_options,
-                reused,
-                state,
-            } => Ok(StartedReviewer {
-                native_session_id,
-                config_options,
-                reused,
-                state: *state,
-            }),
-            _ => bail!("relay returned an unexpected reviewer start response"),
-        }
-    }
-
-    /// Replay the reviewer's journal from a cursor, exactly as [`Self::attach`]
-    /// does for the primary.
-    pub async fn attach_reviewer(
-        &mut self,
-        role: Option<&str>,
-        after_ordinal: u64,
-        after_digest: impl Into<String>,
-    ) -> Result<RelayAttachment> {
-        let after_digest = after_digest.into();
-        let request = self.reviewer_request(
-            role,
-            ReviewerRequest::Attach {
-                after_ordinal,
-                after_digest: after_digest.clone(),
-            },
-        )?;
-        let payload = self
-            .call_with_timeout(request, RELAY_HISTORY_TIMEOUT)
-            .await?;
-        let RelayResponsePayload::Attached {
-            state,
-            events,
-            through_ordinal,
-            through_digest,
-        } = payload
-        else {
-            bail!("relay returned an unexpected reviewer attach response");
-        };
-        // The reviewer's journal is verified the same way the primary's is: a
-        // sidecar's history is not exempt from the chain check.
-        let mut cursor = RelayCursor {
-            ordinal: after_ordinal,
-            digest: after_digest,
-        };
-        for event in &events {
-            validate_relay_event(cursor.ordinal, &cursor.digest, event)
-                .context("verify reviewer attachment event chain")?;
-            cursor.ordinal = event.ordinal;
-            cursor.digest.clone_from(&event.digest);
-        }
-        if cursor.ordinal != through_ordinal || cursor.digest != through_digest {
-            bail!("reviewer attachment frontier does not match its event chain");
-        }
-        Ok(RelayAttachment {
-            state,
-            events,
-            through_ordinal,
-            through_digest,
-        })
-    }
-
-    /// Advance the reviewer's acknowledged frontier so its journal can be
-    /// pruned once the controller has the events durably.
-    pub async fn acknowledge_reviewer(
-        &mut self,
-        role: Option<&str>,
-        through_ordinal: u64,
-        through_digest: impl Into<String>,
-    ) -> Result<RelayCursor> {
-        let request = self.reviewer_request(
-            role,
-            ReviewerRequest::Acknowledge {
-                through_ordinal,
-                through_digest: through_digest.into(),
-            },
-        )?;
-        match self
-            .call_with_timeout(request, RELAY_ACKNOWLEDGE_TIMEOUT)
-            .await?
-        {
-            RelayResponsePayload::Acknowledged {
-                through_ordinal,
-                through_digest,
-            } => Ok(RelayCursor {
-                ordinal: through_ordinal,
-                digest: through_digest,
-            }),
-            _ => bail!("relay returned an unexpected reviewer acknowledgement response"),
-        }
-    }
-
-    /// Queue one command on the reviewer's own relay.
-    pub async fn submit_to_reviewer(
-        &mut self,
-        role: Option<&str>,
-        command_id: impl Into<String>,
-        command: RelayCommand,
-    ) -> Result<u64> {
-        let command_id = command_id.into();
-        let request = self.reviewer_request(
-            role,
-            ReviewerRequest::Submit {
-                command_id: command_id.clone(),
-                command,
-            },
-        )?;
-        match self.call(request).await? {
-            RelayResponsePayload::Accepted {
-                command_id: accepted_id,
-                ordinal,
-            } if accepted_id == command_id => Ok(ordinal),
-            RelayResponsePayload::Accepted {
-                command_id: accepted_id,
-                ..
-            } => bail!("reviewer accepted command under ID {accepted_id}, expected {command_id}"),
-            _ => bail!("relay returned an unexpected reviewer command response"),
-        }
-    }
-
-    pub async fn reviewer_status(&mut self, role: Option<&str>) -> Result<RelayOperationalState> {
-        let request = self.reviewer_request(role, ReviewerRequest::Status)?;
-        match self.call(request).await? {
-            RelayResponsePayload::Status(status) => Ok(status),
-            _ => bail!("relay returned an unexpected reviewer status response"),
-        }
-    }
-
-    /// Answer a form the reviewer's harness is waiting on.
-    pub async fn respond_to_reviewer(
-        &mut self,
-        role: Option<&str>,
-        elicitation_id: String,
-        response: ElicitationResponse,
-    ) -> Result<()> {
-        let request = self.reviewer_request(
-            role,
-            ReviewerRequest::RespondElicitation {
-                elicitation_id: elicitation_id.clone(),
-                response,
-            },
-        )?;
-        match self.call(request).await? {
-            RelayResponsePayload::ElicitationResolved {
-                elicitation_id: resolved,
-            } if resolved == elicitation_id => Ok(()),
-            RelayResponsePayload::ElicitationResolved {
-                elicitation_id: resolved,
-            } => bail!("reviewer resolved elicitation {resolved:?}, expected {elicitation_id:?}"),
-            _ => bail!("relay returned an unexpected reviewer elicitation response"),
-        }
-    }
-
-    /// Cancel any reviewer turn in flight and stop its process group, keeping
-    /// its staged profile, native session and journal for the next review.
-    pub async fn pause_reviewer(&mut self, role: Option<&str>) -> Result<()> {
-        let request = self.reviewer_request(role, ReviewerRequest::Pause)?;
-        match self
-            .call_with_timeout(request, RELAY_ACKNOWLEDGE_TIMEOUT)
-            .await?
-        {
-            RelayResponsePayload::ReviewerPaused => Ok(()),
-            _ => bail!("relay returned an unexpected reviewer pause response"),
-        }
-    }
-
-    pub async fn pause_reviewer_generation(
-        &mut self,
-        role: Option<&str>,
-        generation: u64,
-    ) -> Result<()> {
-        let request =
-            self.reviewer_request(role, ReviewerRequest::PauseGeneration { generation })?;
-        match self
-            .call_with_timeout(request, RELAY_ACKNOWLEDGE_TIMEOUT)
-            .await?
-        {
-            RelayResponsePayload::ReviewerPaused => Ok(()),
-            _ => bail!("relay returned an unexpected reviewer pause response"),
-        }
-    }
-
     /// Report what every workspace repository changed since the review
     /// baselines the controller holds.
     pub async fn capture_review_delta(
         &mut self,
         role: Option<&str>,
         baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
+        scope: mj_core::relay::CaptureScope,
     ) -> Result<Vec<mj_core::relay::RepoDelta>> {
-        let request = self.reviewer_request(role, ReviewerRequest::CaptureDelta { baselines })?;
+        if scope == mj_core::relay::CaptureScope::PushableCommits
+            && self.protocol_version < mj_core::relay::RELAY_PUSH_REVIEW_PROTOCOL
+        {
+            anyhow::bail!("the session's worker predates push review; restart the session");
+        }
+        let request =
+            self.reviewer_request(role, ReviewerRequest::CaptureDelta { baselines, scope })?;
         match self
             .call_with_timeout(request, REVIEW_CAPTURE_TIMEOUT)
             .await?
         {
             RelayResponsePayload::ReviewDelta { repositories } => Ok(repositories),
             _ => bail!("relay returned an unexpected review capture response"),
+        }
+    }
+
+    pub async fn record_reviewed(
+        &mut self,
+        role: Option<&str>,
+        trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
+    ) -> Result<()> {
+        let request = self.reviewer_request(role, ReviewerRequest::RecordReviewed { trees })?;
+        match self
+            .call_with_timeout(request, REVIEW_CAPTURE_TIMEOUT)
+            .await?
+        {
+            RelayResponsePayload::ReviewBaselineAdvanced => Ok(()),
+            _ => bail!("relay returned an unexpected reviewed-tree response"),
         }
     }
 

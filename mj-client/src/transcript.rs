@@ -387,9 +387,8 @@ pub fn entry_role(item: &TranscriptItem) -> ChatRole {
         // Rendering it as the user's would put words in their mouth, so it
         // reads as Hel's own line instead.
         TranscriptBody::User { content } => {
-            if mj_core::second_opinion::is_control_origin_prompt(&materialized_content_text(
-                content,
-            )) {
+            if mj_core::continuation::is_control_origin_prompt(&materialized_content_text(content))
+            {
                 ChatRole::System
             } else {
                 ChatRole::User

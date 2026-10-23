@@ -1,7 +1,6 @@
 use super::*;
 
-/// Everything a review needs from the controller: whether it can review this
-/// session at all, and a staged reviewer profile to launch a role from.
+/// The controller operations a review needs to select and run its child.
 ///
 /// It is a trait so the host's own tests can drive a whole review without a
 /// container, a harness, or the developer's own `config.toml`. The daemon
@@ -28,14 +27,23 @@ pub trait ReviewEnvironment: Send + Sync {
         Result<mj_core::review::settings::ResolvedReviewSettings, String>,
     >;
 
-    /// Stages the reviewer profile for one role and describes how to launch
-    /// it. Blocking: it copies a profile onto the session's target.
-    fn stage(
+    fn register_child(
         &self,
         session_id: &str,
-        profile: &str,
-        generation: u64,
-    ) -> Result<mj_core::worker_launch::ReviewerLaunchConfig, String>;
+        reviewer: &ReviewerIdentity,
+        prompt: String,
+        request_key: String,
+    ) -> Result<String, String>;
+
+    fn start_child<'a>(
+        &'a self,
+        child: &'a str,
+    ) -> mj_client::session::BoxFuture<'a, Result<(), String>>;
+
+    fn close_child<'a>(
+        &'a self,
+        child: &'a str,
+    ) -> mj_client::session::BoxFuture<'a, Result<(), String>>;
 
     /// How far this session has been reviewed. Blocking: it reads the
     /// controller's database.
@@ -51,6 +59,18 @@ pub trait ReviewEnvironment: Send + Sync {
     /// interrupted review never advanced one, so the next review covers the
     /// same change and nothing is lost.
     fn clear_interrupted(&self) -> Result<Vec<String>, String>;
+
+    fn enqueue_verdict(
+        &self,
+        _session_id: &str,
+        _event: &mj_core::mailbox::MailboxEvent,
+    ) -> Result<(), String> {
+        Err("review verdict mailbox is unavailable".into())
+    }
+
+    fn orphaned_children(&self) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
 
     /// Holds the session against background work for as long as a review
     /// needs its worker: waits until no recovery copy or worker upgrade is
@@ -84,6 +104,7 @@ pub type BackgroundHold = Box<dyn Send + Sync>;
 /// daemon reloads config.toml every 500 ms for the same reason.
 #[derive(Default)]
 pub struct ControllerEnvironment {
+    pub(super) runtime: SharedReviewerRuntime,
     /// The daemon's gate for recovery copies and worker upgrades, which a
     /// review waits behind instead of racing for the session's lease.
     pub background: Option<Arc<crate::recovery_gate::RecoveryGate>>,
@@ -96,7 +117,114 @@ pub struct ControllerEnvironment {
 pub(crate) type SharedProfileCatalog =
     Arc<std::sync::OnceLock<Arc<crate::server_runtime::profile_catalog::ProfileCatalog>>>;
 
+pub(crate) type SharedReviewerRuntime =
+    Arc<std::sync::OnceLock<std::sync::Weak<crate::daemon::RuntimeState>>>;
+
+impl ControllerEnvironment {
+    async fn runtime(&self) -> Result<Arc<crate::daemon::RuntimeState>, String> {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(runtime) = self.runtime.get() {
+                    return runtime
+                        .upgrade()
+                        .ok_or_else(|| "reviewer runtime stopped".to_owned());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .map_err(|_| "reviewer runtime did not start".to_owned())?
+    }
+}
+
 impl ReviewEnvironment for ControllerEnvironment {
+    fn enqueue_verdict(
+        &self,
+        session_id: &str,
+        event: &mj_core::mailbox::MailboxEvent,
+    ) -> Result<(), String> {
+        let json = serde_json::to_string(event).map_err(|error| error.to_string())?;
+        crate::database::enqueue_mailbox_event(&event.key, session_id, &json, true, false)
+            .map(|_| ())
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    fn orphaned_children(&self) -> Result<Vec<String>, String> {
+        let controller =
+            crate::controller::Controller::load().map_err(|error| format!("{error:#}"))?;
+        Ok(controller
+            .state
+            .subagents
+            .values()
+            .filter(|child| child.kind == mj_core::subagent::SubagentKind::Reviewer)
+            .filter(|child| {
+                controller
+                    .state
+                    .sessions
+                    .get(&child.child_session_id)
+                    .is_some_and(|session| session.state.is_active())
+            })
+            .map(|child| child.child_session_id.clone())
+            .collect())
+    }
+    fn register_child(
+        &self,
+        session_id: &str,
+        reviewer: &ReviewerIdentity,
+        prompt: String,
+        request_key: String,
+    ) -> Result<String, String> {
+        let mut controller = crate::controller::Controller::load().map_err(|e| format!("{e:#}"))?;
+        let mut launch = controller
+            .reviewer_launch_config(session_id, &reviewer.profile, 0, &[])
+            .map_err(|e| format!("{e:#}"))?;
+        launch.model = reviewer.main.model.clone();
+        launch.effort = reviewer.main.effort.clone();
+        launch.fast_mode = reviewer.main.fast_mode.then_some(true);
+        controller
+            .register_subagent(crate::controller::RegisterSubagentRequest {
+                kind: mj_core::subagent::SubagentKind::Reviewer,
+                reviewer_launch: Some(launch),
+                parent_session_id: session_id.to_owned(),
+                task_name: "review".to_owned(),
+                profile_id: reviewer.profile.clone(),
+                model: reviewer.main.model.clone(),
+                effort: reviewer.main.effort.clone(),
+                working_directory: Default::default(),
+                initial_prompt: prompt,
+                request_key,
+                report_root: None,
+            })
+            .map(|child| child.child_session_id)
+            .map_err(|e| format!("{e:#}"))
+    }
+
+    fn start_child<'a>(
+        &'a self,
+        child: &'a str,
+    ) -> mj_client::session::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let runtime = self.runtime().await?;
+            runtime
+                .start_reviewer_child(child)
+                .await
+                .map_err(|e| format!("{e:#}"))
+        })
+    }
+
+    fn close_child<'a>(
+        &'a self,
+        child: &'a str,
+    ) -> mj_client::session::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let runtime = self.runtime().await?;
+            runtime
+                .suspend_session(child.to_owned())
+                .await
+                .map_err(|e| format!("{e:#}"))
+        })
+    }
+
     fn check(&self, session_id: &str, profile: &str) -> Result<(), String> {
         let controller =
             crate::controller::Controller::load().map_err(|error| format!("{error:#}"))?;
@@ -110,7 +238,7 @@ impl ReviewEnvironment for ControllerEnvironment {
                 "turn review needs an enabled reviewer: [review] profile {profile:?} is disabled"
             ));
         }
-        validate_reviewer_assignment(
+        validate_review_profile(
             session_id,
             controller.state.sessions.get(session_id),
             profile,
@@ -142,19 +270,6 @@ impl ReviewEnvironment for ControllerEnvironment {
         })
     }
 
-    fn stage(
-        &self,
-        session_id: &str,
-        profile: &str,
-        generation: u64,
-    ) -> Result<mj_core::worker_launch::ReviewerLaunchConfig, String> {
-        let controller =
-            crate::controller::Controller::load().map_err(|error| format!("{error:#}"))?;
-        controller
-            .stage_reviewer_profile(session_id, profile, generation)
-            .map_err(|error| format!("{error:#}"))
-    }
-
     fn load_state(&self, session_id: &str) -> Result<TurnReviewState, String> {
         crate::database::turn_review_state(session_id).map_err(|error| format!("{error:#}"))
     }
@@ -183,7 +298,7 @@ impl ReviewEnvironment for ControllerEnvironment {
     }
 }
 
-pub(crate) fn validate_reviewer_assignment(
+pub(crate) fn validate_review_profile(
     session_id: &str,
     session: Option<&mj_core::state::SessionRecord>,
     _profile: &str,

@@ -1734,9 +1734,10 @@ function freshDraft() {
 }
 
 
+// Mirrors HarnessKind::supports_delegation_tools.
 function subagentChoiceApplies(draft = newDraft) {
   const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
-  return kind === 'claude' || kind === 'codex';
+  return kind === 'claude' || kind === 'codex' || kind === 'dsh';
 }
 
 const SUBAGENT_MODES = [['native', 'Native'], ['mjolnir', 'Mjolnir'], ['none', 'None']];
@@ -6076,6 +6077,15 @@ function renderTurnReview(session) {
   }
   const card = el('section', 'card turn-review');
   card.append(el('strong', '', 'Reviewing this turn'));
+  if (review.child_session_id) {
+    const transcript = el('a', '', 'Reviewer conversation');
+    transcript.href = routeHash({
+      name: 'conversation',
+      sessionId: review.child_session_id,
+      subagentParentId: session.id,
+    });
+    card.append(transcript);
+  }
   const roles = review.roles || [];
   if (roles.length) {
     const strip = el('p', 'dim turn-review-roles');
@@ -6824,10 +6834,12 @@ function showHelp() {
 /// Keep this byte-for-byte aligned with `hel_chat::review_status_line`: the
 /// same configuration should answer the same way on the terminal and phone.
 function reviewStatusLine(review, open) {
-  const enabled = review?.enabled === true;
+  const enabled = review?.trigger === "turn";
   const profile = review?.profile;
   let armed;
-  if (enabled && profile) {
+  if (review?.trigger === "push") {
+    armed = "Review trigger is before push";
+  } else if (enabled && profile) {
     armed = `Reviewing every completed turn with [review] profile ${JSON.stringify(profile)}`;
   } else if (enabled) {
     armed = 'Reviewing every completed turn with Auto';
@@ -6906,7 +6918,7 @@ async function runLocalCommand(text) {
       const scope = argument.trim().toLowerCase();
       if (scope === 'status') {
         error.textContent = reviewStatusLine(
-          snapshot?.review_config,
+          { ...snapshot?.review_config, trigger: session?.review_trigger ?? snapshot?.review_config?.trigger },
           Boolean(session?.turn_review),
         );
         setComposerText('');
@@ -6915,7 +6927,7 @@ async function runLocalCommand(text) {
       if (scope === 'on' || scope === 'off') {
         // Arming review is configuration, not a session gesture.
         error.textContent =
-          'automatic review is configured in config.toml: [review] enabled';
+          'automatic review is configured in config.toml: [review] trigger';
         setComposerText('');
         return true;
       }

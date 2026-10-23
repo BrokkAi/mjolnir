@@ -21,7 +21,8 @@ Straightforward, parents delegate straightforward work and do work that
 needs judgment themselves.
 
 **Create** and **Move…** offer **Native** or **Mjolnir** delegation. Mjolnir
-requires a Claude or Codex profile and a configured Straightforward task.
+requires a Claude, Codex, or DSH profile and a configured Straightforward task.
+DSH has no sub-agents of its own, so Native gives a DSH session no delegation.
 Existing sessions keep their recorded policy; leaving Move's choice unchanged
 retains it.
 
@@ -64,7 +65,7 @@ marks models or counters that cannot be priced from the recorded information.
 | Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
 | OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db`, or a provider key in the environment | no |
 | MiMo Code | `mimo` | `MIMOCODE_HOME` | `~/.mimocode` (stock XDG config and login when unset) | `data/auth.json`, or `~/.local/share/mimocode/auth.json` for the stock install | no |
-| DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh-acp` | `DEEPSEEK_API_KEY` in the environment (no file) | no |
+| DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh` | `DEEPSEEK_API_KEY` in the environment (no file) | no |
 
 There are eight harness kinds. Codex can use its built-in Amazon Bedrock
 providers; see [Codex on Amazon Bedrock](#codex-on-amazon-bedrock). It can also
@@ -77,12 +78,15 @@ home that belongs to the session, and the harness's home variable points at
 that copy. See [What a session's staged home holds](#what-a-sessions-staged-home-holds).
 
 `mj setup` checks the home variable first and otherwise looks in the
-conventional location. A detected home becomes the explicit `home` path in
-`config.toml`; subsequent sessions use that configured path.
+conventional location. It also treats an API key in the environment Mjolnir
+started with as an installation signal for a harness that authenticates with
+no login, such as `DEEPSEEK_API_KEY` for DSH. A detected home becomes the
+explicit `home` path in `config.toml`; subsequent sessions use that configured
+path.
 
 Kimi Code does not expose a guardian approval mode. OpenCode and MiMo Code ask
 before tools according to their permission rules, and DSH asks before every
-write, command, and MCP tool call, but all three run commands on the host
+write, command, and MCP tool call other than Mjolnir's own, but all three run commands on the host
 without a sandbox, so they have no guardian either. The dashboard's
 new-session and resume wizards warn before using any of them on a raw target. Muse's guardian is muse-acp's auto-review; see
 [Harness limitations](#harness-limitations).
@@ -487,7 +491,9 @@ runtime on this machine. Do not override `MIMOCODE_HOME` in the profile
 environment.
 
 For DSH, configure `kind = "dsh"`, for example with
-`home = "/home/me/.dsh-acp"`. DSH runs BrokkAi's
+`home = "/home/me/.dsh"`. Detection accepts DeepSeek's own `dsh` CLI, its
+`~/.dsh` home, or `DEEPSEEK_API_KEY` in the environment Mjolnir started with,
+so a key alone is enough to be offered a profile. DSH runs BrokkAi's
 [dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.2.1, a DeepSeek coding agent
 that speaks ACP itself, so there is no separate bridge. It is not the DeepSeek
 harness earlier releases offered as `kind = "deepseek"`; that kind still fails
@@ -498,9 +504,11 @@ receives `AGENTS.md` in one environment variable, so the file must be UTF-8
 text of at most 131049 bytes, including the notes Mjolnir adds to describe a
 container or EC2 session's environment. Mjolnir refuses to start a session whose
 file breaks either rule and says which rule and by how much, and `mj doctor`
-reports the profile's own file the same way. With no login
-to create it, create the home directory yourself; `mj doctor` reports it
-missing until you do. DSH reads no
+reports the profile's own file the same way. Nothing creates the home
+automatically, and it is optional: a session stages its own home, which simply
+starts without an `AGENTS.md`. Create `~/.dsh` when you want to keep
+instructions there or move the profile; `mj doctor` reports it missing until
+you do. DSH reads no
 instruction file itself, so Mjolnir passes the staged `AGENTS.md` as dsh-acp's
 system prompt through `DSH_ACP_SYSTEM_PROMPT` on every launch. The staged file
 is the profile's own `AGENTS.md` plus any guidance Mjolnir adds for the
@@ -517,7 +525,7 @@ it, for example from `secrets.toml`:
 ```toml
 [profiles.dsh]
 kind = "dsh"
-home = "/home/me/.dsh-acp"
+home = "/home/me/.dsh"
 
 [profiles.dsh.environment]
 DEEPSEEK_API_KEY = { from_secret = "DEEPSEEK_API_KEY" }
@@ -540,23 +548,55 @@ Run:
 mj login --profile codex-work
 ```
 
+You can also sign in without leaving the dashboard: press `prefix+s` to open
+Settings, choose **Agent Profiles**, select a profile, and choose **Sign in**. Mjolnir
+hands the terminal to the same login flow and resumes the dashboard when it
+finishes. The Agent Profiles list shows each saved profile's status beside it —
+`signed in`, `signed out`, `credential expired`, or the API-key and no-login
+cases — so a signed-out profile is visible before a session fails. When Mjolnir
+cannot inspect a login, the row says why instead (for example, Claude Code's
+macOS Keychain item). `credential expired` means the harness recorded an
+access-token expiry that has passed;
+some harnesses refresh it automatically on the next turn. The status is a local
+credential probe, not a live provider check, so a token revoked by the provider
+still reads `signed in` until a turn fails. The button is
+available for profiles that already exist in the saved configuration and have no
+unsaved edits; save a new or changed profile first.
+
 When exactly one profile exists, `--profile` may be omitted. With several
 profiles it is required. Mjolnir sets the selected home variable and profile
-environment before starting the harness's interactive login:
+environment, installs the exact pinned harness under its own cache, and starts
+that harness as an ACP agent. It reads the methods the bridge advertises:
 
-| Harness | Command run by `mj login` |
+| Harness | What `mj login` does |
 | --- | --- |
-| Codex | `codex login` (not applicable to an API-key provider) |
-| Claude Code | `claude auth login` |
-| Kimi Code | `kimi login` |
-| Grok Build | `grok login` |
-| Muse Code | `muse login` |
-| OpenCode | `opencode auth login` |
-| MiMo Code | `mimo auth login` |
+| Codex | ACP `authenticate` for `chat-gpt` (browser) or `api-key` (environment key) |
+| Claude Code | No ACP methods; falls back to `claude auth login` when the Claude CLI is installed |
+| Kimi Code | Runs its advertised ACP method; falls back to `kimi login` only when the bridge cannot run |
+| Grok Build | Runs `grok login` for its `grok.com` method; falls back to the CLI when the bridge cannot run |
+| Muse Code | Runs the ACP `terminal` method `muse-acp login` |
+| OpenCode | Runs the pinned `opencode auth login --standalone` |
+| MiMo Code | Runs the pinned `mimo auth login` |
 | DSH | none; `mj login` refuses the profile, which authenticates with `DEEPSEEK_API_KEY` |
 
-The login command is always resolved from the controller's `PATH`. A profile
-selects credentials and environment, not another harness executable.
+Use `--method <id>` when a bridge advertises several methods. Use `--cli` to
+skip ACP and run the harness command found on `PATH`, which is the behavior of
+earlier releases. A bridge that advertises no usable method, or a pinned
+installation that cannot be prepared, also falls back to that command-line
+login. A failure inside a chosen ACP method is reported instead of silently
+trying a different flow.
+
+For harnesses with an ACP login, signing in installs or reuses the pinned
+harness, so the controller does not need a separate installation of that
+harness. Claude agent-acp advertises no login method, so Claude still uses an
+installed `claude` CLI (or the Mjolnir setup token). When a harness is installed
+on `PATH` it is also available through `--cli`, and it is used automatically as
+the fallback when ACP cannot run. A profile pointed at your own OpenCode, Muse, or MiMo
+home signs in through that installed harness's CLI instead: Mjolnir never runs
+the pinned binary against a login database it does not own. A profile with its
+own managed home gets the pinned ACP flow. API-key profiles, and profiles whose
+harness is configured for an API key rather than a native login, have no
+interactive login.
 
 On macOS, Claude Code keeps its login in one Keychain item rather than in the
 home ([anthropics/claude-code#20553](https://github.com/anthropics/claude-code/issues/20553)),
@@ -587,7 +627,8 @@ profiles/<profile-id>/claude-oauth-token
 New and resumed sessions receive it as `CLAUDE_CODE_OAUTH_TOKEN`. It covers
 model requests, not Claude Remote Control or claude.ai connectors. Remove that
 file to return the profile to its normal synced credentials. `--setup-token` is
-valid only for Claude profiles.
+valid only for Claude profiles and runs `claude` from `PATH`; it conflicts with
+`--method` and `--cli`.
 
 ## What a session's staged home holds
 
@@ -823,7 +864,7 @@ Local-bare, raw SSH, and EC2 workers instead install the exact versions pinned b
 Mjolnir release into `$XDG_CACHE_HOME/mjolnir/harnesses`, or
 `$HOME/.cache/mjolnir/harnesses` when `XDG_CACHE_HOME` is unset. They launch
 only the resulting absolute path—never an arbitrary compatible executable from
-`PATH`. Codex, Claude, and MiMo Code require Node.js 22 or newer plus npm on
+`PATH`. DSH is the exception and is never installed; see below. Codex, Claude, and MiMo Code require Node.js 22 or newer plus npm on
 the host.
 Kimi and Grok require curl and Bash for their official installers.
 Muse requires Node.js 22 or newer, npm, and curl; Mjolnir launches the pinned
@@ -838,10 +879,12 @@ self-update so a running session never replaces its own binary.
 MiMo Code installs from the pinned `@mimo-ai/cli` npm package. Its managed
 launch disables automatic updates so a running session never replaces its own
 binary.
-DSH requires curl and tar, and no Node.js; Mjolnir downloads the pinned
-dsh-acp 0.2.1 GitHub release archive for the platform and verifies its SHA-256
-checksum. Linux and macOS, on x86-64 and ARM64, are supported. Linux needs
-glibc 2.34 or newer, so musl distributions such as Alpine cannot run it.
+DSH is never installed. A launch resolves the target's own `dsh-acp` on
+`PATH`, or fetches the pinned `@brokkai/dsh-acp@0.2.1` package through `npx`,
+so a bare target needs Node.js 22 or newer with npm and npx; the npm package
+bundles the release binaries. Linux and macOS, on x86-64 and ARM64, are
+supported. Linux needs glibc 2.34 or newer, so musl distributions such as
+Alpine cannot run it.
 Mjolnir reports a missing prerequisite and leaves the existing worker alone;
 it does not invoke sudo or a system package manager.
 
@@ -937,14 +980,19 @@ handoffs; see
 - DSH has no sandbox: commands run directly on the host, and only its file
   tools are confined to the workspace roots. Under configured approvals
   Mjolnir selects dsh-acp's `permission_mode` `ask` on every session open, so
-  every write, command, and MCP tool call asks for permission; an
-  unconstrained policy selects `allow`. The Plan toggle switches dsh-acp to its
+  every write, command, and MCP tool call asks for permission, except calls to
+  Mjolnir's own `mj-agents` and `mj-memory` tools, which the worker approves
+  without asking, as Claude and Codex sessions do; an unconstrained policy
+  selects `allow`. The Plan toggle switches dsh-acp to its
   `plan` mode and back to its `agent` mode. DSH accepts multiple workspace
   roots and attached directories. Checkpoints keep the session's
   `sessions/<id>.json`, and a restore at a different workspace path rewrites
   the record's working directory so the session resumes. Native import and
-  SessionWiki search do not support DSH yet. It does not serve Mjolnir's
-  delegation, which needs a Claude or Codex profile. It serves DeepSeek-family
+  SessionWiki search do not support DSH yet. A DSH session can use Mjolnir's
+  sub-agents, and a DSH profile can run them: it reads the delegation policy
+  from its staged `AGENTS.md` and receives the `mj-agents` tools over ACP.
+  dsh-acp has no sub-agents of its own, so Native gives a DSH session no
+  delegation, the same as None. It serves DeepSeek-family
   utility inference with its flash model only when its base URL is DeepSeek's
   own `api.deepseek.com` and its key is set.
 - A custom bridge must speak the ACP version and features Mjolnir expects.

@@ -52,6 +52,7 @@ fn idle_background_work_and_working_review_keep_animation_independent() {
     assert!(!chat.needs_animation());
 
     chat.set_turn_review(Some(RuntimeReviewView {
+        child_session_id: None,
         session_id: "session-1".into(),
         questions: Vec::new(),
         phase: TurnReviewPhase::CapturingDelta,
@@ -65,7 +66,7 @@ fn idle_background_work_and_working_review_keep_animation_independent() {
 #[test]
 fn review_status_omits_the_deprecated_tier() {
     let review = mj_core::config::ReviewConfig {
-        enabled: true,
+        trigger: mj_core::config::ReviewTrigger::Turn,
         tier: Some("extended".into()),
         profile: Some("reviewer".into()),
         ..Default::default()

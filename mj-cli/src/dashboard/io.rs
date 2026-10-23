@@ -23,7 +23,6 @@ use mj_core::state::{
 
 use mj_controller::controller::Controller;
 use mj_controller::controller::ResumeRepositorySourcePreflight;
-use mj_controller::session_manager::SessionManagerControl;
 use mj_controller::targets::CancellableProcessExecutor;
 use mj_tui::{
     DashboardAction, DetectScope, PreparedMaterializedSessionDetail,
@@ -295,6 +294,11 @@ pub(crate) enum DashboardIoUpdate {
     SetupDiscovered {
         generation: u64,
         result: std::result::Result<mj_tui::SetupDetection, String>,
+    },
+    /// Saved-profile sign-in statuses read before Settings draws them.
+    ProfileLoginStatuses {
+        generation: u64,
+        result: std::result::Result<BTreeMap<String, mj_core::credentials::LoginStatus>, String>,
     },
     MachineRuntimesChecked {
         generation: u64,
@@ -1345,6 +1349,14 @@ impl DashboardContext {
             DashboardIoUpdate::SetupDiscovered { generation, result } => {
                 self.dashboard.setup_discovered(generation, result)
             }
+            DashboardIoUpdate::ProfileLoginStatuses { generation, result } => match result {
+                Ok(statuses) => self
+                    .dashboard
+                    .set_profile_login_statuses(generation, statuses),
+                Err(error) => {
+                    tracing::warn!(%error, "could not read profile sign-in status");
+                }
+            },
             DashboardIoUpdate::MachineRuntimesChecked { generation, result } => self
                 .dashboard
                 .apply_machine_runtime_check(generation, result),

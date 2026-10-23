@@ -92,7 +92,7 @@ function stateWith(sessions) {
       profiles: [],
       targets: [],
       bundles: [],
-      review_config: { enabled: false, profile: null },
+      review_config: { trigger: "off", profile: null },
     },
     snapshots: 0,
     detailRequests: [],

@@ -88,10 +88,28 @@ Doctor checks configuration compatibility, harness authentication, worker binari
 ```text
 mj login
 mj login --profile <profile-id>
+mj login --profile <profile-id> --method <acp-method-id>
+mj login --profile <profile-id> --cli
 mj login --profile <claude-profile> --setup-token
 ```
 
-The profile may be omitted only when exactly one is configured. Mjolnir launches the appropriate authentication command for that profile. A profile that authenticates with an API key, such as a DSH profile or a Codex profile with a custom provider, has no login, and `mj login` refuses it. `--setup-token` is Claude-only: it mints and stores a long-lived subscription token so containers do not race the controller for a rotating OAuth refresh token.
+The profile may be omitted only when exactly one is configured. Mjolnir installs
+or reuses the same pinned harness a session uses, starts it as an ACP agent, and
+asks it which authentication methods it advertises. It then runs a `terminal`
+method's command, uses a known terminal action for a bridge that describes one
+in text only (OpenCode and MiMo), or completes an agent method through ACP
+`authenticate` (Codex). Use `--method` to choose when several methods are
+offered, or `--cli` to skip ACP and run the harness command found on `PATH`
+exactly as earlier releases did. If the harness advertises no ACP login, Mjolnir
+also falls back to that command-line login. A profile pointed at your own
+OpenCode, Muse, or MiMo home signs in through that installed CLI, so the pinned binary
+never runs against a login database it does not own. The same flow is available
+from the dashboard: Settings → Agent Profiles, select a profile, then **Sign in**. A profile that authenticates with an
+API key, such as a DSH profile or a Codex profile with a custom provider, has no
+login, and `mj login` refuses it. Native Windows controllers take the CLI login
+path; ACP sign-in is available on Unix (including WSL). `--setup-token` is
+Claude-only: it mints and stores a long-lived subscription token so containers do
+not race the controller for a rotating OAuth refresh token.
 
 See [profiles and harnesses](/profiles/) for home directories, credential handling, and runtime limitations.
 
@@ -130,8 +148,8 @@ DSH sessions are not importable yet either.
 | `--allow-dirty` | Acknowledge that dirty Git roots will be archived in their complete current state. |
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
-| `--review-model <name>`, `--review-effort <name>`, `--review-tier quick\|extended` | Review every turn of the imported session with that model or effort. The deprecated tier flag still accepts either value and enables automatic review, but its value is ignored. |
-| `--no-review` | Do not review the imported session's turns automatically. |
+| `--review <off\|turn\|push>` | Set the imported session's review trigger, overriding `[review]`. |
+| `--review-model <name>`, `--review-effort <name>`, `--review-tier quick\|extended` | Set the reviewer model or effort. Without `--review`, these options select `turn`. The deprecated tier option still accepts either value but ignores it. |
 | `--workspace <name>` | Workspace to put the imported session in. Needed when the instance has more than one workspace. |
 
 Import never edits the harness's source transcript. It builds and verifies a Mjolnir recovery archive, creates a suspended session record, and makes that record available through `prefix+g`.
@@ -184,7 +202,7 @@ the matching task choice for this session; each unspecified type uses its global
 choice. Either override implies Mjolnir. The matching
 `--subagent-*-effort` flag requires its model flag. Omitted policy retains
 the session's override. `--subagents none` removes delegation tools entirely;
-it needs a Claude or Codex session. A retry of a sealed
+it needs a Claude, Codex, or DSH session. A retry of a sealed
 Move retains its recorded policy; an explicit different policy is refused.
 
 A session that works in a bare checkout on an SSH host cannot move to
@@ -270,8 +288,8 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--model <name>] [--effort <name>] [--subagents native|mjolnir|none]
        [--subagent-straightforward <model>] [--subagent-straightforward-effort <effort>]
        [--subagent-subtle <model>] [--subagent-subtle-effort <effort>]
-       [--review-model <name>] [--review-effort <name>] [--review-tier quick|extended]
-       [--no-review] [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
+       [--review <off|turn|push>] [--review-model <name>] [--review-effort <name>]
+       [--review-tier quick|extended] [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--command-id <id>]
           [--timeout <seconds>] [--return-on-input] [--json]
@@ -339,7 +357,7 @@ mj new --workspace eval --bundle product --target builder \
   the request fails.
 - `mj new --subagents native|mjolnir|none` selects delegation. Omitted defaults to
   Native. `none` gives the session no delegation tools, native or Mjolnir; it
-  needs a Claude or Codex profile and is not offered in the TUI or browser. Mjolnir requires a Claude or Codex parent and a straightforward
+  needs a Claude, Codex, or DSH profile and is not offered in the TUI or browser. Mjolnir requires a Claude, Codex, or DSH parent and a straightforward
   choice in `[subagents.straightforward]` or a session override. The subtle
   choice in `[subagents.subtle]` is optional. Configure global defaults in
   config.toml or TUI Settings → Sub-agents.
@@ -355,13 +373,12 @@ mj new --workspace eval --bundle product --target builder \
   every child uses the straightforward choice, and the parent is told to
   delegate straightforward work.
   Mjolnir chooses an eligible profile offering its model and effort by quota.
-- `mj new --review-model <name>`, `--review-effort <name>` and
-  `--review-tier quick|extended` review every turn of the new session with
-  that model or effort, even when `[review]` is off. The deprecated tier flag
-  still accepts either value and enables automatic review, but its value is
-  ignored. `--no-review` turns off automatic review for the session, even when
-  `[review]` is on; `/review` still works. `mj import <harness>` takes the same
-  flags for the session it adopts. See
+- `mj new --review off|turn|push` sets the session's trigger, overriding
+  `[review]`. `mj import <harness>` takes the same option for the session it
+  adopts. `--review-model <name>` and `--review-effort <name>` set reviewer
+  choices; without `--review`, either option selects `turn`. The deprecated
+  `--review-tier quick|extended` also selects `turn` when used alone, but its
+  value is ignored. See
   [per-session settings](/turn-review/#per-session-settings).
 - `mj new --no-project-memory` starts the session with no project memory:
   nothing from the workspace's project memory is put in the agent's startup

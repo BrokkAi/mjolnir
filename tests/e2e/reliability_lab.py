@@ -867,7 +867,9 @@ pull_policy = "never"
     ) -> object:
         return daemon_request(self.data, action, request_id, timeout)
 
-    def request(self, method: str, path: str, body: object | None = None) -> tuple[int, object | None]:
+    def request(
+        self, method: str, path: str, body: object | None = None, *, timeout: float = 5
+    ) -> tuple[int, object | None]:
         data = None if body is None else json.dumps(body).encode()
         request = urllib.request.Request(
             self.base_url + path,
@@ -876,7 +878,7 @@ pull_policy = "never"
             headers={"Content-Type": "application/json"},
         )
         try:
-            with self.http.open(request, timeout=5) as response:
+            with self.http.open(request, timeout=timeout) as response:
                 payload = response.read()
                 value = json.loads(payload) if payload else None
                 return response.status, value
@@ -1204,6 +1206,24 @@ pull_policy = "never"
         self.record_client_revision("tui-1", revision)
         self.record_client_revision("tui-2", revision)
         self.record_action("clients-converged", session_id=session_id, clients=3)
+
+        # A review start is answered once the review host has decided, so 202
+        # means the review opened. The fixture's turn changed no file, so the
+        # review needs no reviewer and closes again on its own. The answer can
+        # wait up to two minutes behind the recovery copy the finished turn
+        # started, as `mj review start` allows for.
+        started = time.monotonic()
+        status, value = self.request(
+            "POST",
+            "/api/actions",
+            {"action": "start-review", "session_id": session_id},
+            timeout=150,
+        )
+        if status != 202:
+            raise ScenarioFailure(f"start-review action returned {status}: {value!r}")
+        self.record_action(
+            "review-started", session_id=session_id, seconds=round(time.monotonic() - started, 3)
+        )
 
         status, _ = self.request(
             "POST", "/api/actions", {"action": "suspend", "session_id": session_id}

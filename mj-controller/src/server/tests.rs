@@ -687,7 +687,7 @@ fn generated_code_and_cookie_attributes_are_phone_safe() {
 fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     let (mut config, state) = sample_config_state();
     config.review = mj_core::config::ReviewConfig {
-        enabled: true,
+        trigger: mj_core::config::ReviewTrigger::Turn,
         tier: Some("extended".into()),
         profile: Some("reviewer-1".into()),
         model: Some("private-review-model".into()),
@@ -699,7 +699,7 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     assert_eq!(
         value.get("review_config"),
         Some(&serde_json::json!({
-            "enabled": true,
+            "trigger": "turn",
             "profile": "reviewer-1",
         }))
     );
@@ -772,7 +772,7 @@ fn target_snapshot_uses_each_raw_host_project_history_and_leaves_managed_empty()
 fn public_snapshot_exposes_only_review_status_configuration() {
     let (mut config, state) = sample_config_state();
     config.review = mj_core::config::ReviewConfig {
-        enabled: true,
+        trigger: mj_core::config::ReviewTrigger::Turn,
         tier: Some("extended".into()),
         profile: Some("reviewer-1".into()),
         model: Some("private-review-model".into()),
@@ -785,7 +785,7 @@ fn public_snapshot_exposes_only_review_status_configuration() {
     assert_eq!(
         value.get("review_config"),
         Some(&serde_json::json!({
-            "enabled": true,
+            "trigger": "turn",
             "profile": "reviewer-1",
         }))
     );
@@ -2872,6 +2872,7 @@ fn a_running_review_projects_to_the_phone() {
     use mj_core::review::driver::{Resolution, RoleState, RoleStatus, TurnReviewPhase};
 
     let review = RuntimeReviewView {
+        child_session_id: None,
         session_id: "session-1".into(),
         questions: Vec::new(),
         phase: TurnReviewPhase::Verdict(mj_core::review::verdict::ReviewVerdict::Findings {
@@ -2935,6 +2936,7 @@ fn resolving_a_review_is_gated_on_what_the_daemon_published() {
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
 
     snapshot.sessions[0].turn_review = Some(ViewerTurnReview {
+        child_session_id: None,
         status: "the reviewer is reading the change…".into(),
         roles: Vec::new(),
         verdict: None,
@@ -2950,6 +2952,7 @@ fn resolving_a_review_is_gated_on_what_the_daemon_published() {
 
     // A failed review can be dismissed but has nothing to forward.
     snapshot.sessions[0].turn_review = Some(ViewerTurnReview {
+        child_session_id: None,
         status: "the review failed".into(),
         roles: Vec::new(),
         verdict: Some(ViewerReviewVerdict {

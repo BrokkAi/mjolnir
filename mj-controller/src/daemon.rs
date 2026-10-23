@@ -238,6 +238,7 @@ pub struct RuntimeState {
     /// Turn review runs here, in the process that owns every session, so a
     /// review happens whether the terminal, the phone, or nobody is attached.
     review_host: TurnReviewHost,
+    reviewer_runtime: crate::review_host::SharedReviewerRuntime,
     /// Publishes checkpointed sessions into the user's SessionWiki index.
     wiki: crate::sessionwiki::WikiIndexer,
 }

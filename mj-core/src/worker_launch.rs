@@ -2,7 +2,7 @@
 //!
 //! These are plain data types and the constants they name: the file layout of
 //! a worker root, the launch configuration for a primary session and for a
-//! reviewer beside it, and how a harness learns about its MCP servers. They
+//! reviewer child, and how a harness learns about its MCP servers. They
 //! carry no process, network, or worker-runtime behaviour, so both sides of
 //! the relay can depend on them without depending on each other.
 
@@ -49,30 +49,8 @@ pub fn installed_harness_home(launch_path: &Path) -> anyhow::Result<Option<PathB
         .map(|home| harness.home_from_environment(home)))
 }
 
-/// Directory inside the primary worker root that holds everything the reviewer owns.
-pub const REVIEWER_DIR: &str = "reviewer";
-/// Where the controller stages the chosen profile, inside [`REVIEWER_DIR`].
-pub const REVIEWER_PROFILE_DIR: &str = "profile";
-
-/// Return the immutable profile snapshot staged for one reviewer generation.
-/// Generation zero keeps the original path so an upgraded worker can read a
-/// profile staged by an older controller; later generations are isolated from
-/// one another so staging cannot replace a source another role is copying.
-#[must_use]
-pub fn reviewer_staging_profile_home(worker_root: &Path, generation: u64) -> PathBuf {
-    let profile = if generation == 0 {
-        REVIEWER_PROFILE_DIR.to_owned()
-    } else {
-        format!("{REVIEWER_PROFILE_DIR}-{generation}")
-    };
-    crate::target_path::join(worker_root, &Path::new(REVIEWER_DIR).join(profile))
-}
-
 /// Who owns the ACP adapter and harness executable selected by a worker.
-///
-/// Ambient launch preserves container behavior. Managed launch resolves the
-/// exact pin compiled into the worker and never falls back to an executable
-/// from `PATH`.
+/// Managed launch resolves the compiled pin; ambient launch uses the target's runtime.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HarnessRuntimePolicy {
@@ -156,6 +134,8 @@ pub enum WorkerRunMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerLaunchConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_launch: Option<ReviewerLaunchConfig>,
     /// Unique intent for a user-requested Resume/Restart; recovery preserves it in the relay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_resume_request: Option<String>,
@@ -192,7 +172,7 @@ pub struct WorkerLaunchConfig {
     /// that one wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_model: Option<String>,
-    /// Whether a turn review can ever run for this session, which is the only
+    /// Whether a review can ever run for this session, which is the only
     /// reason to spend anything on capturing the working tree.
     ///
     /// The controller decides it: `[review] profile` has to name a reviewer,
@@ -201,6 +181,8 @@ pub struct WorkerLaunchConfig {
     /// in a large working tree cheap.
     #[serde(default)]
     pub review_capture: bool,
+    #[serde(default)]
+    pub review_trigger: crate::config::ReviewTrigger,
     /// Explicit target settings shared by primary and reviewer processes.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub target_environment: std::collections::BTreeMap<String, String>,
@@ -317,11 +299,11 @@ impl ProjectMemoryMcpDelivery {
     }
 }
 
-/// How to launch the second-opinion reviewer beside a primary session.
+/// Harness launch settings for a reviewer child.
 ///
 /// The reviewer shares the primary's target and working directory and nothing
 /// else: its harness home is a fresh copy of the chosen profile, staged under
-/// the primary worker root, and the worker sets that home itself so a
+/// its own worker root, and the worker sets that home itself so a
 /// controller can never point a reviewer at the primary's credentials.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -351,9 +333,7 @@ pub struct ReviewerLaunchConfig {
     /// Best-effort fast mode, applied only when the harness advertises it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_mode: Option<bool>,
-    /// Bumped whenever native continuity is lost, so a reviewer that outlived
-    /// its harness starts a visibly new conversation instead of pretending to
-    /// resume one.
+    /// Legacy launch field retained so saved worker configurations remain readable.
     #[serde(default)]
     pub generation: u64,
     /// Additional configured MCP servers this reviewer gets.
@@ -399,18 +379,6 @@ impl ReviewMcpDelivery {
     }
 }
 
-impl ReviewerLaunchConfig {
-    /// Whether a running reviewer launched from `self` can serve `other`
-    /// without being restarted. Model and effort are applied on the live
-    /// session, so they never force a restart; identity does.
-    #[must_use]
-    pub fn reusable_for(&self, other: &Self) -> bool {
-        self.profile_id == other.profile_id
-            && self.harness == other.harness
-            && self.generation == other.generation
-    }
-}
-
 /// Resolve the `mj-agents` server role from the launch values that control
 /// whether its durable request queue exists in the worker.
 #[must_use]
@@ -431,6 +399,14 @@ pub fn resolve_subagent_mcp_role(
 }
 
 impl WorkerLaunchConfig {
+    pub fn review_gate(&self) -> bool {
+        self.review_trigger == crate::config::ReviewTrigger::Push
+            && self.harness.supports_delegation_tools()
+            && !self.is_managed_subagent()
+            && !self.handback_tool
+            && self.reviewer_launch.is_none()
+    }
+
     /// Managed ownership is independent of the MCP role and historical handback tools.
     pub fn is_managed_subagent(&self) -> bool {
         self.environment
@@ -441,6 +417,9 @@ impl WorkerLaunchConfig {
     /// The `mj-agents` role is derived once from the launch's ownership and
     /// policy so Codex and Claude expose the same tools.
     pub fn subagent_mcp_role(&self) -> Option<crate::subagent::SubagentMcpRole> {
+        if self.review_gate() {
+            return Some(crate::subagent::SubagentMcpRole::Parent);
+        }
         resolve_subagent_mcp_role(
             &self.subagents,
             self.is_managed_subagent(),
@@ -600,6 +579,43 @@ mod tests {
             "cwd": "/workspace/project",
             "execution_policy": "configured_approvals"
         })
+    }
+
+    #[test]
+    fn persisted_review_trigger_controls_primary_mcp_without_leaking_to_children() {
+        for harness in [
+            HarnessKind::Claude,
+            HarnessKind::Codex,
+            HarnessKind::Dsh,
+            HarnessKind::Muse,
+        ] {
+            for trigger in [
+                crate::config::ReviewTrigger::Off,
+                crate::config::ReviewTrigger::Turn,
+                crate::config::ReviewTrigger::Push,
+            ] {
+                let mut json = launch_json();
+                json["harness"] = serde_json::to_value(harness).unwrap();
+                json["review_trigger"] = serde_json::to_value(trigger).unwrap();
+                let mut launch: WorkerLaunchConfig = serde_json::from_value(json).unwrap();
+                let saved = serde_json::to_value(&launch).unwrap();
+                let read: WorkerLaunchConfig = serde_json::from_value(saved).unwrap();
+                assert_eq!(read.review_trigger, trigger);
+                let expected =
+                    trigger == crate::config::ReviewTrigger::Push && harness != HarnessKind::Muse;
+                assert_eq!(launch.review_gate(), expected);
+                if expected {
+                    assert_eq!(
+                        launch.subagent_mcp_role(),
+                        Some(crate::subagent::SubagentMcpRole::Parent)
+                    );
+                }
+                launch
+                    .environment
+                    .insert(SESSION_MANAGED_SUBAGENT_ENV.into(), "1".into());
+                assert!(!launch.review_gate());
+            }
+        }
     }
 
     #[test]

@@ -347,6 +347,7 @@ pub struct SubagentToolRequest {
 )]
 pub enum SubagentToolAction {
     ListProfiles,
+    RequestReview {},
     Spawn {
         task_name: String,
         instructions: String,
@@ -405,6 +406,7 @@ pub enum SubagentToolAction {
 )]
 enum SubagentToolActionWire {
     ListProfiles,
+    RequestReview {},
     Spawn {
         task_name: String,
         instructions: String,
@@ -459,6 +461,7 @@ impl SubagentToolAction {
         matches!(
             self,
             Self::Spawn { .. }
+                | Self::RequestReview {}
                 | Self::SendInput { .. }
                 | Self::SendMessage { .. }
                 | Self::LegacyInterruptAgent { .. }
@@ -500,6 +503,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
             serde_json::from_value::<SubagentToolActionWire>(value).map_err(D::Error::custom)?;
         Ok(match wire {
             SubagentToolActionWire::ListProfiles => Self::ListProfiles,
+            SubagentToolActionWire::RequestReview {} => Self::RequestReview {},
             SubagentToolActionWire::Spawn {
                 task_name,
                 instructions,
@@ -641,10 +645,33 @@ pub struct SubagentQueuePage {
     pub has_more: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentKind {
+    #[default]
+    Worker,
+    Reviewer,
+}
+
+impl SubagentKind {
+    /// Key in the request index; the record keeps the caller's original id.
+    #[must_use]
+    pub fn request_key(self, key: &str) -> String {
+        match self {
+            Self::Worker => format!("worker:{key}"),
+            Self::Reviewer => format!("reviewer:{key}"),
+        }
+    }
+}
+
 /// Durable ownership and launch intent for one child session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubagentRecord {
+    #[serde(default)]
+    pub kind: SubagentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_launch: Option<crate::worker_launch::ReviewerLaunchConfig>,
     pub child_session_id: String,
     pub parent_session_id: String,
     pub task_name: String,
@@ -798,6 +825,9 @@ pub const HANDBACK_REMINDER_GRACE_MS: i64 = 30_000;
 /// The longest report a child can hand back or a notification includes.
 /// Details belong in files in the child's report directory.
 pub const MAX_HANDBACK_CHARS: usize = 4_000;
+
+/// Reviewers return their complete structured findings in one handback.
+pub const MAX_REVIEWER_HANDBACK_CHARS: usize = 128 * 1024;
 
 /// Directory under a parent's workspace root that holds its children's report
 /// directories, outside every repository.
@@ -1561,6 +1591,7 @@ mod tests {
         for harness in [
             crate::config::HarnessKind::Claude,
             crate::config::HarnessKind::Codex,
+            crate::config::HarnessKind::Dsh,
         ] {
             for policy in [
                 SubagentPolicy::Native,

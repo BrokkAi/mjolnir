@@ -52,9 +52,7 @@ use mj_core::transcript::{ChatEntry, ChatRole, PlanStatus, ToolStatus, Transcrip
 use mj_transcript::transcript::tool_call_presentation;
 // The transcript text helpers live in `transcript`, which sits below every
 // module that reads a transcript. The chat view keeps naming them here.
-pub(super) use mj_transcript::transcript::{
-    materialized_chunks_text, materialized_tool_diffstats, tool_status,
-};
+pub(super) use mj_transcript::transcript::{materialized_tool_diffstats, tool_status};
 
 use super::ChatState;
 use super::rendering::{
@@ -756,7 +754,6 @@ impl ChatState {
     fn transcript_scrollbar_covered(&self) -> bool {
         self.elicitation.is_none()
             && (self.config_picker_active()
-                || (self.second_opinion_active() && !self.second_opinion_split())
                 || (self.turn_review_active() && !self.turn_review_split()))
     }
 

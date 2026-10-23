@@ -635,13 +635,16 @@ pub(super) async fn review_status(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<ReviewStatusResponse>, ApiFailure> {
-    let review = {
+    let (trigger, review) = {
         let snapshot = state.snapshot_rx.borrow();
-        require_session_record(&snapshot, &session_id)?
-            .turn_review
-            .clone()
+        let session = require_session_record(&snapshot, &session_id)?;
+        (session.review_trigger, session.turn_review.clone())
     };
-    Ok(Json(ReviewStatusResponse { session_id, review }))
+    Ok(Json(ReviewStatusResponse {
+        session_id,
+        trigger,
+        review,
+    }))
 }
 
 pub(super) async fn send_action(

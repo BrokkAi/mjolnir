@@ -1,137 +1,35 @@
-//! Staging the second-opinion reviewer's profile onto a session's target.
-//!
-//! The reviewer runs a different configured profile in the primary session's
-//! own target. Its harness home is a fresh copy of that profile, placed inside
-//! the primary worker root, so the reviewer never reads or writes the
-//! primary's home and nothing outside the worker root has to be provisioned.
-//!
-//! Nothing here creates a session record, a target, a checkout, or any target
-//! lifecycle operation. Staging a reviewer is a file copy into a directory the
-//! session's worker already owns.
+//! Launch settings and private MCP configuration for reviewer child sessions.
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 
-use super::worker_binary::{
-    SharedCatalogCache, apply_staged_execution_setting, bridge_launch,
-    container_upload_ownership_args, fetch_catalog_over_https, link_shared_login,
-    shared_profile_login, stage_profile_with_catalog,
-};
-use super::{Controller, execute_checked};
-use crate::targets::{self, CommandExecutor, CommandSpec, ProcessExecutor};
-use mj_core::worker_launch::{
-    ReviewMcpDelivery, ReviewMcpServer, ReviewerLaunchConfig, reviewer_staging_profile_home,
-};
-
-/// Build the capability used by client-side chat views to stage reviewers.
-/// The blocking filesystem and target work remains implemented by the
-/// controller and is invoked from chat's supervised blocking task.
-pub fn reviewer_stager() -> mj_client::session::ReviewerStager {
-    mj_client::session::ReviewerStager::new(ControllerReviewerStager)
-}
-
-struct ControllerReviewerStager;
-
-impl mj_client::session::ReviewerStagerBackend for ControllerReviewerStager {
-    fn stage(
-        &self,
-        _config: mj_core::config::Config,
-        session: mj_core::state::SessionRecord,
-        profile_id: String,
-        generation: u64,
-        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<ReviewerLaunchConfig> {
-        let session_id = session.id.clone();
-        let controller = Controller::load()?;
-        let executor = crate::targets::CancellableProcessExecutor::new(cancelled)
-            .with_deadline(std::time::Duration::from_secs(90));
-        controller.stage_reviewer_profile_controlled(
-            &session_id,
-            &profile_id,
-            generation,
-            &[],
-            &executor,
-        )
-    }
-}
+use super::Controller;
+use super::worker_binary::bridge_launch;
+use mj_core::worker_launch::{ReviewMcpServer, ReviewerLaunchConfig};
 
 impl Controller {
-    /// Copy `profile_id`'s home into the session worker's reviewer directory
-    /// and describe how the worker should launch it.
-    ///
-    /// `generation` distinguishes reviewer lifetimes: bumping it tells the
-    /// worker to start a new conversation instead of reloading the last one.
-    pub fn stage_reviewer_profile(
-        &self,
-        session_id: &str,
-        profile_id: &str,
-        generation: u64,
-    ) -> Result<ReviewerLaunchConfig> {
-        self.stage_reviewer_profile_controlled(
-            session_id,
-            profile_id,
-            generation,
-            &[],
-            &ProcessExecutor,
-        )
-    }
-
-    pub fn stage_reviewer_profile_controlled(
+    pub(crate) fn reviewer_launch_config(
         &self,
         session_id: &str,
         profile_id: &str,
         generation: u64,
         mcp_servers: &[ReviewMcpServer],
-        executor: &impl CommandExecutor,
     ) -> Result<ReviewerLaunchConfig> {
         let profile = self
             .config
-            .profiles
-            .get(profile_id)
-            .with_context(|| format!("unknown profile {profile_id:?}"))?;
-        ensure!(
-            profile.enabled,
-            "reviewer profile {profile_id:?} is disabled"
-        );
+            .enabled_profile(profile_id)
+            .context("reviewer profile is unavailable")?;
+        profile.ensure_ready(profile_id)?;
         let session = self
             .state
             .sessions
             .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?;
-        let target = session.target_runtime_settings(&self.config)?;
-        let execution_policy = target.execution_policy;
-        let (backend, worker_root) = self.worker_placement(session_id)?;
-
-        let staging = tempfile::tempdir().context("create reviewer staging directory")?;
-        let local = staging.path().join("profile");
-        profile.ensure_ready(profile_id)?;
-        stage_profile_with_catalog(
-            profile_id,
-            profile,
-            &local,
-            &fetch_catalog_over_https,
-            &SharedCatalogCache,
-        )
-        .with_context(|| format!("stage profile {profile_id:?}"))?;
-        apply_staged_execution_setting(profile.kind, execution_policy, &local)
-            .with_context(|| format!("stage profile {profile_id:?}"))?;
-        // Harnesses that ignore MCP servers offered over ACP read their own
-        // configuration instead, so the servers are written into the copy
-        // being staged, before it is uploaded.
-        if !mcp_servers.is_empty()
-            && ReviewMcpDelivery::for_harness(profile.kind) == ReviewMcpDelivery::HarnessProfile
-        {
-            configure_staged_review_mcp(profile.kind, &local, mcp_servers)
-                .with_context(|| format!("configure reviewer MCP servers for {profile_id:?}"))?;
-        }
-        // `cp -R` copies the link as a link, and the worker keeps it when it
-        // copies the stage into each reviewer role's home.
-        if let Some(login) = shared_profile_login(profile, &backend) {
-            link_shared_login(&local, &login)?;
-        }
-        upload_reviewer_profile(executor, &backend, &worker_root, generation, &local)?;
-
+            .context("review parent is missing")?;
+        let execution_policy = session
+            .target_runtime_settings(&self.config)?
+            .execution_policy;
+        let (backend, _) = self.worker_placement(session_id)?;
         let (bridge_command, bridge_args) = bridge_launch(profile.kind, execution_policy);
         let mut environment = profile.environment.resolved().clone();
         // The worker sets the harness home from the directory it staged, so
@@ -175,7 +73,7 @@ impl Controller {
 /// Kimi reads `mcpServers` from `mcp.json` in its home, and needs the runtime
 /// id its own schema carries. Both files are the reviewer's private copy, so
 /// nothing here can reach the user's own configuration.
-fn configure_staged_review_mcp(
+pub(super) fn configure_staged_review_mcp(
     harness: mj_core::config::HarnessKind,
     profile_stage: &Path,
     servers: &[ReviewMcpServer],
@@ -237,273 +135,14 @@ fn configure_staged_review_mcp(
         .with_context(|| format!("write staged reviewer configuration {}", path.display()))
 }
 
-/// Where one immutable reviewer profile snapshot lives on the target.
-///
-/// The worker copies this source into each role's private harness home before
-/// launch. Keeping generations in separate directories means staging a lane
-/// cannot replace the profile a running role is using.
-fn reviewer_profile_home(worker_root: &str, generation: u64) -> String {
-    reviewer_staging_profile_home(Path::new(worker_root), generation)
-        .to_string_lossy()
-        .into_owned()
-}
-
-/// Replace this generation's staged profile with a fresh copy of `local`.
-///
-/// The previous snapshot for this generation is removed first: a reviewer
-/// profile is a snapshot of the user's configured home, and merging a new copy
-/// over an old one would leave credentials and skills the source no longer has.
-fn upload_reviewer_profile(
-    executor: &impl CommandExecutor,
-    locator: &targets::TargetLocator,
-    worker_root: &str,
-    generation: u64,
-    local: &Path,
-) -> Result<()> {
-    let home = reviewer_profile_home(worker_root, generation);
-    match locator {
-        targets::TargetLocator::LocalBare { .. } => {
-            for command in [
-                CommandSpec::new("rm", ["-rf", "--", &home])
-                    .purpose("clear the local reviewer profile"),
-                CommandSpec::new("mkdir", ["-p", &home])
-                    .purpose("create the local reviewer profile directory"),
-                CommandSpec::new(
-                    "cp",
-                    [
-                        "-R".to_owned(),
-                        format!("{}/.", local.display()),
-                        home.clone(),
-                    ],
-                )
-                .purpose("install the local reviewer profile"),
-                CommandSpec::new("chmod", ["-R", "go-rwx", &home])
-                    .purpose("restrict local reviewer profile permissions"),
-            ] {
-                execute_checked(executor, command)?;
-            }
-        }
-        targets::TargetLocator::LocalPodman { container_id, .. }
-        | targets::TargetLocator::LocalDocker { container_id, .. }
-        | targets::TargetLocator::AppleContainer { container_id, .. } => {
-            let engine = match locator {
-                targets::TargetLocator::LocalPodman { .. } => "podman",
-                targets::TargetLocator::LocalDocker { .. } => "docker",
-                targets::TargetLocator::AppleContainer { .. } => "container",
-                _ => unreachable!("matched local container target"),
-            };
-            for arguments in [
-                vec![
-                    "exec".to_owned(),
-                    container_id.clone(),
-                    "rm".to_owned(),
-                    "-rf".to_owned(),
-                    "--".to_owned(),
-                    home.clone(),
-                ],
-                vec![
-                    "exec".to_owned(),
-                    container_id.clone(),
-                    "mkdir".to_owned(),
-                    "-p".to_owned(),
-                    home.clone(),
-                ],
-                vec![
-                    "cp".to_owned(),
-                    format!("{}/.", local.display()),
-                    format!("{container_id}:{home}"),
-                ],
-                container_upload_ownership_args(engine, container_id, worker_root, &[&home]),
-                vec![
-                    "exec".to_owned(),
-                    container_id.clone(),
-                    "chmod".to_owned(),
-                    "-R".to_owned(),
-                    "go-rwx".to_owned(),
-                    home.clone(),
-                ],
-            ] {
-                execute_checked(
-                    executor,
-                    CommandSpec::new(engine, arguments).purpose("stage the reviewer profile"),
-                )?;
-            }
-        }
-        targets::TargetLocator::AwsEc2 { ssh, .. }
-        | targets::TargetLocator::SshBare { ssh, .. } => {
-            let incoming = format!("{home}.incoming");
-            execute_checked(
-                executor,
-                crate::targets::ssh_command(ssh, ["mkdir", "-p", worker_root])
-                    .purpose("create the reviewer directory"),
-            )?;
-            execute_checked(
-                executor,
-                crate::targets::ssh_command(ssh, ["rm", "-rf", "--", &incoming, &home])
-                    .purpose("clear the reviewer profile"),
-            )?;
-            execute_checked(
-                executor,
-                crate::targets::scp_upload(ssh, local, &incoming, true)
-                    .purpose("upload the reviewer profile"),
-            )?;
-            execute_checked(
-                executor,
-                crate::targets::ssh_command(ssh, ["mv", &incoming, &home])
-                    .purpose("install the reviewer profile"),
-            )?;
-            execute_checked(
-                executor,
-                crate::targets::ssh_command(ssh, ["chmod", "-R", "go-rwx", &home])
-                    .purpose("restrict reviewer profile permissions"),
-            )?;
-        }
-        targets::TargetLocator::SshPodman {
-            ssh, container_id, ..
-        }
-        | targets::TargetLocator::SshDocker {
-            ssh, container_id, ..
-        } => {
-            let engine = match locator {
-                targets::TargetLocator::SshPodman { .. } => "podman",
-                targets::TargetLocator::SshDocker { .. } => "docker",
-                _ => unreachable!("matched remote container target"),
-            };
-            // `worker_root` is a path inside the container, so it does not exist
-            // on the SSH host; stage on the host the way checkpoint uploads do.
-            let worker = Path::new(worker_root)
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .filter(|name| !name.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("worker root {worker_root:?} names no worker"))?;
-            let upload = format!(
-                "{}/{worker}-reviewer-{generation}",
-                targets::REMOTE_UPLOAD_STAGING
-            );
-            execute_checked(
-                executor,
-                crate::targets::ssh_command(ssh, ["mkdir", "-p", targets::REMOTE_UPLOAD_STAGING])
-                    .purpose("create remote reviewer staging"),
-            )?;
-            execute_checked(
-                executor,
-                crate::targets::ssh_command(ssh, ["rm", "-rf", "--", &upload])
-                    .purpose("clear remote reviewer staging"),
-            )?;
-            execute_checked(
-                executor,
-                crate::targets::scp_upload(ssh, local, &upload, true)
-                    .purpose("upload the remote reviewer profile"),
-            )?;
-            for arguments in [
-                vec![
-                    engine.to_owned(),
-                    "exec".to_owned(),
-                    container_id.clone(),
-                    "rm".to_owned(),
-                    "-rf".to_owned(),
-                    "--".to_owned(),
-                    home.clone(),
-                ],
-                vec![
-                    engine.to_owned(),
-                    "exec".to_owned(),
-                    container_id.clone(),
-                    "mkdir".to_owned(),
-                    "-p".to_owned(),
-                    home.clone(),
-                ],
-                vec![
-                    engine.to_owned(),
-                    "cp".to_owned(),
-                    format!("{upload}/."),
-                    format!("{container_id}:{home}"),
-                ],
-                std::iter::once(engine.to_owned())
-                    .chain(container_upload_ownership_args(
-                        engine,
-                        container_id,
-                        worker_root,
-                        &[&home],
-                    ))
-                    .collect(),
-                vec![
-                    engine.to_owned(),
-                    "exec".to_owned(),
-                    container_id.clone(),
-                    "chmod".to_owned(),
-                    "-R".to_owned(),
-                    "go-rwx".to_owned(),
-                    home.clone(),
-                ],
-            ] {
-                execute_checked(
-                    executor,
-                    crate::targets::ssh_command(ssh, arguments)
-                        .purpose("stage the remote reviewer profile"),
-                )?;
-            }
-            execute_checked(
-                executor,
-                crate::targets::ssh_command(ssh, ["rm", "-rf", "--", &upload])
-                    .purpose("remove remote reviewer staging"),
-            )?;
-        }
-    }
-    if home.trim().is_empty() {
-        bail!("the reviewer profile home resolved to an empty path");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-    use std::collections::BTreeMap;
-
     use super::*;
     use crate::controller::test_support::checkpoint_test_session;
     use mj_core::config::{Config, HarnessKind, HarnessProfile, TargetTemplate};
     use mj_core::state::{SessionState, State};
-
-    use crate::targets::CommandOutput;
-
-    struct RecordingExecutor {
-        commands: RefCell<Vec<CommandSpec>>,
-    }
-
-    impl RecordingExecutor {
-        fn new() -> Self {
-            Self {
-                commands: RefCell::new(Vec::new()),
-            }
-        }
-
-        /// Every command as one line, for order-sensitive assertions.
-        fn script(&self) -> Vec<String> {
-            self.commands
-                .borrow()
-                .iter()
-                .map(|command| format!("{} {}", command.program, command.args.join(" ")))
-                .collect()
-        }
-    }
-
-    impl CommandExecutor for RecordingExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.commands.borrow_mut().push(command.clone());
-            Ok(CommandOutput {
-                status: 0,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            })
-        }
-    }
-
-    /// A controller with one running session and two configured profiles: the
-    /// session's own and a second one to review with.
+    use std::collections::BTreeMap;
     const SESSION_ID: &str = "0123456789abcdef0123456789abcdef";
-
     fn fixture(directory: &Path, locator: mj_core::state::TargetLocator) -> (Controller, String) {
         let session_id = SESSION_ID;
         let mut session = checkpoint_test_session(session_id);
@@ -558,184 +197,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
-    )]
-    fn staging_copies_the_chosen_profile_into_the_worker_root() {
-        let directory = tempfile::tempdir().unwrap();
-        let worker_root = directory.path().join(SESSION_ID);
-        std::fs::create_dir_all(directory.path().join("claude")).unwrap();
-        // A file the allowlist copies, so the stage has something to move.
-        std::fs::write(directory.path().join("claude/CLAUDE.md"), b"reviewer").unwrap();
-        let (controller, session_id) = fixture(
-            directory.path(),
-            mj_core::state::TargetLocator::LocalBare {
-                worker_root: worker_root.clone(),
-            },
-        );
-        let executor = RecordingExecutor::new();
-
-        let config = controller
-            .stage_reviewer_profile_controlled(&session_id, "claude", 0, &[], &executor)
-            .unwrap();
-
-        assert_eq!(config.profile_id, "claude");
-        assert_eq!(config.harness, HarnessKind::Claude);
-        assert_eq!(config.generation, 0);
-        assert_eq!(config.model, None);
-        assert_eq!(config.effort, None);
-        // The worker owns the harness home, so the controller never sends one.
-        assert!(
-            !config
-                .environment
-                .contains_key(HarnessKind::Claude.home_env())
-        );
-        assert_eq!(
-            config.environment.get("EXTRA").map(String::as_str),
-            Some("1")
-        );
-
-        let home = format!("{}/reviewer/profile", worker_root.display());
-        let script = executor.script();
-        let cleared = script
-            .iter()
-            .position(|line| line.starts_with("rm ") && line.contains(&home))
-            .expect("the previous reviewer profile is cleared");
-        let copied = script
-            .iter()
-            .position(|line| line.starts_with("cp ") && line.ends_with(&home))
-            .expect("the staged profile is installed");
-        assert!(
-            cleared < copied,
-            "a stale profile must go before the new one lands: {script:?}"
-        );
-        assert!(
-            script
-                .iter()
-                .any(|line| line.contains("go-rwx") && line.contains(&home)),
-            "the reviewer profile must not be world readable: {script:?}"
-        );
-    }
-
-    // Hard-won: 251e812e42b5: SSH container uploads targeted a path that existed only inside the container.
-    #[test]
-    fn remote_container_targets_stage_the_reviewer_on_the_host_not_in_the_worker_root() {
-        // The worker root is a path inside the container. Uploading to it over
-        // scp failed with "No such file" on every remote podman session, so no
-        // turn review could start there (2026-10-02).
-        let directory = tempfile::tempdir().unwrap();
-        let container_id = crate::targets::resource_name(SESSION_ID).unwrap();
-        let (controller, session_id) = fixture(
-            directory.path(),
-            mj_core::state::TargetLocator::SshPodman {
-                host: "builder.test".into(),
-                container_id: container_id.clone(),
-                workspace_storage: Default::default(),
-                borrowed_from: None,
-            },
-        );
-        let executor = RecordingExecutor::new();
-
-        controller
-            .stage_reviewer_profile_controlled(&session_id, "codex", 3, &[], &executor)
-            .unwrap();
-
-        let script = executor.script();
-        let upload = script
-            .iter()
-            .find(|line| line.starts_with("scp "))
-            .expect("the profile is uploaded with scp")
-            .clone();
-        let staging = format!(
-            "{}/{session_id}-reviewer-3",
-            crate::targets::REMOTE_UPLOAD_STAGING
-        );
-        assert!(
-            upload.contains(&staging),
-            "the upload lands in host staging: {upload}"
-        );
-        assert!(
-            !upload.contains("/var/lib/hel/workers/"),
-            "the upload does not target the container's worker root: {upload}"
-        );
-        let copy = script
-            .iter()
-            .find(|line| line.contains("cp") && line.contains(&format!("{container_id}:")))
-            .unwrap_or_else(|| {
-                panic!("the engine copies the staged profile into the container: {script:?}")
-            });
-        assert!(
-            copy.contains(&format!("{staging}/.")) && copy.contains(&format!("{container_id}:")),
-            "the engine copies from host staging into the container: {copy}"
-        );
-        let last = script.last().unwrap();
-        assert!(
-            last.contains("'rm'")
-                && last.contains(&format!("'{staging}'"))
-                && !last.contains("podman"),
-            "host staging is removed afterwards: {script:?}"
-        );
-    }
-
-    #[test]
-    fn local_container_targets_stage_the_reviewer_through_their_engine() {
-        let directory = tempfile::tempdir().unwrap();
-        let container_id = crate::targets::resource_name(SESSION_ID).unwrap();
-        for (locator, engine) in [
-            (
-                mj_core::state::TargetLocator::LocalPodman {
-                    borrowed_from: None,
-                    container_id: container_id.clone(),
-                    workspace_storage: Default::default(),
-                },
-                "podman",
-            ),
-            (
-                mj_core::state::TargetLocator::LocalDocker {
-                    borrowed_from: None,
-                    container_id: container_id.clone(),
-                },
-                "docker",
-            ),
-        ] {
-            let (controller, session_id) = fixture(directory.path(), locator);
-            let executor = RecordingExecutor::new();
-
-            controller
-                .stage_reviewer_profile_controlled(&session_id, "codex", 3, &[], &executor)
-                .unwrap();
-
-            let script = executor.script();
-            assert!(
-                script
-                    .iter()
-                    .all(|line| line.starts_with(&format!("{engine} "))),
-                "a container target is reached only through its engine: {script:?}"
-            );
-            let home = script
-                .iter()
-                .find_map(|line| {
-                    line.split(' ')
-                        .find(|word| word.contains("/reviewer/profile"))
-                })
-                .expect("the reviewer profile is placed")
-                .to_owned();
-            assert!(
-                home.contains(&format!("/{session_id}")),
-                "the reviewer lives under this session's worker root: {home}"
-            );
-            // Nothing here provisions a target, a checkout, or another session.
-            assert!(
-                !script.iter().any(|line| {
-                    line.contains("run") || line.contains("git") || line.contains("create")
-                }),
-                "staging a reviewer provisions nothing: {script:?}"
-            );
-        }
-    }
-
-    #[test]
     fn a_claude_reviewer_in_a_podman_session_is_told_it_is_sandboxed() {
         let directory = tempfile::tempdir().unwrap();
         let container_id = crate::targets::resource_name(SESSION_ID).unwrap();
@@ -755,13 +216,7 @@ mod tests {
         ] {
             let (controller, session_id) = fixture(directory.path(), locator);
             let config = controller
-                .stage_reviewer_profile_controlled(
-                    &session_id,
-                    profile_id,
-                    0,
-                    &[],
-                    &RecordingExecutor::new(),
-                )
+                .reviewer_launch_config(&session_id, profile_id, 0, &[])
                 .unwrap();
             assert_eq!(
                 config.environment.get("IS_SANDBOX").map(String::as_str),
@@ -769,82 +224,5 @@ mod tests {
                 "{profile_id}"
             );
         }
-    }
-
-    #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
-    )]
-    fn a_muse_reviewer_is_staged_with_the_permission_profile_its_policy_enforces() {
-        let directory = tempfile::tempdir().unwrap();
-        let worker_root = directory.path().join(SESSION_ID);
-        let (mut controller, session_id) = fixture(
-            directory.path(),
-            mj_core::state::TargetLocator::LocalBare {
-                worker_root: worker_root.clone(),
-            },
-        );
-        // Muse reads its permission profile from this file, and nothing on the
-        // ACP wire overrides it.
-        let home = directory.path().join("muse");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(
-            home.join("settings.json"),
-            br#"{"schema_version":1,"permissions":{"schema_version":1,"default_profile":":auto-review"}}"#,
-        )
-        .unwrap();
-        controller.config.profiles.insert(
-            "muse".into(),
-            HarnessProfile {
-                enabled: true,
-                kind: HarnessKind::Muse,
-                home,
-                environment: BTreeMap::new().into(),
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                codex_profile: None,
-            },
-        );
-        controller
-            .stage_reviewer_profile_controlled(&session_id, "muse", 0, &[], &ProcessExecutor)
-            .unwrap();
-
-        let staged: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(worker_root.join("reviewer/profile/settings.json")).unwrap(),
-        )
-        .unwrap();
-        // The fixture's bare target keeps configured approvals.
-        assert_eq!(staged["permissions"]["default_profile"], ":ask-me");
-    }
-
-    #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
-    )]
-    fn a_new_generation_travels_to_the_worker_so_it_starts_a_fresh_reviewer() {
-        let directory = tempfile::tempdir().unwrap();
-        let (controller, session_id) = fixture(
-            directory.path(),
-            mj_core::state::TargetLocator::LocalBare {
-                worker_root: directory.path().join(SESSION_ID),
-            },
-        );
-        let executor = RecordingExecutor::new();
-
-        let first = controller
-            .stage_reviewer_profile_controlled(&session_id, "codex", 0, &[], &executor)
-            .unwrap();
-        let second = controller
-            .stage_reviewer_profile_controlled(&session_id, "codex", 1, &[], &executor)
-            .unwrap();
-
-        assert!(first.reusable_for(&first));
-        assert!(
-            !first.reusable_for(&second),
-            "a new generation must not reload the old conversation"
-        );
     }
 }

@@ -183,14 +183,18 @@ mj doctor
 
 ## First run
 
-Mjolnir runs a coding agent you already have (Claude Code, Codex, Kimi Code, Grok Build, Muse Code, OpenCode, MiMo Code, or DSH), so install and sign in to one first. DSH has no sign-in; export `DEEPSEEK_API_KEY` before starting `mj` instead. Then go to a project directory and run `mj`:
+Mjolnir runs a coding agent and can install its own pinned copy when you sign
+in. Add a profile in Settings → Agent Profiles and choose **Sign in**; if you
+already have an agent installed and signed in, **Detect profiles** finds it.
+DSH has no sign-in; export `DEEPSEEK_API_KEY` before starting `mj` instead, and
+discovery offers it. Then go to a project directory and run `mj`:
 
 ```sh
 cd path/to/your/repository
 mj
 ```
 
-The first interactive `mj` automatically discovers installed agents and the current GitHub repository, and every later plain `mj` launch adds profiles for newly installed agents; `mj go`, `mj workspaces`, and the relaunch after an upgrade do not. A brief welcome reports prerequisite errors, and container images download in the background. `mj setup` reruns discovery from the shell while preserving existing configuration. `mj go` is a shortcut for later: it remembers each folder's setup and returns to that folder's last conversation. The [quickstart](/quickstart/) walks through the first session. For unattended or advanced setup, see [configuration](/configuration/), [profiles](/profiles/), [targets](/targets/), and the complete [CLI reference](/cli-reference/).
+The first interactive `mj` automatically discovers installed agents, login-free API keys exported to it, and the current GitHub repository, and every later plain `mj` launch adds profiles for newly installed agents; `mj go`, `mj workspaces`, and the relaunch after an upgrade do not. A brief welcome reports prerequisite errors, and container images download in the background. `mj setup` reruns discovery from the shell while preserving existing configuration. `mj go` is a shortcut for later: it remembers each folder's setup and returns to that folder's last conversation. The [quickstart](/quickstart/) walks through the first session. For unattended or advanced setup, see [configuration](/configuration/), [profiles](/profiles/), [targets](/targets/), and the complete [CLI reference](/cli-reference/).
 
 ## Uninstall
 

@@ -1,5 +1,6 @@
 //! Move-only workspace transport. It never reads or writes a checkpoint payload.
 use super::*;
+use crate::controller::checkpoint::HOST_CHECKOUT_REPOSITORY;
 use crate::targets::{self, CommandSpec};
 use mj_core::move_workspace::*;
 use std::path::Path;
@@ -404,6 +405,53 @@ impl Controller {
         }
     }
 
+    /// Each repository of a Move's workspace transfer, under the id the source
+    /// captured it as, with the repository of the session's accepted bundle
+    /// that receives it on a destination that clones the bundle.
+    ///
+    /// The bundle names every destination folder, so the clone made while
+    /// provisioning and the restore that fills it reach the same directory,
+    /// the one [`Self::session_export_layout`] reports afterwards. A source
+    /// that ran in a host checkout captured its one repository as
+    /// [`HOST_CHECKOUT_REPOSITORY`], whatever the bundle calls it; moving into
+    /// a bundle workspace makes that checkout the bundle's primary repository,
+    /// as every raw-to-workspace conversion does.
+    fn move_destination_repositories(
+        &self,
+        id: &str,
+        transfer: &WorkspaceTransfer,
+    ) -> Result<(
+        &mj_core::config::ProjectBundle,
+        Vec<(String, &mj_core::config::ProjectRepository)>,
+    )> {
+        let bundle = self
+            .state
+            .sessions
+            .get(id)
+            .with_context(|| format!("unknown session {id}"))?
+            .project_bundle(&self.config)
+            .context("session bundle is missing")?;
+        let repositories = if self
+            .state
+            .checkout_for_record(id, &transfer.source)?
+            .project_directory()
+            .is_some()
+        {
+            let primary = bundle.primary().context("bundle primary is missing")?;
+            vec![(HOST_CHECKOUT_REPOSITORY.to_owned(), primary)]
+        } else {
+            bundle
+                .repositories
+                .iter()
+                .map(|repository| (repository.id.clone(), repository))
+                .collect()
+        };
+        Ok((bundle, repositories))
+    }
+
+    /// What a Move that rebuilds into a bundle workspace clones: the folders
+    /// come from the session's bundle, and only the clone and push URLs come
+    /// from the handoff, which recorded the source's remotes.
     pub(in crate::controller) fn move_destination_bundle(
         &self,
         id: &str,
@@ -411,21 +459,19 @@ impl Controller {
         let Some(operation) = crate::database::load_move_operation(id)? else {
             return Ok(None);
         };
-        if operation.workspace_transfer.is_none()
-            || operation.phase != MovePhase::ResumingDestination
-        {
+        let Some(transfer) = operation.workspace_transfer.as_ref() else {
+            return Ok(None);
+        };
+        if operation.phase != MovePhase::ResumingDestination {
             return Ok(None);
         }
-        let handoff = operation.handoff.context("Move handoff missing")?;
-        let archive = super::super::resume::verify_resume_checkpoint(id, &handoff)?;
-        let primary = archive
-            .manifest
-            .repositories
-            .iter()
-            .find(|repo| repo.metadata.id == archive.manifest.bundle.primary_repository)
-            .context("Move primary repository missing")?
-            .metadata
-            .relative_destination
+        let handoff = operation.handoff.as_ref().context("Move handoff missing")?;
+        let archive = super::super::resume::verify_resume_checkpoint(id, handoff)?;
+        let (bundle, destinations) = self.move_destination_repositories(id, transfer)?;
+        let primary = bundle
+            .primary()
+            .context("bundle primary is missing")?
+            .destination
             .to_string_lossy()
             .into_owned();
         let repositories = archive
@@ -434,11 +480,20 @@ impl Controller {
             .iter()
             .map(|repo| {
                 let metadata = &repo.metadata;
+                let (_, repository) = destinations
+                    .iter()
+                    .find(|(source_id, _)| *source_id == metadata.id)
+                    .with_context(|| {
+                        format!(
+                            "the Move handoff's repository {:?} has no counterpart in the session's project, so Mjolnir cannot tell which folder to clone it into",
+                            metadata.id
+                        )
+                    })?;
                 mj_core::remote_git::validate_network_url(&metadata.origin)?;
                 Ok(targets::RepositorySpec {
                     url: Some(metadata.origin.clone()),
                     push_urls: metadata.push_urls.clone(),
-                    destination: metadata.relative_destination.to_string_lossy().into_owned(),
+                    destination: repository.destination.to_string_lossy().into_owned(),
                     git_ref: None,
                     reference: None,
                     history_cutoff: None,
@@ -894,13 +949,31 @@ impl Controller {
             &transfer.controller_stage,
             true,
         )?;
+        // A bundle workspace was cloned where `move_destination_bundle` said,
+        // under the bundle's ids; the transfer names each repository as the
+        // source did.
+        let repositories = if self.state.checkout(id)?.project_directory().is_some() {
+            repositories(&layout)
+        } else {
+            self.move_destination_repositories(id, &transfer)?
+                .1
+                .into_iter()
+                .map(|(source_id, repository)| WorkspaceRepository {
+                    id: source_id,
+                    root: mj_core::target_path::join(
+                        Path::new(&layout.workspace_root),
+                        &repository.destination,
+                    ),
+                })
+                .collect()
+        };
         utility(
             executor,
             &layout.backend,
             id,
             &WorkspaceCommand::Restore {
                 source: stage,
-                repositories: repositories(&layout),
+                repositories,
             },
         )?;
         operation.workspace_transfer.as_mut().unwrap().phase = WorkspaceTransferPhase::Restored;

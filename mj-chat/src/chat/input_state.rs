@@ -296,8 +296,7 @@ impl ChatState {
 
     pub(super) fn clipboard_target(&self) -> ClipboardTarget {
         if self.earlier.is_some()
-            || (!self.reviewer_elicitation_open()
-                && (self.second_opinion_active() || self.turn_review_active()))
+            || (!self.reviewer_elicitation_open() && (self.turn_review_active()))
         {
             ClipboardTarget::Unavailable
         } else if let Some(dialog) = &self.elicitation {
@@ -730,7 +729,7 @@ impl ChatState {
                         // machine-wide setting from inside one conversation.
                         "on" | "off" => {
                             self.set_notice(
-                                "automatic review is configured in config.toml: [review] enabled",
+                                "automatic review is configured in config.toml: [review] trigger",
                             );
                             ChatAction::None
                         }

@@ -133,6 +133,8 @@ enum WorkerCommand {
         /// spawn tool then offers no task type.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         subtle_subagents: bool,
+        #[arg(long)]
+        review_gate: bool,
     },
     /// Print a unified diff of the session's work in one repository.
     Diff {
@@ -540,6 +542,7 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             role,
             agent_mailboxes_enabled,
             subtle_subagents,
+            review_gate,
         } => mj_worker::subagent_mcp::run_mcp_stdio(
             &socket,
             harness,
@@ -547,6 +550,7 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             mj_worker::subagent_mcp::ParentTools {
                 agent_mailboxes_enabled,
                 subtle_subagents,
+                review_gate,
             },
         ),
         WorkerCommand::Diff {

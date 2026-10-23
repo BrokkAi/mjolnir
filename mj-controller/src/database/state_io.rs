@@ -224,7 +224,7 @@ pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
             params![
                 subagent.child_session_id,
                 subagent.parent_session_id,
-                subagent.request_key,
+                subagent.kind.request_key(&subagent.request_key),
                 record_json
             ],
         )?;

@@ -150,6 +150,10 @@ pub(super) async fn run_daemon_runtime(
         worker_upgrades.observer(),
         workspaces,
     ));
+    state
+        .reviewer_runtime
+        .set(Arc::downgrade(&state))
+        .expect("reviewer runtime installed once");
     // Views are published only from the serving loop below, so the first
     // targets are installed before any can arrive.
     state.owner().install_relay_sessions(
