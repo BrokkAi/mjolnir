@@ -4,7 +4,7 @@ use super::*;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct PendingSubmission {
     id: String,
-    kind: UnsentKind,
+    kind: SubmissionKind,
     payload: PromptPayload,
     status: String,
     represented: bool,
@@ -41,7 +41,7 @@ fn represents_submission(stable_id: &str, id: &str) -> bool {
 impl PendingSubmission {
     /// A `/clear` the relay runs as a context reset, not as a prompt.
     fn is_context_clear(&self) -> bool {
-        self.kind == UnsentKind::Prompt
+        self.kind == SubmissionKind::Prompt
             && self.payload.images.is_empty()
             && self.payload.text.trim() == "/clear"
     }
@@ -72,7 +72,7 @@ impl ChatState {
     pub(super) fn begin_submission(
         &mut self,
         id: String,
-        kind: UnsentKind,
+        kind: SubmissionKind,
         payload: PromptPayload,
         status: &str,
     ) {
@@ -174,7 +174,7 @@ impl ChatState {
             .iter()
             .filter(|pending| !pending.represented)
             .map(|pending| {
-                let text = if pending.kind == UnsentKind::Shell {
+                let text = if pending.kind == SubmissionKind::Shell {
                     format!("!{}", pending.payload.text)
                 } else {
                     pending.payload.text.clone()
@@ -262,7 +262,7 @@ mod tests {
         chat.set_input("new draft".into());
         result(&mut chat, "one", Err("lost reply".into()));
         assert_eq!(chat.input, "new draft");
-        assert!(chat.unsent_prompts.is_empty());
+        assert!(chat.conversation_notices.is_empty());
         assert!(chat.pending_submissions.is_empty());
     }
 
@@ -391,7 +391,6 @@ mod tests {
                 result: Err("/clear requires an idle session".into()),
             },
         );
-        assert!(chat.unsent_prompts.is_empty());
         assert!(chat.pending_submissions.is_empty());
         assert_eq!(chat.input, "/clear");
         assert_eq!(
@@ -408,7 +407,7 @@ mod tests {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.begin_submission(
             "shell".into(),
-            UnsentKind::Shell,
+            SubmissionKind::Shell,
             PromptPayload::text("pwd"),
             "Sending…",
         );
@@ -442,7 +441,7 @@ mod tests {
             "{screen}"
         );
         assert!(!screen.contains("Sending"), "{screen}");
-        assert!(chat.unsent_prompts.is_empty());
+        assert!(!screen.contains("was not sent"), "{screen}");
     }
 
     #[test]
@@ -456,7 +455,7 @@ mod tests {
         let payload = PromptPayload::with_image("", image);
         chat.begin_submission(
             "image".into(),
-            UnsentKind::Prompt,
+            SubmissionKind::Prompt,
             payload.clone(),
             "Sending…",
         );
