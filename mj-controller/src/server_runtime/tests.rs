@@ -764,6 +764,8 @@ fn golden_phone_session_snapshot() {
     controller.state.subagents.insert(
         "child-1".into(),
         mj_core::subagent::SubagentRecord {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             child_session_id: "child-1".into(),
             parent_session_id: "session-1".into(),
             task_name: "piece".into(),
@@ -1404,6 +1406,8 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
     controller.state.subagents.insert(
         child.id.clone(),
         mj_core::subagent::SubagentRecord {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             child_session_id: child.id.clone(),
             parent_session_id: parent.id.clone(),
             task_name: "Answer project codename".into(),
@@ -2284,6 +2288,7 @@ fn a_reviewers_question_is_one_of_the_sessions_questions() {
     let reviews = BTreeMap::from([(
         "parent".to_owned(),
         RuntimeReviewView {
+            child_session_id: None,
             session_id: "parent".into(),
             questions: vec![mj_client::review::ReviewerQuestion {
                 role: "reviewer".into(),

@@ -82,7 +82,28 @@ impl HostState {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let changed = match self.reviews.get(session_id) {
             Some(slot) => {
-                let next = slot.view(session_id);
+                let mut next = slot.view(session_id);
+                if let Some(session) = slot
+                    .state
+                    .child_session_id
+                    .as_ref()
+                    .and_then(|child| self.sessions.get(child))
+                    .and_then(|watch| watch.materialized.as_ref())
+                {
+                    next.questions = session
+                        .pending_elicitations
+                        .iter()
+                        .filter(|request| !mj_core::acp::is_plan_review_id(&request.id))
+                        .map(|request| ReviewerQuestion {
+                            role: slot
+                                .state
+                                .child_session_id
+                                .clone()
+                                .expect("reviewer child exists"),
+                            request: request.clone(),
+                        })
+                        .collect();
+                }
                 if views.get(session_id) == Some(&next) {
                     false
                 } else {
@@ -92,6 +113,7 @@ impl HostState {
             }
             None if self.preparing.contains(session_id) => {
                 let next = RuntimeReviewView {
+                    child_session_id: None,
                     session_id: session_id.into(),
                     questions: Vec::new(),
                     phase: TurnReviewPhase::LaunchingReviewer,

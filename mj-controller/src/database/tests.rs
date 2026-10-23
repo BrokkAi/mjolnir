@@ -4367,6 +4367,7 @@ fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
     );
 
     let state = TurnReviewState {
+        child_session_id: Some("reviewer-child".into()),
         baselines: std::collections::BTreeMap::from([(
             std::path::PathBuf::from("/workspace/app"),
             "1234abcd".to_string(),
@@ -4426,6 +4427,7 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
         &database,
         "session-1",
         &TurnReviewState {
+            child_session_id: Some("reviewer-child".into()),
             baselines: baselines.clone(),
             reviewed_through_ordinal: 42,
             prior_review: None,
@@ -4445,6 +4447,7 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
         &database,
         "session-2",
         &TurnReviewState {
+            child_session_id: Some("reviewer-child".into()),
             baselines: baselines.clone(),
             reviewed_through_ordinal: 7,
             prior_review: None,
@@ -5255,6 +5258,8 @@ fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
     state.subagents.insert(
         child.id.clone(),
         mj_core::subagent::SubagentRecord {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             child_session_id: child.id.clone(),
             parent_session_id: parent.id.clone(),
             task_name: "probe".into(),

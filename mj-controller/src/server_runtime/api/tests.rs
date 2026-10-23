@@ -1518,6 +1518,8 @@ async fn a_child_hands_back_one_report_per_turn() {
     crate::database::save_subagent_session(
         &child,
         &mj_core::subagent::SubagentRecord {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             child_session_id: "child-1".into(),
             parent_session_id: "parent-1".into(),
             task_name: "audit deps".into(),
@@ -2103,6 +2105,8 @@ fn store_parent_and_child(child_id: &str) {
     crate::database::save_subagent_session(
         &parent_record(child_id, "helper"),
         &mj_core::subagent::SubagentRecord {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             child_session_id: child_id.into(),
             parent_session_id: "parent-1".into(),
             task_name: "audit deps".into(),
@@ -2549,6 +2553,8 @@ async fn send_message_resolves_only_authorized_hex_session_prefixes() {
         crate::database::save_subagent_session(
             &record,
             &mj_core::subagent::SubagentRecord {
+                kind: mj_core::subagent::SubagentKind::Worker,
+                reviewer_launch: None,
                 child_session_id: id.into(),
                 parent_session_id: parent_id.into(),
                 task_name: "message routing".into(),
@@ -4246,4 +4252,39 @@ async fn report_reconcile_recovers_unreported_finishes_and_ignores_parent_opt_ou
             crate::mailbox_outbox::MailboxEventDelivery::Accepted(40)
         );
     }
+}
+
+#[tokio::test]
+async fn reviewer_children_are_private_to_the_review_host() {
+    if !isolated_parked_test("reviewer_children_are_private_to_the_review_host") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut state = crate::database::load_state().unwrap();
+    state.subagents.get_mut("child-1").unwrap().kind = mj_core::subagent::SubagentKind::Reviewer;
+    crate::database::save_state(&state).unwrap();
+    record_finished_child("child-1", "review", "private JSON result", 3, 9, 7);
+    let (backend, _) = report_backend(active_parent_view("working"));
+    let result = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "list-workers".into(),
+                created_at_ms: 1,
+                action: mj_core::subagent::SubagentToolAction::ListAgents,
+            },
+        )
+        .await;
+    assert!(!result.is_error, "{}", result.message);
+    let body: serde_json::Value = serde_json::from_str(&result.message).unwrap();
+    assert_eq!(body["agents"], serde_json::json!([]));
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty(),
+        "reviewers never notify their parent through SubagentFinished"
+    );
 }

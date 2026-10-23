@@ -156,6 +156,27 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
 pub(super) struct ClientSessionControl(pub(super) SessionManagerControl);
 
 impl mj_client::session::SessionControlBackend for ClientSessionControl {
+    fn snapshot(
+        &self,
+        session_id: String,
+    ) -> mj_client::session::BoxFuture<'_, Result<MaterializedSession>> {
+        Box::pin(async move {
+            if let Some(handle) = self.0.find_session(session_id.clone()).await? {
+                handle.sync_now().await?;
+                return handle
+                    .view()
+                    .snapshot
+                    .map(|snapshot| snapshot.materialized)
+                    .context("session has no transcript yet");
+            }
+            tokio::task::spawn_blocking(move || {
+                crate::database::load_materialized_session(&session_id)
+            })
+            .await
+            .context("load reviewer transcript")??
+            .context("session transcript is unavailable")
+        })
+    }
     fn session(
         &self,
         session_id: String,

@@ -310,21 +310,45 @@ impl ActiveChat {
         response: mj_core::elicitation::ElicitationResponse,
     ) {
         let session = self.session.clone();
+        let control = self.session_manager.clone();
+        let child = match role.as_ref() {
+            Some(child) => {
+                let owner = self
+                    .state
+                    .turn_review()
+                    .and_then(|review| review.view.child_session_id.as_ref());
+                if owner != Some(child) {
+                    self.report_review_refusal(
+                        "The reviewer's question is no longer active".to_owned(),
+                    );
+                    return;
+                }
+                Some(child.clone())
+            }
+            None => None,
+        };
         let updates = self.chat_io_tx.clone();
         let answered_role = role.clone();
         let automatic = mj_core::acp::is_plan_review_id(&elicitation_id);
         tokio::spawn(async move {
-            let result = session
-                .reviewer_as(
-                    role,
-                    ReviewerAction::RespondElicitation {
-                        elicitation_id,
-                        response,
-                    },
-                )
-                .await
-                .map(|_| ())
-                .map_err(|error| format!("{error:#}"));
+            let result = if let Some(child) = child {
+                match control.session(child).await {
+                    Ok(handle) => handle.respond_elicitation(elicitation_id, response).await,
+                    Err(error) => Err(error),
+                }
+            } else {
+                session
+                    .reviewer_as(
+                        role,
+                        ReviewerAction::RespondElicitation {
+                            elicitation_id,
+                            response,
+                        },
+                    )
+                    .await
+                    .map(|_| ())
+            }
+            .map_err(|error| format!("{error:#}"));
             let Some(update) = reviewer_answer_update(result, automatic) else {
                 return;
             };
@@ -431,99 +455,58 @@ impl ActiveChat {
     /// review uses one role, so an idle journal waits a beat before asking
     /// again; a page that did carry events is followed up immediately, which
     /// keeps a streaming answer smooth.
-    pub(crate) fn poll_turn_review_role_after(&self, role: &str, delay: Duration) {
+    pub(crate) fn poll_turn_review_role_after(&self, _role: &str, delay: Duration) {
         let Some(review) = self.state.turn_review() else {
             return;
         };
-        let (after_ordinal, cursor_digest) = review.cursor();
-        let after_digest = if cursor_digest.is_empty() {
-            mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.to_owned()
-        } else {
-            cursor_digest
+        let Some(child) = review.view.child_session_id.clone() else {
+            return;
         };
-        let session = self.session.clone();
+        let control = self.session_manager.clone();
         let updates = self.chat_io_tx.clone();
-        let role = role.to_owned();
+        let role = child.clone();
         tokio::spawn(async move {
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
             }
-            let result = match session
-                .reviewer_as(
-                    Some(role.clone()),
-                    ReviewerAction::Attach {
-                        after_ordinal,
-                        after_digest,
-                    },
-                )
+            let result = control
+                .snapshot(child)
                 .await
-            {
-                Ok(ReviewerOutcome::Attached(attachment)) => Ok(attachment.events),
-                Ok(other) => Err(format!("unexpected reviewer response {other:?}")),
-                Err(error) => Err(format!("{error:#}")),
-            };
+                .map(Box::new)
+                .map_err(|error| format!("{error:#}"));
             if let Err(error) = updates.send(ChatIoUpdate::TurnReviewEvents { role, result }) {
                 tracing::debug!(%error, "review events dropped because the chat closed");
             }
         });
     }
 
-    /// Folds reviewer events into its pane, and keeps reading.
-    ///
-    /// Display only: the daemon reads the same journals to drive the review,
-    /// and nothing here advances it. Two readers on one journal are safe --
-    /// an attach is a read at a cursor, and only the host acknowledges.
     pub(crate) fn apply_turn_review_role_events(
         &mut self,
-        role: String,
-        result: std::result::Result<Vec<mj_core::relay::RelayEvent>, String>,
+        child: String,
+        result: std::result::Result<Box<mj_core::state::MaterializedSession>, String>,
     ) {
-        let events = match result {
-            Ok(events) => events,
+        let Some(review) = self.state.turn_review_mut() else {
+            self.reviewed_role = None;
+            return;
+        };
+        if review.view.child_session_id.as_deref() != Some(&child) {
+            return;
+        }
+        match result {
+            Ok(snapshot) => {
+                review.pane().replace_snapshot(*snapshot);
+            }
             Err(error) => {
-                // A journal this terminal cannot read is a display problem,
-                // not a review problem: the daemon is still running it.
-                tracing::debug!(%role, %error, "could not read a reviewing role's journal");
-                self.report_review_refusal(error);
-                return;
+                tracing::debug!(%child, %error, "reviewer transcript is not available yet");
             }
-        };
-        let idle = events.is_empty();
-        let session_id = review_role_session_id(self.session.session_id(), &role);
-        if let Some(review) = self.state.turn_review_mut()
-            && !events.is_empty()
-        {
-            review.pane().apply_events(&session_id, &events);
         }
+        let active = review.view.is_working() || !review.view.questions.is_empty();
         self.surface_reviewer_elicitations();
-        if self.state.turn_review().is_none() {
-            if self.reviewed_role.as_deref() == Some(role.as_str()) {
-                self.reviewed_role = None;
-            }
-            return;
+        if active {
+            self.poll_turn_review_role_after(&child, REVIEW_POLL_IDLE_INTERVAL);
+        } else {
+            self.reviewed_role = None;
         }
-        let Some(review) = self.state.turn_review() else {
-            return;
-        };
-        if !review.view.roles.iter().any(|status| status.role == role) {
-            return;
-        }
-        if !review.role_is_active(&role) {
-            // A verdict keeps the reviewer row for context but needs no more
-            // journal attaches.
-            if self.reviewed_role.as_deref() == Some(role.as_str()) {
-                self.reviewed_role = None;
-            }
-            return;
-        }
-        self.poll_turn_review_role_after(
-            &role,
-            if idle {
-                REVIEW_POLL_IDLE_INTERVAL
-            } else {
-                Duration::ZERO
-            },
-        );
     }
 
     pub(crate) fn apply_reviewer_events(

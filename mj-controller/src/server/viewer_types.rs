@@ -786,6 +786,8 @@ pub struct ViewerReviewConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerTurnReview {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_session_id: Option<String>,
     /// What the review is doing, in one line.
     pub status: String,
     /// One row per reviewing agent: its label and where it has got to.
@@ -823,6 +825,7 @@ impl ViewerTurnReview {
     #[must_use]
     pub fn from_runtime(review: &crate::review_host::RuntimeReviewView) -> Self {
         Self {
+            child_session_id: review.child_session_id.clone(),
             status: review.status.clone(),
             roles: review
                 .roles

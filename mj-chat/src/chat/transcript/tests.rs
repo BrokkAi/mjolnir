@@ -3940,6 +3940,7 @@ fn golden_conversation_title() {
 
     draw("idle", &mut chat);
     let mut view = RuntimeReviewView {
+        child_session_id: None,
         session_id: "session".to_owned(),
         questions: Vec::new(),
         phase: TurnReviewPhase::LaunchingReviewer,

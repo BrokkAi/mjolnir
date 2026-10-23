@@ -2256,6 +2256,8 @@ fn sub_agents_are_never_offered_for_resume() {
     state.subagents.insert(
         managed_child.id.clone(),
         mj_core::subagent::SubagentRecord {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             child_session_id: managed_child.id.clone(),
             parent_session_id: owner.id.clone(),
             task_name: "lane".into(),

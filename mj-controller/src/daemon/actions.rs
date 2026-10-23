@@ -593,6 +593,10 @@ pub(super) async fn handle_action(
             elicitation_id,
             response,
         } => {
+            let (session_id, elicitation_id) = state
+                .review_host()
+                .question_target(&session_id, &elicitation_id)
+                .unwrap_or((session_id, elicitation_id));
             state
                 .session_manager
                 .session(session_id)

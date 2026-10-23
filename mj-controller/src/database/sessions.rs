@@ -87,7 +87,7 @@ pub fn save_subagent_session(
             params![
                 subagent.child_session_id,
                 subagent.parent_session_id,
-                subagent.request_key,
+                subagent.kind.request_key(&subagent.request_key),
                 serde_json::to_string(&subagent)?,
             ],
         )?;

@@ -332,7 +332,18 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         bridge_spec_path: Some(supervisor_path.clone()),
         cwd: config.cwd,
         additional_directories,
-        extra_mcp_servers: Vec::new(),
+        extra_mcp_servers: config
+            .reviewer_launch
+            .as_ref()
+            .map(|reviewer| {
+                reviewer
+                    .mcp_servers
+                    .iter()
+                    .cloned()
+                    .map(crate::acp::ReviewerMcpServer::new)
+                    .collect()
+            })
+            .unwrap_or_default(),
         subagent_policy: if config.handback_tool {
             mj_core::subagent::SubagentPolicy::None
         } else {
@@ -1608,6 +1619,32 @@ async fn prepare_and_start_harness(
                 .await?;
             claude_mailbox_hook_available = mailbox_hook_available;
             registered
+        }
+        HarnessKind::Kimi if config.reviewer_launch.is_some() => {
+            let budget = preparation_step(
+                root,
+                status,
+                "harness-profile",
+                LOCAL_PREPARATION_STEP_TIMEOUT,
+                cancel,
+            )
+            .await?;
+            let home = credentials
+                .as_ref()
+                .map_err(|message| anyhow::anyhow!("{message}"))?
+                .home
+                .clone();
+            let root = root.to_owned();
+            let session_id = config.session_id.clone();
+            let role = subagent_role.context("reviewer child has no handback MCP role")?;
+            bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
+                if step_cancel.is_cancelled() {
+                    bail!("preparation cancelled before configuring the Kimi profile");
+                }
+                super::subagents::configure_kimi_subagent_mcp(&root, &session_id, &home, role)
+            })
+            .await?;
+            true
         }
         _ => false,
     };

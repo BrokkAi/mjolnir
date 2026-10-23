@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 92;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 93;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1661,6 +1661,30 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     if version < 92 {
         admit_harness_kind(connection, "mimo", "dsh", 92)
             .context("migrate DSH harness constraints")?;
+    }
+
+    // Breaking: older readers reject reviewer child records, and must never
+    // deliver a reviewer's private verdict as an ordinary child report.
+    if version < 93 {
+        let child_state = if super::legacy_schema::table_has_column(
+            connection,
+            "turn_review_state",
+            "child_session_id",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE turn_review_state ADD COLUMN child_session_id TEXT;
+             UPDATE subagent_sessions SET request_key = 'worker:' || request_key;"
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {child_state}
+             UPDATE schema_compatibility SET minimum_compatible_version = 93 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (93, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 93;
+             COMMIT;",
+        ))?;
     }
 
     let recorded: Option<i64> =

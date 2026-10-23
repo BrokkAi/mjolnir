@@ -21,6 +21,15 @@ impl HostState {
                 materialized: snapshot,
             },
         );
+        let parents: Vec<_> = self
+            .reviews
+            .iter()
+            .filter(|(_, slot)| slot.state.child_session_id.as_deref() == Some(&session_id))
+            .map(|(parent, _)| parent.clone())
+            .collect();
+        for parent in parents {
+            self.publish(&parent);
+        }
         if self.recovery_candidates.contains(&session_id)
             && matches!(execution, MaterializedExecutionState::Idle)
         {
@@ -163,11 +172,18 @@ impl HostState {
         if let Some(slot) = self.reviews.get(session_id) {
             // Name what the open review waits for when it waits on a person,
             // since that is what lets the next one start.
-            return Some(StartRefusal(match slot.questions().next() {
+            let question = slot
+                .state
+                .child_session_id
+                .as_ref()
+                .and_then(|child| self.sessions.get(child))
+                .and_then(|watch| watch.materialized.as_ref())
+                .and_then(|session| session.pending_elicitations.first());
+            return Some(StartRefusal(match question {
                 Some(question) => format!(
                     "the previous review is waiting for your answer to a question ({}); \
                      answer or dismiss it",
-                    quoted_question(&question.request.message)
+                    quoted_question(&question.message)
                 ),
                 None => "a review is already open".to_owned(),
             }));

@@ -61,42 +61,6 @@ pub(super) const LIFECYCLE_WAIT: std::time::Duration = std::time::Duration::from
 /// The longest pause between attempts while a running review waits.
 const LIFECYCLE_RETRY_PAUSE_MAX: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Stages the configured reviewer profile and starts one role under it.
-pub(super) async fn launch_role(
-    control: &SessionManagerControl,
-    environment: &Arc<dyn ReviewEnvironment>,
-    session_id: &str,
-    role: &str,
-    reviewer: &ReviewerIdentity,
-    generation: u64,
-) -> Result<(), String> {
-    let staged = {
-        let session_id = session_id.to_owned();
-        let profile = reviewer.profile.clone();
-        let environment = environment.clone();
-        tokio::task::spawn_blocking(move || environment.stage(&session_id, &profile, generation))
-            .await
-            .map_err(|error| format!("staging the reviewer stopped: {error}"))??
-    };
-    let mut config = staged;
-    config.model = reviewer.main.model.clone();
-    config.effort = reviewer.main.effort.clone();
-    config.fast_mode = reviewer.main.fast_mode.then_some(true);
-    match reviewer_action(
-        control,
-        session_id,
-        Some(role.to_owned()),
-        ReviewerAction::Start {
-            config: Box::new(config),
-        },
-    )
-    .await
-    {
-        Ok(ReviewerOutcome::Started(_)) => Ok(()),
-        other => Err(unexpected(other)),
-    }
-}
-
 /// Everything a review needs that only the database and the worker can answer.
 pub(super) async fn prepare(
     control: &SessionManagerControl,
@@ -262,10 +226,13 @@ pub(super) async fn prepare_recovery(
     session_id: &str,
 ) -> Result<Option<Prepared>, String> {
     let session = session_id.to_owned();
-    let environment = environment.clone();
-    let state = tokio::task::spawn_blocking(move || environment.load_state(&session))
+    let load = environment.clone();
+    let state = tokio::task::spawn_blocking(move || load.load_state(&session))
         .await
         .map_err(|error| format!("loading the pending review handoff stopped: {error}"))??;
+    if let Some(child) = &state.child_session_id {
+        environment.close_child(child).await?;
+    }
     let handle = control
         .session(session_id.to_owned())
         .await

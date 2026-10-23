@@ -6078,6 +6078,15 @@ function renderTurnReview(session) {
   }
   const card = el('section', 'card turn-review');
   card.append(el('strong', '', 'Reviewing this turn'));
+  if (review.child_session_id) {
+    const transcript = el('a', '', 'Reviewer conversation');
+    transcript.href = routeHash({
+      name: 'conversation',
+      sessionId: review.child_session_id,
+      subagentParentId: session.id,
+    });
+    card.append(transcript);
+  }
   const roles = review.roles || [];
   if (roles.length) {
     const strip = el('p', 'dim turn-review-roles');

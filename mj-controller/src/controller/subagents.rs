@@ -11,6 +11,8 @@ use mj_core::subagent::SubagentRecord;
 
 #[derive(Debug, Clone)]
 pub struct RegisterSubagentRequest {
+    pub kind: mj_core::subagent::SubagentKind,
+    pub reviewer_launch: Option<mj_core::worker_launch::ReviewerLaunchConfig>,
     pub parent_session_id: String,
     pub task_name: String,
     pub profile_id: String,
@@ -369,10 +371,11 @@ impl Controller {
         &mut self,
         request: RegisterSubagentRequest,
     ) -> Result<SubagentRecord> {
-        if let Some(existing) = crate::database::lookup_subagent_request(
-            &request.parent_session_id,
-            &request.request_key,
-        )? {
+        let request_key = request.kind.request_key(&request.request_key);
+        let reviewer = request.kind == mj_core::subagent::SubagentKind::Reviewer;
+        if let Some(existing) =
+            crate::database::lookup_subagent_request(&request.parent_session_id, &request_key)?
+        {
             return Ok(existing);
         }
         ensure!(
@@ -394,13 +397,16 @@ impl Controller {
             .with_context(|| format!("unknown parent session {}", request.parent_session_id))?
             .clone();
         ensure!(
-            matches!(
-                parent.harness_kind,
-                HarnessKind::Claude | HarnessKind::Codex
-            ),
+            reviewer
+                || matches!(
+                    parent.harness_kind,
+                    HarnessKind::Claude | HarnessKind::Codex
+                ),
             "only Claude and Codex sessions can spawn sub-agents"
         );
-        ensure_parent_may_delegate(&parent)?;
+        if !reviewer {
+            ensure_parent_may_delegate(&parent)?;
+        }
         ensure!(
             parent.state != SessionState::StartupCleanup,
             "parent startup cleanup is pending"
@@ -412,9 +418,11 @@ impl Controller {
             "sub-agents cannot spawn other sub-agents"
         );
         ensure!(
-            self.config
-                .subagents
-                .profile_is_eligible(&parent.last_profile, &request.profile_id),
+            reviewer
+                || self
+                    .config
+                    .subagents
+                    .profile_is_eligible(&parent.last_profile, &request.profile_id),
             "profile {:?} is not eligible for sub-agent use",
             request.profile_id
         );
@@ -441,7 +449,9 @@ impl Controller {
                 profile.kind.display_name()
             );
         }
-        self.ensure_subagent_slot_available(&parent.id, None)?;
+        if !reviewer {
+            self.ensure_subagent_slot_available(&parent.id, None)?;
+        }
 
         let child_id = new_session_id()?;
         let target = borrowed_locator(
@@ -498,7 +508,7 @@ impl Controller {
             last_checkpoint_error: None,
             checkpoint: None,
         };
-        let handback_tool = child_gets_handback_tool(profile.kind);
+        let handback_tool = reviewer || child_gets_handback_tool(profile.kind);
         let report_dir = request
             .report_root
             .as_deref()
@@ -513,6 +523,8 @@ impl Controller {
             _ => request.initial_prompt,
         };
         let relation = SubagentRecord {
+            kind: request.kind,
+            reviewer_launch: request.reviewer_launch,
             child_session_id: child_id.clone(),
             parent_session_id: parent.id,
             task_name: request.task_name,
@@ -554,6 +566,7 @@ impl Controller {
     ) -> Result<()> {
         let live = crate::database::list_subagents(parent_session_id)?
             .into_iter()
+            .filter(|child| child.kind != mj_core::subagent::SubagentKind::Reviewer)
             .filter(|child| Some(child.child_session_id.as_str()) != starting)
             .filter_map(|child| {
                 let session = self.state.sessions.get(&child.child_session_id)?;
@@ -1099,6 +1112,8 @@ mod tests {
             crate::database::save_subagent_session(
                 &child,
                 &SubagentRecord {
+                    kind: mj_core::subagent::SubagentKind::Worker,
+                    reviewer_launch: None,
                     child_session_id: id.into(),
                     parent_session_id: "parent-1".into(),
                     task_name: title.into(),

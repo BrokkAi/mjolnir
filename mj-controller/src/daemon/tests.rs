@@ -1323,6 +1323,8 @@ pub(super) fn runtime_test_subagent(
     parent_session_id: &str,
 ) -> SubagentRecord {
     SubagentRecord {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        reviewer_launch: None,
         child_session_id: child_session_id.into(),
         parent_session_id: parent_session_id.into(),
         task_name: "task".into(),

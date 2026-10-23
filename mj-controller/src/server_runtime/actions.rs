@@ -368,6 +368,11 @@ pub(super) async fn apply_phone_action(
             elicitation_id,
             response,
         } => {
+            let (session_id, elicitation_id) = services
+                .daemon_runtime
+                .review_host()
+                .question_target(&session_id, &elicitation_id)
+                .unwrap_or((session_id, elicitation_id));
             services
                 .sessions
                 .session(&session_id)

@@ -60,7 +60,7 @@ pub(super) fn configure_claude_subagent_mcp(
     );
     let config_path = home.join(".claude.json");
     let settings_path = home.join("settings.json");
-    if !(private_claude_home(root, session_id, home)
+    if !(private_staged_home(root, session_id, home)
         && regular_file_or_absent(&config_path)
         && regular_file_or_absent(&settings_path))
     {
@@ -80,7 +80,7 @@ pub(super) fn configure_claude_subagent_mcp(
         };
     }
 
-    edit_claude_json(&config_path, "staged Claude configuration", |config| {
+    edit_profile_json(&config_path, "staged Claude configuration", |config| {
         if role.is_none() && !config.contains_key("mcpServers") {
             return Ok(());
         }
@@ -134,7 +134,7 @@ pub(super) fn configure_claude_subagent_mcp(
     };
     // In any mode but Auto, Claude would otherwise ask a person before a
     // child's mandatory `handback` or a parent's `spawn` (R11-1).
-    edit_claude_json(&settings_path, "staged Claude settings", |settings| {
+    edit_profile_json(&settings_path, "staged Claude settings", |settings| {
         let allow = settings
             .entry("permissions")
             .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
@@ -164,10 +164,51 @@ pub(super) fn configure_claude_subagent_mcp(
     })
 }
 
-/// Rewrite one of the staged Claude JSON files through `edit`, writing it only
-/// when its content changes. A missing file starts as an empty object and is
-/// created only when `edit` adds something.
-fn edit_claude_json(
+/// Kimi binds stdio servers to a runtime through its private MCP profile.
+pub(super) fn configure_kimi_subagent_mcp(
+    root: &Path,
+    session_id: &str,
+    home: &Path,
+    role: mj_core::subagent::SubagentMcpRole,
+) -> Result<()> {
+    let path = home.join("mcp.json");
+    anyhow::ensure!(
+        root.is_absolute()
+            && private_staged_home(root, session_id, home)
+            && regular_file_or_absent(&path),
+        "cannot register the Kimi {} tools outside a private staged profile",
+        role.id(),
+    );
+    let command = root.join("hel");
+    let command = command
+        .to_str()
+        .context("Kimi MCP command path is not UTF-8")?;
+    let socket = root.join(SUBAGENT_SOCKET);
+    let socket = socket
+        .to_str()
+        .context("Kimi MCP socket path is not UTF-8")?;
+    edit_profile_json(&path, "staged Kimi MCP configuration", |config| {
+        let servers = config
+            .entry("mcpServers")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .context("Kimi mcpServers must be an object")?;
+        servers.insert(
+            mj_core::subagent::SUBAGENT_MCP_SERVER.into(),
+            serde_json::json!({
+                "transport": "stdio",
+                "command": command,
+                "args": ["worker", "subagent-mcp", "--socket", socket, "--harness", "kimi", "--role", role.id()],
+                "runtime_id": "local",
+            }),
+        );
+        Ok(())
+    })
+}
+
+/// Rewrite a staged profile's JSON file, writing only when its content changes.
+/// A missing file starts as an empty object.
+fn edit_profile_json(
     path: &Path,
     label: &str,
     edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<()>,
@@ -196,13 +237,13 @@ fn edit_claude_json(
     Ok(())
 }
 
-/// Whether `home` is a Claude profile this session staged for itself:
+/// Whether `home` is a profile this session staged for itself:
 /// `<root>/profile` on this machine, `profiles/<session>` in a container or
 /// under a remote login (the controller's `removable_profile_root`). An
 /// earlier local session's `<root>/profile` may link to the person's own home,
 /// so each directory is checked without following links; resolving both sides
 /// would accept that link.
-fn private_claude_home(root: &Path, session_id: &str, home: &Path) -> bool {
+fn private_staged_home(root: &Path, session_id: &str, home: &Path) -> bool {
     let staged_directories = if home == root.join("profile") {
         vec![root, home]
     } else if home.file_name() == Some(session_id.as_ref())
@@ -238,7 +279,7 @@ pub(super) fn configure_claude_mailbox_hook(
     session_id: &str,
     home: &Path,
 ) -> Result<bool> {
-    let private = private_claude_home(root, session_id, home)
+    let private = private_staged_home(root, session_id, home)
         && regular_file_or_absent(&home.join("settings.json"));
     if !private {
         tracing::warn!(path = %home.display(), "skipping Claude mailbox hook repair: settings are not in a private staged directory");
@@ -943,6 +984,56 @@ impl Drop for LiveWaiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_kimi_reviewer_registers_handback_in_its_private_runtime_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("profile");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(
+            home.join("mcp.json"),
+            br#"{"mcpServers":{"existing":{"command":"keep"}}}"#,
+        )
+        .unwrap();
+        configure_kimi_subagent_mcp(
+            root.path(),
+            "reviewer",
+            &home,
+            mj_core::subagent::SubagentMcpRole::Child,
+        )
+        .unwrap();
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join("mcp.json")).unwrap()).unwrap();
+        assert_eq!(config["mcpServers"]["existing"]["command"], "keep");
+        let server = &config["mcpServers"]["mj-agents"];
+        assert_eq!(server["runtime_id"], "local");
+        assert_eq!(server["transport"], "stdio");
+        assert_eq!(server["command"], root.path().join("hel").to_str().unwrap());
+        assert_eq!(
+            server["args"],
+            serde_json::json!([
+                "worker",
+                "subagent-mcp",
+                "--socket",
+                root.path().join(SUBAGENT_SOCKET),
+                "--harness",
+                "kimi",
+                "--role",
+                "child"
+            ])
+        );
+        let outside = tempfile::tempdir().unwrap();
+        assert!(
+            configure_kimi_subagent_mcp(
+                root.path(),
+                "reviewer",
+                outside.path(),
+                mj_core::subagent::SubagentMcpRole::Child
+            )
+            .is_err()
+        );
+    }
+
     use mj_core::subagent::SubagentToolAction;
 
     // Hard-won: 3c8973b87: the check expected <root>/profile/.claude, so it refused every real Claude home and steering was never offered.

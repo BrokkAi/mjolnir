@@ -379,6 +379,8 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
     state.subagents.insert(
         child.id.clone(),
         crate::subagent::SubagentRecord {
+            kind: crate::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             child_session_id: child.id.clone(),
             parent_session_id: parent.id.clone(),
             task_name: "Inspect parser".into(),
@@ -423,6 +425,8 @@ fn managed_and_native_children_are_sub_agents_and_their_owner_is_not() {
     state.subagents.insert(
         child.id.clone(),
         crate::subagent::SubagentRecord {
+            kind: crate::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             child_session_id: child.id.clone(),
             parent_session_id: parent.id.clone(),
             task_name: "Inspect parser".into(),
@@ -597,6 +601,8 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
         state.subagents.insert(
             child.id.clone(),
             crate::subagent::SubagentRecord {
+                kind: crate::subagent::SubagentKind::Worker,
+                reviewer_launch: None,
                 child_session_id: child.id.clone(),
                 parent_session_id: parent.id.clone(),
                 task_name: "Borrow checkout".into(),
@@ -1217,6 +1223,8 @@ fn a_stored_subagent_may_launch_outside_the_parent_workspace() {
     state.subagents.insert(
         child_id.clone(),
         SubagentRecord {
+            kind: crate::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             child_session_id: child_id.clone(),
             parent_session_id: parent_id,
             task_name: "lane".into(),

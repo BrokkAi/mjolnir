@@ -15,38 +15,30 @@ impl HostState {
                     },
                 );
             }
-            ReviewRequest::StartRole { role, fresh } => self.start_role(session_id, role, fresh),
-            ReviewRequest::PromptRole {
-                role,
-                command_id,
-                prompt,
-            } => {
-                self.prompt_role(session_id, &role, command_id, prompt);
-                self.poll_role(session_id, &role, Duration::ZERO);
+            ReviewRequest::StartRole { role, .. } => {
+                if let Some(slot) = self.reviews.get_mut(session_id) {
+                    let requests = slot.driver.role_started(&role);
+                    self.run(session_id, requests);
+                }
             }
+            ReviewRequest::PromptRole {
+                command_id, prompt, ..
+            } => self.register_reviewer_child(session_id, command_id, prompt),
             ReviewRequest::PromptPrimary { command_id, prompt } => {
                 // The review's own corrective prompt must not be held by the
                 // review's own lock, and by this point the review has
                 // resolved, so the lock is already released below.
                 self.prompt_primary(session_id, command_id, prompt);
             }
-            ReviewRequest::PauseRole { role } => {
-                let session_id = session_id.to_owned();
-                self.spawn_reviewer(
-                    session_id.clone(),
-                    Some(role),
-                    ReviewerAction::Pause,
-                    move |outcome| {
-                        if let Err(error) = outcome {
-                            tracing::debug!(
-                                session_id = %session_id,
-                                %error,
-                                "pausing a review role failed"
-                            );
-                        }
-                        None
-                    },
-                );
+            ReviewRequest::PauseRole { .. } => {
+                if self.reviews.get(session_id).is_some_and(|slot| {
+                    matches!(
+                        slot.driver.phase(),
+                        TurnReviewPhase::Resolved(Resolution::Cancelled)
+                    )
+                }) {
+                    self.close_reviewer_child(session_id);
+                }
             }
             ReviewRequest::AdvanceBaseline {
                 trees,
@@ -137,93 +129,6 @@ impl HostState {
         }
     }
 
-    /// Stages the configured reviewer profile and starts one role under it.
-    pub(super) fn start_role(&mut self, session_id: &str, role: String, fresh: bool) {
-        let fresh_generation = if fresh {
-            match next_review_generation() {
-                Ok(generation) => Some(generation),
-                Err(error) => {
-                    self.fail(
-                        session_id,
-                        format!("the reviewer could not allocate a fresh conversation: {error}"),
-                    );
-                    return;
-                }
-            }
-        } else {
-            None
-        };
-        let Some(slot) = self.reviews.get_mut(session_id) else {
-            return;
-        };
-        // A fresh role must not reuse the running harness session: each role
-        // of a new review starts without another role's context. Bumping the
-        // generation is what the sidecar reads as "this is a different
-        // reviewer".
-        if let Some(generation) = fresh_generation {
-            slot.generation = generation;
-        }
-        let generation = slot.generation;
-        let epoch = slot.epoch;
-        let reviewer = slot.reviewer.clone();
-        let control = self.control.clone();
-        let environment = self.environment.clone();
-        let events = self.events.clone();
-        let session_id = session_id.to_owned();
-        tokio::spawn(async move {
-            let result = launch_role(
-                &control,
-                &environment,
-                &session_id,
-                &role,
-                &reviewer,
-                generation,
-            )
-            .await;
-            let _ = events.send(HostEvent::Step {
-                session_id,
-                epoch,
-                step: ReviewStep::RoleStarted { role, result },
-            });
-        });
-    }
-
-    pub(super) fn prompt_role(
-        &mut self,
-        session_id: &str,
-        role: &str,
-        command_id: String,
-        prompt: String,
-    ) {
-        let Some(epoch) = self.reviews.get(session_id).map(|slot| slot.epoch) else {
-            return;
-        };
-        let owner = session_id.to_owned();
-        let result_role = role.to_owned();
-        self.spawn_reviewer(
-            session_id.to_owned(),
-            Some(role.to_owned()),
-            ReviewerAction::Submit {
-                command_id,
-                command: prompt_command(prompt),
-            },
-            move |outcome| {
-                let result = match outcome {
-                    Ok(ReviewerOutcome::Accepted { .. }) => Ok(()),
-                    other => Err(unexpected(other)),
-                };
-                Some(HostEvent::Step {
-                    session_id: owner,
-                    epoch,
-                    step: ReviewStep::RolePrompted {
-                        role: result_role,
-                        result,
-                    },
-                })
-            },
-        );
-    }
-
     /// Sends the review's corrective prompt to the primary agent. The actor
     /// receives a scoped admission that is valid only for this review and
     /// command id; the hold remains until the resulting event acknowledges a
@@ -264,131 +169,5 @@ impl HostState {
                 step: ReviewStep::PrimaryPrompted(submitted),
             });
         });
-    }
-
-    /// Reads one role's journal from where the host left off.
-    pub(super) fn poll_role(&mut self, session_id: &str, role: &str, delay: Duration) {
-        let Some(slot) = self.reviews.get_mut(session_id) else {
-            return;
-        };
-        let transcript = slot.roles.entry(role.to_owned()).or_default();
-        let after_ordinal = transcript.cursor_ordinal;
-        let after_digest = if transcript.cursor_digest.is_empty() {
-            mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.to_owned()
-        } else {
-            transcript.cursor_digest.clone()
-        };
-        let epoch = slot.epoch;
-        let control = self.control.clone();
-        let events = self.events.clone();
-        let session_id = session_id.to_owned();
-        let role = role.to_owned();
-        tokio::spawn(async move {
-            if !delay.is_zero() {
-                tokio::time::sleep(delay).await;
-            }
-            let result = reviewer_action(
-                &control,
-                &session_id,
-                Some(role.clone()),
-                ReviewerAction::Attach {
-                    after_ordinal,
-                    after_digest,
-                },
-            )
-            .await;
-            let result = match result {
-                Ok(ReviewerOutcome::Attached(attachment)) => Ok(attachment.events),
-                other => Err(unexpected(other)),
-            };
-            let _ = events.send(HostEvent::Step {
-                session_id,
-                epoch,
-                step: ReviewStep::RoleEvents { role, result },
-            });
-        });
-    }
-
-    pub(super) fn role_events(
-        &mut self,
-        session_id: String,
-        role: String,
-        result: Result<Vec<RelayEvent>, String>,
-    ) {
-        let events = match result {
-            Ok(events) => events,
-            Err(error) => {
-                if self.reviews.get(&session_id).is_some_and(|slot| {
-                    matches!(slot.driver.phase(), TurnReviewPhase::Forwarding { .. })
-                }) {
-                    tracing::debug!(
-                        session_id = %session_id,
-                        role = %role,
-                        %error,
-                        "ignoring a late reviewer-role poll during primary handoff"
-                    );
-                    return;
-                }
-                self.fail(&session_id, error);
-                return;
-            }
-        };
-        let Some(slot) = self.reviews.get_mut(&session_id) else {
-            return;
-        };
-        let idle = events.is_empty();
-        let relay_session = role_session_id(&session_id, &role);
-        let transcript = slot.roles.entry(role.clone()).or_default();
-        transcript.apply(&relay_session, &events);
-        // The newest agent message is not enough on its own: an earlier
-        // prompt's answer can still be the newest message in a role's journal
-        // when its next command starts. The relay's completion record for the
-        // exact command the driver submitted is what settles it.
-        let awaited = slot
-            .driver
-            .awaited_commands()
-            .into_iter()
-            .find(|(awaited_role, _)| *awaited_role == role)
-            .map(|(_, command_id)| command_id);
-        let completed = awaited.as_ref().is_some_and(|awaited| {
-            events.iter().any(|event| {
-                matches!(
-                    &event.observation,
-                    RelayObservation::CommandCompleted { command_id, outcome , ..}
-                        if command_id == awaited
-                            && matches!(
-                                outcome,
-                                mj_core::relay::RelayCommandOutcome::Prompt { .. }
-                            )
-                )
-            })
-        });
-        let requests = match (completed, awaited) {
-            (true, Some(awaited)) => {
-                let answer = slot
-                    .roles
-                    .get(&role)
-                    .and_then(RoleTranscript::latest_answer)
-                    .unwrap_or_default();
-                let slot = self.reviews.get_mut(&session_id).expect("the slot is open");
-                slot.driver.role_turn_completed(&awaited, &answer)
-            }
-            _ => Vec::new(),
-        };
-        self.run(&session_id, requests);
-        let Some(slot) = self.reviews.get(&session_id) else {
-            return;
-        };
-        if slot.driver.active_roles().contains(&role) {
-            self.poll_role(
-                &session_id,
-                &role,
-                if idle {
-                    ROLE_POLL_IDLE_INTERVAL
-                } else {
-                    Duration::ZERO
-                },
-            );
-        }
     }
 }

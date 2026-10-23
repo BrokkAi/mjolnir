@@ -31,6 +31,8 @@ pub(super) async fn spawn_subagent(
 
     let relation = backend
         .start_subagent(crate::controller::RegisterSubagentRequest {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             parent_session_id: parent_session_id.clone(),
             task_name: request.task_name,
             profile_id: selection.profile_id,
@@ -623,6 +625,7 @@ pub(super) async fn list_subagents(
     let snapshot = state.snapshot_rx.borrow();
     let subagents = records
         .into_iter()
+        .filter(|record| record.kind != mj_core::subagent::SubagentKind::Reviewer)
         .map(|record| {
             let session = require_session_record(&snapshot, &record.child_session_id)?;
             Ok(SubagentView {

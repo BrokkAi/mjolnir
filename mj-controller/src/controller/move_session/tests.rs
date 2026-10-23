@@ -1195,6 +1195,8 @@ fn in_place_move_retains_running_and_parked_children_and_roleless_refusal_names_
     parked.id = "child-parked".into();
     parked.state = SessionState::Parked;
     let relation = |child_session_id: &str, task_name: &str| mj_core::subagent::SubagentRecord {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        reviewer_launch: None,
         child_session_id: child_session_id.into(),
         parent_session_id: parent.id.clone(),
         task_name: task_name.into(),
@@ -2390,6 +2392,8 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         worker_root: fixture._directory.path().join("live-child"),
     });
     let relation = mj_core::subagent::SubagentRecord {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        reviewer_launch: None,
         child_session_id: child.id.clone(),
         parent_session_id: parent_id.into(),
         task_name: "finish the migration".into(),
@@ -2504,6 +2508,8 @@ fn recovery_from_in_place_closing_source_keeps_children_and_skips_stop_hook() {
             worker_root: _directory.path().join(child_id),
         });
         let relation = mj_core::subagent::SubagentRecord {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             child_session_id: child_id.into(),
             parent_session_id: parent.id.clone(),
             task_name: task_name.into(),

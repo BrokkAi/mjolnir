@@ -2870,6 +2870,7 @@ fn a_running_review_projects_to_the_phone() {
     use mj_core::review::driver::{Resolution, RoleState, RoleStatus, TurnReviewPhase};
 
     let review = RuntimeReviewView {
+        child_session_id: None,
         session_id: "session-1".into(),
         questions: Vec::new(),
         phase: TurnReviewPhase::Verdict(mj_core::review::verdict::ReviewVerdict::Findings {
@@ -2933,6 +2934,7 @@ fn resolving_a_review_is_gated_on_what_the_daemon_published() {
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
 
     snapshot.sessions[0].turn_review = Some(ViewerTurnReview {
+        child_session_id: None,
         status: "the reviewer is reading the change…".into(),
         roles: Vec::new(),
         verdict: None,
@@ -2948,6 +2950,7 @@ fn resolving_a_review_is_gated_on_what_the_daemon_published() {
 
     // A failed review can be dismissed but has nothing to forward.
     snapshot.sessions[0].turn_review = Some(ViewerTurnReview {
+        child_session_id: None,
         status: "the review failed".into(),
         roles: Vec::new(),
         verdict: Some(ViewerReviewVerdict {

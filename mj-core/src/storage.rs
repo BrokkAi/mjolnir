@@ -224,6 +224,8 @@ pub struct StoredReview {
 /// what makes a cancelled review lossless -- the next one covers both turns.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TurnReviewState {
+    #[serde(default)]
+    pub child_session_id: Option<String>,
     pub baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
     pub reviewed_through_ordinal: u64,
     /// The last forwarded verdict, which turns the next review into a

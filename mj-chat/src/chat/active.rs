@@ -48,7 +48,7 @@ use super::rendering::{
 };
 use super::second_opinion::{
     CapturedProposal, ReviewerPane, SecondOpinion, SecondOpinionIntent, render_reviewer,
-    render_setup, render_split_actions, review_role_session_id, reviewer_session_id,
+    render_setup, render_split_actions, reviewer_session_id,
 };
 use super::transcript::{ToolDiffstatRequest, materialized_prefix_entries, render_transcript};
 use super::{
@@ -154,7 +154,7 @@ enum ChatIoUpdate {
     /// A page of one reviewing role's own relay events.
     TurnReviewEvents {
         role: String,
-        result: std::result::Result<Vec<mj_core::relay::RelayEvent>, String>,
+        result: std::result::Result<Box<mj_core::state::MaterializedSession>, String>,
     },
 }
 

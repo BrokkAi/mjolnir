@@ -24,7 +24,14 @@ impl TurnReviewHost {
     /// Starts the host's task, reviewing through the real controller.
     #[must_use]
     pub fn spawn(control: SessionManagerControl, config: ReviewConfigSource) -> Self {
-        Self::spawn_notifying(control, config, Arc::new(|| {}), None, None)
+        Self::spawn_notifying(
+            control,
+            config,
+            Arc::new(|| {}),
+            None,
+            None,
+            Default::default(),
+        )
     }
 
     /// Starts the production host and calls `changed` whenever a surface view
@@ -38,11 +45,13 @@ impl TurnReviewHost {
         changed: Arc<dyn Fn() + Send + Sync>,
         background: Option<Arc<crate::recovery_gate::RecoveryGate>>,
         catalog: Option<super::environment::SharedProfileCatalog>,
+        runtime: super::environment::SharedReviewerRuntime,
     ) -> Self {
         Self::spawn_in_notifying(
             control,
             config,
             Arc::new(ControllerEnvironment {
+                runtime,
                 background,
                 catalog,
             }),
@@ -175,6 +184,24 @@ impl TurnReviewHost {
             .map_err(|_| StartRefusal("the review host stopped".to_owned()))?
     }
 
+    pub(crate) async fn reviewer_finished(
+        &self,
+        session_id: String,
+        child_session_id: String,
+        answer: Option<String>,
+    ) -> Result<(), String> {
+        let (reply, result) = oneshot::channel();
+        self.events
+            .send(HostEvent::ReviewerFinished {
+                session_id,
+                child_session_id,
+                answer,
+                reply,
+            })
+            .map_err(|_| "review host stopped".to_owned())?;
+        result.await.map_err(|_| "review host stopped".to_owned())?
+    }
+
     /// Forwards, dismisses, or cancels the open review.
     pub async fn resolve(&self, session_id: &str, resolution: Resolution) -> Result<(), String> {
         let (reply, answer) = oneshot::channel();
@@ -230,6 +257,17 @@ impl TurnReviewHost {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(session_id)
             .cloned()
+    }
+
+    pub(crate) fn question_target(
+        &self,
+        session_id: &str,
+        elicitation_id: &str,
+    ) -> Option<(String, String)> {
+        let (child, question) = mj_client::review::parse_reviewer_question_id(elicitation_id)?;
+        let review = self.view(session_id)?;
+        (review.child_session_id.as_deref() == Some(child))
+            .then(|| (child.to_owned(), question.to_owned()))
     }
 
     /// Whether an unresolved review is holding this session's prompts.

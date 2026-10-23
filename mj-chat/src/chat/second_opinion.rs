@@ -298,6 +298,17 @@ impl ReviewerPane {
         true
     }
 
+    pub(super) fn replace_snapshot(&mut self, session: MaterializedSession) -> bool {
+        if self.session.as_ref() == Some(&session) {
+            return false;
+        }
+        self.entries = materialized_chat_entries_reusing(&session, 0, Vec::new());
+        self.cursor_ordinal = session.applied_event_ordinal;
+        self.session = Some(session);
+        self.width = 0;
+        true
+    }
+
     /// The reviewer's latest complete agent answer, which is what a transfer
     /// sends. Thoughts and tool logs are deliberately not part of it.
     pub(super) fn latest_answer(&self) -> Option<String> {
@@ -982,15 +993,6 @@ pub(super) fn render_split_actions(
 /// session id a reviewer's events are folded under.
 pub(super) fn reviewer_session_id(primary_session_id: &str) -> String {
     format!("{primary_session_id}-reviewer")
-}
-
-/// The same, for one turn-review role.
-///
-/// One definition, in the host that also folds these journals, so the pane and
-/// the review can never disagree about which session id a role's events belong
-/// under.
-pub(super) fn review_role_session_id(primary_session_id: &str, role: &str) -> String {
-    mj_client::review::role_session_id(primary_session_id, role)
 }
 
 /// Builds a pane straight from entries, for tests that need a populated

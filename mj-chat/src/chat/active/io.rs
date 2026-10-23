@@ -126,10 +126,7 @@ impl ActiveChat {
     /// reviewer's journal to show its transcript, and sends resolutions back.
     /// A review therefore survives this view closing.
     pub fn apply_review_view(&mut self, view: Option<mj_client::review::RuntimeReviewView>) {
-        let role = view
-            .as_ref()
-            .and_then(|view| view.roles.first())
-            .map(|role| role.role.clone());
+        let role = view.as_ref().and_then(|view| view.child_session_id.clone());
         self.state.set_turn_review(view);
         if self.state.turn_review().is_none() {
             self.reviewed_role = None;
@@ -144,7 +141,7 @@ impl ActiveChat {
             && self
                 .state
                 .turn_review()
-                .is_some_and(|review| review.role_is_active(&role))
+                .is_some_and(|review| review.view.is_working() || !review.view.questions.is_empty())
             && self.reviewed_role.as_deref() != Some(role.as_str())
         {
             self.reviewed_role = Some(role.clone());

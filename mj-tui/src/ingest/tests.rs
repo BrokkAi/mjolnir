@@ -153,6 +153,7 @@ fn notice_replacement_does_not_overwrite_a_newer_notice() {
 fn runtime_review_projection_restores_and_removes_session_activity() {
     let mut dashboard = dashboard_with_session(stopped_session());
     let review = mj_client::review::RuntimeReviewView {
+        child_session_id: None,
         session_id: "session-1".into(),
         questions: Vec::new(),
         phase: mj_core::review::driver::TurnReviewPhase::LaunchingReviewer,

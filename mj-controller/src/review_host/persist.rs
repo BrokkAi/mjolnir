@@ -41,6 +41,9 @@ impl HostState {
         self.next_epoch = self.next_epoch.saturating_add(1);
         let epoch = self.next_epoch;
         let mut prepared = prepared;
+        if prepared.resume_forward.is_none() {
+            prepared.state.child_session_id = None;
+        }
         prepared.state.active = Some(format!("review-{epoch}"));
         let state = prepared.state.clone();
         self.pending_open.insert(
@@ -83,6 +86,14 @@ impl HostState {
         result: Result<(), String>,
     ) {
         match completion {
+            PersistenceCompletion::LaunchChild => {
+                if let Err(error) = result {
+                    self.fail(&session_id, error);
+                    self.close_reviewer_child(&session_id);
+                    return;
+                }
+                self.launch_reviewer_child(&session_id);
+            }
             PersistenceCompletion::Open => {
                 let Some(pending) = self.pending_open.remove(&session_id) else {
                     return;
@@ -153,14 +164,10 @@ impl HostState {
                     ReviewSlot {
                         epoch: pending.epoch,
                         driver,
-                        roles: BTreeMap::new(),
                         reviewer: pending.prepared.reviewer,
                         state: pending.prepared.state,
                         _background: pending.prepared.background,
-                        // `start_role` assigns a process-wide generation before
-                        // every fresh role. Zero remains the explicit
-                        // generation for a role that resumes in place.
-                        generation: 0,
+                        command_id: None,
                     },
                 );
                 answer(pending.reply, Ok(()));

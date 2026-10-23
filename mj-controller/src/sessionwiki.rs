@@ -3519,6 +3519,8 @@ mod tests {
 
     fn child(child_session_id: &str, parent_session_id: &str) -> mj_core::subagent::SubagentRecord {
         mj_core::subagent::SubagentRecord {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
             child_session_id: child_session_id.into(),
             parent_session_id: parent_session_id.into(),
             task_name: "task".into(),
@@ -3850,6 +3852,8 @@ mod tests {
         state.subagents.insert(
             mj_child_id.to_owned(),
             mj_core::subagent::SubagentRecord {
+                kind: mj_core::subagent::SubagentKind::Worker,
+                reviewer_launch: None,
                 child_session_id: mj_child_id.to_owned(),
                 parent_session_id: "mj-parent-session".to_owned(),
                 task_name: "child".to_owned(),

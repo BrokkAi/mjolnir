@@ -186,6 +186,9 @@ impl TurnReview {
 
     /// Takes the daemon's newer view of the same review.
     pub(super) fn update(&mut self, view: RuntimeReviewView) -> bool {
+        if self.view.child_session_id != view.child_session_id {
+            self.pane = ReviewerPane::default();
+        }
         let changed = self.view != view;
         let verdict_changed = self.view.verdict.as_ref().map(|verdict| verdict.kind)
             != view.verdict.as_ref().map(|verdict| verdict.kind);
@@ -240,11 +243,6 @@ impl TurnReview {
         self.tab == ReviewTab::Overview
     }
 
-    #[must_use]
-    pub(super) fn role_is_active(&self, role: &str) -> bool {
-        matches!(&self.view.phase, TurnReviewPhase::Running { roles } if roles.iter().any(|status| status.role == role))
-    }
-
     /// Moves between the overview, the reviewer transcript, and the verdict.
     pub(super) fn cycle_selection(&mut self) -> bool {
         let before_tab = self.tab;
@@ -262,12 +260,6 @@ impl TurnReview {
         before_tab != self.tab
     }
 
-    /// Where the reviewer's journal has been read to.
-    #[must_use]
-    pub(super) fn cursor(&self) -> (u64, String) {
-        (self.pane.cursor_ordinal, self.pane.cursor_digest.clone())
-    }
-
     /// Forms the reviewer's pending requests with the role that asked, because
     /// that is where the answer has to go.
     #[must_use]
@@ -283,7 +275,15 @@ impl TurnReview {
         self.pane
             .pending_elicitations()
             .iter()
-            .map(|request| (role.role.clone(), request.clone()))
+            .map(|request| {
+                (
+                    self.view
+                        .child_session_id
+                        .clone()
+                        .unwrap_or_else(|| role.role.clone()),
+                    request.clone(),
+                )
+            })
             .collect()
     }
 
@@ -1028,12 +1028,38 @@ mod tests {
     use mj_core::review::driver::{RoleStatus, TurnReviewPhase};
     use mj_core::review::verdict::ReviewPassEvidence;
 
+    #[test]
+    fn changing_the_reviewer_child_discards_the_previous_childs_pending_form() {
+        let mut view = running_view();
+        view.child_session_id = Some("old-reviewer".into());
+        let mut review = TurnReview::new(view.clone());
+        let mut old = mj_core::state::MaterializedSession::empty("old-reviewer");
+        old.pending_elicitations
+            .push(mj_core::elicitation::ElicitationRequest {
+                id: "permission-1".into(),
+                message: "Allow this tool?".into(),
+                title: None,
+                description: None,
+                fields: Vec::new(),
+                tool_permission: None,
+            });
+        review.pane().replace_snapshot(old);
+        assert_eq!(review.pending_elicitations()[0].0, "old-reviewer");
+        view.child_session_id = Some("new-reviewer".into());
+        review.update(view);
+        assert!(
+            review.pending_elicitations().is_empty(),
+            "a reused elicitation id must not be answered on the replacement child"
+        );
+    }
+
     fn chat() -> super::super::ChatState {
         super::super::ChatState::new(&snapshot(), &[])
     }
 
     fn running_view() -> RuntimeReviewView {
         RuntimeReviewView {
+            child_session_id: None,
             session_id: "1234567890".to_owned(),
             questions: Vec::new(),
             phase: TurnReviewPhase::Running {
@@ -1410,22 +1436,22 @@ mod tests {
         let mut review = TurnReview::new(findings_view());
 
         assert!(review.verdict_selected());
-        review.pane().restore(
-            "reviewer-session",
-            vec![std::sync::Arc::new(TranscriptItem {
-                stable_id: "agent:1".to_owned(),
-                position: 1,
-                latest_content_event_ordinal: Some(1),
-                created_at_ms: 0,
-                last_changed_at_ms: 0,
-                body: TranscriptBody::Agent {
-                    chunks: vec![serde_json::json!({
-                        "content": {"type": "text", "text": "reviewer transcript"}
-                    })],
-                    streaming: false,
-                },
-            })],
-        );
+        review.view.child_session_id = Some("reviewer-child".into());
+        let mut child = mj_core::state::MaterializedSession::empty("reviewer-child");
+        child.transcript = vec![std::sync::Arc::new(TranscriptItem {
+            stable_id: "agent:1".to_owned(),
+            position: 1,
+            latest_content_event_ordinal: Some(1),
+            created_at_ms: 0,
+            last_changed_at_ms: 0,
+            body: TranscriptBody::Agent {
+                chunks: vec![serde_json::json!({
+                    "content": {"type": "text", "text": "reviewer transcript"}
+                })],
+                streaming: false,
+            },
+        })];
+        review.pane().replace_snapshot(child);
         append_review_golden_state(
             &mut output,
             "verdict tab",

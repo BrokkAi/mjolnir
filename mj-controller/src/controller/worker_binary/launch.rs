@@ -148,6 +148,16 @@ impl Controller {
             launch.subtle_subagents,
         )?;
         apply_staged_execution_setting(profile.kind, launch.execution_policy, &profile_stage)?;
+        if let Some(reviewer) = &launch.reviewer_launch
+            && mj_core::worker_launch::ReviewMcpDelivery::for_harness(profile.kind)
+                == mj_core::worker_launch::ReviewMcpDelivery::HarnessProfile
+        {
+            super::super::reviewer::configure_staged_review_mcp(
+                profile.kind,
+                &profile_stage,
+                &reviewer.mcp_servers,
+            )?;
+        }
         // The `mj-agents` registration is not staged here: the worker writes
         // it on every start, because an upgrade or recovery replaces the
         // launch configuration without restaging this profile.
@@ -425,6 +435,16 @@ impl Controller {
             },
             &target,
         )?;
+        launch.reviewer_launch = subagent
+            .as_ref()
+            .and_then(|child| child.reviewer_launch.clone());
+        if let Some(reviewer) = &launch.reviewer_launch {
+            launch.bridge_command = reviewer.bridge_command.clone();
+            launch.bridge_args = reviewer.bridge_args.clone();
+            launch.execution_policy = reviewer.execution_policy;
+            launch.environment.extend(reviewer.environment.clone());
+            launch.excluded_environment = reviewer.excluded_environment.clone();
+        }
         // Read by the target-side MCP server from launch.json beside its socket,
         // independently of how each harness starts or registers that server.
         for name in [
@@ -944,6 +964,7 @@ pub(super) fn worker_launch_config_with_checkout(
     }
     Ok((
         WorkerLaunchConfig {
+            reviewer_launch: None,
             goal_resume_request: None,
             target_environment,
             seed_image_environment: backend.container_engine().is_some(),

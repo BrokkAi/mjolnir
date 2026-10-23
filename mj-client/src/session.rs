@@ -477,6 +477,20 @@ impl fmt::Debug for SessionHandle {
 }
 
 pub trait SessionControlBackend: Send + Sync {
+    fn snapshot(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<mj_core::state::MaterializedSession>> {
+        Box::pin(async move {
+            let handle = self.session(session_id).await?;
+            handle.sync_now().await?;
+            handle
+                .view()
+                .snapshot
+                .map(|snapshot| snapshot.materialized)
+                .context("session has no transcript yet")
+        })
+    }
     fn session(&self, session_id: String) -> BoxFuture<'_, Result<SessionHandle>>;
 }
 
@@ -486,6 +500,12 @@ pub struct SessionControl {
 }
 
 impl SessionControl {
+    pub async fn snapshot(
+        &self,
+        session_id: String,
+    ) -> Result<mj_core::state::MaterializedSession> {
+        self.backend.snapshot(session_id).await
+    }
     pub fn new(backend: impl SessionControlBackend + 'static) -> Self {
         Self {
             backend: Arc::new(backend),

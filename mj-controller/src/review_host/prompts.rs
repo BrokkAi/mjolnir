@@ -1,10 +1,5 @@
 use super::*;
 
-/// How long the reviewer waits before reading its journal again when idle. An
-/// attach answers immediately even when nothing has been journaled, so without
-/// this the review would spin on empty pages.
-pub(super) const ROLE_POLL_IDLE_INTERVAL: Duration = Duration::from_millis(200);
-
 /// Why a review could not start. Every variant is something a person can act
 /// on, which is why they carry their own sentences rather than a code.
 #[derive(Debug, Clone, PartialEq, Eq)]

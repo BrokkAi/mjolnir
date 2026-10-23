@@ -59,6 +59,8 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
         worker_root: child_directory.path().join(&child.id),
     });
     let relation = mj_core::subagent::SubagentRecord {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        reviewer_launch: None,
         child_session_id: child.id.clone(),
         parent_session_id: parent_id.into(),
         task_name: "inspect current child state".into(),

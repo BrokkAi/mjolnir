@@ -52,6 +52,7 @@ fn idle_background_work_and_working_review_keep_animation_independent() {
     assert!(!chat.needs_animation());
 
     chat.set_turn_review(Some(RuntimeReviewView {
+        child_session_id: None,
         session_id: "session-1".into(),
         questions: Vec::new(),
         phase: TurnReviewPhase::CapturingDelta,

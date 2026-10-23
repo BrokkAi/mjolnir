@@ -831,6 +831,8 @@ impl ApiBackend {
                 };
                 let relation = self
                     .start_subagent(crate::controller::RegisterSubagentRequest {
+                        kind: mj_core::subagent::SubagentKind::Worker,
+                        reviewer_launch: None,
                         parent_session_id: parent_session_id.to_owned(),
                         task_name: task_name.clone(),
                         profile_id: selection.profile_id,
@@ -872,7 +874,12 @@ impl ApiBackend {
             }
             SubagentToolAction::ListAgents => {
                 let inputs = self.subagent_input_progress(parent_session_id).await?;
-                let relations = self.list_subagents(parent_session_id.to_owned()).await?;
+                let relations = self
+                    .list_subagents(parent_session_id.to_owned())
+                    .await?
+                    .into_iter()
+                    .filter(|relation| relation.kind != mj_core::subagent::SubagentKind::Reviewer)
+                    .collect::<Vec<_>>();
                 let child_ids = relations
                     .iter()
                     .map(|relation| relation.child_session_id.clone())
@@ -1291,9 +1298,10 @@ impl ApiBackend {
         let ready = children
             .into_iter()
             .filter(|child| {
-                !self
-                    .exports
-                    .close_is_requested(&child.relation.child_session_id)
+                child.relation.kind != mj_core::subagent::SubagentKind::Reviewer
+                    && !self
+                        .exports
+                        .close_is_requested(&child.relation.child_session_id)
                     && !matches!(child.state.as_str(), "stopping" | "stopped")
                     && child.identity.as_ref().is_some_and(|identity| {
                         child.relation.reported_finish.as_ref() != Some(identity)

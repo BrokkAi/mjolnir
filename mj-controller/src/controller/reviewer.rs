@@ -132,6 +132,30 @@ impl Controller {
         }
         upload_reviewer_profile(executor, &backend, &worker_root, generation, &local)?;
 
+        self.reviewer_launch_config(session_id, profile_id, generation, mcp_servers)
+    }
+
+    pub(crate) fn reviewer_launch_config(
+        &self,
+        session_id: &str,
+        profile_id: &str,
+        generation: u64,
+        mcp_servers: &[ReviewMcpServer],
+    ) -> Result<ReviewerLaunchConfig> {
+        let profile = self
+            .config
+            .enabled_profile(profile_id)
+            .context("reviewer profile is unavailable")?;
+        profile.ensure_ready(profile_id)?;
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .context("review parent is missing")?;
+        let execution_policy = session
+            .target_runtime_settings(&self.config)?
+            .execution_policy;
+        let (backend, _) = self.worker_placement(session_id)?;
         let (bridge_command, bridge_args) = bridge_launch(profile.kind, execution_policy);
         let mut environment = profile.environment.resolved().clone();
         // The worker sets the harness home from the directory it staged, so
@@ -175,7 +199,7 @@ impl Controller {
 /// Kimi reads `mcpServers` from `mcp.json` in its home, and needs the runtime
 /// id its own schema carries. Both files are the reviewer's private copy, so
 /// nothing here can reach the user's own configuration.
-fn configure_staged_review_mcp(
+pub(super) fn configure_staged_review_mcp(
     harness: mj_core::config::HarnessKind,
     profile_stage: &Path,
     servers: &[ReviewMcpServer],

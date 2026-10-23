@@ -641,10 +641,33 @@ pub struct SubagentQueuePage {
     pub has_more: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentKind {
+    #[default]
+    Worker,
+    Reviewer,
+}
+
+impl SubagentKind {
+    /// Key in the request index; the record keeps the caller's original id.
+    #[must_use]
+    pub fn request_key(self, key: &str) -> String {
+        match self {
+            Self::Worker => format!("worker:{key}"),
+            Self::Reviewer => format!("reviewer:{key}"),
+        }
+    }
+}
+
 /// Durable ownership and launch intent for one child session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubagentRecord {
+    #[serde(default)]
+    pub kind: SubagentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_launch: Option<crate::worker_launch::ReviewerLaunchConfig>,
     pub child_session_id: String,
     pub parent_session_id: String,
     pub task_name: String,

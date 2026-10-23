@@ -1255,6 +1255,8 @@ impl SubagentBackend for FakeBackend {
     ) -> BoxFuture<'_, AnyResult<mj_core::subagent::SubagentRecord>> {
         Box::pin(async move {
             Ok(mj_core::subagent::SubagentRecord {
+                kind: mj_core::subagent::SubagentKind::Worker,
+                reviewer_launch: None,
                 child_session_id: SPAWNED_CHILD.to_owned(),
                 parent_session_id: request.parent_session_id,
                 task_name: request.task_name,
@@ -6056,6 +6058,7 @@ async fn review_status_reports_the_open_review_or_none() {
             .unwrap()
             .clone();
         session.turn_review = Some(crate::server::ViewerTurnReview {
+            child_session_id: None,
             status: "sending findings to the primary agent…".into(),
             roles: vec![crate::server::ViewerReviewRole {
                 label: "reviewer".into(),
@@ -6124,6 +6127,7 @@ async fn resolving_a_review_sends_the_controller_action_or_explains_the_refusal(
             .unwrap()
             .clone();
         session.turn_review = Some(crate::server::ViewerTurnReview {
+            child_session_id: None,
             status: "the review failed: relay reviewer_start timed out after 300 seconds".into(),
             roles: Vec::new(),
             verdict: Some(crate::server::ViewerReviewVerdict {
@@ -6339,4 +6343,58 @@ async fn published_apply_queued_crosses_the_api_without_retargeting_or_child_act
         StatusCode::ACCEPTED
     );
     assert!(actions.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn the_subagent_list_api_excludes_reviewer_children() {
+    const MARKER: &str = "MJ_TEST_REVIEWER_LIST_API";
+    if std::env::var_os(MARKER).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "the_subagent_list_api_excludes_reviewer_children",
+            ),
+        )
+        .env(MARKER, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let parent = crate::controller::test_support::checkpoint_test_session("session-1");
+    let child = crate::controller::test_support::checkpoint_test_session("review-child");
+    crate::database::save_session(&parent).unwrap();
+    let relation = mj_core::subagent::SubagentRecord {
+        kind: mj_core::subagent::SubagentKind::Reviewer,
+        reviewer_launch: None,
+        child_session_id: child.id.clone(),
+        parent_session_id: parent.id.clone(),
+        task_name: "review".into(),
+        profile_id: "codex".into(),
+        model: None,
+        effort: None,
+        working_directory: Default::default(),
+        initial_prompt: "review".into(),
+        request_key: "review-child-request".into(),
+        created_at: parent.created_at.clone(),
+        noticed_turn: None,
+        reported_finish: None,
+        handback_tool: true,
+    };
+    crate::database::save_subagent_session(&child, &relation).unwrap();
+    let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .oneshot(
+            bearer(Request::get("/api/v1/sessions/session-1/subagents"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(response).await["subagents"],
+        serde_json::json!([])
+    );
 }
