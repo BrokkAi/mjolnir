@@ -38,6 +38,8 @@ pub const ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS: u32 = 7;
 pub const ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY: u32 = 8;
 /// Typed received-message history that older canonical readers cannot decode.
 pub const ARCHIVE_SCHEMA_VERSION_MESSAGES: u32 = 9;
+/// Durable private Git refs, including non-commit review baselines.
+pub const ARCHIVE_SCHEMA_VERSION_REVIEW_REFS: u32 = 10;
 pub const ARCHIVE_FORMAT: &str = "hel-session";
 pub const EVENT_FRONTIER_GENESIS_DIGEST: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
@@ -103,7 +105,11 @@ pub struct RepositoryMetadata {
     pub base_commit: String,
     pub head_commit: String,
     pub branch: Option<String>,
-    /// Saved local branches, tags, and notes in an independent clone.
+    /// The source checkout's baseline name, used to relocate that checkout's
+    /// review state without adopting pins belonging to other worktrees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_baseline_ref: Option<String>,
+    /// Saved local branches, tags, notes, and durable Mjolnir refs.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub saved_refs: BTreeMap<String, String>,
     /// Newest to oldest, including stash entries unreachable from refs/stash.

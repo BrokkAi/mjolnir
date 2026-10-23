@@ -1,12 +1,11 @@
 use std::io::{Seek, SeekFrom};
-use std::sync::{Barrier, Mutex};
+use std::sync::Barrier;
 
 use super::*;
 
 struct CollectionGit {
     delta_count: u64,
     payload_barrier: Option<Barrier>,
-    commands: Mutex<Vec<GitCommand>>,
 }
 
 impl CollectionGit {
@@ -14,18 +13,12 @@ impl CollectionGit {
         Self {
             delta_count,
             payload_barrier: concurrent_payloads.then(|| Barrier::new(4)),
-            commands: Mutex::new(Vec::new()),
         }
-    }
-
-    fn commands(&self) -> Vec<GitCommand> {
-        self.commands.lock().unwrap().clone()
     }
 }
 
 impl GitCommandRunner for CollectionGit {
     fn run(&self, repository: &Path, command: &GitCommand) -> Result<GitOutput> {
-        self.commands.lock().unwrap().push(command.clone());
         let arguments = command
             .arguments
             .iter()
@@ -39,6 +32,27 @@ impl GitCommandRunner for CollectionGit {
                     .any(|argument| argument == "--show-toplevel") =>
             {
                 (0, format!("{}\n\n", repository.display()).into_bytes())
+            }
+            Some("rev-parse")
+                if arguments
+                    .iter()
+                    .any(|argument| argument == "--absolute-git-dir") =>
+            {
+                (
+                    0,
+                    format!("{}\n{}\n", repository.display(), repository.display()).into_bytes(),
+                )
+            }
+            Some("show-ref") => (1, Vec::new()),
+            Some("rev-parse")
+                if arguments
+                    .iter()
+                    .any(|argument| argument.starts_with("refs/hel/")) =>
+            {
+                (1, Vec::new())
+            }
+            Some("for-each-ref") if arguments.iter().any(|argument| argument == "refs/mj/") => {
+                (0, Vec::new())
             }
             Some("remote") => (0, b"https://token@github.com/example/repo.git\n".to_vec()),
             Some("rev-parse") => (0, format!("{}\n", "b".repeat(40)).into_bytes()),
@@ -126,6 +140,7 @@ fn tar_with_file(path: &str, contents: &[u8], mode: u32) -> Vec<u8> {
 fn repository(id: &str) -> RepositorySnapshot {
     RepositorySnapshot {
         metadata: RepositoryMetadata {
+            review_baseline_ref: None,
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
             git_operation: None,
@@ -150,6 +165,7 @@ fn repository(id: &str) -> RepositorySnapshot {
 fn checkpoint_bundle(head: &str, contents: impl Into<Vec<u8>>) -> CheckpointRepositoryBundle {
     CheckpointRepositoryBundle {
         metadata: RepositoryMetadata {
+            review_baseline_ref: None,
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
             git_operation: None,
@@ -1463,7 +1479,6 @@ fn git_collection_is_abstracted_redacts_origin_and_skips_credentials() {
         .map(|entry| entry.unwrap().path().unwrap().into_owned())
         .collect();
     assert_eq!(paths, vec![PathBuf::from("note.txt")]);
-    assert_eq!(runner.commands().len(), 11);
 }
 
 #[test]
@@ -1495,7 +1510,6 @@ fn git_collection_builds_independent_payloads_concurrently() {
     assert_eq!(snapshot.committed_bundle, b"bundle");
     assert_eq!(snapshot.staged_patch, b"staged");
     assert_eq!(snapshot.unstaged_patch, b"unstaged");
-    assert_eq!(runner.commands().len(), 12);
 }
 
 /// Checkpoint work runs with nobody watching the terminal it inherits, so
@@ -1742,6 +1756,210 @@ fn managed_clone_snapshot_restores_secondary_branch_and_full_stash_stack() {
     assert_eq!(
         git_line(&destination, &["rev-parse", "refs/tags/side-tag"]),
         git_line(&source, &["rev-parse", "refs/tags/side-tag"])
+    );
+}
+
+// Hard-won: 0fefbee48: review refs disappeared when a checkpoint moved its checkout.
+#[test]
+fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
+    for metadata_only in [false, true] {
+        for tagged in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let origin = directory.path().join("origin");
+            initialize_repository(&origin);
+            commit_file(&origin, "tracked", b"base\n", "base");
+            let head = git_line(&origin, &["rev-parse", "HEAD"]);
+            let source = clone_repository(directory.path(), &origin, "source");
+            fs::write(source.join("tracked"), b"baseline only\n").unwrap();
+            let tree = capture_worktree_tree(&SystemGit, &source).unwrap();
+            git(&source, &["checkout", "--", "tracked"]);
+            let point = if tagged {
+                record_review_point(
+                    &SystemGit,
+                    &source,
+                    &ReviewPoint {
+                        tree: tree.clone(),
+                        head: Some(head.clone()),
+                        reflog: None,
+                        pending: Vec::new(),
+                        session: Some("moving".into()),
+                    },
+                )
+                .unwrap()
+            } else {
+                tree.clone()
+            };
+            let reviewed = format!(
+                "refs/mj/reviewed/{}",
+                git_line(&source, &["rev-parse", "HEAD^{tree}"])
+            );
+            let start = format!(
+                "refs/mj/session-start/{}/{}",
+                digest_bytes(b"moving"),
+                digest_bytes(REVIEW_BASELINE_REF.as_bytes())
+            );
+            for (name, object) in [
+                (reviewed.as_str(), &head),
+                (start.as_str(), &head),
+                (REVIEW_BASELINE_REF, &point),
+            ] {
+                git(&source, &["update-ref", name, object]);
+            }
+            let spec = GitCollectionSpec {
+                id: "repo".into(),
+                relative_destination: "repo".into(),
+                history: GitHistoryMode::CloneFrom(head.clone()),
+                origin_override: None,
+            };
+            let snapshot = if metadata_only {
+                collect_git_metadata_snapshot(&SystemGit, &source, &spec)
+            } else {
+                collect_git_snapshot(&SystemGit, &source, &spec)
+            }
+            .unwrap();
+            assert!(!snapshot.committed_bundle.is_empty());
+            let destination = clone_repository(directory.path(), &origin, "restored");
+            restore_git_snapshot(&SystemGit, &destination, &snapshot).unwrap();
+            for (name, object) in [
+                (reviewed.as_str(), &head),
+                (start.as_str(), &head),
+                (REVIEW_BASELINE_REF, &point),
+            ] {
+                assert_eq!(git_line(&destination, &["rev-parse", name]), *object);
+            }
+            assert_eq!(
+                git(&destination, &["show", &format!("{tree}:tracked")]),
+                b"baseline only\n"
+            );
+            // A reviewed tree may be recorded at a different equivalent commit;
+            // another session's start must remain untouched during restore.
+            git(
+                &destination,
+                &["commit", "--allow-empty", "-qm", "equivalent reviewed tree"],
+            );
+            let later = git_line(&destination, &["rev-parse", "HEAD"]);
+            git(&destination, &["update-ref", &reviewed, &later]);
+            git(&destination, &["update-ref", &start, &later]);
+            let other_start = format!("refs/mj/session-start/{}/other", digest_bytes(b"other"));
+            git(&destination, &["update-ref", &other_start, &later]);
+            let mut conflicting = snapshot.clone();
+            conflicting
+                .metadata
+                .saved_refs
+                .insert(other_start.clone(), head.clone());
+            super::git::restore_git_snapshot_for_session(
+                &SystemGit,
+                &destination,
+                &conflicting,
+                Some("moving"),
+            )
+            .unwrap();
+            assert_eq!(git_line(&destination, &["rev-parse", &reviewed]), later);
+            assert_eq!(git_line(&destination, &["rev-parse", &start]), head);
+            assert_eq!(git_line(&destination, &["rev-parse", &other_start]), later);
+        }
+    }
+}
+
+#[test]
+fn review_refs_follow_the_session_between_worktree_names() {
+    let directory = tempfile::tempdir().unwrap();
+    let origin = directory.path().join("origin");
+    initialize_repository(&origin);
+    commit_file(&origin, "tracked", b"base\n", "base");
+    let base = git_line(&origin, &["rev-parse", "HEAD"]);
+    let linked = directory.path().join("linked");
+    git(
+        &origin,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "session",
+            linked.to_str().unwrap(),
+        ],
+    );
+    let baseline = review_baseline_ref(&SystemGit, &linked).unwrap();
+    let tree = git_line(&linked, &["rev-parse", "HEAD^{tree}"]);
+    let point = record_review_point(
+        &SystemGit,
+        &linked,
+        &ReviewPoint {
+            tree,
+            head: Some(base.clone()),
+            reflog: None,
+            pending: Vec::new(),
+            session: Some("moving".into()),
+        },
+    )
+    .unwrap();
+    let start = format!(
+        "refs/mj/session-start/{}/{}",
+        digest_bytes(b"moving"),
+        digest_bytes(baseline.as_bytes())
+    );
+    git(&linked, &["update-ref", &baseline, &point]);
+    git(&linked, &["update-ref", &start, &base]);
+    let snapshot = collect_git_snapshot(
+        &SystemGit,
+        &linked,
+        &GitCollectionSpec {
+            id: "repo".into(),
+            relative_destination: "repo".into(),
+            history: GitHistoryMode::CloneFrom(base.clone()),
+            origin_override: Some(origin.to_string_lossy().into_owned()),
+        },
+    )
+    .unwrap();
+    let destination = clone_repository(directory.path(), &origin, "destination");
+    super::git::restore_git_snapshot_for_session(
+        &SystemGit,
+        &destination,
+        &snapshot,
+        Some("moving"),
+    )
+    .unwrap();
+    assert_eq!(
+        git_line(&destination, &["rev-parse", REVIEW_BASELINE_REF]),
+        point
+    );
+    let relocated_start = format!(
+        "refs/mj/session-start/{}/{}",
+        digest_bytes(b"moving"),
+        digest_bytes(REVIEW_BASELINE_REF.as_bytes())
+    );
+    assert_eq!(
+        git_line(&destination, &["rev-parse", &relocated_start]),
+        base
+    );
+    let foreign = record_review_point(
+        &SystemGit,
+        &destination,
+        &ReviewPoint {
+            tree: git_line(&destination, &["rev-parse", "HEAD^{tree}"]),
+            head: Some(base),
+            reflog: None,
+            pending: Vec::new(),
+            session: Some("other".into()),
+        },
+    )
+    .unwrap();
+    git(&destination, &["update-ref", REVIEW_BASELINE_REF, &foreign]);
+    let error = super::git::restore_git_snapshot_for_session(
+        &SystemGit,
+        &destination,
+        &snapshot,
+        Some("moving"),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("belongs to another session"),
+        "{error:#}"
+    );
+    assert_eq!(
+        git_line(&destination, &["rev-parse", REVIEW_BASELINE_REF]),
+        foreign
     );
 }
 

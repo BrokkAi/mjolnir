@@ -130,10 +130,16 @@ pub fn collect_git_snapshot_with_progress(
         GitHistoryMode::CloneFrom(base) => Some(collect_clone_refs(runner, repository, base)?),
         _ => None,
     };
-    let history = match &clone_state {
+    let mut history = match &clone_state {
         Some(state) => state.history.clone(),
         None => select_git_history(runner, repository, &spec.history, &identity.head_commit)?,
     };
+    let review_refs = if clone_state.is_none() {
+        collect_review_refs(runner, repository)?
+    } else {
+        BTreeMap::new()
+    };
+    include_review_history(&mut history, &review_refs);
     let unmerged_paths = clone_state
         .as_ref()
         .and_then(|state| state.operation.as_ref())
@@ -153,6 +159,13 @@ pub fn collect_git_snapshot_with_progress(
         let cleanup = remove_temporary_refs(runner, repository, &state.temporary_refs);
         let mut snapshot = result?;
         cleanup?;
+        if state
+            .saved_refs
+            .keys()
+            .any(|name| name.starts_with("refs/mj/"))
+        {
+            snapshot.metadata.review_baseline_ref = Some(review_baseline_ref(runner, repository)?);
+        }
         snapshot.metadata.saved_refs = state.saved_refs;
         snapshot.metadata.stash_stack = state.stash_stack;
         if let Some(operation) = state.operation {
@@ -161,12 +174,18 @@ pub fn collect_git_snapshot_with_progress(
         }
         Ok(snapshot)
     } else {
-        result
+        let mut snapshot = result?;
+        if !review_refs.is_empty() {
+            snapshot.metadata.review_baseline_ref = Some(review_baseline_ref(runner, repository)?);
+        }
+        snapshot.metadata.saved_refs = review_refs;
+        Ok(snapshot)
     }
 }
 
 /// Collect only enough Git identity to associate native harness state with an
-/// existing project. The project itself remains the recovery source.
+/// existing project, together with its durable review refs and their objects.
+/// The project itself remains the recovery source for working files.
 pub fn collect_git_metadata_snapshot(
     runner: &dyn GitCommandRunner,
     repository: &Path,
@@ -175,9 +194,26 @@ pub fn collect_git_metadata_snapshot(
     validate_component(&spec.id, "repository id")?;
     validate_archive_relative_path(&spec.relative_destination)?;
     let identity = collect_git_identity(runner, repository, spec.origin_override.as_deref())?;
+    let saved_refs = collect_review_refs(runner, repository)?;
+    let mut history = GitHistorySelection {
+        base_commit: identity.head_commit.clone(),
+        bundle_arguments: None,
+    };
+    include_review_history(&mut history, &saved_refs);
+    let committed_bundle = match history.bundle_arguments {
+        Some(arguments) => {
+            git_bytes_owned(runner, repository, &arguments, "bundle the review refs")?
+        }
+        None => Vec::new(),
+    };
     Ok(RepositorySnapshot {
         metadata: RepositoryMetadata {
-            saved_refs: Default::default(),
+            review_baseline_ref: if saved_refs.is_empty() {
+                None
+            } else {
+                Some(review_baseline_ref(runner, repository)?)
+            },
+            saved_refs,
             stash_stack: Vec::new(),
             git_operation: None,
             id: spec.id.clone(),
@@ -190,7 +226,7 @@ pub fn collect_git_metadata_snapshot(
             head_commit: identity.head_commit,
             branch: identity.branch,
         },
-        committed_bundle: Vec::new(),
+        committed_bundle,
         staged_patch: Vec::new(),
         unstaged_patch: Vec::new(),
         untracked_tar: Vec::new(),
@@ -415,11 +451,12 @@ pub fn has_origin_refs(runner: &dyn GitCommandRunner, repository: &Path) -> Resu
 /// A capture taken during a review is deliberately not pinned. It is consumed
 /// inside that review, and if the review completes it is pinned here as the
 /// new baseline.
-pub const REVIEW_BASELINE_REF: &str = "refs/hel/review-baseline";
+pub const REVIEW_BASELINE_REF: &str = "refs/mj/review-baseline";
 
 /// Where linked worktrees pin their review baselines, as
-/// `refs/hel/worktrees/<name>/review-baseline`.
-const WORKTREE_REVIEW_PINS: &str = "refs/hel/worktrees/";
+/// `refs/mj/worktrees/<name>/review-baseline`.
+const WORKTREE_REVIEW_PINS: &str = "refs/mj/worktrees/";
+const LEGACY_WORKTREE_REVIEW_PINS: &str = "refs/hel/worktrees/";
 
 /// The ref that pins the review baseline of the worktree `repository` is.
 ///
@@ -434,13 +471,66 @@ const WORKTREE_REVIEW_PINS: &str = "refs/hel/worktrees/";
 pub fn review_baseline_ref(runner: &dyn GitCommandRunner, repository: &Path) -> Result<String> {
     let (git_dir, common_dir) = git_directories(runner, repository)?;
     if same_directory(&git_dir, &common_dir)? {
+        migrate_review_ref(
+            runner,
+            repository,
+            "refs/hel/review-baseline",
+            REVIEW_BASELINE_REF,
+        )?;
         return Ok(REVIEW_BASELINE_REF.to_owned());
     }
     let name = git_dir
         .file_name()
         .and_then(|name| name.to_str())
         .with_context(|| format!("name the worktree of {}", git_dir.display()))?;
-    Ok(format!("{WORKTREE_REVIEW_PINS}{name}/review-baseline"))
+    let reference = format!("{WORKTREE_REVIEW_PINS}{name}/review-baseline");
+    migrate_review_ref(
+        runner,
+        repository,
+        &format!("{LEGACY_WORKTREE_REVIEW_PINS}{name}/review-baseline"),
+        &reference,
+    )?;
+    Ok(reference)
+}
+
+/// Move a legacy pin without overwriting a concurrent initializer or deleting
+/// a legacy value that changed after it was read.
+pub fn migrate_review_ref(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    legacy: &str,
+    reference: &str,
+) -> Result<()> {
+    let current = run_git(
+        runner,
+        repository,
+        ["show-ref", "--verify", "--quiet", reference],
+        &[],
+    )?;
+    if current.status == 0 {
+        return Ok(());
+    }
+    let old = run_git(
+        runner,
+        repository,
+        ["rev-parse", "--verify", "--quiet", legacy],
+        &[],
+    )?;
+    if old.status != 0 {
+        return Ok(());
+    }
+    let object = trim_output(&old.stdout, "read the legacy review ref")?;
+    // One Git transaction publishes the new ref and removes the old one only
+    // if neither value changed. Failure is visible; no baseline is discarded.
+    let transaction = format!("create {reference} {object}\ndelete {legacy} {object}\n");
+    git_bytes(
+        runner,
+        repository,
+        ["update-ref", "--stdin"],
+        transaction.as_bytes(),
+        "migrate the legacy review ref",
+    )?;
+    Ok(())
 }
 
 /// Deletes the review pins of linked worktrees the repository no longer has,
@@ -463,6 +553,7 @@ pub fn remove_departed_worktree_pins(
             "for-each-ref",
             "--format=%(objectname) %(refname)",
             WORKTREE_REVIEW_PINS,
+            LEGACY_WORKTREE_REVIEW_PINS,
         ],
     )
     .context("list the worktree review pins")?;
@@ -485,6 +576,7 @@ pub fn remove_departed_worktree_pins(
         };
         let Some(name) = reference
             .strip_prefix(WORKTREE_REVIEW_PINS)
+            .or_else(|| reference.strip_prefix(LEGACY_WORKTREE_REVIEW_PINS))
             .and_then(|rest| rest.strip_suffix("/review-baseline"))
         else {
             continue;
@@ -1413,6 +1505,40 @@ struct GitHistorySelection {
     bundle_arguments: Option<Vec<String>>,
 }
 
+fn collect_review_refs(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+) -> Result<BTreeMap<String, String>> {
+    // Migrate this checkout's baseline before enumerating durable state.
+    review_baseline_ref(runner, repository)?;
+    git_text(
+        runner,
+        repository,
+        [
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/mj/",
+        ],
+    )?
+    .lines()
+    .map(|line| {
+        let (name, oid) = line.split_once(' ').context("malformed review ref")?;
+        Ok((name.to_owned(), oid.to_owned()))
+    })
+    .collect()
+}
+
+fn include_review_history(history: &mut GitHistorySelection, refs: &BTreeMap<String, String>) {
+    if refs.is_empty() {
+        return;
+    }
+    let arguments = history
+        .bundle_arguments
+        .get_or_insert_with(|| vec!["bundle".to_owned(), "create".to_owned(), "-".to_owned()]);
+    // Before --not: these are positive tips even for SessionDelta bundles.
+    arguments.splice(3..3, refs.keys().cloned());
+}
+
 struct CloneRefState {
     history: GitHistorySelection,
     saved_refs: std::collections::BTreeMap<String, String>,
@@ -1435,12 +1561,14 @@ fn collect_clone_refs(
         ["rev-parse", "--verify", &format!("{base}^{{commit}}")],
     )
     .context("managed clone source commit is unavailable")?;
+    review_baseline_ref(runner, repository)?;
     let mut list_refs = [
         "for-each-ref",
         "--format=%(refname) %(objectname)",
         "refs/heads",
         "refs/tags",
         "refs/notes",
+        "refs/mj/",
     ]
     .map(String::from)
     .to_vec();
@@ -1485,7 +1613,7 @@ fn collect_clone_refs(
     let capture_id = mj_core::state::new_session_id()?;
     let staged = (|| -> Result<GitHistorySelection> {
         for (index, entry) in stash_stack.iter().enumerate() {
-            let name = format!("refs/mj/checkpoint/{capture_id}/stash/{index:08}");
+            let name = format!("refs/mj-checkpoint/{capture_id}/stash/{index:08}");
             git_bytes(
                 runner,
                 repository,
@@ -1499,7 +1627,7 @@ fn collect_clone_refs(
             operation.carry_objects(
                 runner,
                 repository,
-                &format!("refs/mj/checkpoint/{capture_id}/operation"),
+                &format!("refs/mj-checkpoint/{capture_id}/operation"),
                 &mut temporary_refs,
             )?;
         }
@@ -1518,17 +1646,16 @@ fn collect_clone_refs(
         .trim()
         .parse::<u64>()
         .context("count clone-owned commits")?;
-        let annotated_tag = saved_refs
-            .iter()
-            .filter(|(name, _)| name.starts_with("refs/tags/"))
-            .map(|(_, oid)| git_text(runner, repository, ["cat-file", "-t", oid]))
+        let non_commit_tip = saved_refs
+            .values()
+            .map(|oid| git_text(runner, repository, ["cat-file", "-t", oid]))
             .collect::<Result<Vec<_>>>()?
             .iter()
-            .any(|kind| kind == "tag")
+            .any(|kind| kind != "commit")
             || operation
                 .as_ref()
                 .is_some_and(operation::CollectedOperation::carries_tags);
-        let bundle_arguments = (count > 0 || annotated_tag).then(|| {
+        let bundle_arguments = (count > 0 || non_commit_tip).then(|| {
             let mut args = vec!["bundle".to_owned(), "create".to_owned(), "-".to_owned()];
             args.extend(tips);
             args.push(format!("^{base}"));
@@ -1727,6 +1854,7 @@ fn collect_git_contents(
 
     Ok(RepositorySnapshot {
         metadata: RepositoryMetadata {
+            review_baseline_ref: None,
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
             git_operation: None,
@@ -1748,6 +1876,60 @@ fn collect_git_contents(
     })
 }
 
+/// A worktree name changes when a session moves into another checkout. Keep
+/// every archived ref, and publish that session's baseline and start under the
+/// destination checkout's names as well.
+fn relocated_review_refs(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    metadata: &RepositoryMetadata,
+    session: Option<&str>,
+) -> Result<BTreeMap<String, String>> {
+    let refs = &metadata.saved_refs;
+    let mut restored = refs.clone();
+    let (Some(session), Some(source)) = (session, metadata.review_baseline_ref.as_deref()) else {
+        return Ok(restored);
+    };
+    let destination = review_baseline_ref(runner, repository)?;
+    if let Some(oid) = refs.get(source) {
+        let owner = read_review_point(runner, repository, oid)?.session;
+        if owner.as_deref().is_none_or(|owner| owner == session) {
+            let existing = run_git(
+                runner,
+                repository,
+                ["rev-parse", "--verify", "--quiet", &destination],
+                &[],
+            )?;
+            if existing.status == 0 {
+                let old = trim_output(&existing.stdout, "read destination baseline")?;
+                let owner = read_review_point(runner, repository, &old)?.session;
+                ensure!(
+                    old == *oid || owner.as_deref() == Some(session),
+                    "destination review baseline {destination} belongs to another session; restore into an unused checkout"
+                );
+            }
+            restored.insert(destination.clone(), oid.clone());
+        }
+    }
+    let prefix = format!(
+        "refs/mj/session-start/{}/",
+        digest_bytes(session.as_bytes())
+    );
+    for source in [
+        source.to_owned(),
+        source.replacen("refs/mj/", "refs/hel/", 1),
+    ] {
+        if let Some(start) = refs.get(&format!("{prefix}{}", digest_bytes(source.as_bytes()))) {
+            restored.insert(
+                format!("{prefix}{}", digest_bytes(destination.as_bytes())),
+                start.clone(),
+            );
+            break;
+        }
+    }
+    Ok(restored)
+}
+
 /// Restore a snapshot into `repository`, the directory its paths are named
 /// from. For a snapshot that records a `checkout_subdirectory` that is the
 /// destination checkout's top level: its untracked files are named from
@@ -1756,6 +1938,15 @@ pub fn restore_git_snapshot(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     snapshot: &RepositorySnapshot,
+) -> Result<()> {
+    restore_git_snapshot_for_session(runner, repository, snapshot, None)
+}
+
+pub(crate) fn restore_git_snapshot_for_session(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    snapshot: &RepositorySnapshot,
+    session: Option<&str>,
 ) -> Result<()> {
     if snapshot.metadata.remote_workspace {
         mj_core::remote_git::validate_network_url(&snapshot.metadata.origin)?;
@@ -1803,6 +1994,7 @@ pub fn restore_git_snapshot(
             "import committed delta bundle",
         )?;
     }
+    let saved_refs = relocated_review_refs(runner, repository, &snapshot.metadata, session)?;
     if let Some((operation, _)) = operation {
         operation::verify_objects(runner, repository, operation)?;
     }
@@ -1842,11 +2034,12 @@ pub fn restore_git_snapshot(
     // Check out before moving saved refs: changing the currently checked-out
     // branch first leaves the old index and worktree staged against its new tip.
     if clone_refs {
-        for (name, oid) in &snapshot.metadata.saved_refs {
+        for (name, oid) in &saved_refs {
             ensure!(
                 name.starts_with("refs/heads/")
                     || name.starts_with("refs/tags/")
                     || name.starts_with("refs/notes/")
+                    || name.starts_with("refs/mj/")
                     || (operation.is_some()
                         && operation::OPERATION_REF_NAMESPACES
                             .iter()
@@ -1867,13 +2060,60 @@ pub fn restore_git_snapshot(
                 &[],
                 "verify saved Git ref object",
             )?;
-            git_bytes(
-                runner,
-                repository,
-                ["update-ref", name, oid],
-                &[],
-                "restore saved Git ref",
-            )?;
+            if name.starts_with("refs/mj/") {
+                let existing = run_git(
+                    runner,
+                    repository,
+                    ["rev-parse", "--verify", "--quiet", name],
+                    &[],
+                )?;
+                let old = if existing.status == 0 {
+                    trim_output(&existing.stdout, "read destination review ref")?
+                } else {
+                    String::new()
+                };
+                if !old.is_empty() {
+                    if name.starts_with("refs/mj/reviewed/") {
+                        continue;
+                    }
+                    let owned_start = session.is_some_and(|session| {
+                        name.starts_with(&format!(
+                            "refs/mj/session-start/{}/",
+                            digest_bytes(session.as_bytes())
+                        ))
+                    });
+                    let owned_baseline = session.is_some()
+                        && (name == REVIEW_BASELINE_REF
+                            || (name.starts_with(WORKTREE_REVIEW_PINS)
+                                && name.ends_with("/review-baseline")))
+                        && read_review_point(runner, repository, oid)?
+                            .session
+                            .as_deref()
+                            == session
+                        && read_review_point(runner, repository, &old)?
+                            .session
+                            .as_deref()
+                            == session;
+                    if !owned_start && !owned_baseline {
+                        continue;
+                    }
+                }
+                git_bytes(
+                    runner,
+                    repository,
+                    ["update-ref", name, oid, &old],
+                    &[],
+                    "restore durable review ref",
+                )?;
+            } else {
+                git_bytes(
+                    runner,
+                    repository,
+                    ["update-ref", name, oid],
+                    &[],
+                    "restore saved Git ref",
+                )?;
+            }
         }
         for entry in snapshot.metadata.stash_stack.iter().rev() {
             git_bytes(

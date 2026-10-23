@@ -779,7 +779,9 @@ fn prepare_archive_view_with_part_size(
         .map(|payload| payload.descriptor.clone())
         .collect();
     let manifest = ArchiveManifest {
-        schema_version: if input
+        schema_version: if carries_review_refs(&repositories) {
+            ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
+        } else if input
             .canonical_session
             .transcript
             .iter()
@@ -1399,7 +1401,8 @@ fn parse_archive_manifest(manifest_bytes: &[u8]) -> Result<ArchiveManifest> {
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_CLONE_REFS
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY
-            || header.schema_version == ARCHIVE_SCHEMA_VERSION_MESSAGES,
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_MESSAGES
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_REVIEW_REFS,
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         header.schema_version,
         ARCHIVE_SCHEMA_VERSION
@@ -1440,9 +1443,22 @@ fn carries_checkout_subdirectory(repositories: &[RepositoryManifest]) -> bool {
         .any(|repository| repository.metadata.checkout_subdirectory.is_some())
 }
 
+fn carries_review_refs(repositories: &[RepositoryManifest]) -> bool {
+    repositories.iter().any(|repository| {
+        repository.metadata.review_baseline_ref.is_some()
+            || repository
+                .metadata
+                .saved_refs
+                .keys()
+                .any(|name| name.starts_with("refs/mj/"))
+    })
+}
+
 fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
     let expected_schema =
-        if carries_checkout_subdirectory(&manifest.repositories) {
+        if carries_review_refs(&manifest.repositories) {
+            ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
+        } else if carries_checkout_subdirectory(&manifest.repositories) {
             ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY
         } else if carries_agent_reports(&manifest.payloads) {
             ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
@@ -1455,8 +1471,11 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
         };
     ensure!(
         manifest.schema_version == expected_schema
-            || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_MESSAGES
-            || (expected_schema != ARCHIVE_SCHEMA_VERSION_CLONE_REFS
+            || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
+            || (manifest.schema_version == ARCHIVE_SCHEMA_VERSION_MESSAGES
+                && expected_schema != ARCHIVE_SCHEMA_VERSION_REVIEW_REFS)
+            || (expected_schema != ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
+                && expected_schema != ARCHIVE_SCHEMA_VERSION_CLONE_REFS
                 && expected_schema != ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
                 && expected_schema != ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY
                 && manifest.schema_version == ARCHIVE_SCHEMA_VERSION_CONTEXT),
@@ -1474,6 +1493,16 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
         "manifest session id is empty"
     );
     validate_secret_free_map(&manifest.target.details)?;
+    for repository in &manifest.repositories {
+        if let Some(reference) = &repository.metadata.review_baseline_ref {
+            ensure!(
+                reference == REVIEW_BASELINE_REF
+                    || (reference.starts_with("refs/mj/worktrees/")
+                        && reference.ends_with("/review-baseline")),
+                "invalid source review baseline ref: {reference}"
+            );
+        }
+    }
     let mut paths = BTreeSet::new();
     for descriptor in &manifest.payloads {
         validate_archive_relative_path(Path::new(&descriptor.path))?;
@@ -2010,7 +2039,6 @@ pub use file_input::{read_session_file_input, write_session_file};
 
 mod git;
 
-pub(crate) use git::ensure_no_symlink_ancestors;
 pub use git::{
     EXPORT_REFUSED_EXIT_CODE, GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode,
     GitOutput, GitSnapshotProgress, MergeConflicts, NON_INTERACTIVE_GIT_ENV,
@@ -2018,13 +2046,14 @@ pub use git::{
     ReflogAnchor, ReflogEntry, ReviewPoint, SessionDiff, SessionExportError, SystemGit,
     capture_paths, capture_worktree_tree, collect_git_metadata_snapshot, collect_git_snapshot,
     collect_git_snapshot_with_progress, diff_between_trees, empty_tree_id, has_origin_refs,
-    merge_trees, numstat_between_trees, pin_review_tree, push_branch, read_head_reflog,
-    read_review_point, record_review_point, record_reviewed_tree, remote_workspace_base,
-    remove_departed_worktree_pins, restore_git_snapshot, review_baseline_ref, session_diff,
-    session_diff_details, validate_symlink_target,
+    merge_trees, migrate_review_ref, numstat_between_trees, pin_review_tree, push_branch,
+    read_head_reflog, read_review_point, record_review_point, record_reviewed_tree,
+    remote_workspace_base, remove_departed_worktree_pins, restore_git_snapshot,
+    review_baseline_ref, session_diff, session_diff_details, validate_symlink_target,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};
+pub(crate) use git::{ensure_no_symlink_ancestors, restore_git_snapshot_for_session};
 use git::{
     validate_conflicted_worktree_tar, validate_conflicted_worktree_tar_reader,
     validate_operation_state_tar, validate_operation_state_tar_reader, validate_untracked_tar,

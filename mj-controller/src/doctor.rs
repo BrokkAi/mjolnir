@@ -3302,7 +3302,7 @@ mod tests;
 /// What one repository still holds from a Mjolnir review capture.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReviewResidue {
-    /// `refs/hel/*` refs in the repository.
+    /// Durable `refs/mj/*` refs and legacy `refs/hel/*` refs in the repository.
     pub refs: Vec<String>,
     /// Scratch index files left in the Git directory by an interrupted capture.
     pub scratch_indexes: Vec<PathBuf>,
@@ -3319,7 +3319,7 @@ impl ReviewResidue {
 /// Releases before this one staged the whole working tree into the user's own
 /// object store and pinned it with two refs, and a capture that was killed
 /// partway left its scratch index behind. Linked worktrees pin their baselines
-/// under `refs/hel/worktrees/`. All of it is the user's to remove, so this
+/// under `refs/mj/worktrees/` (formerly `refs/hel/worktrees/`). All of it is the user's to remove, so this
 /// only reads.
 pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
     let mut residue = ReviewResidue::default();
@@ -3328,11 +3328,12 @@ pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
         return residue;
     }
     loose_refs(&git_dir.join("refs/hel"), "refs/hel", &mut residue.refs);
+    loose_refs(&git_dir.join("refs/mj"), "refs/mj", &mut residue.refs);
     // A packed ref survives `git pack-refs`, which a `git gc` runs.
     if let Ok(packed) = std::fs::read_to_string(git_dir.join("packed-refs")) {
         for line in packed.lines() {
             if let Some((_, reference)) = line.split_once(' ')
-                && reference.starts_with("refs/hel/")
+                && (reference.starts_with("refs/hel/") || reference.starts_with("refs/mj/"))
                 && !residue.refs.iter().any(|known| known == reference)
             {
                 residue.refs.push(reference.to_owned());

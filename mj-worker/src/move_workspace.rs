@@ -738,6 +738,32 @@ mod tests {
             ],
         )
         .unwrap();
+        let head = git_text(&source, &["rev-parse", "HEAD"]).unwrap();
+        let tree = mj_checkpoint::archive::capture_worktree_tree(
+            &mj_checkpoint::archive::SystemGit,
+            &source,
+        )
+        .unwrap();
+        let point = mj_checkpoint::archive::record_review_point(
+            &mj_checkpoint::archive::SystemGit,
+            &source,
+            &mj_checkpoint::archive::ReviewPoint {
+                tree: tree.clone(),
+                head: Some(head.clone()),
+                reflog: None,
+                pending: Vec::new(),
+                session: Some("moving".into()),
+            },
+        )
+        .unwrap();
+        for (name, object) in [
+            (format!("refs/mj/reviewed/{tree}"), head.clone()),
+            ("refs/mj/session-start/session/baseline".into(), head),
+            ("refs/mj/review-baseline".into(), point),
+            ("refs/mj/worktrees/linked/review-baseline".into(), tree),
+        ] {
+            git(&source, &["update-ref", &name, &object]).unwrap();
+        }
         fs::write(source.join("tracked"), "staged\n").unwrap();
         git(&source, &["add", "tracked"]).unwrap();
         fs::write(source.join("tracked"), "unstaged\n").unwrap();

@@ -809,6 +809,7 @@ fn restore_rewrites_grok_cwd_key_and_session_summary_for_target_workspace() {
     const NATIVE: &str = "01a00c3a-553f-71e0-95ab-aa04396d3ad7";
     let repositories = vec![crate::archive::RepositoryManifest {
         metadata: crate::archive::RepositoryMetadata {
+            review_baseline_ref: None,
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
             git_operation: None,
@@ -1139,6 +1140,7 @@ fn claude_project_slug_matches_captured_local_rollout_fixtures() {
 fn restore_rewrites_claude_project_artifacts_for_target_workspace() {
     let repositories = vec![crate::archive::RepositoryManifest {
         metadata: crate::archive::RepositoryMetadata {
+            review_baseline_ref: None,
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
             git_operation: None,
@@ -1184,6 +1186,7 @@ fn restore_rewrites_claude_project_artifacts_for_target_workspace() {
 fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
     let repositories = vec![crate::archive::RepositoryManifest {
         metadata: crate::archive::RepositoryMetadata {
+            review_baseline_ref: None,
             saved_refs: Default::default(),
             stash_stack: Vec::new(),
             git_operation: None,
@@ -2528,6 +2531,62 @@ fn raw_project_export_keeps_git_metadata_without_git_contents() {
     ] {
         assert!(archive.payload_by_role(&role).unwrap().is_empty());
     }
+}
+
+// Hard-won: 0fefbee48: raw checkpoint identity omitted the review refs and their objects.
+#[test]
+fn raw_checkpoint_restores_review_refs_and_declares_the_new_schema() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    spec.repositories[0].capture = CheckpointRepositoryCapture::MetadataOnly;
+    let source = spec.workspace_root.join("app");
+    let head = git(&source, &["rev-parse", "HEAD"]);
+    let session = spec.session.id.clone();
+    let baseline = "refs/mj/review-baseline";
+    let start = format!(
+        "refs/mj/session-start/{}/{}",
+        mj_core::hex::lower_hex(Sha256::digest(session.as_bytes())),
+        mj_core::hex::lower_hex(Sha256::digest(baseline.as_bytes()))
+    );
+    fs::write(source.join("README.md"), b"review baseline\n").unwrap();
+    let tree = crate::archive::capture_worktree_tree(&SystemGit, &source).unwrap();
+    let point = crate::archive::record_review_point(
+        &SystemGit,
+        &source,
+        &crate::archive::ReviewPoint {
+            tree: tree.clone(),
+            head: Some(head.clone()),
+            reflog: None,
+            pending: Vec::new(),
+            session: Some(session),
+        },
+    )
+    .unwrap();
+    let reviewed = format!("refs/mj/reviewed/{tree}");
+    for (name, object) in [(baseline, &point), (&start, &head), (&reviewed, &head)] {
+        git(&source, &["update-ref", name, object]);
+    }
+    export_checkpoint(&spec).unwrap();
+    let archive = read_archive_verified(&spec.output_path).unwrap();
+    assert_eq!(
+        archive.manifest.schema_version,
+        crate::archive::ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
+    );
+    let destination = temp.path().join("destination");
+    fs::create_dir(&destination).unwrap();
+    git(&destination, &["init", "-q"]);
+    restore_single_repository_into_checkout(&spec.output_path, &destination, &SystemGit).unwrap();
+    for (name, object) in [(baseline, &point), (&start, &head), (&reviewed, &head)] {
+        assert_eq!(git(&destination, &["rev-parse", name]), *object);
+    }
+    assert_eq!(
+        git(&destination, &["show", &format!("{tree}:README.md")]),
+        "review baseline"
+    );
+    assert_ne!(
+        fs::read(destination.join("README.md")).unwrap(),
+        b"review baseline\n"
+    );
 }
 
 #[test]

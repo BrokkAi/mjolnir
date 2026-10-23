@@ -938,6 +938,7 @@ impl CommandExecutor for CheckoutPositionExecutor {
 
 fn recorded_repository(head_commit: &str, branch: Option<&str>) -> RepositoryMetadata {
     RepositoryMetadata {
+        review_baseline_ref: None,
         saved_refs: Default::default(),
         stash_stack: Vec::new(),
         git_operation: None,

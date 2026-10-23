@@ -5230,7 +5230,7 @@ async fn first_daemon_start_pins_the_worktree_before_the_primary_harness() {
     expect_daemon_launch_failure(&root, config).await;
 
     let baseline = std::process::Command::new("git")
-        .args(["rev-parse", "--verify", "refs/hel/review-baseline^{tree}"])
+        .args(["rev-parse", "--verify", "refs/mj/review-baseline^{tree}"])
         .current_dir(&repository)
         .output()
         .unwrap();

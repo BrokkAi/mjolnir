@@ -130,6 +130,7 @@ pub(super) fn write_network_checkpoint_archive(
         event_frontier,
         vec![RepositorySnapshot {
             metadata: RepositoryMetadata {
+                review_baseline_ref: None,
                 saved_refs: Default::default(),
                 stash_stack: Vec::new(),
                 git_operation: None,

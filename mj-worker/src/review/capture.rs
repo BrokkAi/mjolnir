@@ -531,11 +531,21 @@ fn parse_numstat(output: &[u8]) -> Vec<FileLineChange> {
 fn session_start_ref(runner: &dyn GitCommandRunner, root: &Path, session: &str) -> Result<String> {
     use sha2::{Digest, Sha256};
     let baseline = review_baseline_ref(runner, root)?;
-    Ok(format!(
-        "refs/mj/session-start/{}/{}",
-        mj_core::hex::lower_hex(Sha256::digest(session.as_bytes())),
-        mj_core::hex::lower_hex(Sha256::digest(baseline.as_bytes())),
-    ))
+    let prefix = format!(
+        "refs/mj/session-start/{}",
+        mj_core::hex::lower_hex(Sha256::digest(session.as_bytes()))
+    );
+    let reference = format!(
+        "{prefix}/{}",
+        mj_core::hex::lower_hex(Sha256::digest(baseline.as_bytes()))
+    );
+    let legacy_baseline = baseline.replacen("refs/mj/", "refs/hel/", 1);
+    let legacy = format!(
+        "{prefix}/{}",
+        mj_core::hex::lower_hex(Sha256::digest(legacy_baseline.as_bytes()))
+    );
+    mj_checkpoint::archive::migrate_review_ref(runner, root, &legacy, &reference)?;
+    Ok(reference)
 }
 
 /// Reads the immutable start commit, if this checkout has recorded one.
@@ -782,6 +792,52 @@ mod capture_tests {
         git(temp.path(), &["add", "."]);
         git(temp.path(), &["commit", "-qm", "base"]);
         temp
+    }
+
+    #[test]
+    fn legacy_review_refs_migrate_before_the_next_capture() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.name", "Test"]);
+        git(&root, &["config", "user.email", "test@example.test"]);
+        std::fs::write(root.join("tracked"), "before\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "base"]);
+        initialize_review_baselines(&SystemGit, std::slice::from_ref(&root), "session").unwrap();
+        let reference = review_baseline_ref(&SystemGit, &root).unwrap();
+        let point = git(&root, &["rev-parse", &reference]);
+        let start = session_start_ref(&SystemGit, &root, "session").unwrap();
+        git(&root, &["update-ref", "refs/hel/review-baseline", &point]);
+        git(&root, &["update-ref", "-d", &reference]);
+        use sha2::{Digest, Sha256};
+        let legacy = format!(
+            "refs/mj/session-start/{}/{}",
+            mj_core::hex::lower_hex(Sha256::digest(b"session")),
+            mj_core::hex::lower_hex(Sha256::digest(b"refs/hel/review-baseline"))
+        );
+        let head = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["update-ref", &legacy, &head]);
+        git(&root, &["update-ref", "-d", &start]);
+        std::fs::write(root.join("tracked"), "after\n").unwrap();
+        let deltas = capture_repository_deltas(
+            &SystemGit,
+            std::slice::from_ref(&root),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            "session",
+        )
+        .unwrap();
+        assert!(deltas[0].patch.contains("-before"));
+        assert!(deltas[0].patch.contains("+after"));
+        assert_eq!(git(&root, &["rev-parse", &reference]), point);
+        assert_eq!(
+            ensure_session_start_head(&SystemGit, &root, "session").unwrap(),
+            Some(head)
+        );
+        assert_eq!(git(&root, &["for-each-ref", "refs/hel/"]), "");
+        assert_eq!(git(&root, &["for-each-ref", &legacy]), "");
     }
 
     #[test]
@@ -1576,13 +1632,26 @@ mod capture_tests {
         );
 
         assert!(
-            git(&main, &["for-each-ref", "refs/hel/worktrees/feature"]).contains("review-baseline")
+            git(&main, &["for-each-ref", "refs/mj/worktrees/feature"]).contains("review-baseline")
+        );
+        let pin = git(
+            &main,
+            &["rev-parse", "refs/mj/worktrees/feature/review-baseline"],
+        );
+        git(
+            &main,
+            &[
+                "update-ref",
+                "refs/hel/worktrees/feature/review-baseline",
+                &pin,
+            ],
         );
         git(
             &main,
             &["worktree", "remove", "--force", linked.to_str().unwrap()],
         );
         initialize_review_baselines(&SystemGit, std::slice::from_ref(&main), "session-c").unwrap();
+        assert_eq!(git(&main, &["for-each-ref", "refs/mj/worktrees"]), "");
         assert_eq!(git(&main, &["for-each-ref", "refs/hel/worktrees"]), "");
     }
 
