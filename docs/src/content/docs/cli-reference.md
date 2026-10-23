@@ -102,7 +102,7 @@ in text only (OpenCode and MiMo), or completes an agent method through ACP
 offered, or `--cli` to skip ACP and run the harness command found on `PATH`
 exactly as earlier releases did. If the harness advertises no ACP login, Mjolnir
 also falls back to that command-line login. A profile pointed at your own
-OpenCode or Muse home signs in through that installed CLI, so the pinned binary
+OpenCode, Muse, or MiMo home signs in through that installed CLI, so the pinned binary
 never runs against a login database it does not own. The same flow is available
 from the dashboard: Settings → Agent Profiles, select a profile, then **Sign in**. A profile that authenticates with an
 API key, such as a DSH profile or a Codex profile with a custom provider, has no

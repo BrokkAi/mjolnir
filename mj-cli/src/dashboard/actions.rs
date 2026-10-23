@@ -2168,6 +2168,9 @@ async fn run_setup_login(context: &mut DashboardContext, profile_id: &str) -> Re
         return Err(format!("{error:#}"));
     }
     let profile = profile_id.to_owned();
+    // Ctrl+C belongs to the login child, not to the dashboard's shutdown
+    // coordinator, while the terminal is handed over.
+    let _interrupts = mj_controller::termination::suppress_interrupts();
     // The interactive child cannot run on a runtime worker. The dashboard
     // waits for the handover, but the Tokio worker remains available for the
     // daemon's other tasks.

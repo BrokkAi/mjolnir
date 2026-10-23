@@ -49,12 +49,17 @@ pub(crate) async fn login(
     if !scheme.syncs_login() {
         return Ok(Outcome::NoLogin(describe_auth(&scheme)));
     }
-    // A person's own nested home is the one directory their installed
-    // OpenCode or Muse already owns. Pointing the pinned harness at it could
-    // migrate its database. Use their CLI for that case instead.
-    if profile.kind.nested_home() && profile.kind.is_own_nested_home(&profile.home) {
+    // A person's own installation keeps its data outside the profile home
+    // (OpenCode/Muse XDG data, or MiMo's stock XDG data). Pointing the pinned
+    // harness at it could migrate a database Mjolnir does not own. Use their
+    // CLI for that case instead.
+    if !profile
+        .kind
+        .data_source(&profile.home)
+        .starts_with(&profile.home)
+    {
         return Ok(Outcome::Unavailable(format!(
-            "this profile uses your own {} home; Mjolnir signs in through that harness's installed CLI",
+            "this profile uses your own {} data directory; Mjolnir signs in through that harness's installed CLI",
             profile.kind.display_name()
         )));
     }
@@ -194,6 +199,7 @@ async fn sign_in(
     match terminal {
         Some(terminal) => {
             session.shutdown().await;
+            restore_default_sigint();
             let rendered = render_command(&terminal);
             println!("Running `{rendered}`.");
             let status = Command::new(&terminal.command)
@@ -445,6 +451,19 @@ fn api_key_present(environment: &BTreeMap<String, String>) -> bool {
             .get(*name)
             .is_some_and(|value| !value.trim().is_empty())
     })
+}
+
+/// `tokio::signal::ctrl_c` installs a process-wide SIGINT handler that
+/// outlives the future. A terminal login command and the CLI fallback expect
+/// Ctrl+C to terminate this process, so restore the default before handing
+/// over to them.
+pub(crate) fn restore_default_sigint() {
+    #[cfg(unix)]
+    // SAFETY: setting SIGINT back to its default disposition is process-wide
+    // and does not touch any memory owned by another thread.
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+    }
 }
 
 fn render_command(command: &TerminalCommand) -> String {

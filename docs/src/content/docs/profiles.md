@@ -583,7 +583,7 @@ harness, so the controller does not need a separate installation of that
 harness. Claude agent-acp advertises no login method, so Claude still uses an
 installed `claude` CLI (or the Mjolnir setup token). When a harness is installed
 on `PATH` it is also available through `--cli`, and it is used automatically as
-the fallback when ACP cannot run. A profile pointed at your own OpenCode or Muse
+the fallback when ACP cannot run. A profile pointed at your own OpenCode, Muse, or MiMo
 home signs in through that installed harness's CLI instead: Mjolnir never runs
 the pinned binary against a login database it does not own. A profile with its
 own managed home gets the pinned ACP flow. API-key profiles, and profiles whose

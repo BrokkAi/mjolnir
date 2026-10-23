@@ -1916,6 +1916,8 @@ async fn login(args: LoginArgs) -> Result<()> {
     if args.method.is_some() {
         bail!("--method requires a Unix host");
     }
+    #[cfg(unix)]
+    crate::acp_login::restore_default_sigint();
 
     let (program, arguments) = mj_core::credentials::login_command(profile)
         .with_context(|| format!("profile {profile_id:?}"))?;

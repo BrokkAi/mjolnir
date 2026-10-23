@@ -785,12 +785,8 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "theme" => {
             "Auto matches the terminal's background. Terminal Dark and Light use its own colors. Applies after saving."
         }
-        "profiles" => {
-            "Add a profile, then choose Sign in. Detect profiles finds installed agents."
-        }
-        "home" => {
-            "The agent's account directory, such as ~/.codex. Save, then choose Sign in."
-        }
+        "profiles" => "Add a profile, then choose Sign in. Detect profiles finds installed agents.",
+        "home" => "The agent's account directory, such as ~/.codex. Save, then choose Sign in.",
         "machines" => {
             "Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its build cache settings."
         }
