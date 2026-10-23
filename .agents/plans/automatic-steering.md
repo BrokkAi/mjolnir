@@ -52,9 +52,11 @@ The `claude4` account was at its session limit during validation; the Claude run
 
 2026-09-24: Codex's new "Other" field has `_meta.codex.role: "user_note"` and `questionId`, where 1.11.5 had `isOtherAnswer: true`. mj pairs it with its question through the existing `custom_answer_for` link with no `custom_answer_option`, so the note replaces the choice, as the old "Other" field did. Coupling to the bridge's "None of the above" label was rejected.
 
+2026-10-23: Automatic steering follows `_meta.steering.supported` alone. The extra `idleBehaviors` requirement excluded Muse, which advertises the extension, accepts `idleBehavior: "promptRequired"`, and queues the steer to the host's next turn boundary. Every bridge Mjolnir drives that advertises steering also implements that fallback, so the second capability was not a safety gate; it only kept supported harnesses in the queue until the turn ended.
+
 ## Outcomes & Retrospective
 
-Queued prompts now join the running turn without Escape for Codex (bridge 1.13.2 and later) and Claude, and `mj prompt --wait` finishes for a steered prompt when its turn ends. Harnesses that do not return idle steers keep the queue-then-Escape behavior. The race in which a steer arrives just as a turn ends was not reproduced live; unit tests cover it at the bridge (`returned_steering_leaves_the_prompt_to_mj_without_cancellation`), relay, and projection levels. On Claude a steer still aborts the model response in progress, as Escape steering already did; the turn, its tools and its subagents continue.
+Queued prompts now join the running turn without Escape for every harness that advertises the ACP steering extension: Codex (bridge 1.13.2 and later), Claude, Muse, and DSH today. The bridge queues the steer until its next tool boundary, so a tool call is not stopped or interrupted; Claude keeps its PostToolBatch delivery because its extension pre-empts generation. `mj prompt --wait` finishes for a steered prompt when its turn ends. Harnesses that do not advertise steering keep the queue-then-Escape behavior. The race in which a steer arrives just as a turn ends was not reproduced live; unit tests cover it at the bridge (`returned_steering_leaves_the_prompt_to_mj_without_cancellation`), relay, and projection levels. On Claude a steer still aborts the model response in progress, as Escape steering already did; the turn, its tools and its subagents continue.
 
 ## Context and Orientation
 

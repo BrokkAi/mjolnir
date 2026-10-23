@@ -2867,7 +2867,6 @@ fn typed_acp_observations_are_journaled() {
             capabilities: Some(Box::new(AgentCapabilities::default())),
             agent_info: Some(Implementation::new("test-agent", "1")),
             steering_supported: Some(true),
-            steering_returns_idle_input: false,
         },
     )
     .unwrap();
@@ -2911,6 +2910,45 @@ fn typed_acp_observations_are_journaled() {
     drop(relay);
     let reopened = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     assert_eq!(reopened.operational_state().steering_supported, None);
+}
+
+// Muse advertises only `steering.supported` while implementing
+// `idleBehavior: promptRequired` and queueing the steer itself.
+#[test]
+fn advertised_steering_enables_automatic_steering() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(Mutex::new(
+        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
+    ));
+    let mut in_flight = BTreeMap::new();
+    unix::record_runtime_event(
+        &relay,
+        &mut in_flight,
+        &no_prompt_loop(),
+        RuntimeEvent::Connected {
+            agent_name: Some("test-agent".into()),
+            agent_version: Some("1".into()),
+            protocol_version: Some(ProtocolVersion::V1),
+            capabilities: Some(Box::new(AgentCapabilities::default())),
+            agent_info: Some(Implementation::new("test-agent", "1")),
+            steering_supported: Some(true),
+        },
+    )
+    .unwrap();
+
+    let mut relay = relay.lock().unwrap();
+    submit(&mut relay, "prompt-first", prompt("first"));
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    submit(&mut relay, "prompt-second", prompt("second"));
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    let [steer] = claimed.as_slice() else {
+        panic!("a steering bridge must auto-steer the queued prompt: {claimed:?}");
+    };
+    assert!(steer.command_id.starts_with("auto-steer-"));
+    assert!(matches!(
+        &steer.command,
+        RelayCommand::Steer { queued_prompt_id, .. } if queued_prompt_id == "prompt-second"
+    ));
 }
 
 #[test]
@@ -3993,7 +4031,6 @@ async fn checkpoint_waits_for_current_session_configuration_then_stays_local() {
             capabilities: Some(Box::new(AgentCapabilities::default())),
             agent_info: Some(Implementation::new("test-agent", "1")),
             steering_supported: None,
-            steering_returns_idle_input: false,
         })
         .unwrap();
     wait_for_relay_state(&relay, |state| state.latest_ordinal > before_connection).await;
