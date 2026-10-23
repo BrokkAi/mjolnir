@@ -25,9 +25,9 @@ Two words come up on every screen:
   a local container, an SSH host, or an EC2 instance.
 
 When no workspace exists, Mjolnir creates one named after the current
-directory. On first launch, it automatically discovers your installed agents,
-adds their profiles, and creates a bundle for the current GitHub repository
-when one is found. Every later plain `mj` launch adds profiles for agents
+directory. On first launch, it automatically discovers your installed agents
+and any login-free API key exported to Mjolnir, adds their profiles, and
+creates a bundle for the current GitHub repository when one is found. Every later plain `mj` launch adds profiles for agents
 installed since (`mj go`, `mj workspaces`, and the relaunch after an upgrade
 do not); disable a profile in Settings to stop using an agent, because a removed
 profile for an installed agent comes back. A one-time welcome dialog shows the detected agents and
@@ -59,14 +59,18 @@ the folder.
 Mjolnir can install the exact pinned harness for a profile when you sign in, but
 it needs a profile first. If no agent is found:
 
+Mjolnir can install the exact pinned harness for a profile when you sign in, but
+it needs a profile first. If no agent is found:
+
 1. Open Settings (`prefix+s`), choose **Agent Profiles**, choose **Add**, pick
    the agent kind, point `home` at a directory for that profile, and save.
 2. Select the profile and choose **Sign in**. The first sign-in installs the
    pinned harness under Mjolnir's cache; `mj login --profile <id>` does the same
    from a shell. Claude's ACP bridge advertises no login, so a Claude profile
    still needs the `claude` CLI (or `mj login --setup-token`, which also runs
-   that CLI). DSH has no sign-in: set `DEEPSEEK_API_KEY` in the profile
-   environment or the environment Mjolnir starts with, then restart the daemon.
+   that CLI). DSH has no sign-in: export `DEEPSEEK_API_KEY` before starting
+   Mjolnir and detection offers it without a DeepSeek CLI installation; see
+   [Profiles](/profiles/).
 
 Alternatively, install an agent and sign in with its own CLI, then choose
 **Detect profiles** (or run `mj setup`). That is also the path for a profile
@@ -78,7 +82,8 @@ Node.js 22 or newer and npm on `PATH`; Mjolnir launches its own pinned copy of
 each agent. OpenCode uses a verified download, and Kimi and Grok use their
 official installers. The managed OpenCode and Muse downloads need `curl` and
 `tar` (and Muse also needs Node/npm for its adapter); Kimi and Grok need `bash`
-and `curl`. DSH needs no Node.js, but on Linux it needs glibc 2.34 or newer.
+and `curl`. DSH also needs Node.js 22 or newer with npm and npx, unless
+`dsh-acp` itself is on `PATH`; on Linux it needs glibc 2.34 or newer.
 
 The dashboard keeps its session list, Conversation and Prompt regions, target
 capacity, and profile quota visible together.
