@@ -1805,7 +1805,9 @@ function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}
   select.value = shown.mode;
   select.disabled = draft.queueLocked === true;
   select.onchange = () => {
-    if (select.value !== shown.mode) {
+    // Compare with the draft as it is now: the control can change more than
+    // once before the form renders again.
+    if (select.value !== shownDelegation(draft, draft.subagents).mode) {
       draft.subagents = select.value === 'mjolnir' && draft.storedSubagents?.mode === 'mjolnir'
         ? { ...draft.storedSubagents } : { mode: select.value };
     }
