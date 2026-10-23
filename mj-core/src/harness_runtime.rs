@@ -107,7 +107,7 @@ pub const MUSE_ACP_VERSION: &str = "0.15.0";
 pub const MUSE_VERSION: &str = "1.4.11-R6667.1";
 pub const OPENCODE_VERSION: &str = "2.1.2";
 pub const MIMO_CLI_VERSION: &str = "0.1.15";
-pub const DSH_ACP_VERSION: &str = "0.2.0";
+pub const DSH_ACP_VERSION: &str = "0.2.1";
 
 /// The shell commands that start OpenCode's ACP server with the executable
 /// named by `$opencode`, for the managed install and the container fallback
@@ -137,7 +137,7 @@ pub fn opencode_acp_script() -> String {
 /// The most bytes of staged instructions dsh-acp can be given. They travel
 /// in one environment variable, and Linux refuses to start a program with an
 /// environment string longer than 32 pages (131072 bytes), counting the
-/// `DSH_ACP_SYSTEM_PROMPT=` prefix and the terminating NUL. dsh-acp 0.2.0
+/// `DSH_ACP_SYSTEM_PROMPT=` prefix and the terminating NUL. dsh-acp
 /// reads instructions from no file, and Mjolnir's ACP schema has no session
 /// system-prompt field, so there is no other channel. The ceiling applies on
 /// every target, so a session behaves the same wherever it runs.
@@ -355,8 +355,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             entrypoint: "node_modules/.bin/mimo",
         },
         HarnessKind::Dsh => HarnessPin {
-            install_id: "dsh-acp-0.2.0",
-            display_version: "dsh-acp 0.2.0",
+            install_id: "dsh-acp-0.2.1",
+            display_version: "dsh-acp 0.2.1",
             entrypoint: "dsh-acp",
         },
     }

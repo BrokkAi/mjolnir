@@ -487,7 +487,7 @@ mod tests {
     }
 
     /// Leaving Plan selects the normal mode each harness's `mode` select
-    /// offers: MiMo Code's `build` and dsh-acp 0.2.0's `agent`.
+    /// offers: MiMo Code's `build` and dsh-acp's `agent`.
     #[test]
     fn plan_exit_selects_each_harness_own_normal_mode() {
         for (harness, normal) in [(HarnessKind::Mimo, "build"), (HarnessKind::Dsh, "agent")] {
