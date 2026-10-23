@@ -1334,7 +1334,11 @@ mod tests {
         git(path, &["commit", "-q", "-m", "base"]);
         git(path, &["mv", "before.txt", "after 名前.txt"]);
         fs::write(path.join("my notes 日本.txt"), "hello\n").unwrap();
-        fs::write(path.join("quo\"te.txt"), "q\n").unwrap();
+        // Windows forbids `"` in file names; elsewhere git quotes it.
+        let quoted_name = cfg!(not(windows)).then_some("quo\"te.txt");
+        if let Some(name) = quoted_name {
+            fs::write(path.join(name), "q\n").unwrap();
+        }
         fs::write(path.join("tracked 日本.txt"), "x\ny\n").unwrap();
         let read = |args: &[&str]| {
             let output = Command::new("git")
@@ -1358,15 +1362,14 @@ mod tests {
             .map(|file| (file.path.as_str(), file.kind()))
             .collect();
         files.sort();
-        assert_eq!(
-            files,
-            [
-                ("after 名前.txt", "renamed"),
-                ("my notes 日本.txt", "new"),
-                ("quo\"te.txt", "new"),
-                ("tracked 日本.txt", "modified"),
-            ]
-        );
+        let mut expected = vec![
+            ("after 名前.txt", "renamed"),
+            ("my notes 日本.txt", "new"),
+            ("tracked 日本.txt", "modified"),
+        ];
+        expected.extend(quoted_name.map(|name| (name, "new")));
+        expected.sort();
+        assert_eq!(files, expected);
         let tracked = status
             .changed
             .iter()
