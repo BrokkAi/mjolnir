@@ -586,14 +586,20 @@ pub(crate) fn spawn_machine_runtime_check(
 
 /// Read saved-profile sign-in status off the dashboard's loop.
 pub(crate) fn spawn_profile_login_statuses(
+    generation: u64,
     config: Config,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) -> JoinHandle<()> {
     spawn_io(
         "reading profile sign-in status",
         updates,
-        move || Ok(mj_controller::profile_login::statuses(&config)),
-        DashboardIoUpdate::ProfileLoginStatuses,
+        move || {
+            let executor = mj_controller::targets::BoundedProcessExecutor::new(
+                std::time::Duration::from_secs(10),
+            );
+            Ok(mj_controller::profile_login::statuses(&config, &executor))
+        },
+        move |result| DashboardIoUpdate::ProfileLoginStatuses { generation, result },
     )
 }
 

@@ -275,16 +275,19 @@ fn signing_in_to_the_selected_profile_is_a_settings_action() {
 #[test]
 fn the_profiles_list_shows_each_profiles_sign_in_status() {
     let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.set_profile_login_statuses(std::collections::BTreeMap::from([
-        (
-            "codex-1".to_owned(),
-            mj_core::credentials::LoginStatus::SignedOut,
-        ),
-        (
-            "claude-1".to_owned(),
-            mj_core::credentials::LoginStatus::SignedIn,
-        ),
-    ]));
+    dashboard.set_profile_login_statuses(
+        0,
+        std::collections::BTreeMap::from([
+            (
+                "codex-1".to_owned(),
+                mj_core::credentials::LoginStatus::SignedOut,
+            ),
+            (
+                "claude-1".to_owned(),
+                mj_core::credentials::LoginStatus::SignedIn,
+            ),
+        ]),
+    );
     dashboard.begin_settings_section("profiles", None);
     let lines = drawn(&mut dashboard, 140, 40);
     let codex = lines
@@ -297,6 +300,51 @@ fn the_profiles_list_shows_each_profiles_sign_in_status() {
         .find(|line| line.contains("claude-1"))
         .unwrap_or_else(|| panic!("missing claude row: {lines:#?}"));
     assert!(claude.contains("signed in"), "{claude:?}");
+}
+
+#[test]
+fn an_older_sign_in_status_read_does_not_replace_a_newer_one() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.set_profile_login_statuses(
+        2,
+        std::collections::BTreeMap::from([(
+            "codex-1".to_owned(),
+            mj_core::credentials::LoginStatus::SignedOut,
+        )]),
+    );
+    dashboard.set_profile_login_statuses(
+        1,
+        std::collections::BTreeMap::from([(
+            "codex-1".to_owned(),
+            mj_core::credentials::LoginStatus::SignedIn,
+        )]),
+    );
+    assert_eq!(
+        dashboard.profile_login_status("codex-1"),
+        Some(&mj_core::credentials::LoginStatus::SignedOut)
+    );
+}
+
+#[test]
+fn editing_a_profile_disables_sign_in_until_the_change_is_saved() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("profiles", None);
+    let Mode::Setup(dialog) = &mut dashboard.mode else {
+        panic!("settings");
+    };
+    dialog.draft["profiles"]["codex-1"]["home"] = json!("/tmp/another-home");
+    dialog.selected = dialog
+        .keys()
+        .iter()
+        .position(|key| key == "codex-1")
+        .expect("the test profile is listed");
+    dialog.prepare();
+    let sign_in = dialog
+        .page_actions()
+        .into_iter()
+        .find(|(control, _, _)| *control == SetupControl::SignIn)
+        .expect("the profiles page offers sign-in");
+    assert!(!sign_in.2, "Sign in must wait for the edit to be saved");
 }
 
 fn choose(dashboard: &mut DashboardState, name: &str) -> DashboardAction {

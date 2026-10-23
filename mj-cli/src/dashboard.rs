@@ -969,8 +969,9 @@ pub(crate) async fn run_dashboard_for_workspace(
             // Settings shows whether each saved profile has a login. Reading
             // those files belongs off the loop; this is the one place that
             // starts it so every surface that opens Settings is covered.
-            if context.dashboard.take_profile_login_refresh() {
+            if let Some(generation) = context.dashboard.take_profile_login_refresh() {
                 io::spawn_profile_login_statuses(
+                    generation,
                     context.controller.config.clone(),
                     context.dashboard_io_tx.clone(),
                 );

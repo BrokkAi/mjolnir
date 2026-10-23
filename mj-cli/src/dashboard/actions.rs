@@ -527,7 +527,7 @@ pub(crate) async fn apply_dashboard_action(
             generation,
             profile_id,
         } => {
-            let result = run_setup_login(context, &profile_id);
+            let result = run_setup_login(context, &profile_id).await;
             context
                 .dashboard
                 .setup_login_finished(generation, &profile_id, result);
@@ -2155,41 +2155,43 @@ async fn dispatch_restart(
 /// not at the dashboard, and the child must own standard input for browser and
 /// device-code prompts. The event stream is dropped first so it cannot consume
 /// that input, and recreated afterwards.
-fn run_setup_login(context: &mut DashboardContext, profile_id: &str) -> Result<(), String> {
-    #[cfg(not(unix))]
-    {
-        let _ = context;
-        return Err("sign-in requires a Unix host".to_owned());
-    }
-    #[cfg(unix)]
-    {
-        let events = context.events.take();
-        if let Err(error) = context.terminal.suspend() {
-            context.events = events;
-            return Err(format!("{error:#}"));
-        }
-        let result = (|| -> Result<(), String> {
-            let executable = std::env::current_exe()
-                .map_err(|error| format!("find the mj executable: {error}"))?;
-            let status = std::process::Command::new(executable)
-                .args(["login", "--profile", profile_id])
-                .status()
-                .map_err(|error| {
-                    format!("could not start `mj login --profile {profile_id}`: {error}")
-                })?;
-            if status.success() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "`mj login --profile {profile_id}` exited with {status}; see the output above"
-                ))
-            }
-        })();
-        let resumed = context.terminal.resume();
-        drop(events);
+async fn run_setup_login(context: &mut DashboardContext, profile_id: &str) -> Result<(), String> {
+    let executable =
+        std::env::current_exe().map_err(|error| format!("find the mj executable: {error}"))?;
+    // The event stream must be gone before the child owns stdin. Crossterm
+    // stops its reader thread when the stream is dropped, so releasing the
+    // last handle here (rather than after the child) is what makes the
+    // handover safe.
+    let events = context.events.take();
+    drop(events);
+    if let Err(error) = context.terminal.suspend() {
         context.events = Some(crossterm::event::EventStream::new());
-        resumed.map_err(|error| format!("{error:#}"))?;
-        result
+        return Err(format!("{error:#}"));
+    }
+    let profile = profile_id.to_owned();
+    // The interactive child cannot run on a runtime worker. The dashboard
+    // waits for the handover, but the Tokio worker remains available for the
+    // daemon's other tasks.
+    let status = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(executable)
+            .args(["login", "--profile", &profile])
+            .status()
+    })
+    .await
+    .map_err(|error| format!("sign-in task failed: {error}"))?
+    .map_err(|error| format!("could not start `mj login --profile {profile_id}`: {error}"))?;
+    let resumed = context.terminal.resume();
+    context.events = Some(crossterm::event::EventStream::new());
+    if let Err(error) = resumed {
+        context.request_shutdown();
+        return Err(format!("{error:#}"));
+    }
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "`mj login --profile {profile_id}` exited with {status}; see the output above"
+        ))
     }
 }
 

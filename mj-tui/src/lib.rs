@@ -880,6 +880,8 @@ pub struct DashboardState {
     /// A surface that shows sign-in status opened, or a login finished. The
     /// dashboard loop reads the statuses off the loop when it takes this.
     profile_login_refresh: bool,
+    /// Orders status reads so a slow earlier read cannot replace a newer one.
+    profile_login_generation: u64,
     pub(crate) profile_hydration_requests: BTreeMap<String, BTreeSet<String>>,
     pub(crate) profile_hydration_errors: BTreeMap<String, String>,
     /// The resolved `[keys]` bindings, refreshed whenever configuration is
@@ -1217,6 +1219,7 @@ impl DashboardState {
             profile_capabilities: Default::default(),
             profile_login_statuses: Default::default(),
             profile_login_refresh: false,
+            profile_login_generation: 0,
             profile_hydration_requests: Default::default(),
             profile_hydration_errors: Default::default(),
             config: config.into(),

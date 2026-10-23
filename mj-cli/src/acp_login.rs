@@ -36,6 +36,8 @@ pub(crate) enum Outcome {
     /// ACP login cannot run for this profile or target. The caller may use the
     /// harness CLI's own login command instead.
     Unavailable(String),
+    /// This profile authenticates without an interactive harness login.
+    NoLogin(String),
 }
 
 /// Sign in `profile` through the pinned harness's ACP methods.
@@ -43,37 +45,58 @@ pub(crate) async fn login(
     profile: &HarnessProfile,
     requested_method: Option<&str>,
 ) -> Result<Outcome> {
-    if !profile.auth_scheme().syncs_login() {
-        return Ok(Outcome::Unavailable(describe_auth(&profile.auth_scheme())));
+    let scheme = profile.auth_scheme();
+    if !scheme.syncs_login() {
+        return Ok(Outcome::NoLogin(describe_auth(&scheme)));
     }
+    // A person's own nested home is the one directory their installed
+    // OpenCode or Muse already owns. Pointing the pinned harness at it could
+    // migrate its database. Use their CLI for that case instead.
+    if profile.kind.nested_home() && profile.kind.is_own_nested_home(&profile.home) {
+        return Ok(Outcome::Unavailable(format!(
+            "this profile uses your own {} home; Mjolnir signs in through that harness's installed CLI",
+            profile.kind.display_name()
+        )));
+    }
+    let created_home = !profile.home.exists();
     std::fs::create_dir_all(&profile.home).with_context(|| {
         format!(
             "create the harness profile home {} for sign-in",
             profile.home.display()
         )
     })?;
+    #[cfg(unix)]
+    if created_home {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&profile.home, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| {
+                format!(
+                    "restrict permissions on the harness profile home {}",
+                    profile.home.display()
+                )
+            })?;
+    }
     let mut environment = profile.environment.resolved().clone();
     profile.kind.configure_profile_home_environment(
         &profile.home,
         HarnessHost::current(),
         &mut environment,
     );
-    let mut launch_environment = match mj_core::login_environment::with_overrides(&environment)
-        .await
-    {
-        Ok(environment) => environment,
+    // A login runs in the person's terminal, not in an isolated worker. Keep
+    // the ambient display, browser and provider-key environment, then layer
+    // the account login shell and finally the profile's own overrides. The
+    // old CLI login inherited this environment; env_clear here would drop
+    // DISPLAY/BROWSER and exported provider keys.
+    let mut launch_environment: BTreeMap<String, String> = std::env::vars().collect();
+    match mj_core::login_environment::with_overrides(&BTreeMap::new()).await {
+        Ok(login) => launch_environment.extend(login),
         Err(error) => {
-            // A login must not depend on an interactive shell being startable
-            // in this process. The account identity and the profile overrides
-            // are enough to run the installer and the harness.
             eprintln!(
-                "Could not read the account login shell ({error:#}); using the account environment."
+                "Could not read the account login shell ({error:#}); using the environment Mjolnir started with."
             );
-            let mut base = mj_core::login_environment::bootstrap()?;
-            base.extend(environment.clone());
-            base
         }
-    };
+    }
+    launch_environment.extend(environment.clone());
     let managed =
         match mj_worker::worker_runtime::managed_harness(profile.kind, &launch_environment).await {
             Ok(managed) => managed,
@@ -126,6 +149,19 @@ async fn sign_in(
         return Ok(Outcome::Unavailable(
             "the ACP bridge advertised no login methods".to_owned(),
         ));
+    } else if requested_method.is_none()
+        && !has_desktop_session(environment)
+        && api_key_present(environment)
+    {
+        // Headless with an exported key: use the key method rather than
+        // waiting for a browser that cannot appear.
+        session
+            .methods
+            .iter()
+            .find(|method| method.id == "api-key")
+            .cloned()
+            .or_else(|| select(&session.methods, requested_method).ok().cloned())
+            .context("the ACP bridge advertised no usable login method")?
     } else {
         match select(&session.methods, requested_method) {
             Ok(method) => method.clone(),
@@ -135,6 +171,15 @@ async fn sign_in(
             }
         }
     };
+    if !has_desktop_session(environment)
+        && method.id.eq_ignore_ascii_case("chat-gpt")
+        && !api_key_present(environment)
+    {
+        session.shutdown().await;
+        bail!(
+            "the Codex ChatGPT sign-in needs a desktop browser; set CODEX_API_KEY or OPENAI_API_KEY, or run `mj login --cli` on a desktop"
+        );
+    }
     println!("Signing in with {} ({}).", method.name, method.id);
     match method.terminal_command(kind, entrypoint)? {
         Some(terminal) => {
@@ -145,6 +190,7 @@ async fn sign_in(
                 .args(&terminal.args)
                 .env_clear()
                 .envs(environment)
+                .envs(&terminal.env)
                 .current_dir(home)
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
@@ -162,6 +208,23 @@ async fn sign_in(
             }
         }
         None => {
+            if !method.env_vars.is_empty() {
+                let missing = method
+                    .env_vars
+                    .iter()
+                    .filter(|name| !environment.contains_key(*name))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !missing.is_empty() {
+                    session.shutdown().await;
+                    bail!(
+                        "the {} sign-in method {} needs {} in the environment before it can run",
+                        kind.display_name(),
+                        method.id,
+                        missing.join(", ")
+                    );
+                }
+            }
             let result =
                 tokio::time::timeout(AUTHENTICATE_TIMEOUT, session.authenticate(&method.id))
                     .await
@@ -208,6 +271,8 @@ struct AuthMethod {
     #[allow(dead_code)]
     description: Option<String>,
     terminal: Option<TerminalHint>,
+    /// Variables an `env_var` method needs the agent to receive.
+    env_vars: Vec<String>,
 }
 
 /// What a bridge says about a `terminal` auth method.
@@ -215,12 +280,14 @@ struct AuthMethod {
 struct TerminalHint {
     command: Option<String>,
     args: Vec<String>,
+    env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
 struct TerminalCommand {
     command: PathBuf,
     args: Vec<String>,
+    env: BTreeMap<String, String>,
 }
 
 impl AuthMethod {
@@ -236,6 +303,7 @@ impl AuthMethod {
                 return Ok(Some(TerminalCommand {
                     command: PathBuf::from(command),
                     args: hint.args.clone(),
+                    env: hint.env.clone(),
                 }));
             }
             if let Some(fallback) = known_terminal_fallback(kind, &self.id, entrypoint) {
@@ -251,6 +319,7 @@ impl AuthMethod {
             return Ok(Some(TerminalCommand {
                 command: entrypoint.to_path_buf(),
                 args: hint.args.clone(),
+                env: hint.env.clone(),
             }));
         }
         Ok(known_terminal_fallback(kind, &self.id, entrypoint))
@@ -271,11 +340,16 @@ fn known_terminal_fallback(
         (HarnessKind::OpenCode, "opencode-login") => &["auth", "login", "--standalone"],
         (HarnessKind::Mimo, "opencode-login") => &["auth", "login"],
         (HarnessKind::Muse, "muse-login") => &["login"],
+        // Grok's ACP bridge names an agent method, but its usable sign-in is
+        // the CLI's own login. Running it is safer than leaving `authenticate`
+        // to open a browser the target cannot show.
+        (HarnessKind::Grok, "grok.com") => &["login"],
         _ => return None,
     };
     Some(TerminalCommand {
         command: entrypoint.to_path_buf(),
         args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        env: BTreeMap::new(),
     })
 }
 
@@ -320,6 +394,24 @@ fn looks_interactive(id: &str) -> bool {
         .any(|needle| id.contains(needle))
 }
 
+/// Whether this login has a desktop session for a browser callback or opener.
+fn has_desktop_session(environment: &BTreeMap<String, String>) -> bool {
+    cfg!(any(target_os = "macos", target_os = "windows"))
+        || ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|name| {
+            environment
+                .get(*name)
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+}
+
+fn api_key_present(environment: &BTreeMap<String, String>) -> bool {
+    ["CODEX_API_KEY", "OPENAI_API_KEY"].iter().any(|name| {
+        environment
+            .get(*name)
+            .is_some_and(|value| !value.trim().is_empty())
+    })
+}
+
 fn render_command(command: &TerminalCommand) -> String {
     std::iter::once(command.command.to_string_lossy().into_owned())
         .chain(command.args.iter().cloned())
@@ -343,7 +435,9 @@ impl AcpSession {
         args: &[String],
         environment: &BTreeMap<String, String>,
     ) -> Result<Self> {
-        let mut child = Command::new(command)
+        let program = command;
+        let mut command = Command::new(program);
+        command
             .args(args)
             .env_clear()
             .envs(environment)
@@ -351,15 +445,18 @@ impl AcpSession {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| {
-                format!(
-                    "start the {} ACP bridge {}",
-                    kind.display_name(),
-                    command.display()
-                )
-            })?;
+            .kill_on_drop(true);
+        // A shell bootstrap or npx can leave a native server in the bridge's
+        // process group. Own that group so shutdown reaches it.
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut child = command.spawn().with_context(|| {
+            format!(
+                "start the {} ACP bridge {}",
+                kind.display_name(),
+                program.display()
+            )
+        })?;
         let stdin = child.stdin.take().context("ACP bridge has no stdin")?;
         let stdout = BufReader::new(child.stdout.take().context("ACP bridge has no stdout")?);
         let mut session = Self {
@@ -374,7 +471,7 @@ impl AcpSession {
             Ok(Ok(())) => Ok(session),
             Ok(Err(error)) => Err(error),
             Err(_) => {
-                let _ = session.child.start_kill();
+                session.shutdown().await;
                 bail!(
                     "the {} ACP bridge did not answer initialize within {} seconds",
                     kind.display_name(),
@@ -445,39 +542,59 @@ impl AcpSession {
                     line.trim()
                 );
             };
+            if let Some(server_method) = message.get("method").and_then(Value::as_str) {
+                // A request from the agent has its own id space. Check this
+                // before matching our response id: both sides commonly start
+                // at 1, and treating the request as the response would report
+                // a successful login that never happened.
+                if let Some(server_id) = message.get("id") {
+                    let response = json!({
+                        "jsonrpc": "2.0",
+                        "id": server_id,
+                        "error": {
+                            "code": -32601,
+                            "message": format!(
+                                "Mjolnir sign-in cannot provide the client method {server_method}"
+                            ),
+                        },
+                    });
+                    let mut bytes = serde_json::to_vec(&response)?;
+                    bytes.push(b'\n');
+                    self.stdin.write_all(&bytes).await?;
+                    self.stdin.flush().await?;
+                    bail!("the ACP bridge asked for client method {server_method} during sign-in");
+                }
+                // A notification is progress or logging; keep reading.
+                continue;
+            }
             if message.get("id").and_then(Value::as_u64) == Some(id) {
                 if let Some(error) = message.get("error") {
                     bail!("the ACP bridge rejected {method}: {error}");
                 }
                 return Ok(message.get("result").cloned().unwrap_or(Value::Null));
             }
-            if let (Some(server_id), Some(server_method)) = (
-                message.get("id"),
-                message.get("method").and_then(Value::as_str),
-            ) {
-                let response = json!({
-                    "jsonrpc": "2.0",
-                    "id": server_id,
-                    "error": {
-                        "code": -32601,
-                        "message": format!(
-                            "Mjolnir sign-in cannot provide the client method {server_method}"
-                        ),
-                    },
-                });
-                let mut bytes = serde_json::to_vec(&response)?;
-                bytes.push(b'\n');
-                self.stdin.write_all(&bytes).await?;
-                self.stdin.flush().await?;
-                bail!("the ACP bridge asked for client method {server_method} during sign-in");
-            }
-            // Notifications (no id) are progress or logging; keep reading.
         }
     }
 
     async fn shutdown(&mut self) {
-        let _ = self.child.start_kill();
-        let _ = self.child.wait().await;
+        // Closing the protocol stream gives the bridge a chance to finish a
+        // credential write before the group is signaled.
+        let _ = self.stdin.shutdown().await;
+        #[cfg(unix)]
+        if let Some(pid) = self.child.id() {
+            mj_core::subprocess::terminate_process_group(pid as i32, libc::SIGTERM);
+        }
+        match tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await {
+            Ok(_) => {}
+            Err(_) => {
+                #[cfg(unix)]
+                if let Some(pid) = self.child.id() {
+                    mj_core::subprocess::terminate_process_group(pid as i32, libc::SIGKILL);
+                }
+                let _ = self.child.start_kill();
+                let _ = self.child.wait().await;
+            }
+        }
     }
 }
 
@@ -500,7 +617,8 @@ fn parse_method(value: &Value) -> Option<AuthMethod> {
         .get("description")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let terminal = (value.get("type").and_then(Value::as_str) == Some("terminal")).then(|| {
+    let kind = value.get("type").and_then(Value::as_str);
+    let terminal = (kind == Some("terminal")).then(|| {
         let meta = value.pointer("/_meta/terminal-auth");
         let command = meta
             .and_then(|meta| meta.get("command"))
@@ -517,13 +635,39 @@ fn parse_method(value: &Value) -> Option<AuthMethod> {
                     .collect()
             })
             .unwrap_or_default();
-        TerminalHint { command, args }
+        let env = value
+            .get("env")
+            .and_then(Value::as_object)
+            .map(|env| {
+                env.iter()
+                    .filter_map(|(name, value)| {
+                        value.as_str().map(|value| (name.clone(), value.to_owned()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        TerminalHint { command, args, env }
     });
+    let env_vars = if kind == Some("env_var") {
+        value
+            .get("vars")
+            .and_then(Value::as_array)
+            .map(|vars| {
+                vars.iter()
+                    .filter_map(|var| var.get("name").and_then(Value::as_str))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     Some(AuthMethod {
         id,
         name,
         description,
         terminal,
+        env_vars,
     })
 }
 
@@ -551,6 +695,7 @@ mod tests {
                 directory.join(".local/share").display().to_string(),
             ),
             ("PATH".into(), std::env::var("PATH").unwrap_or_default()),
+            ("DISPLAY".into(), ":0".into()),
         ])
     }
 
@@ -585,19 +730,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_api_key_profile_reports_no_interactive_login() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut profile = HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Dsh,
+            home: directory.path().to_path_buf(),
+            environment: Default::default(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+            codex_profile: None,
+            legacy_subagents: Default::default(),
+        };
+        profile
+            .environment
+            .insert("DEEPSEEK_API_KEY".to_owned(), "secret".to_owned());
+        let outcome = login(&profile, None).await.unwrap();
+        assert!(matches!(outcome, Outcome::NoLogin(reason) if reason.contains("DEEPSEEK_API_KEY")));
+    }
+
+    #[tokio::test]
     async fn a_terminal_method_runs_the_advertised_command_with_the_profile_environment() {
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("terminal-ran");
         let login = write_script(
             directory.path(),
             "login.sh",
-            &format!("#!/bin/sh\nprintf '%s' \"$HOME\" > {}\n", marker.display()),
+            &format!(
+                "#!/bin/sh\nprintf '%s' \"$HOME:$MJ_LOGIN_ENV\" > {}\n",
+                marker.display()
+            ),
         );
         let methods = json!([{
             "id": "muse-login",
             "name": "Log in with Muse",
             "type": "terminal",
             "args": ["login"],
+            "env": { "MJ_LOGIN_ENV": "from-bridge" },
             "_meta": { "terminal-auth": {
                 "command": login.display().to_string(),
                 "args": []
@@ -618,7 +787,7 @@ mod tests {
         assert!(matches!(outcome, Outcome::SignedIn { method } if method == "muse-login"));
         assert_eq!(
             std::fs::read_to_string(marker).unwrap(),
-            directory.path().display().to_string()
+            format!("{}:from-bridge", directory.path().display())
         );
     }
 
@@ -694,6 +863,47 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_server_request_sharing_the_response_id_is_not_mistaken_for_a_login() {
+        let directory = tempfile::tempdir().unwrap();
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": 1,
+                "authMethods": [{ "id": "chat-gpt", "name": "ChatGPT" }],
+            },
+        });
+        let bridge = write_script(
+            directory.path(),
+            "bridge.sh",
+            &format!(
+                "#!/bin/sh\n\
+                 read -r line\n\
+                 printf '%s\\n' '{response}'\n\
+                 read -r line\n\
+                 printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"elicitation/create\",\"params\":{{}}}}'\n\
+                 sleep 5\n",
+                response = response
+            ),
+        );
+        let error = sign_in(
+            HarnessKind::Codex,
+            directory.path(),
+            &bridge,
+            &[],
+            &bridge,
+            &home(directory.path()),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("elicitation/create"),
+            "{error:#}"
+        );
+    }
+
     /// An empty list is what makes `login` fall back to the harness CLI; this
     /// pins the wording callers rely on.
     #[test]
@@ -712,6 +922,7 @@ mod tests {
             name: "Login with opencode".into(),
             description: Some("Run `opencode auth login` in the terminal".into()),
             terminal: None,
+            env_vars: Vec::new(),
         };
         let command = method
             .terminal_command(HarnessKind::OpenCode, Path::new("/pinned/opencode"))

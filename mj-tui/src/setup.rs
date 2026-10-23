@@ -193,6 +193,11 @@ pub(crate) struct SetupDialog {
     /// Profiles that already exist in the saved configuration. A profile added
     /// in this draft has no entry on disk for `mj login --profile` to find.
     saved_profiles: BTreeSet<String>,
+    /// The saved, expanded value of each profile. Sign in targets the file on
+    /// disk, so it is only offered while the draft still matches that shape.
+    saved_profile_values: std::collections::BTreeMap<String, Value>,
+    /// Saved-profile statuses, used to keep Sign in off API-key profiles.
+    login_statuses: std::collections::BTreeMap<String, mj_core::credentials::LoginStatus>,
     pub(crate) notice: Option<String>,
     /// Where the notice was first shown. A status line belongs to the page
     /// or prompt that set it and goes when the dialog is no longer there.
@@ -871,6 +876,16 @@ impl SetupDialog {
         ensure_local_machine(&mut draft);
         schema::expand(&mut draft, &mut Vec::new());
         populate_subagent_profile_choices(&mut draft);
+        let saved_profile_values = draft
+            .get("profiles")
+            .and_then(Value::as_object)
+            .map(|profiles| {
+                profiles
+                    .iter()
+                    .map(|(id, value)| (id.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
         static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let preferred = preferred_size(&draft);
         let mut dialog = Self {
@@ -887,6 +902,8 @@ impl SetupDialog {
             saving: false,
             discovering: false,
             saved_profiles: config.profiles.keys().cloned().collect(),
+            saved_profile_values,
+            login_statuses: std::collections::BTreeMap::new(),
             notice: None,
             notice_anchor: None,
             build_cache_preview: None,
@@ -907,6 +924,17 @@ impl SetupDialog {
 
     fn keys(&self) -> Vec<String> {
         visible_keys(&self.path, self.current())
+    }
+
+    /// Whether the draft still describes the profile that is saved on disk.
+    fn saved_identity_matches(&self, profile_id: &str) -> bool {
+        let Some(saved) = self.saved_profile_values.get(profile_id) else {
+            return false;
+        };
+        self.draft
+            .get("profiles")
+            .and_then(|profiles| profiles.get(profile_id))
+            == Some(saved)
     }
 
     fn selected_path(&self) -> Option<Vec<String>> {
@@ -978,16 +1006,39 @@ impl SetupDialog {
         }
         // Signing in applies to the selected row, so the button belongs to the
         // profiles list rather than to every page. A profile added in this
-        // draft is not on disk yet and cannot be the target of `mj login`.
+        // draft is not on disk yet, a disabled profile cannot be selected for
+        // work, and an API-key profile has no interactive login.
         if self.path == ["profiles"] {
-            let saved = self
-                .keys()
-                .get(self.selected)
+            let selected = self.keys().get(self.selected).cloned();
+            let saved = selected
+                .as_deref()
                 .is_some_and(|key| self.saved_profiles.contains(key));
+            let unchanged = selected
+                .as_deref()
+                .is_some_and(|key| self.saved_identity_matches(key));
+            let enabled = selected.as_deref().is_some_and(|key| {
+                self.draft["profiles"]
+                    .get(key)
+                    .and_then(|profile| profile.get("enabled"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true)
+            });
+            let needs_login = selected.as_deref().is_some_and(|key| {
+                !matches!(
+                    self.login_statuses.get(key),
+                    Some(mj_core::credentials::LoginStatus::NotRequired(_))
+                )
+            });
             actions.push((
                 SignIn,
                 "Sign in",
-                interactive && saved && !self.discovering && !self.saving,
+                interactive
+                    && saved
+                    && unchanged
+                    && enabled
+                    && needs_login
+                    && !self.discovering
+                    && !self.saving,
             ));
         }
         if let Some((label, enabled)) = self.install_mbx_page_action() {
@@ -2164,9 +2215,17 @@ impl DashboardState {
     /// Replace the saved-profile sign-in statuses read off the loop.
     pub fn set_profile_login_statuses(
         &mut self,
+        generation: u64,
         statuses: std::collections::BTreeMap<String, mj_core::credentials::LoginStatus>,
     ) {
+        if generation < self.profile_login_generation {
+            return;
+        }
+        self.profile_login_generation = generation;
         self.profile_login_statuses = statuses;
+        if let Some(dialog) = setup_dialog_mut(&mut self.mode) {
+            dialog.login_statuses = self.profile_login_statuses.clone();
+        }
     }
 
     pub(crate) fn profile_login_status(
@@ -2177,8 +2236,12 @@ impl DashboardState {
     }
 
     /// Take the request to read saved-profile sign-in status off the loop.
-    pub fn take_profile_login_refresh(&mut self) -> bool {
-        std::mem::take(&mut self.profile_login_refresh)
+    pub fn take_profile_login_refresh(&mut self) -> Option<u64> {
+        if !std::mem::take(&mut self.profile_login_refresh) {
+            return None;
+        }
+        self.profile_login_generation = self.profile_login_generation.wrapping_add(1);
+        Some(self.profile_login_generation)
     }
 
     pub(crate) fn take_profile_hydration(&mut self) -> Option<DashboardAction> {
@@ -2578,10 +2641,34 @@ impl DashboardState {
             Some(Interaction::Activate(SignIn)) if dialog.path == ["profiles"] => {
                 match dialog.keys().get(dialog.selected) {
                     Some(profile_id) if dialog.saved_profiles.contains(profile_id) => {
-                        action = DashboardAction::SetupLogin {
-                            generation: dialog.generation,
-                            profile_id: profile_id.clone(),
-                        };
+                        if !dialog.saved_identity_matches(profile_id) {
+                            dialog.notice =
+                                Some("Save changes before signing in to this profile.".into());
+                        } else {
+                            let enabled = dialog.draft["profiles"]
+                                .get(profile_id)
+                                .and_then(|profile| profile.get("enabled"))
+                                .and_then(Value::as_bool)
+                                .unwrap_or(true);
+                            let no_login = matches!(
+                                dialog.login_statuses.get(profile_id),
+                                Some(mj_core::credentials::LoginStatus::NotRequired(_))
+                            );
+                            if !enabled {
+                                dialog.notice =
+                                    Some("Enable this profile before signing in.".into());
+                            } else if no_login {
+                                dialog.notice = Some(
+                                    "This profile authenticates without an interactive login."
+                                        .into(),
+                                );
+                            } else {
+                                action = DashboardAction::SetupLogin {
+                                    generation: dialog.generation,
+                                    profile_id: profile_id.clone(),
+                                };
+                            }
+                        }
                     }
                     Some(_) => {
                         dialog.notice =
@@ -3452,7 +3539,10 @@ pub(crate) fn render_setup(
             // Sign-in status is part of the profile list, not a detail hidden
             // inside the profile page: a signed-out row is visible before a
             // session is started.
-            let summary = if !choice_editor && dialog.path == ["profiles"] {
+            let summary = if !choice_editor
+                && dialog.path == ["profiles"]
+                && dialog.saved_identity_matches(key)
+            {
                 match dashboard.profile_login_status(key) {
                     Some(status) => {
                         let base = summary.strip_suffix("  ›").unwrap_or(&summary);

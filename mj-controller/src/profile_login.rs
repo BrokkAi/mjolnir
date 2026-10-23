@@ -10,21 +10,32 @@ use std::collections::BTreeMap;
 use mj_core::config::{AuthScheme, Config, HarnessKind, HarnessProfile};
 use mj_core::credentials::{self, LoginStatus};
 
+use crate::targets::CommandExecutor;
+
 /// The status of every profile in `config`, keyed by profile id.
-pub fn statuses(config: &Config) -> BTreeMap<String, LoginStatus> {
+pub fn statuses(config: &Config, executor: &impl CommandExecutor) -> BTreeMap<String, LoginStatus> {
     config
         .profiles
         .iter()
-        .map(|(id, profile)| (id.clone(), status(id, profile)))
+        .map(|(id, profile)| (id.clone(), status(id, profile, executor)))
         .collect()
 }
 
 /// Whether `profile` has a usable harness login or needs no interactive login.
-pub fn status(profile_id: &str, profile: &HarnessProfile) -> LoginStatus {
+pub fn status(
+    profile_id: &str,
+    profile: &HarnessProfile,
+    executor: &impl CommandExecutor,
+) -> LoginStatus {
     // A Claude setup token is Mjolnir-owned and does not live in the harness
-    // home, so check it before the ordinary login file.
+    // home, so check it before the ordinary login file. A token supplied by
+    // the profile's own environment is a login too.
     if profile.kind == HarnessKind::Claude
-        && credentials::claude_oauth_token_path(profile_id).is_file()
+        && (credentials::claude_oauth_token_path(profile_id).is_file()
+            || profile
+                .environment
+                .get("CLAUDE_CODE_OAUTH_TOKEN")
+                .is_some_and(|token| !token.trim().is_empty()))
     {
         return LoginStatus::SignedIn;
     }
@@ -39,27 +50,29 @@ pub fn status(profile_id: &str, profile: &HarnessProfile) -> LoginStatus {
         AuthScheme::InlineApiKey => LoginStatus::NotRequired("inline API key".to_owned()),
         AuthScheme::AwsCredentialChain => LoginStatus::NotRequired("AWS credentials".to_owned()),
         AuthScheme::NoAuthentication => LoginStatus::NotRequired("no login required".to_owned()),
-        AuthScheme::NativeLoginStore => match crate::opencode_logins::profile_logins(profile) {
-            Ok(Some(_)) => LoginStatus::SignedIn,
-            Ok(None) => LoginStatus::SignedOut,
-            Err(error) => {
-                LoginStatus::Unknown(format!("could not read OpenCode logins: {error:#}"))
+        AuthScheme::NativeLoginStore => {
+            if crate::setup::harness_is_authenticated_with_executor(profile, executor) {
+                LoginStatus::SignedIn
+            } else {
+                LoginStatus::SignedOut
             }
-        },
+        }
         AuthScheme::NativeLogin => {
-            #[cfg(target_os = "macos")]
-            if profile.kind == HarnessKind::Claude {
-                // Claude Code stores this login in the Keychain, where only
-                // Claude Code reads it. Neither file nor absence proves either
-                // state, so do not claim one.
-                return LoginStatus::Unknown(
-                    "Claude Code keeps this login in the macOS Keychain".to_owned(),
-                );
+            if !crate::setup::harness_is_authenticated_with_executor(profile, executor) {
+                return LoginStatus::SignedOut;
             }
+            // Authenticated, but a recorded access-token expiry is worth
+            // calling out. Harnesses with no expiry record (or a macOS
+            // Keychain login with no file) simply stay "signed in".
             match credentials::read_credential_file(profile.kind, &profile.authentication_marker())
             {
-                Ok((snapshot, _)) if !snapshot.present => LoginStatus::SignedOut,
+                Ok((snapshot, _)) if !snapshot.present => LoginStatus::SignedIn,
                 Ok((_, bytes)) => {
+                    if serde_json::from_slice::<serde_json::Value>(&bytes).is_err() {
+                        return LoginStatus::Unknown(
+                            "the credential file is not valid JSON".to_owned(),
+                        );
+                    }
                     let expired = credentials::credential_expiry(profile.kind, &bytes)
                         .is_some_and(|expiry| expiry <= mj_core::clock::epoch_millis());
                     if expired {
@@ -79,6 +92,7 @@ pub fn status(profile_id: &str, profile: &HarnessProfile) -> LoginStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::targets::ProcessExecutor;
     use mj_core::config::HarnessProfile;
 
     fn profile(kind: HarnessKind, home: &std::path::Path) -> HarnessProfile {
@@ -98,7 +112,10 @@ mod tests {
     fn a_profile_without_its_login_file_is_signed_out() {
         let home = tempfile::tempdir().unwrap();
         let profile = profile(HarnessKind::Codex, home.path());
-        assert_eq!(status("codex", &profile), LoginStatus::SignedOut);
+        assert_eq!(
+            status("codex", &profile, &ProcessExecutor),
+            LoginStatus::SignedOut
+        );
     }
 
     #[test]
@@ -106,7 +123,21 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("auth.json"), "{}").unwrap();
         let profile = profile(HarnessKind::Codex, home.path());
-        assert_eq!(status("codex", &profile), LoginStatus::SignedIn);
+        assert_eq!(
+            status("codex", &profile, &ProcessExecutor),
+            LoginStatus::SignedIn
+        );
+    }
+
+    #[test]
+    fn an_unreadable_login_file_is_reported_as_unknown() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("auth.json"), "not json").unwrap();
+        let profile = profile(HarnessKind::Codex, home.path());
+        assert!(matches!(
+            status("codex", &profile, &ProcessExecutor),
+            LoginStatus::Unknown(_)
+        ));
     }
 
     #[test]
@@ -116,7 +147,7 @@ mod tests {
         profile
             .environment
             .insert("DEEPSEEK_API_KEY".to_owned(), "secret".to_owned());
-        let status = status("dsh", &profile);
+        let status = status("dsh", &profile, &ProcessExecutor);
         assert_eq!(
             status,
             LoginStatus::NotRequired("DEEPSEEK_API_KEY API key".into())
@@ -128,6 +159,9 @@ mod tests {
     fn an_opencode_profile_without_a_database_is_signed_out() {
         let home = tempfile::tempdir().unwrap();
         let profile = profile(HarnessKind::OpenCode, home.path());
-        assert_eq!(status("opencode", &profile), LoginStatus::SignedOut);
+        assert_eq!(
+            status("opencode", &profile, &ProcessExecutor),
+            LoginStatus::SignedOut
+        );
     }
 }

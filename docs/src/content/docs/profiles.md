@@ -533,14 +533,16 @@ Run:
 mj login --profile codex-work
 ```
 
-You can also sign in without leaving the dashboard: press the prefix, then `b`
-and `s` to open Settings, choose **Profiles**, select a profile, and choose
-**Sign in**. Mjolnir hands the terminal to the same login flow and resumes the
-dashboard when it finishes. The profiles list shows each saved profile's status
-beside it — `signed in`, `signed out`, `credential expired`, or the API-key and
-no-login cases — so a signed-out profile is visible before a session fails. The
-button is available for profiles that already exist in the saved configuration;
-save a newly added profile first.
+You can also sign in without leaving the dashboard: press `prefix+s` to open
+Settings, choose **Profiles**, select a profile, and choose **Sign in**. Mjolnir
+hands the terminal to the same login flow and resumes the dashboard when it
+finishes. The profiles list shows each saved profile's status beside it —
+`signed in`, `signed out`, `credential expired`, or the API-key and no-login
+cases — so a signed-out profile is visible before a session fails. `credential
+expired` means the harness recorded an access-token expiry that has passed;
+some harnesses refresh it automatically on the next turn. The button is
+available for profiles that already exist in the saved configuration and have no
+unsaved edits; save a new or changed profile first.
 
 When exactly one profile exists, `--profile` may be omitted. With several
 profiles it is required. Mjolnir sets the selected home variable and profile
@@ -568,9 +570,12 @@ trying a different flow.
 The pinned harness is the same version a session runs, so signing in never
 requires a separate installation of the harness on the controller. When a
 harness is installed on `PATH` it is still available through `--cli`, and it is
-used automatically as the fallback when ACP cannot run. API-key profiles, and
-profiles whose harness is configured for an API key rather than a native login,
-have no interactive login.
+used automatically as the fallback when ACP cannot run. A profile pointed at
+your own OpenCode or Muse home signs in through that installed harness's CLI
+instead: Mjolnir never runs the pinned binary against a login database it does
+not own. A profile with its own managed home gets the pinned ACP flow. API-key
+profiles, and profiles whose harness is configured for an API key rather than a
+native login, have no interactive login.
 
 On macOS, Claude Code keeps its login in one Keychain item rather than in the
 home ([anthropics/claude-code#20553](https://github.com/anthropics/claude-code/issues/20553)),

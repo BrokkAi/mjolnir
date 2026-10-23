@@ -101,8 +101,10 @@ in text only (OpenCode and MiMo), or completes an agent method through ACP
 `authenticate` (Codex). Use `--method` to choose when several methods are
 offered, or `--cli` to skip ACP and run the harness command found on `PATH`
 exactly as earlier releases did. If the harness advertises no ACP login, Mjolnir
-also falls back to that command-line login. The same flow is available from the
-dashboard: Settings → Profiles, select a profile, then **Sign in**. A profile that authenticates with an
+also falls back to that command-line login. A profile pointed at your own
+OpenCode or Muse home signs in through that installed CLI, so the pinned binary
+never runs against a login database it does not own. The same flow is available
+from the dashboard: Settings → Profiles, select a profile, then **Sign in**. A profile that authenticates with an
 API key, such as a DSH profile or a Codex profile with a custom provider, has no
 login, and `mj login` refuses it. `--setup-token` is Claude-only: it mints and
 stores a long-lived subscription token so containers do not race the controller
