@@ -21,8 +21,8 @@ use mj_controller::controller::Controller;
 use mj_controller::import::{
     BundleResolution, ClaudeSessionSelection, ClaudeTranscript, ImportArchiveProgress,
     ImportControl, ImportedClaudeSession, NativeImportRequest, NativeScanCache, SessionEditTargets,
-    import_native_session, import_safety_issues, locate_native_session, read_native_transcript,
-    resolve_bundle, scan_native_sessions, session_edit_targets,
+    import_native_session, import_safety_issues, locate_native_session, native_sessions_enumerable,
+    read_native_transcript, resolve_bundle, scan_native_sessions, session_edit_targets,
 };
 use mj_tui::{ImportProfileOption, ImportSessionOption};
 
@@ -489,6 +489,11 @@ pub(crate) fn discover_import_profile(
         scan_progress: None,
         error: None,
     };
+    // A harness whose sessions cannot be listed yet is not an error to report.
+    if !native_sessions_enumerable(harness_kind) {
+        publish(&profile);
+        return profile;
+    }
     let mut last_publish: Option<Instant> = None;
     let mut git_availability = HashMap::new();
     let discovered = scan_native_sessions(harness_kind, &home, cache, |progress| {
@@ -910,6 +915,22 @@ mod tests {
         };
         let profile = scan();
         assert!(profile.error.is_none(), "{:?}", profile.error);
+        // Hard-won: DSH campaign 2026-10-23: Import tab reported unsupported DSH scans as failures
+        for unsupported in [HarnessKind::Dsh, HarnessKind::OpenCode, HarnessKind::Mimo] {
+            let skipped = discover_import_profile(
+                "unsupported".into(),
+                unsupported,
+                home.clone(),
+                &cache,
+                |_| {},
+            );
+            assert!(
+                skipped.error.is_none(),
+                "{unsupported:?}: {:?}",
+                skipped.error
+            );
+            assert!(skipped.sessions.is_empty());
+        }
         assert_eq!(profile.sessions.len(), 1);
         assert_eq!(
             profile.sessions[0].unavailable_reason.as_deref(),

@@ -124,6 +124,23 @@ pub(super) fn container_capabilities(engine: &str) -> &'static [&'static str] {
     }
 }
 
+/// Security options Mjolnir itself puts on a session container. The retained
+/// container guard and the replacement builder both read this list so a
+/// storage-preserving upgrade cannot silently drop an option the new container
+/// needs.
+pub(super) fn container_security_opts(engine: &str) -> &'static [&'static str] {
+    match engine {
+        // Host bind mounts carry the host's SELinux label (`cache_home_t` or
+        // `user_home_t`), which a `container_t` process is denied. Relabeling
+        // the shared mbx cache on every start would walk every object in it,
+        // and Docker targets already run without that separation; keep the
+        // rootless user namespace and drop only the SELinux layer that cannot
+        // see these mounts.
+        "podman" => &["label=disable"],
+        _ => &[],
+    }
+}
+
 pub(super) fn container_run(
     engine: &str,
     template: &ContainerTemplate,
@@ -597,6 +614,9 @@ pub(super) fn container_run_args(
             "--env".to_owned(),
             "HOME=/home/hel".to_owned(),
         ]);
+        for option in container_security_opts(engine) {
+            args.extend(["--security-opt".to_owned(), (*option).to_owned()]);
+        }
     }
     let temporary_volume = temporary_volume_argument(name, additional_mounts);
     if !temporary_volume.is_empty() {

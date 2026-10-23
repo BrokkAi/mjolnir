@@ -128,8 +128,9 @@ pub struct DurableRelay {
     next_reviewer_admission: u64,
     /// Optional extension advertised by the current ACP process.
     steering_supported: Option<bool>,
-    /// The connected bridge returns steers it cannot inject, so the relay may
-    /// steer queued prompts on its own. Belongs to the bridge, like readiness.
+    /// The connected bridge advertises steering, so the relay may steer
+    /// queued prompts on its own; the bridge queues them to its next safe
+    /// boundary. Belongs to the bridge, like readiness.
     automatic_steering: bool,
     /// How this harness receives an accepted steer. Claude never uses ACP
     /// steering because its bridge can cancel an in-flight tool hook.

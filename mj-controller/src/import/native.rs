@@ -339,6 +339,16 @@ pub fn read_native_transcript(
     }
 }
 
+/// Whether Mjolnir can list this harness's native sessions at all. The
+/// harnesses that keep sessions in a database, and DSH, cannot be scanned yet;
+/// callers skip them instead of reporting the scan as a failure.
+pub fn native_sessions_enumerable(harness: HarnessKind) -> bool {
+    !matches!(
+        harness,
+        HarnessKind::OpenCode | HarnessKind::Mimo | HarnessKind::Dsh
+    )
+}
+
 /// Scan a harness home newest first, reporting after every candidate.
 pub fn scan_native_sessions(
     harness: HarnessKind,

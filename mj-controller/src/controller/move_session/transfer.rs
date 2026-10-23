@@ -125,6 +125,11 @@ const RSYNC_TRANSFER_OPTIONS: [&str; 6] = [
 const RSYNC_REQUIREMENT: &str = "Move needs rsync 3.0 or newer, which accepts --protect-args; \
 the rsync that ships with macOS does not (install one with `brew install rsync`)";
 
+/// Why an rsync inside a container failed the probe. The container image
+/// supplies that rsync, so the macOS advice does not apply.
+const CONTAINER_RSYNC_REQUIREMENT: &str = "Move needs rsync 3.0 or newer, which accepts --protect-args; \
+the container image must provide it (add rsync to the image)";
+
 /// Rsync arguments that succeed only if rsync accepts every transfer option.
 /// `--version` makes rsync exit once it has parsed them.
 fn rsync_probe_arguments() -> impl Iterator<Item = String> {
@@ -466,20 +471,31 @@ impl Controller {
                 repositories: repositories(&layout),
             },
         )?)?;
-        for command in [
-            CommandSpec::new("rsync", rsync_probe_arguments())
-                .purpose("check controller Move transport"),
-            targets::command_on_locator(
-                &layout.backend,
-                id,
-                rsync_probe(),
-                "check source Move transport",
-            )?,
+        let source_requirement = if targets::is_container(&layout.backend) {
+            CONTAINER_RSYNC_REQUIREMENT
+        } else {
+            RSYNC_REQUIREMENT
+        };
+        for (command, requirement) in [
+            (
+                CommandSpec::new("rsync", rsync_probe_arguments())
+                    .purpose("check controller Move transport"),
+                RSYNC_REQUIREMENT,
+            ),
+            (
+                targets::command_on_locator(
+                    &layout.backend,
+                    id,
+                    rsync_probe(),
+                    "check source Move transport",
+                )?,
+                source_requirement,
+            ),
         ] {
             match executor.execute(&command) {
                 Ok(output) if output.status == 0 => {}
                 Ok(output) => assessment.blockers.push(format!(
-                    "{}: {RSYNC_REQUIREMENT}: {}",
+                    "{}: {requirement}: {}",
                     command.purpose,
                     String::from_utf8_lossy(&output.stderr)
                 )),
@@ -588,9 +604,19 @@ impl Controller {
             CommandSpec::new(program, arguments)
         };
         match executor.execute(&command.purpose("check destination Move transport")) {
-            Ok(output) if output.status == 0 => {},
-            Ok(output) => assessment.blockers.push(format!("Destination: {RSYNC_REQUIREMENT}. Update the target image or install rsync there: {}", String::from_utf8_lossy(&output.stderr))),
-            Err(error) => assessment.blockers.push(format!("Destination transport check failed: {error:#}")),
+            Ok(output) if output.status == 0 => {}
+            Ok(output) => assessment.blockers.push(format!(
+                "Destination: {}. Update the target image or install rsync there: {}",
+                if destination_engine.is_some() {
+                    CONTAINER_RSYNC_REQUIREMENT
+                } else {
+                    RSYNC_REQUIREMENT
+                },
+                String::from_utf8_lossy(&output.stderr)
+            )),
+            Err(error) => assessment
+                .blockers
+                .push(format!("Destination transport check failed: {error:#}")),
         }
         let destination_ssh = destination_ssh.map(targets::SshTarget::from);
         if let mj_core::config::TargetTemplate::LocalPodman { container }

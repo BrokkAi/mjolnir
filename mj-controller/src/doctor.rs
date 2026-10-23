@@ -772,7 +772,7 @@ fn configuration_checks(path: &Path) -> (std::result::Result<Config, ConfigGap>,
                 "config",
                 "Mjolnir configuration",
                 format!("{} is invalid: {error:#}", path.display()),
-                "Fix the reported TOML error in config.toml, or run `mj setup` to replace it.",
+                "Fix the reported error in config.toml, then rerun `mj doctor`. `mj setup` does not replace an existing config.toml.",
             )],
         ),
     }
