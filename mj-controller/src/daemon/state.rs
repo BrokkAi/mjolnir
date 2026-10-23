@@ -253,6 +253,7 @@ impl RuntimeState {
                 at: None,
                 branch: None,
                 base: None,
+                no_later_history: false,
                 create_managed_worktree: None,
                 subagents: None,
                 review: None,

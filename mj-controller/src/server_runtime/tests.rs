@@ -1592,6 +1592,7 @@ fn new_action() -> ControllerAction {
         at: None,
         branch: None,
         base: None,
+        no_later_history: false,
         subagents: None,
         create_managed_worktree: None,
         workspace_id: String::new(),

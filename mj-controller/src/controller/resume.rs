@@ -1115,6 +1115,21 @@ fn load_in_place_subagent_prompt_data(
 /// Canonicalizing first keeps one exact absolute path for the restore. The
 /// digest and session id must both match the record, and a legacy host-bridge
 /// archive is refused here rather than part way through a restore.
+/// Resume and Move clone the repository again from its origin, which would
+/// bring back every later commit, so a session that started without later
+/// history refuses them.
+pub(super) fn ensure_full_history_allowed(session: &SessionRecord) -> Result<()> {
+    ensure!(
+        !session
+            .checkout
+            .as_ref()
+            .is_some_and(|checkout| checkout.no_later_history),
+        "session {} was started without later history, and resuming or moving it would clone the full history; start a new session instead",
+        session.id
+    );
+    Ok(())
+}
+
 pub(super) fn verify_resume_checkpoint(
     session_id: &str,
     checkpoint: &mj_core::state::CheckpointMetadata,
@@ -1545,6 +1560,7 @@ impl Controller {
         {
             bail!("session {session_id} is not stopped, lost, or retryable");
         }
+        ensure_full_history_allowed(&previous)?;
         let checkpoint = move_operation
             .and_then(|op| op.handoff.as_ref())
             .or(previous.checkpoint.as_ref())

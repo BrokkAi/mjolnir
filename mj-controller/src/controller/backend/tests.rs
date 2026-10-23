@@ -333,6 +333,7 @@ fn github_token_is_inherited_only_by_managed_containers() {
             destination: "app".into(),
             git_ref: None,
             reference: None,
+            history_cutoff: None,
         }],
     };
     use_github_https_urls(&mut bundle);

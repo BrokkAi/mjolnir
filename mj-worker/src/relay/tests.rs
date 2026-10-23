@@ -5745,6 +5745,102 @@ fn output_while_a_resumed_session_is_set_up_is_a_notice_and_opens_no_turn() {
     assert!(relay.operational_state().harness_turn.is_some());
 }
 
+// Hard-won: e8566ee4: a late Claude tool failure opened a turn that blocked mailbox wakes for 94 minutes.
+#[test]
+fn late_claude_tool_status_preserves_the_transcript_without_opening_a_turn() {
+    use agent_client_protocol::schema::v1::{
+        Content, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    };
+    use mj_core::state::TranscriptBody;
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay.set_turn_verdict_harness(HarnessKind::Claude);
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    relay
+        .record_session_update(agent_text_chunk("Checking the background command."))
+        .unwrap();
+    assert!(relay.operational_state().harness_turn.is_some());
+    relay
+        .record_session_update(SessionUpdate::ToolCall(ToolCall::new(
+            "background-terminal",
+            "Terminal",
+        )))
+        .unwrap();
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    relay
+        .record_session_update(origin_marker("task-notification"))
+        .unwrap();
+    let settled_transcript = projected_transcript(&relay);
+    let settled_ordinal = relay.snapshot.latest_ordinal;
+
+    relay
+        .record_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            "background-terminal",
+            ToolCallUpdateFields::new()
+                .status(ToolCallStatus::Failed)
+                .content(vec![ToolCallContent::Content(Content::new(
+                    "Claude stopped this tool call before it ran.",
+                ))]),
+        )))
+        .unwrap();
+
+    assert!(relay.operational_state().harness_turn.is_none());
+    assert!(
+        !relay
+            .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+            .unwrap()
+            .iter()
+            .any(|event| event.ordinal > settled_ordinal
+                && matches!(
+                    event.observation,
+                    RelayObservation::HarnessTurnStarted { .. }
+                ))
+    );
+    let transcript = projected_transcript(&relay);
+    assert!(
+        transcript.iter().any(|item| matches!(
+            &item.body,
+            TranscriptBody::Tool { call, .. }
+                if call["toolCallId"] == "background-terminal" && call["status"] == "failed"
+        )),
+        "{transcript:#?}"
+    );
+    // The legitimate first turn already has its marker; the late update must
+    // add no second "Agent continued on its own" row.
+    assert_eq!(
+        transcript
+            .iter()
+            .filter(|item| item.is_turn_start())
+            .collect::<Vec<_>>(),
+        settled_transcript
+            .iter()
+            .filter(|item| item.is_turn_start())
+            .collect::<Vec<_>>()
+    );
+
+    submit_relay(
+        &mut relay,
+        "subagent-finished",
+        RelayCommand::DeliverMailboxEvent {
+            event: mailbox_fixture_event("late-tool-wake", true),
+        },
+    );
+    assert!(
+        relay
+            .snapshot
+            .dispatches
+            .values()
+            .any(|dispatch| matches!(dispatch.command, RelayCommand::MailboxWake { .. }))
+    );
+}
+
 /// R8-5: a live `/model haiku` on a session that already had a reply added
 /// the adapter's notice to that reply: item `agent:msg_011Cf…` went from
 /// "one two" to "one two**Auto mode unavailable:** …" (cli/038 vs 046). The

@@ -102,7 +102,7 @@ pub fn install_git_plan(boundary: ExecutionBoundary<'_>) -> CommandPlan {
 /// [`CommandPlan`], so a single fixed marker never mixes batches across plans.
 pub(super) const BUNDLE_REPOSITORIES_PARALLEL_GROUP: u32 = 1;
 
-pub(super) fn clone_commands(
+pub(crate) fn clone_commands(
     bundle: &ProjectBundleSpec,
     workspace: &str,
     wrap: impl Fn(Vec<String>) -> CommandSpec,
@@ -122,6 +122,16 @@ pub(super) fn clone_commands(
             .url
             .as_ref()
             .expect("validated network repository");
+        if let Some(cutoff) = &repository.history_cutoff {
+            commands.extend(
+                cutoff_checkout_commands(&destination, url, repository, cutoff)
+                    .into_iter()
+                    .map(|(args, purpose)| {
+                        wrap(args).purpose(purpose).stage(ProvisionStage::Cloning)
+                    }),
+            );
+            continue;
+        }
         let mut args = vec!["git".to_owned(), "clone".to_owned()];
         for push_url in &repository.push_urls {
             args.extend([
@@ -143,6 +153,82 @@ pub(super) fn clone_commands(
         );
     }
     commands
+}
+
+/// Create a checkout that holds the cutoff commits and their ancestors and
+/// nothing else. A clone would copy every branch and tag, and a clone-cache
+/// reference would lend it the whole mirror through `objects/info/alternates`,
+/// so the checkout starts empty and fetches only these object IDs, from the
+/// cache's cutoff bundle when one was prepared and from the network otherwise.
+/// It has no `origin` remote. The commands run in order: each needs the last.
+fn cutoff_checkout_commands(
+    destination: &str,
+    url: &str,
+    repository: &RepositorySpec,
+    cutoff: &HistoryCutoff,
+) -> Vec<(Vec<String>, String)> {
+    let git = |arguments: &[&str]| {
+        ["git", "-C", destination]
+            .iter()
+            .chain(arguments)
+            .map(|argument| (*argument).to_owned())
+            .collect::<Vec<_>>()
+    };
+    // A bundle is fetched from by its ref names, which every Git version
+    // accepts; fetching an object ID it does not advertise is newer. The
+    // network serves the object IDs themselves.
+    let (source, head, base) = match &repository.reference {
+        Some(bundle) => (
+            bundle.as_str(),
+            HistoryCutoff::BUNDLE_HEAD_REF,
+            HistoryCutoff::BASE_REF,
+        ),
+        None => (
+            url,
+            cutoff.head.as_str(),
+            cutoff.base.as_deref().unwrap_or_default(),
+        ),
+    };
+    let mut fetch = git(&["fetch", "--quiet", "--no-tags", "--", source, head]);
+    if cutoff.base.is_some() {
+        fetch.push(format!("{base}:{}", HistoryCutoff::BASE_REF));
+    }
+    vec![
+        (
+            vec![
+                "git".to_owned(),
+                "init".to_owned(),
+                "--quiet".to_owned(),
+                "--".to_owned(),
+                destination.to_owned(),
+            ],
+            format!(
+                "initialize {} without later history",
+                repository.destination
+            ),
+        ),
+        (
+            fetch,
+            format!(
+                "fetch {} history up to {}",
+                repository.destination, cutoff.head
+            ),
+        ),
+        (
+            git(&["checkout", "--quiet", "--detach", &cutoff.head]),
+            format!("check out {} at {}", repository.destination, cutoff.head),
+        ),
+    ]
+}
+
+/// Whether a command from [`clone_commands`] reaches the repository's server:
+/// a clone, or the fetch of a checkout without later history.
+pub(super) fn fetches_repository(args: &[String]) -> bool {
+    match args.get(1).map(String::as_str) {
+        Some("clone") => true,
+        Some("-C") => args.get(3).is_some_and(|argument| argument == "fetch"),
+        _ => false,
+    }
 }
 
 /// Run one `git clone` from [`clone_commands`] with a GitHub token that only

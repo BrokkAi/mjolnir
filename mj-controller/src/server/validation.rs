@@ -428,6 +428,7 @@ fn validate_action_against(
             at: _,
             branch: _,
             base: _,
+            no_later_history: _,
             subagents: _,
             review,
             no_project_memory: _,

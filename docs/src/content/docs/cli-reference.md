@@ -282,7 +282,8 @@ Inspect `scan` output before adopting or destroying anything. See [session recov
 mj workspaces list [--json]
 mj workspaces create <name> [--json]
 mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id>] [--bundle <id>]
-       [--project-directory <path>] [--at <sha>] [--branch <name>] [--base <revision>]
+       [--project-directory <path>] [--at <sha> [--no-later-history]]
+       [--branch <name>] [--base <revision>]
        [--title <text>]
        [--model <name>] [--effort <name>] [--subagents native|mjolnir|none]
        [--subagent-straightforward <model>] [--subagent-straightforward-effort <effort>]
@@ -331,6 +332,21 @@ base for `mj diff` when it should not be `--at`; it defaults to `--at` and does
 not move the checkout. A local clone resolves the base in the source
 repository, while a network clone resolves it from fetched Git history. A base
 cannot be combined with a session that runs directly in the selected directory.
+
+`mj new --at <sha> --no-later-history` gives the workspace the full history up
+to that commit and the `--base` commit, and nothing later. Use it when the
+agent must not see what happened after a commit, for example to review a pull
+request as it stood. See
+[Start without later history](/api-reference/#start-without-later-history) for
+what the workspace holds and what the agent can still reach. `--base` must then
+be a full commit ID, the bundle must have one repository, and the session
+cannot be resumed or moved.
+
+```text
+mj new --workspace eval --bundle product --target builder \
+  --at 0123456789abcdef0123456789abcdef01234567 --no-later-history \
+  --base 89abcdef0123456789abcdef0123456789abcdef --branch review/pr-670
+```
 
 - `mj new` without `--profile` or `--target` uses the saved default for the
   missing one (the pair `GET /api/v1/options` reports as `default`).

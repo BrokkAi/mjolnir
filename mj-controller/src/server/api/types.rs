@@ -115,6 +115,10 @@ pub struct ApiSession {
     /// Diff base the session was started with; `at` unless another was named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// Whether the workspace started with `at`, `base` and their ancestors
+    /// only, as `StartSessionRequest::no_later_history` asked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_later_history: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_work: Option<ApiBackgroundWork>,
     pub id: String,
@@ -171,6 +175,7 @@ impl From<&ViewerSession> for ApiSession {
             at: session.at.clone(),
             branch: session.branch.clone(),
             base: session.base.clone(),
+            no_later_history: session.no_later_history,
             id: session.id.clone(),
             workspace_id: session.workspace_id.clone(),
             title: session.title.clone(),
@@ -258,6 +263,12 @@ pub struct StartSessionRequest {
     /// revision for a raw managed worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// With `at`, start the workspace with `at`, `base` and their ancestors
+    /// only: no `origin` remote, remote-tracking refs, tags, or clone-cache
+    /// objects. `base` must then be a full commit object ID, and the bundle
+    /// must hold one repository. The session cannot be resumed or moved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_later_history: bool,
     /// Omitted uses the selected profile's subagent setting.
     #[serde(default)]
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,

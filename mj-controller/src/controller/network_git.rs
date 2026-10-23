@@ -147,6 +147,9 @@ fn initialize_workspace(
             Some(revision) => resolve_base(revision)?,
             None => checkout.commit.clone(),
         };
+        if checkout.no_later_history {
+            return configure_workspace_without_origin(&checked, &base);
+        }
         return configure_workspace(&git, &checked, &base);
     }
     let marker = git(&["config", "--local", "--get", "mj.remoteWorkspace"])?;
@@ -226,6 +229,19 @@ fn configure_workspace(
     Ok(())
 }
 
+/// The markers [`configure_workspace`] writes, without the `origin` settings:
+/// a checkout without later history has no remote, and naming one would make
+/// `git remote` list it.
+fn configure_workspace_without_origin(
+    checked: &impl Fn(&[&str]) -> Result<String>,
+    base: &str,
+) -> Result<()> {
+    for (key, value) in [("mj.baseCommit", base), ("mj.remoteWorkspace", "true")] {
+        checked(&["config", "--local", "--replace-all", key, value])?;
+    }
+    Ok(())
+}
+
 fn prepare_exact_checkout(
     git: &impl Fn(&[&str]) -> Result<targets::CommandOutput>,
     checked: &impl Fn(&[&str]) -> Result<String>,
@@ -291,6 +307,13 @@ fn prepare_exact_checkout(
         }
     }
     let object = git(&["cat-file", "-t", &checkout.commit])?;
+    // A checkout without later history fetched its commits when it was
+    // created, and has no origin to fetch from now.
+    ensure!(
+        object.status == 0 || !checkout.no_later_history,
+        "exact checkout commit {} is missing from the checkout without later history",
+        checkout.commit
+    );
     if object.status != 0 {
         checked(&["fetch", "--no-tags", "origin", &checkout.commit]).with_context(|| {
             format!(
@@ -400,6 +423,7 @@ pub(super) fn bundle_from_manifest(
             destination: metadata.relative_destination.to_string_lossy().into_owned(),
             git_ref: None,
             reference: None,
+            history_cutoff: None,
         })
     }).collect::<Result<Vec<_>>>()?;
     let primary = manifest
@@ -544,6 +568,7 @@ mod tests {
                     repository_id: "project".into(),
                     commit,
                     branch: Some("town/run-123".into()),
+                    no_later_history: false,
                 },
                 later,
             }
@@ -1092,5 +1117,413 @@ mod tests {
             test_git(&executor.push, &["rev-parse", "trunk"]),
             first_pushed_head.unwrap()
         );
+    }
+
+    /// A host repository whose history runs past the cutoff in every way a
+    /// reviewer could look: a later commit on the head's branch, a later
+    /// commit on the base's branch, an annotated tag, and another pull
+    /// request's ref.
+    struct CutoffFixture {
+        host: tempfile::TempDir,
+        _root: tempfile::TempDir,
+        workspace: PathBuf,
+        directory: PathBuf,
+        head: String,
+        base: String,
+        later: Vec<String>,
+    }
+
+    impl CutoffFixture {
+        fn new() -> Self {
+            let host = committed_repository();
+            let commit = |message: &str| {
+                std::fs::write(host.path().join("nested/file.txt"), format!("{message}\n"))
+                    .unwrap();
+                test_git(host.path(), &["commit", "-qam", message]);
+                test_git(host.path(), &["rev-parse", "HEAD"])
+            };
+            test_git(host.path(), &["switch", "-qc", "trunk"]);
+            let base = commit("base branch at review time");
+            test_git(host.path(), &["switch", "-q", "master"]);
+            let head = commit("reviewed head");
+            let later_head = commit("fix found later");
+            test_git(
+                host.path(),
+                &["tag", "-a", "v-later", "-m", "later release"],
+            );
+            let later_tag = test_git(host.path(), &["rev-parse", "v-later"]);
+            test_git(host.path(), &["switch", "-q", "trunk"]);
+            let later_base = commit("trunk moved on");
+            test_git(host.path(), &["switch", "-qc", "other-pr", &head]);
+            let other_pr = commit("another pull request");
+            test_git(host.path(), &["update-ref", "refs/pull/2/head", &other_pr]);
+            test_git(host.path(), &["switch", "-q", "master"]);
+            let root = tempfile::tempdir().unwrap();
+            let workspace = root.path().join(EXACT_SESSION);
+            Self {
+                directory: workspace.join("project"),
+                workspace,
+                _root: root,
+                host,
+                head,
+                base,
+                later: vec![later_head, later_tag, later_base, other_pr],
+            }
+        }
+
+        fn selection(&self, branch: Option<&str>) -> mj_core::remote_git::ExactCheckout {
+            mj_core::remote_git::ExactCheckout {
+                repository_id: "project".into(),
+                commit: self.head.clone(),
+                branch: branch.map(str::to_owned),
+                no_later_history: true,
+            }
+        }
+
+        fn locator(&self) -> targets::TargetLocator {
+            targets::TargetLocator::LocalBare {
+                worker_root: self.workspace.to_string_lossy().into_owned(),
+            }
+        }
+
+        /// Run the production clone step against the host repository, which
+        /// the fixture transport serves at the network URL.
+        fn clone(&self, base: Option<&str>, reference: Option<&Path>) {
+            let bundle = targets::ProjectBundleSpec {
+                primary: "project".into(),
+                repositories: vec![targets::RepositorySpec {
+                    url: Some("https://fetch.example.test/repo.git".into()),
+                    push_urls: Vec::new(),
+                    destination: "project".into(),
+                    git_ref: None,
+                    reference: reference.map(|path| path.to_string_lossy().into_owned()),
+                    history_cutoff: Some(targets::HistoryCutoff {
+                        head: self.head.clone(),
+                        base: base.map(str::to_owned),
+                    }),
+                }],
+            };
+            bundle.validate().unwrap();
+            let transport = FixtureTransport {
+                fetch: self.host.path().to_path_buf(),
+                push: self.host.path().to_path_buf(),
+            };
+            for command in
+                targets::clone_commands(&bundle, &self.workspace.to_string_lossy(), |args| {
+                    CommandSpec::new(args[0].clone(), args[1..].to_vec())
+                })
+            {
+                let output = if command.program == "git" {
+                    transport.execute(&command)
+                } else {
+                    ProcessExecutor.execute(&command)
+                }
+                .unwrap();
+                assert_eq!(
+                    output.status,
+                    0,
+                    "{}: {}",
+                    command.purpose,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+
+        fn initialize(&self, base: Option<&str>, branch: Option<&str>) -> Result<()> {
+            initialize_workspace(
+                &ProcessExecutor,
+                &self.locator(),
+                EXACT_SESSION,
+                &self.directory,
+                base,
+                None,
+                Some(&self.selection(branch)),
+            )
+        }
+    }
+
+    fn has_object(directory: &Path, object: &str) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .args(["cat-file", "-e", object])
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    /// Every object the repository stores, and every object reachable from
+    /// `commits`, each sorted.
+    fn inventory(directory: &Path, commits: &[&str]) -> (Vec<String>, Vec<String>) {
+        let mut present = test_git(
+            directory,
+            &[
+                "cat-file",
+                "--batch-all-objects",
+                "--batch-check=%(objectname)",
+            ],
+        )
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        present.sort();
+        let mut arguments = vec!["rev-list", "--objects"];
+        arguments.extend(commits);
+        let mut reachable = test_git(directory, &arguments)
+            .lines()
+            .map(|line| line.split(' ').next().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        reachable.sort();
+        reachable.dedup();
+        (present, reachable)
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
+    fn a_checkout_without_later_history_holds_exactly_the_head_and_base_ancestry() {
+        let fixture = CutoffFixture::new();
+        let host_refs = test_git(fixture.host.path(), &["show-ref"]);
+        fixture.clone(Some(&fixture.base), None);
+        fixture
+            .initialize(Some(&fixture.base), Some("town/run-123"))
+            .unwrap();
+        let directory = &fixture.directory;
+
+        assert_eq!(test_git(directory, &["rev-parse", "HEAD"]), fixture.head);
+        assert_eq!(
+            test_git(directory, &["branch", "--show-current"]),
+            "town/run-123"
+        );
+        assert_eq!(
+            test_git(directory, &["config", "mj.baseCommit"]),
+            fixture.base
+        );
+        assert_eq!(
+            test_git(directory, &["config", "mj.remoteWorkspace"]),
+            "true"
+        );
+        assert_eq!(test_git(directory, &["remote"]), "");
+        assert_eq!(
+            test_git(
+                directory,
+                &["for-each-ref", "--format=%(refname) %(objectname)"]
+            ),
+            format!(
+                "refs/heads/town/run-123 {}\nrefs/mj/base {}",
+                fixture.head, fixture.base
+            )
+        );
+        assert!(!directory.join(".git/objects/info/alternates").exists());
+        // The real object IDs, so a reviewer can name them in findings.
+        let (present, reachable) = inventory(directory, &[&fixture.head, &fixture.base]);
+        assert_eq!(present, reachable);
+        // The whole history up to the head, not a shallow fetch.
+        assert_eq!(
+            test_git(directory, &["rev-parse", "--is-shallow-repository"]),
+            "false"
+        );
+        assert_eq!(
+            test_git(directory, &["log", "--format=%H", "HEAD"]),
+            test_git(fixture.host.path(), &["log", "--format=%H", &fixture.head])
+        );
+        for later in &fixture.later {
+            assert!(!has_object(directory, later), "{later} is reachable");
+        }
+        // The base is not an ancestor of the head, and is still diffable.
+        assert!(
+            !std::process::Command::new("git")
+                .arg("-C")
+                .arg(directory)
+                .args(["merge-base", "--is-ancestor", &fixture.base, &fixture.head])
+                .status()
+                .unwrap()
+                .success()
+        );
+        test_git(directory, &["diff", "--stat", &fixture.base, "HEAD"]);
+        // With no remote, `git fetch` does nothing, and `git fetch origin`
+        // and `git pull` fail.
+        test_git(directory, &["fetch"]);
+        assert_eq!(
+            inventory(directory, &[&fixture.head, &fixture.base]).0,
+            present
+        );
+        for arguments in [&["fetch", "origin"][..], &["pull"]] {
+            assert!(
+                !std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(directory)
+                    .args(arguments)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {arguments:?} succeeded"
+            );
+        }
+        assert_eq!(test_git(fixture.host.path(), &["show-ref"]), host_refs);
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
+    fn a_detached_checkout_without_later_history_and_base_keeps_no_refs() {
+        let fixture = CutoffFixture::new();
+        fixture.clone(None, None);
+        fixture.initialize(None, None).unwrap();
+        let directory = &fixture.directory;
+        assert_eq!(test_git(directory, &["rev-parse", "HEAD"]), fixture.head);
+        assert_eq!(test_git(directory, &["branch", "--show-current"]), "");
+        assert_eq!(test_git(directory, &["for-each-ref"]), "");
+        assert_eq!(
+            test_git(directory, &["config", "mj.baseCommit"]),
+            fixture.head
+        );
+        let (present, reachable) = inventory(directory, &[&fixture.head]);
+        assert_eq!(present, reachable);
+        assert!(!has_object(directory, &fixture.base));
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
+    fn a_checkout_fetched_from_a_cutoff_bundle_holds_exactly_the_head_and_base_ancestry() {
+        let fixture = CutoffFixture::new();
+        let cache = tempfile::tempdir().unwrap();
+        let repository = tempfile::tempdir().unwrap();
+        test_git(repository.path(), &["init", "--quiet", "--bare"]);
+        for (commit, refname) in [
+            (&fixture.head, "refs/mj/head"),
+            (&fixture.base, "refs/mj/base"),
+        ] {
+            test_git(
+                repository.path(),
+                &[
+                    "fetch",
+                    "--quiet",
+                    fixture.host.path().to_str().unwrap(),
+                    &format!("{commit}:{refname}"),
+                ],
+            );
+        }
+        let bundle = cache.path().join("key.bundle");
+        test_git(
+            repository.path(),
+            &[
+                "bundle",
+                "create",
+                bundle.to_str().unwrap(),
+                "refs/mj/head",
+                "refs/mj/base",
+            ],
+        );
+        fixture.clone(Some(&fixture.base), Some(&bundle));
+        fixture
+            .initialize(Some(&fixture.base), Some("town/run-123"))
+            .unwrap();
+        let (present, reachable) = inventory(&fixture.directory, &[&fixture.head, &fixture.base]);
+        assert_eq!(present, reachable);
+        assert_eq!(test_git(&fixture.directory, &["remote"]), "");
+        assert!(
+            !fixture
+                .directory
+                .join(".git/objects/info/alternates")
+                .exists()
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
+    fn initialization_of_a_checkout_without_later_history_never_fetches_from_origin() {
+        let fixture = CutoffFixture::new();
+        test_git(
+            fixture._root.path(),
+            &["init", "--quiet", fixture.directory.to_str().unwrap()],
+        );
+        test_git(
+            &fixture.directory,
+            &[
+                "remote",
+                "add",
+                "origin",
+                fixture.host.path().to_str().unwrap(),
+            ],
+        );
+        test_git(
+            &fixture.directory,
+            &["fetch", "--quiet", "origin", &fixture.base],
+        );
+        test_git(
+            &fixture.directory,
+            &["checkout", "--quiet", "--detach", &fixture.base],
+        );
+        let error = fixture.initialize(None, None).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("missing from the checkout without later history"),
+            "{error:#}"
+        );
+        assert!(!has_object(&fixture.directory, &fixture.head));
+    }
+
+    #[test]
+    fn a_checkpoint_of_a_checkout_without_later_history_records_the_session_source_as_origin() {
+        let mut config = resume_compatibility_config();
+        config
+            .bundles
+            .insert("project".into(), local_bundle(Path::new("/unused")));
+        let mut session = super::super::test_support::checkpoint_test_session(EXACT_SESSION);
+        session.target = Some(mj_core::state::TargetLocator::LocalDocker {
+            container_id: "hel-session".into(),
+            borrowed_from: None,
+        });
+        session.project = Some(mj_core::repository::ProjectBundleSnapshot {
+            bundle: config.bundles["project"].clone(),
+            identities: Default::default(),
+            network_sources: [(
+                "project".to_owned(),
+                mj_core::remote_git::NetworkGitSource {
+                    fetch_url: "https://github.com/example/project.git".into(),
+                    push_urls: vec!["https://github.com/example/project.git".into()],
+                },
+            )]
+            .into(),
+        });
+        let mut selection = mj_core::remote_git::ExactCheckout {
+            repository_id: "project".into(),
+            commit: "a".repeat(40),
+            branch: None,
+            no_later_history: true,
+        };
+        let origin = |selection: &mj_core::remote_git::ExactCheckout| {
+            let mut session = session.clone();
+            session.checkout = Some(selection.clone());
+            let mut state = mj_core::state::State::default();
+            state.sessions.insert(EXACT_SESSION.into(), session);
+            let controller = Controller {
+                config: config.clone(),
+                state,
+            };
+            let layout = controller
+                .session_export_layout(EXACT_SESSION, &ProcessExecutor)
+                .unwrap();
+            assert_eq!(layout.repositories.len(), 1);
+            layout.repositories[0].origin_override.clone()
+        };
+        assert_eq!(
+            origin(&selection).as_deref(),
+            Some("https://github.com/example/project.git")
+        );
+        // A normal exact checkout keeps its origin remote, which capture reads.
+        selection.no_later_history = false;
+        assert_eq!(origin(&selection), None);
     }
 }

@@ -709,6 +709,7 @@ fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptio
         at: None,
         branch: None,
         base: None,
+        no_later_history: false,
         subagents: None,
         create_managed_worktree: None,
         initial_prompt: None,
@@ -896,6 +897,7 @@ fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repo
             repository_id: "project".into(),
             commit: at.into(),
             branch: Some("town/run-1".into()),
+            no_later_history: false,
         })
     );
     // The checkout owns the branch, and the base is left to default to `at`.
@@ -906,6 +908,7 @@ fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repo
             at: Some(at.into()),
             branch: Some("town/run-1".into()),
             base: Some(at.into()),
+            no_later_history: false,
         }
     );
 
@@ -929,7 +932,117 @@ fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repo
             at: Some(at.into()),
             branch: None,
             base: Some("v1.0".into()),
+            no_later_history: false,
         }
+    );
+}
+
+#[test]
+fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_cannot_honor() {
+    const MARKER: &str = "MJ_TEST_NO_LATER_HISTORY_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "registration_without_later_history_records_a_cutoff_and_refuses_what_it_cannot_honor",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State::default(),
+    };
+    let at = "0123456789abcdef0123456789abcdef01234567";
+    let base = "89abcdef0123456789abcdef0123456789abcdef";
+    let mut register = |options: SessionLaunchOptions| {
+        controller.register_session_with_resources(
+            "codex",
+            "project",
+            "podman",
+            "without later history",
+            options,
+        )
+    };
+    let refusal = |result: Result<String>, expected: &str| {
+        let error = result.unwrap_err();
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
+    };
+    refusal(
+        register(SessionLaunchOptions {
+            no_later_history: true,
+            ..launch_options(Vec::new())
+        }),
+        "`no_later_history` requires `at`",
+    );
+    // A name would have to resolve against remote refs the workspace lacks.
+    refusal(
+        register(SessionLaunchOptions {
+            at: Some(at.into()),
+            base: Some("origin/main".into()),
+            no_later_history: true,
+            ..launch_options(Vec::new())
+        }),
+        "`base` must be a full commit object ID",
+    );
+
+    let id = register(SessionLaunchOptions {
+        at: Some(at.to_uppercase()),
+        base: Some(base.to_uppercase()),
+        branch: Some("review/run-1".into()),
+        no_later_history: true,
+        ..launch_options(Vec::new())
+    })
+    .unwrap();
+    let stored = crate::database::load_state().unwrap().sessions[&id].clone();
+    assert_eq!(
+        stored.checkout,
+        Some(mj_core::remote_git::ExactCheckout {
+            repository_id: "project".into(),
+            commit: at.into(),
+            branch: Some("review/run-1".into()),
+            no_later_history: true,
+        })
+    );
+    assert_eq!(stored.launch_base.as_deref(), Some(base));
+    assert!(stored.start_selection().no_later_history);
+    assert_eq!(
+        super::backend::session_history_cutoff(&stored).unwrap(),
+        Some(crate::targets::HistoryCutoff {
+            head: at.into(),
+            base: Some(base.into()),
+        })
+    );
+    let error = super::resume::ensure_full_history_allowed(&stored).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("started without later history"),
+        "{error:#}"
+    );
+
+    // Any other repository in the bundle would start with its whole history.
+    let bundle = controller.config.bundles.get_mut("project").unwrap();
+    let mut second = bundle.repositories[0].clone();
+    second.id = "second".into();
+    second.github = Some("owner/second".into());
+    second.destination = PathBuf::from("second");
+    bundle.repositories.push(second);
+    let error = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "podman",
+            "without later history",
+            SessionLaunchOptions {
+                at: Some(at.into()),
+                no_later_history: true,
+                ..launch_options(Vec::new())
+            },
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("single-repository bundle"),
+        "{error:#}"
     );
 }
 
