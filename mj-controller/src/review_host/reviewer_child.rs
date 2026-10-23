@@ -177,12 +177,16 @@ impl HostState {
         };
         if matches!(slot.driver.phase(), TurnReviewPhase::Running { .. }) {
             let requests = match answer {
-                Some(answer) => slot.driver.role_turn_completed(
-                    slot.command_id
-                        .as_deref()
-                        .expect("registered reviewer has a command"),
-                    &answer,
-                ),
+                Some(answer) => match slot.command_id.as_deref() {
+                    Some(command_id) => slot.driver.role_turn_completed(command_id, &answer),
+                    None => {
+                        self.fail(
+                            &session_id,
+                            "the reviewer finished without a registered review command",
+                        );
+                        Vec::new()
+                    }
+                },
                 None => {
                     self.fail(
                         &session_id,
