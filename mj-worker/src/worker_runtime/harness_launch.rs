@@ -179,11 +179,30 @@ async fn link_build_cache_configuration(environment: &BTreeMap<String, String>) 
         .join(".config"),
     };
     tokio::task::spawn_blocking(move || -> Result<()> {
-        anyhow::ensure!(
-            source.is_file(),
-            "shared machine mbx configuration {} is missing",
-            source.display()
-        );
+        // The shared cache is optional. The controller reports why it could not
+        // prepare the policy and starts the session without the mbx launchers,
+        // so a policy that is absent here must not refuse the harness. Report
+        // the OS error rather than calling every failure "missing": a host file
+        // the container cannot reach is a different problem from one that was
+        // never published.
+        match std::fs::metadata(&source) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => {
+                tracing::warn!(
+                    configuration = %source.display(),
+                    "shared machine mbx configuration is not a file; mbx uses its own defaults"
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                tracing::warn!(
+                    configuration = %source.display(),
+                    %error,
+                    "shared machine mbx configuration is unavailable; mbx uses its own defaults"
+                );
+                return Ok(());
+            }
+        }
         let directory = root.join("mbx");
         std::fs::create_dir_all(&directory).context("create mbx configuration lookup directory")?;
         let destination = directory.join("config.toml");
@@ -277,5 +296,26 @@ mod tests {
                 b"[target]\nmax_size = '300GiB'\n"
             );
         }
+    }
+
+    // A failed optional cache must not refuse the harness: the controller
+    // deliberately starts a session without the shared cache when it cannot
+    // verify the in-container mbx copy, but the worker then refused to start
+    // because the unpublished policy was absent.
+    #[tokio::test]
+    async fn a_missing_machine_policy_does_not_refuse_the_harness() {
+        let root = tempfile::tempdir().unwrap();
+        let environment = BTreeMap::from([
+            (
+                "MJ_MBX_CONFIG_DIR".into(),
+                root.path().join("missing").to_string_lossy().into_owned(),
+            ),
+            (
+                "XDG_CONFIG_HOME".into(),
+                root.path().join("home").to_string_lossy().into_owned(),
+            ),
+        ]);
+        link_build_cache_configuration(&environment).await.unwrap();
+        assert!(!root.path().join("home/mbx/config.toml").exists());
     }
 }
