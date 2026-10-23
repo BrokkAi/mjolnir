@@ -218,6 +218,7 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         subtle_subagents: true,
         initial_model: None,
         review_capture: true,
+        review_trigger: Default::default(),
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -7746,4 +7747,92 @@ async fn cpu_usage_answers_from_the_sampler_without_journaling() {
     }
     drop(client);
     task.await.unwrap().unwrap();
+}
+
+#[test]
+fn push_gate_startup_and_environment_follow_harness_and_primary_ownership() {
+    for harness in [HarnessKind::Codex, HarnessKind::Claude, HarnessKind::Muse] {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = git_repository(&temp);
+        let mut launch = launch_config("/test/profile");
+        launch.cwd = repository.clone();
+        launch.harness = harness;
+        launch.review_trigger = mj_core::config::ReviewTrigger::Push;
+        launch
+            .environment
+            .insert("MJ_REVIEW_GATE".into(), "inherited".into());
+        let notices = super::harness_launch::prepare_review_gate(&launch).unwrap();
+        let spec = super::harness_launch::primary_supervisor_spec(&launch);
+        if harness == HarnessKind::Muse {
+            assert_eq!(
+                notices,
+                vec![
+                    "Before-push review is not available for Muse Code; this session runs without review."
+                ]
+            );
+            assert!(!repository.join(".git/hooks/pre-push").exists());
+            assert!(!spec.environment.contains_key("MJ_REVIEW_GATE"));
+            assert!(
+                spec.excluded_environment
+                    .iter()
+                    .any(|name| name == "MJ_REVIEW_GATE")
+            );
+        } else {
+            assert!(notices.is_empty());
+            assert!(
+                std::fs::read_to_string(repository.join(".git/hooks/pre-push"))
+                    .unwrap()
+                    .contains("# mj-review-gate")
+            );
+            assert_eq!(spec.environment["MJ_REVIEW_GATE"], "1");
+        }
+        launch.environment.insert(
+            mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV.into(),
+            "1".into(),
+        );
+        assert!(
+            super::harness_launch::prepare_review_gate(&launch)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !super::harness_launch::primary_supervisor_spec(&launch)
+                .environment
+                .contains_key("MJ_REVIEW_GATE")
+        );
+        launch
+            .environment
+            .remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
+        for trigger in [
+            mj_core::config::ReviewTrigger::Turn,
+            mj_core::config::ReviewTrigger::Off,
+        ] {
+            launch.review_trigger = trigger;
+            assert!(
+                !super::harness_launch::primary_supervisor_spec(&launch)
+                    .environment
+                    .contains_key("MJ_REVIEW_GATE")
+            );
+        }
+    }
+}
+
+#[test]
+fn push_gate_startup_reports_a_refused_hook_install_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = git_repository(&temp);
+    let hooks = repository.join(".git/hooks");
+    std::fs::write(hooks.join("pre-push"), "existing hook").unwrap();
+    std::fs::write(hooks.join("pre-push.before-mj"), "existing backup").unwrap();
+    let mut launch = launch_config("/test/profile");
+    launch.cwd = repository.clone();
+    launch.review_trigger = mj_core::config::ReviewTrigger::Push;
+    let notices = super::harness_launch::prepare_review_gate(&launch).unwrap();
+    assert_eq!(notices.len(), 1);
+    assert!(notices[0].contains(&hooks.join("pre-push.before-mj").display().to_string()));
+    assert!(notices[0].contains("the gate is not installed"));
+    assert_eq!(
+        std::fs::read_to_string(hooks.join("pre-push")).unwrap(),
+        "existing hook"
+    );
 }

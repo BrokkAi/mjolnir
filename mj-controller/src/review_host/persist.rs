@@ -131,6 +131,12 @@ impl HostState {
                     );
                     return;
                 }
+                let push = (pending.prepared.scope
+                    == mj_core::relay::CaptureScope::PushableCommits)
+                    .then(|| PushReview {
+                        deltas: pending.prepared.captured.clone().unwrap_or_default(),
+                        finishing: false,
+                    });
                 let seed = seed_from_session(
                     &pending.prepared.materialized,
                     &pending.prepared.state,
@@ -168,6 +174,7 @@ impl HostState {
                         state: pending.prepared.state,
                         _background: pending.prepared.background,
                         command_id: None,
+                        push,
                     },
                 );
                 answer(pending.reply, Ok(()));

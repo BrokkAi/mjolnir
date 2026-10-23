@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 94;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 95;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1701,6 +1701,20 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
     }
 
+    // Breaking: older daemons cannot decode durable RequestReview delegation
+    // actions or ReviewVerdict mailbox bodies. Refuse their reads and writes
+    // before either new enum value can be stored.
+    if version < 95 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 95 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (95, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 95;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2184,7 +2198,8 @@ mod reader_tests {
         ).unwrap();
         migrate_schema(&connection).unwrap();
         let state = read_schema_state(&connection).unwrap();
-        assert_eq!(state.minimum_compatible, Some(94));
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        assert!(state.ensure_supported_by(94).is_err());
         assert!(state.ensure_supported_by(92).is_err());
         // Both legacy tables have been removed, while the independent turn-review state remains.
         let tables: Vec<String> = connection

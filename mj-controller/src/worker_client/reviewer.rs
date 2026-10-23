@@ -214,14 +214,36 @@ impl RelayClient {
         &mut self,
         role: Option<&str>,
         baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
+        scope: mj_core::relay::CaptureScope,
     ) -> Result<Vec<mj_core::relay::RepoDelta>> {
-        let request = self.reviewer_request(role, ReviewerRequest::CaptureDelta { baselines })?;
+        if scope == mj_core::relay::CaptureScope::PushableCommits
+            && self.protocol_version < mj_core::relay::RELAY_PUSH_REVIEW_PROTOCOL
+        {
+            anyhow::bail!("the session's worker predates push review; restart the session");
+        }
+        let request =
+            self.reviewer_request(role, ReviewerRequest::CaptureDelta { baselines, scope })?;
         match self
             .call_with_timeout(request, REVIEW_CAPTURE_TIMEOUT)
             .await?
         {
             RelayResponsePayload::ReviewDelta { repositories } => Ok(repositories),
             _ => bail!("relay returned an unexpected review capture response"),
+        }
+    }
+
+    pub async fn record_reviewed(
+        &mut self,
+        role: Option<&str>,
+        trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
+    ) -> Result<()> {
+        let request = self.reviewer_request(role, ReviewerRequest::RecordReviewed { trees })?;
+        match self
+            .call_with_timeout(request, REVIEW_CAPTURE_TIMEOUT)
+            .await?
+        {
+            RelayResponsePayload::ReviewBaselineAdvanced => Ok(()),
+            _ => bail!("relay returned an unexpected reviewed-tree response"),
         }
     }
 

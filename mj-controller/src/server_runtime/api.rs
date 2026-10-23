@@ -47,6 +47,10 @@ pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + 
 /// built in a test without one. Startup admission and status also go through
 /// this runtime, keeping their durable owner shared by every control surface.
 pub trait ExportRuntime: Send + Sync {
+    fn request_review(&self, _session_id: String) -> BoxFuture<'_, Result<serde_json::Value>> {
+        Box::pin(async { bail!("push review is unavailable") })
+    }
+
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         Default::default()
     }
@@ -199,6 +203,15 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
+    fn request_review(&self, session_id: String) -> BoxFuture<'_, Result<serde_json::Value>> {
+        Box::pin(async move {
+            self.review_host()
+                .begin_push(&session_id)
+                .await
+                .map_err(|error| anyhow!("request_review refused: {}", error.0))
+        })
+    }
+
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         self.with_config(|config| config.subagents.clone())
     }
@@ -759,6 +772,11 @@ impl ApiBackend {
         use mj_core::subagent::SubagentToolAction;
         let request_created_at_ms = request.created_at_ms;
         match &request.action {
+            SubagentToolAction::RequestReview {} => {
+                self.exports
+                    .request_review(parent_session_id.to_owned())
+                    .await
+            }
             SubagentToolAction::ListProfiles => {
                 anyhow::bail!("list_profiles is no longer available")
             }

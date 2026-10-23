@@ -15,6 +15,10 @@ pub(super) enum HostEvent {
     Retain {
         live: std::collections::BTreeSet<String>,
     },
+    StartPush {
+        session_id: String,
+        reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
+    },
     Start {
         session_id: String,
         manual: bool,
@@ -82,6 +86,7 @@ pub(super) enum PersistenceCompletion {
 
 pub(super) enum PersistenceRequest {
     SweepInterrupted,
+    FinishPush(Box<PushCompletion>),
     CloseFailedChild {
         session_id: String,
         child: String,
@@ -108,10 +113,12 @@ pub(super) enum ReviewStep {
     Failed(String),
     Delta(Result<Vec<mj_core::relay::RepoDelta>, String>),
     PrimaryPrompted(Result<(), String>),
+    PushDelivered(Result<Box<TurnReviewState>, String>),
 }
 
 /// Everything one blocking preparation gathered before a review can start.
 pub(super) struct Prepared {
+    pub(super) scope: mj_core::relay::CaptureScope,
     pub(super) state: TurnReviewState,
     pub(super) reviewer: ReviewerIdentity,
     /// Read from the live actor after the admission hold is installed and a
@@ -149,6 +156,7 @@ pub(super) struct ReviewSlot {
     /// Released when the slot is removed, which is how every review ends.
     pub(super) _background: Option<BackgroundHold>,
     pub(super) command_id: Option<String>,
+    pub(super) push: Option<PushReview>,
 }
 
 pub(super) struct HostState {
@@ -215,8 +223,53 @@ pub(super) async fn persistence_loop(
     mut requests: mpsc::UnboundedReceiver<PersistenceRequest>,
 ) {
     let mut failed_writes = BTreeMap::<String, String>::new();
-    while let Some(request) = requests.recv().await {
+    type Delivery = (String, u64, Result<Box<TurnReviewState>, String>);
+    let mut deliveries = tokio::task::JoinSet::<Delivery>::new();
+    let mut delivery_owners = std::collections::HashMap::<tokio::task::Id, (String, u64)>::new();
+    let mut in_flight = BTreeMap::<String, Vec<oneshot::Sender<Result<(), String>>>>::new();
+    let mut accepting = true;
+    while accepting || !deliveries.is_empty() {
+        let request = tokio::select! {
+            request = requests.recv(), if accepting => match request {
+                Some(request) => request,
+                None => { accepting = false; continue; }
+            },
+            completed = deliveries.join_next_with_id(), if !deliveries.is_empty() => {
+                match completed.expect("a delivery was in flight") {
+                    Ok((task, (session_id, epoch, result))) => {
+                        delivery_owners.remove(&task);
+                        let acknowledged = match &result { Ok(_) => Ok(()), Err(error) => Err(error.clone()) };
+                        if let Err(error) = &result { failed_writes.insert(session_id.clone(), error.clone()); }
+                        for reply in in_flight.remove(&session_id).unwrap_or_default() { let _ = reply.send(acknowledged.clone()); }
+                        let _ = events.send(HostEvent::Step { session_id, epoch, step: ReviewStep::PushDelivered(result) });
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "push review verdict task stopped");
+                        if let Some((session_id, epoch)) = delivery_owners.remove(&error.id()) {
+                            let reason = format!("push review verdict task stopped: {error}");
+                            failed_writes.insert(session_id.clone(), reason.clone());
+                            for reply in in_flight.remove(&session_id).unwrap_or_default() { let _ = reply.send(Err(reason.clone())); }
+                            let _ = events.send(HostEvent::Step { session_id, epoch, step: ReviewStep::PushDelivered(Err(reason)) });
+                        }
+                    }
+                }
+                continue;
+            }
+        };
         match request {
+            PersistenceRequest::FinishPush(completion) => {
+                let environment = environment.clone();
+                in_flight.insert(completion.session_id.clone(), Vec::new());
+                let owner = (completion.session_id.clone(), completion.epoch);
+                let task = deliveries.spawn(async move {
+                    let session_id = completion.session_id.clone();
+                    let epoch = completion.epoch;
+                    let result =
+                        super::resolve::finish_push_delivery(environment, *completion).await;
+                    (session_id, epoch, result)
+                });
+                delivery_owners.insert(task.id(), owner);
+            }
             PersistenceRequest::CloseFailedChild { session_id, child } => {
                 if let Some(error) = failed_writes.get(&session_id) {
                     tracing::warn!(%session_id, %child, %error, "the reviewer failure could not be persisted before cleanup");
@@ -229,6 +282,10 @@ pub(super) async fn persistence_loop(
                 });
             }
             PersistenceRequest::AcknowledgeReviewer { session_id, reply } => {
+                if let Some(waiting) = in_flight.get_mut(&session_id) {
+                    waiting.push(reply);
+                    continue;
+                }
                 let result = failed_writes.get(&session_id).cloned().map_or(Ok(()), Err);
                 let _ = reply.send(result);
             }
@@ -322,4 +379,21 @@ pub(super) async fn persistence_loop(
             }
         }
     }
+}
+
+pub(super) struct PushReview {
+    pub(super) deltas: Vec<mj_core::relay::RepoDelta>,
+    pub(super) finishing: bool,
+}
+
+pub(super) struct PushCompletion {
+    pub(super) session_id: String,
+    pub(super) epoch: u64,
+    pub(super) review_id: String,
+    pub(super) control: SessionManagerControl,
+    pub(super) state: TurnReviewState,
+    pub(super) deltas: Vec<mj_core::relay::RepoDelta>,
+    pub(super) verdict: ReviewVerdict,
+    pub(super) _admission: crate::upgrade::Work,
+    pub(super) reviewed_through_ordinal: Option<u64>,
 }

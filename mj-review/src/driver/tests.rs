@@ -14,6 +14,9 @@ fn seed() -> TurnReviewSeed {
 
 fn changed_delta() -> Vec<RepoDelta> {
     vec![RepoDelta {
+        base_commit: None,
+        head_commit: None,
+        base_kind: None,
         root: PathBuf::from("/w/app"),
         baseline_tree: Some("base-tree".to_string()),
         current_tree: "new-tree".to_string(),
@@ -32,6 +35,9 @@ fn changed_delta() -> Vec<RepoDelta> {
 
 fn empty_delta() -> Vec<RepoDelta> {
     vec![RepoDelta {
+        base_commit: None,
+        head_commit: None,
+        base_kind: None,
         root: PathBuf::from("/w/app"),
         baseline_tree: Some("base-tree".to_string()),
         current_tree: "base-tree".to_string(),
@@ -132,6 +138,9 @@ fn a_workspace_with_no_baseline_starts_coverage_rather_than_reviewing_nothing() 
     seed.baselines.clear();
     let (mut driver, _) = TurnReviewDriver::start(seed);
     let requests = driver.delta_captured(vec![RepoDelta {
+        base_commit: None,
+        head_commit: None,
+        base_kind: None,
         root: PathBuf::from("/w/app"),
         baseline_tree: None,
         current_tree: "first-tree".to_string(),

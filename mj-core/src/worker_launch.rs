@@ -194,7 +194,7 @@ pub struct WorkerLaunchConfig {
     /// that one wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_model: Option<String>,
-    /// Whether a turn review can ever run for this session, which is the only
+    /// Whether a review can ever run for this session, which is the only
     /// reason to spend anything on capturing the working tree.
     ///
     /// The controller decides it: `[review] profile` has to name a reviewer,
@@ -203,6 +203,8 @@ pub struct WorkerLaunchConfig {
     /// in a large working tree cheap.
     #[serde(default)]
     pub review_capture: bool,
+    #[serde(default)]
+    pub review_trigger: crate::config::ReviewTrigger,
     /// Explicit target settings shared by primary and reviewer processes.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub target_environment: std::collections::BTreeMap<String, String>,
@@ -433,9 +435,20 @@ pub fn resolve_subagent_mcp_role(
 }
 
 impl WorkerLaunchConfig {
+    pub fn review_gate(&self) -> bool {
+        self.review_trigger == crate::config::ReviewTrigger::Push
+            && matches!(self.harness, HarnessKind::Claude | HarnessKind::Codex)
+            && !self.environment.contains_key(SESSION_MANAGED_SUBAGENT_ENV)
+            && !self.handback_tool
+            && self.reviewer_launch.is_none()
+    }
+
     /// The `mj-agents` role is derived once from the launch's ownership and
     /// policy so Codex and Claude expose the same tools.
     pub fn subagent_mcp_role(&self) -> Option<crate::subagent::SubagentMcpRole> {
+        if self.review_gate() {
+            return Some(crate::subagent::SubagentMcpRole::Parent);
+        }
         resolve_subagent_mcp_role(
             &self.subagents,
             self.environment
@@ -597,6 +610,38 @@ mod tests {
             "cwd": "/workspace/project",
             "execution_policy": "configured_approvals"
         })
+    }
+
+    #[test]
+    fn persisted_review_trigger_controls_primary_mcp_without_leaking_to_children() {
+        for harness in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Muse] {
+            for trigger in [
+                crate::config::ReviewTrigger::Off,
+                crate::config::ReviewTrigger::Turn,
+                crate::config::ReviewTrigger::Push,
+            ] {
+                let mut json = launch_json();
+                json["harness"] = serde_json::to_value(harness).unwrap();
+                json["review_trigger"] = serde_json::to_value(trigger).unwrap();
+                let mut launch: WorkerLaunchConfig = serde_json::from_value(json).unwrap();
+                let saved = serde_json::to_value(&launch).unwrap();
+                let read: WorkerLaunchConfig = serde_json::from_value(saved).unwrap();
+                assert_eq!(read.review_trigger, trigger);
+                let expected =
+                    trigger == crate::config::ReviewTrigger::Push && harness != HarnessKind::Muse;
+                assert_eq!(launch.review_gate(), expected);
+                if expected {
+                    assert_eq!(
+                        launch.subagent_mcp_role(),
+                        Some(crate::subagent::SubagentMcpRole::Parent)
+                    );
+                }
+                launch
+                    .environment
+                    .insert(SESSION_MANAGED_SUBAGENT_ENV.into(), "1".into());
+                assert!(!launch.review_gate());
+            }
+        }
     }
 
     #[test]

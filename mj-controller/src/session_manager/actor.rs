@@ -1476,9 +1476,13 @@ pub(super) async fn drive_reviewer(
             client.pause_reviewer(role).await?;
             ReviewerOutcome::Paused
         }
-        ReviewerAction::CaptureDelta { baselines } => ReviewerOutcome::Delta {
-            repositories: client.capture_review_delta(role, baselines).await?,
+        ReviewerAction::CaptureDelta { baselines, scope } => ReviewerOutcome::Delta {
+            repositories: client.capture_review_delta(role, baselines, scope).await?,
         },
+        ReviewerAction::RecordReviewed { trees } => {
+            client.record_reviewed(role, trees).await?;
+            ReviewerOutcome::BaselineAdvanced
+        }
         ReviewerAction::AdvanceBaseline { trees } => {
             client.advance_review_baseline(role, trees).await?;
             ReviewerOutcome::BaselineAdvanced

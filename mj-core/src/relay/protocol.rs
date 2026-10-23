@@ -198,6 +198,14 @@ pub enum RelayRequest {
     },
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureScope {
+    #[default]
+    TurnDelta,
+    PushableCommits,
+}
+
 /// What a controller asks of the turn-review reviewer sidecar.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", content = "params", rename_all = "snake_case")]
@@ -249,10 +257,15 @@ pub enum ReviewerRequest {
     /// whole repository as this turn's work. Capture never touches the
     /// repository's index or working tree.
     CaptureDelta {
+        #[serde(default)]
+        scope: CaptureScope,
         baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
     },
     /// Record `trees`, the `current_tree` ids of a reviewed capture, as the new
     /// review baselines, pinning each so a later `git gc` cannot collect it.
+    RecordReviewed {
+        trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
+    },
     AdvanceBaseline {
         trees: std::collections::BTreeMap<std::path::PathBuf, String>,
     },
@@ -263,6 +276,12 @@ pub enum ReviewerRequest {
 #[serde(deny_unknown_fields)]
 pub struct RepoDelta {
     pub root: std::path::PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_kind: Option<String>,
     /// The tree-ish `patch` is diffed from: the baseline, with every change
     /// the turn did not write already in it (see `merged_in`). `None` when
     /// there is no usable baseline and coverage starts at this capture.
@@ -326,6 +345,7 @@ impl ReviewerRequest {
             Self::Pause | Self::PauseGeneration { .. } => "reviewer_pause",
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
+            Self::RecordReviewed { .. } => "reviewer_record_reviewed",
         }
     }
 }
@@ -403,6 +423,15 @@ impl RelayRequest {
                 request: ReviewerRequest::Start { config },
                 ..
             } if config.fast_mode.is_some() => 14,
+            Self::Reviewer {
+                request:
+                    ReviewerRequest::RecordReviewed { .. }
+                    | ReviewerRequest::CaptureDelta {
+                        scope: CaptureScope::PushableCommits,
+                        ..
+                    },
+                ..
+            } => super::RELAY_PUSH_REVIEW_PROTOCOL,
             Self::Reviewer { .. } => 6,
             _ => RELAY_MIN_PROTOCOL_VERSION,
         }

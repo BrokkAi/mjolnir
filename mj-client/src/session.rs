@@ -87,7 +87,12 @@ pub enum ReviewerAction {
         generation: u64,
     },
     CaptureDelta {
+        #[serde(default)]
+        scope: mj_core::relay::CaptureScope,
         baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
+    },
+    RecordReviewed {
+        trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
     },
     AdvanceBaseline {
         trees: std::collections::BTreeMap<std::path::PathBuf, String>,
@@ -106,6 +111,7 @@ impl ReviewerAction {
             Self::Pause | Self::PauseGeneration { .. } => "reviewer_pause",
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
+            Self::RecordReviewed { .. } => "reviewer_record_reviewed",
         }
     }
 }

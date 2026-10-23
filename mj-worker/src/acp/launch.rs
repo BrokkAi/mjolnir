@@ -9,6 +9,7 @@ pub struct SubagentMcpSocket {
     pub agent_mailboxes_enabled: bool,
     /// Whether a parent's spawn tool offers the subtle task type.
     pub subtle_subagents: bool,
+    pub review_gate: bool,
     /// False for legacy shared Codex homes, which must retain ACP delivery.
     pub profile_registration: bool,
 }
@@ -219,6 +220,11 @@ pub(super) fn session_request_meta(
                     .map(|tool| format!("mcp__{}__{tool}", mj_core::subagent::SUBAGENT_MCP_SERVER)),
             );
         }
+        if spec.subagent_mcp_socket.as_ref().is_some_and(|socket| {
+            socket.review_gate && socket.role == mj_core::subagent::SubagentMcpRole::Parent
+        }) {
+            allowed.push("mcp__mj-agents__request_review".into());
+        }
         if !allowed.is_empty() {
             options.insert("allowedTools".to_owned(), serde_json::json!(allowed));
         }
@@ -270,6 +276,9 @@ pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
             "--agent-mailboxes-enabled".into(),
             socket.agent_mailboxes_enabled.to_string(),
         ];
+        if socket.review_gate && socket.role == mj_core::subagent::SubagentMcpRole::Parent {
+            args.push("--review-gate".into());
+        }
         if !socket.subtle_subagents {
             // Only the non-default value is passed, for older workers.
             args.extend(["--subtle-subagents".into(), "false".into()]);

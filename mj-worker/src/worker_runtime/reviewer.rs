@@ -526,7 +526,27 @@ impl ReviewerRole {
                 elicitation_id,
                 response,
             } => self.respond_elicitation(elicitation_id, response).await,
-            ReviewerRequest::CaptureDelta { baselines } => self.capture_delta(baselines).await,
+            ReviewerRequest::CaptureDelta { baselines, scope } => {
+                self.capture_delta(baselines, scope).await
+            }
+            ReviewerRequest::RecordReviewed { trees } => {
+                tokio::task::spawn_blocking(move || -> Result<()> {
+                    for (root, (tree, commit)) in trees {
+                        mj_checkpoint::archive::record_reviewed_tree(
+                            &mj_checkpoint::archive::SystemGit,
+                            &root,
+                            &tree,
+                            &commit,
+                        )?;
+                    }
+                    Ok(())
+                })
+                .await
+                .context("reviewed-tree recording task stopped")??;
+                Ok(RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::ReviewBaselineAdvanced,
+                })
+            }
             ReviewerRequest::AdvanceBaseline { trees } => self.advance_baseline(trees).await,
         }
     }
@@ -547,6 +567,7 @@ impl ReviewerRole {
     async fn capture_delta(
         &mut self,
         baselines: std::collections::BTreeMap<PathBuf, String>,
+        scope: mj_core::relay::CaptureScope,
     ) -> Result<RelayResponseBody> {
         anyhow::ensure!(
             self.placement.review_capture,
@@ -564,6 +585,26 @@ impl ReviewerRole {
             .clone();
         let session_id = self.placement.session_id.clone();
         let repositories = tokio::task::spawn_blocking(move || {
+            if scope == mj_core::relay::CaptureScope::PushableCommits {
+                return repositories
+                    .iter()
+                    .map(|root| {
+                        let git = &mj_checkpoint::archive::SystemGit;
+                        let start = crate::review::capture::ensure_session_start_head(
+                            git,
+                            root,
+                            &session_id,
+                        )?
+                        .ok_or_else(|| anyhow::anyhow!("the repository has no HEAD commit"))?;
+                        let capture =
+                            crate::review::capture::capture_pushable_commits(git, root, &start)?;
+                        let mut delta = capture.delta;
+                        delta.base_commit = Some(capture.base.commit().to_owned());
+                        delta.head_commit = Some(capture.head_commit);
+                        Ok(delta)
+                    })
+                    .collect::<Result<Vec<_>>>();
+            }
             crate::review::capture::capture_repository_deltas(
                 &mj_checkpoint::archive::SystemGit,
                 &repositories,

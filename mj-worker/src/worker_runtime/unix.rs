@@ -246,6 +246,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
     };
     let supervisor_path = root.join("acp-supervisor.json");
     supervisor_spec.write_spec(&supervisor_path)?;
+    let review_gate = config.review_gate();
     let worker_executable = std::env::current_exe().context("locate Hel worker executable")?;
     let mut reviewer_target_environment = config.target_environment.clone();
     reviewer_target_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
@@ -354,6 +355,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
             role,
             agent_mailboxes_enabled: config.agent_mailboxes_enabled,
             subtle_subagents: config.subtle_subagents,
+            review_gate,
             profile_registration,
         }),
         project_memory: config.project_memory,
@@ -1412,6 +1414,13 @@ async fn prepare_and_start_harness(
         resume_session,
         native_session_may_have_history,
     } = setup;
+    if config
+        .environment
+        .contains_key(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV)
+    {
+        config.review_trigger = Default::default();
+    }
+    let review_gate = config.review_gate();
     let subagent_role = config.subagent_mcp_role();
     let root = root_path.as_path();
     // The first capture must precede the primary harness, so pre-existing
@@ -1571,8 +1580,11 @@ async fn prepare_and_start_harness(
                         &mut environment,
                         role,
                         policy,
-                        mailboxes_enabled,
-                        subtle_subagents,
+                        crate::subagent_mcp::ParentTools {
+                            agent_mailboxes_enabled: mailboxes_enabled,
+                            subtle_subagents,
+                            review_gate,
+                        },
                     )?;
                     Ok((registered, environment))
                 })
@@ -1611,6 +1623,7 @@ async fn prepare_and_start_harness(
                         role,
                         mailboxes_enabled,
                         subtle_subagents,
+                        review_gate,
                     )?;
                     let mailbox_hook_available =
                         super::subagents::configure_claude_mailbox_hook(&root, &session_id, &home)?;
@@ -1695,6 +1708,37 @@ async fn prepare_and_start_harness(
         .await?;
     }
 
+    if config.review_trigger == mj_core::config::ReviewTrigger::Push
+        && !config
+            .environment
+            .contains_key(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV)
+        && !config.handback_tool
+        && config.reviewer_launch.is_none()
+    {
+        let budget = preparation_step(
+            root,
+            status,
+            "review-gate",
+            LOCAL_PREPARATION_STEP_TIMEOUT,
+            cancel,
+        )
+        .await?;
+        let launch = config.clone();
+        let journal = relay.clone();
+        bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
+            if step_cancel.is_cancelled() {
+                bail!("review gate preparation cancelled");
+            }
+            let notices = super::harness_launch::prepare_review_gate(&launch)?;
+            let mut relay = journal.lock().expect("relay state lock poisoned");
+            for message in notices {
+                relay.record_observation(RelayObservation::Warning { message })?;
+            }
+            Ok(())
+        })
+        .await?;
+    }
+
     let harness_budget = preparation_step(
         root,
         status,
@@ -1709,7 +1753,7 @@ async fn prepare_and_start_harness(
             config.harness,
             config.harness_runtime,
             config.execution_policy,
-            AcpSupervisorSpec::from(&config),
+            super::harness_launch::primary_supervisor_spec(&config),
         ),
     )
     .await?;
@@ -1824,7 +1868,7 @@ pub async fn prepare_managed_harness(mut config: WorkerLaunchConfig) -> Result<(
             config.harness,
             config.harness_runtime,
             config.execution_policy,
-            AcpSupervisorSpec::from(&config),
+            super::harness_launch::primary_supervisor_spec(&config),
         )
         .await?;
     }

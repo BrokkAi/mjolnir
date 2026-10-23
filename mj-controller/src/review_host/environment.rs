@@ -60,6 +60,14 @@ pub trait ReviewEnvironment: Send + Sync {
     /// same change and nothing is lost.
     fn clear_interrupted(&self) -> Result<Vec<String>, String>;
 
+    fn enqueue_verdict(
+        &self,
+        _session_id: &str,
+        _event: &mj_core::mailbox::MailboxEvent,
+    ) -> Result<(), String> {
+        Err("review verdict mailbox is unavailable".into())
+    }
+
     fn orphaned_children(&self) -> Result<Vec<String>, String> {
         Ok(Vec::new())
     }
@@ -130,6 +138,17 @@ impl ControllerEnvironment {
 }
 
 impl ReviewEnvironment for ControllerEnvironment {
+    fn enqueue_verdict(
+        &self,
+        session_id: &str,
+        event: &mj_core::mailbox::MailboxEvent,
+    ) -> Result<(), String> {
+        let json = serde_json::to_string(event).map_err(|error| error.to_string())?;
+        crate::database::enqueue_mailbox_event(&event.key, session_id, &json, true, false)
+            .map(|_| ())
+            .map_err(|error| format!("{error:#}"))
+    }
+
     fn orphaned_children(&self) -> Result<Vec<String>, String> {
         let controller =
             crate::controller::Controller::load().map_err(|error| format!("{error:#}"))?;

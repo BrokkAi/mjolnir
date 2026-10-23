@@ -82,6 +82,7 @@ async fn run(
                                 SubagentToolAction::SendInput { .. }
                                     | SubagentToolAction::SendMessage { .. }
                                     | SubagentToolAction::Spawn { .. }
+                                    | SubagentToolAction::RequestReview {}
                             ) {
                                 None
                             } else {

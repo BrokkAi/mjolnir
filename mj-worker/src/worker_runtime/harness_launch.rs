@@ -279,3 +279,78 @@ mod tests {
         }
     }
 }
+
+/// Only a supported primary may enforce the repository's review gate.
+pub(super) fn primary_supervisor_spec(
+    config: &mj_core::worker_launch::WorkerLaunchConfig,
+) -> AcpSupervisorSpec {
+    let mut spec = AcpSupervisorSpec::from(config);
+    spec.environment.remove("MJ_REVIEW_GATE");
+    if config.review_gate() {
+        spec.excluded_environment
+            .retain(|name| name != "MJ_REVIEW_GATE");
+        spec.environment.insert("MJ_REVIEW_GATE".into(), "1".into());
+    } else if !spec
+        .excluded_environment
+        .iter()
+        .any(|name| name == "MJ_REVIEW_GATE")
+    {
+        spec.excluded_environment.push("MJ_REVIEW_GATE".into());
+    }
+    spec
+}
+
+#[cfg(unix)]
+pub(super) fn prepare_review_gate(
+    launch: &mj_core::worker_launch::WorkerLaunchConfig,
+) -> Result<Vec<String>> {
+    if launch.review_trigger != mj_core::config::ReviewTrigger::Push
+        || launch
+            .environment
+            .contains_key(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV)
+        || launch.handback_tool
+        || launch.reviewer_launch.is_some()
+    {
+        return Ok(Vec::new());
+    }
+    let mut notices = Vec::new();
+    if launch.review_gate() {
+        let git = crate::review::capture::BoundedGit::new(
+            crate::review::capture::WORKSPACE_STATE_TIMEOUT,
+        );
+        let _cancel_git = git.cancellation_guard();
+        let mut roots = vec![launch.cwd.clone()];
+        roots.extend(super::reviewer_workspace_directories(launch));
+        for repository in crate::review::capture::discover_repositories(&git, &roots) {
+            crate::review::capture::ensure_session_start_head(
+                &git,
+                &repository,
+                &launch.session_id,
+            )?;
+            use crate::review::hook::{HookInstall, install_pre_push_hook};
+            let reason = match install_pre_push_hook(&git, &repository) {
+                Ok(HookInstall::Installed | HookInstall::Rewritten) => None,
+                Ok(HookInstall::RefusedExistingBackup(path)) => {
+                    Some(format!("{} already exists", path.display()))
+                }
+                Ok(HookInstall::RefusedWorkTreeHooksDirectory(path)) => Some(format!(
+                    "{} is inside the work tree and is not ignored",
+                    path.display()
+                )),
+                Err(error) => Some(format!("{error:#}")),
+            };
+            if let Some(reason) = reason {
+                notices.push(format!(
+                    "Before-push review in {}: {reason}; the gate is not installed.",
+                    repository.display()
+                ));
+            }
+        }
+    } else {
+        notices.push(format!(
+            "Before-push review is not available for {}; this session runs without review.",
+            launch.harness.display_name()
+        ));
+    }
+    Ok(notices)
+}

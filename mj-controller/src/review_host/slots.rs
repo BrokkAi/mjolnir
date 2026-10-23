@@ -2,7 +2,7 @@ use super::*;
 
 impl ReviewSlot {
     pub(super) fn view(&self, session_id: &str) -> RuntimeReviewView {
-        let verdict = match self.driver.phase() {
+        let mut verdict = match self.driver.phase() {
             TurnReviewPhase::Forwarding { synthesis, .. } => Some(VerdictView {
                 kind: VerdictKind::Findings,
                 text: synthesis.clone(),
@@ -40,6 +40,15 @@ impl ReviewSlot {
                 },
             }),
         };
+        if self.push.is_some()
+            && let Some(verdict) = verdict.as_mut()
+        {
+            verdict.allowed = if self.push.as_ref().is_some_and(|push| push.finishing) {
+                Vec::new()
+            } else {
+                vec![Resolution::Cancelled]
+            };
+        }
         RuntimeReviewView {
             session_id: session_id.to_owned(),
             questions: Vec::new(),

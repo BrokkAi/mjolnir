@@ -515,6 +515,11 @@ impl Controller {
             .map(|root| format!("{}/{child_id}", root.trim_end_matches('/')));
         // The first prompt names the tool only when the child will have it.
         let initial_prompt = match (handback_tool, &report_dir) {
+            (true, Some(report_dir)) if reviewer => format!(
+                "You are a Mjolnir reviewer child. Your report directory is {report_dir}. Call handback with the complete rubric JSON (up to {} characters).\n\n{}",
+                mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS,
+                request.initial_prompt
+            ),
             (true, Some(report_dir)) => format!(
                 "{}\n\n{}",
                 mj_core::subagent::handback_prompt_note(report_dir),
