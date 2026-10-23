@@ -1584,6 +1584,12 @@ fn podman_containers_use_root_in_the_default_namespace() {
     assert!(
         podman
             .windows(2)
+            .any(|pair| pair == ["--security-opt", "label=disable"]),
+        "SELinux would deny the unlabeled host cache and workspace mounts: {podman:?}"
+    );
+    assert!(
+        podman
+            .windows(2)
             .any(|pair| pair == ["--env", "HOME=/home/hel"])
     );
     assert!(
@@ -1609,6 +1615,10 @@ fn podman_containers_use_root_in_the_default_namespace() {
             "{engine} must keep its own user namespace"
         );
         assert!(!args.contains(&"0:0".to_owned()), "{engine}: {args:?}");
+        assert!(
+            !args.iter().any(|argument| argument == "label=disable"),
+            "{engine} does not need Podman's SELinux adjustment: {args:?}"
+        );
         assert!(!args.contains(&"--cap-add=PERFMON".to_owned()));
     }
 }

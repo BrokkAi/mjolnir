@@ -115,21 +115,10 @@ impl Controller {
             "count commits against upstream",
         )?;
         // A repository with no commit yet has no HEAD to diff against.
-        let numstat = run(
-            &["--no-optional-locks", "diff", "--numstat", "HEAD"],
-            "count changed lines",
-        )?
-        .unwrap_or_default();
-        let porcelain = run(
-            &[
-                "--no-optional-locks",
-                "status",
-                "--porcelain",
-                "--untracked-files=normal",
-            ],
-            "list changed files",
-        )?
-        .unwrap_or_default();
+        let numstat =
+            run(&mj_core::local_git::NUMSTAT_ARGS, "count changed lines")?.unwrap_or_default();
+        let porcelain =
+            run(&mj_core::local_git::STATUS_ARGS, "list changed files")?.unwrap_or_default();
         Ok(mj_core::local_git::parse_git_status(
             cwd,
             &branch,

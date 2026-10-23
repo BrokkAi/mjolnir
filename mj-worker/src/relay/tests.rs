@@ -354,8 +354,7 @@ fn uncertain_steering_survives_restart_and_requires_explicit_retry() {
     assert_eq!(claimed[0].command_id, "prompt-queued");
 }
 
-/// A relay whose bridge returns steers it cannot inject, with `prompt-first`
-/// running.
+/// A relay whose bridge advertises steering, with `prompt-first` running.
 fn relay_steering_automatically(root: &std::path::Path) -> DurableRelay {
     let mut relay = DurableRelay::open(root, SESSION, "test").unwrap();
     relay.set_steering_supported(Some(true));

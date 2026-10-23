@@ -3215,6 +3215,33 @@ fn a_page_lists_its_settings_in_a_fixed_order() {
     );
 }
 
+/// A profile page lists only the settings its kind reads: the guardian review
+/// model and Codex profile belong to Codex alone.
+// Hard-won: DSH campaign 2026-10-23: Settings showed guardian and Codex fields for DSH
+#[test]
+fn a_profile_page_hides_codex_only_settings_for_other_kinds() {
+    let keys = |kind: &str| {
+        let mut draft = json!({"profiles": {"p": {"kind": kind, "home": "/h"}}});
+        schema::expand(&mut draft, &mut Vec::new());
+        let path = vec!["profiles".to_owned(), "p".to_owned()];
+        visible_keys(&path, draft.pointer(&pointer(&path)).unwrap())
+    };
+    let codex_only = ["guardian_review_model", "codex_profile"];
+    assert!(
+        codex_only
+            .iter()
+            .all(|key| keys("codex").contains(&(*key).to_owned()))
+    );
+    for kind in ["claude", "kimi", "grok", "muse", "opencode", "mimo", "dsh"] {
+        assert!(
+            !keys(kind)
+                .iter()
+                .any(|key| codex_only.contains(&key.as_str())),
+            "{kind}"
+        );
+    }
+}
+
 /// Opens the field `key` on the page `section` and types `text` into it.
 fn edit_field(dialog: &mut SetupDialog, section: &str, key: &str, text: &str) {
     dialog.path = vec![section.to_owned()];

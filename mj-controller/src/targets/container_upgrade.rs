@@ -262,7 +262,11 @@ pub(crate) fn inspect_retained_container(
                 .host_config
                 .security_opt
                 .as_ref()
-                .is_none_or(Vec::is_empty)
+                .is_none_or(|options| {
+                    options.iter().all(|option| {
+                        container::container_security_opts(host.engine()).contains(&option.as_str())
+                    })
+                })
             && !record.host_config.network_mode.starts_with("container:"),
         "storage-preserving upgrades do not support this container's device, privilege, port, or namespace overrides; the existing container is unchanged"
     );
@@ -727,6 +731,9 @@ impl RetainedContainer {
                 .iter()
                 .map(|capability| format!("--cap-add={capability}")),
         );
+        for option in container::container_security_opts(host.engine()) {
+            args.extend(["--security-opt".to_owned(), (*option).to_owned()]);
+        }
         args.extend(managed_resource_identity_args(
             ManagedResourceKind::Container,
             session_id,
@@ -1098,6 +1105,128 @@ mod tests {
             }
             ProcessExecutor.execute(command)
         }
+    }
+
+    struct RetainedInspectionExecutor {
+        inspection: String,
+    }
+
+    impl CommandExecutor for RetainedInspectionExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            match command.purpose.as_str() {
+                "inspect retained session container" => Ok(CommandOutput {
+                    status: 0,
+                    stdout: self.inspection.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                }),
+                "inspect selected upgrade image" => Ok(CommandOutput {
+                    status: 0,
+                    stdout: b"sha256:prepared\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                purpose => bail!("unexpected fixture command {purpose}"),
+            }
+        }
+    }
+
+    fn retained_inspection(security_opt: &[&str]) -> String {
+        serde_json::json!([{
+            "Id": "source-id",
+            "Name": "/container-name",
+            "Image": "sha256:source-image",
+            "Config": {
+                "Image": "example/image:old",
+                "Labels": {
+                    "dev.mj.managed": "true",
+                    "dev.mj.session": "session-fixture",
+                },
+                "User": "",
+                "Env": [],
+                "WorkingDir": "",
+                "Cmd": ["sh", "-c", container::KEEPALIVE_SCRIPT],
+                "Entrypoint": null,
+            },
+            "HostConfig": {
+                "Memory": 0,
+                "NanoCpus": 0,
+                "PidsLimit": null,
+                "NetworkMode": "default",
+                "Privileged": false,
+                "ReadonlyRootfs": false,
+                "Devices": null,
+                "PortBindings": null,
+                "UsernsMode": "",
+                "SecurityOpt": security_opt,
+                "CapAdd": ["PERFMON"],
+                "CapDrop": [],
+            },
+            "Mounts": [{
+                "Type": "bind",
+                "Source": "/tmp",
+                "Destination": "/",
+                "RW": true,
+                "Propagation": "rprivate",
+                "Options": [],
+            }],
+            "State": { "Running": true },
+        }])
+        .to_string()
+    }
+
+    fn inspect_fixture(
+        locator: &TargetLocator,
+        security_opt: &[&str],
+    ) -> Result<RetainedContainer> {
+        inspect_retained_container(
+            locator,
+            "session-fixture",
+            "example/image:new",
+            "operation-fixture",
+            Path::new("/workspace/session-fixture"),
+            Path::new("/var/lib/hel/workers/session-fixture"),
+            &RetainedInspectionExecutor {
+                inspection: retained_inspection(security_opt),
+            },
+        )
+    }
+
+    #[test]
+    fn retained_podman_container_may_carry_the_managed_security_option() {
+        let locator = TargetLocator::LocalPodman {
+            container_id: "container-name".into(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        };
+        let retained = inspect_fixture(&locator, &["label=disable"]).unwrap();
+        assert_eq!(retained.name, "container-name");
+    }
+
+    #[test]
+    fn retained_container_rejects_a_security_option_the_replacement_would_drop() {
+        let podman = TargetLocator::LocalPodman {
+            container_id: "container-name".into(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        };
+        let error = inspect_fixture(&podman, &["seccomp=unconfined"]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("storage-preserving upgrades do not support"),
+            "{error:#}"
+        );
+
+        let docker = TargetLocator::LocalDocker {
+            container_id: "container-name".into(),
+            borrowed_from: None,
+        };
+        let error = inspect_fixture(&docker, &["label=disable"]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("storage-preserving upgrades do not support"),
+            "{error:#}"
+        );
     }
 
     // Hard-won: #1326: automatic recreation deleted uncheckpointed workspace and cache storage.

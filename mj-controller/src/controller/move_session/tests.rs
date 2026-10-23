@@ -1847,7 +1847,8 @@ fn a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args() {
                 .iter()
                 .any(|blocker| blocker.contains(side)
                     && blocker.contains("--protect-args")
-                    && blocker.contains("brew install rsync")),
+                    // The destination is a container: its rsync comes from the image, not brew.
+                    && blocker.contains("brew install rsync") == (side != "Destination")),
             "{side} rsync is not reported: {:?}",
             assessment.blockers
         );

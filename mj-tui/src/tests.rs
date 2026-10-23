@@ -2708,8 +2708,8 @@ fn git_status_fixture() -> mj_core::local_git::SessionGitStatus {
         std::path::PathBuf::from("/work"),
         "feature/x",
         Some("2\t1"),
-        "12\t3\tsrc/main.rs\n",
-        " M src/main.rs\n?? notes.md\n",
+        "12\t3\tsrc/main.rs\0",
+        " M src/main.rs\0?? notes.md\0",
     )
 }
 
@@ -2736,8 +2736,8 @@ fn a_long_branch_name_is_elided_in_the_middle_so_the_marker_keeps_its_counts() {
             "/work".into(),
             branch,
             Some("2\t1"),
-            "12\t3\tsrc/main.rs\n",
-            " M src/main.rs\n?? notes.md\n",
+            "12\t3\tsrc/main.rs\0",
+            " M src/main.rs\0?? notes.md\0",
         )),
     );
     // A third of a 100-column terminal, floored at 40, is a 40-column pane.
