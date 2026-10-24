@@ -233,8 +233,9 @@ Then follow the target-specific result:
   working OverlayFS support on the daemon's filesystem host. Run `docker info`
   and follow [Docker for Mjolnir](/docker/).
 - **Apple container:** the controller must be Apple silicon on macOS 26 or
-  newer. If doctor reports a stopped service, run `container system start`.
-  See [Apple container](/apple-container/).
+  newer. The daemon starts an installed service automatically; if doctor still
+  reports it stopped, run `container system start` and review its output. See
+  [Apple container](/apple-container/).
 - **SSH Podman:** run the Podman prerequisite and image checks on the remote
   host as the same user selected by SSH. See [SSH and SSH Podman](/ssh/).
 - **EC2:** verify the configured AWS profile, region, launch template, SSH

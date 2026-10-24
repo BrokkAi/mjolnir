@@ -164,6 +164,16 @@ pub(super) async fn run_daemon_runtime(
             .collect(),
     );
     let cancellation = crate::termination::Coordinator::install().token();
+    let apple_container_startup = spawn_apple_container_startup(
+        state.clone(),
+        cancellation.clone(),
+        config.targets.values().any(|target| {
+            matches!(
+                target,
+                mj_core::config::TargetTemplate::AppleContainer { .. }
+            )
+        }),
+    );
     // Bootstrap already owns live managers. Capture its error so those owners
     // are shut down before the process-level writer can be closed.
     let bootstrapping = Instant::now();
@@ -196,6 +206,13 @@ pub(super) async fn run_daemon_runtime(
             spawn_shutdown_watchdog();
             cancellation.cancel();
             let mut outcome = Err(error);
+            if let Some(apple_container_startup) = apple_container_startup {
+                record_daemon_cleanup(
+                    &mut outcome,
+                    "join Apple container startup after bootstrap failure",
+                    apple_container_startup.await.map_err(anyhow::Error::new),
+                );
+            }
             record_daemon_cleanup(
                 &mut outcome,
                 "shut down bootstrap worker upgrade coordinator",
@@ -818,6 +835,13 @@ pub(super) async fn run_daemon_runtime(
         "join container image refresher",
         image_refresh.await.map_err(anyhow::Error::new),
     );
+    if let Some(apple_container_startup) = apple_container_startup {
+        epilogue.record(
+            &mut outcome,
+            "join Apple container startup",
+            apple_container_startup.await.map_err(anyhow::Error::new),
+        );
+    }
     epilogue.record(
         &mut outcome,
         "join capacity service",
@@ -1241,6 +1265,72 @@ pub(super) fn spawn_manager_target_refresher(
             }
         }
     })
+}
+
+/// Start Apple's container service when a configured Apple target makes it
+/// useful. This runs beside daemon startup so a slow launchd registration or
+/// first health check cannot hold the daemon's event loop or serving phase.
+fn spawn_apple_container_startup(
+    state: Arc<RuntimeState>,
+    cancellation: CancellationToken,
+    apple_target_configured: bool,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !cfg!(target_os = "macos") || !apple_target_configured {
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        let command_cancelled = Arc::new(AtomicBool::new(false));
+        let executor = CancellableProcessExecutor::new(command_cancelled.clone())
+            .with_deadline(Duration::from_secs(90));
+        let mut startup = tokio::task::spawn_blocking(move || {
+            if !crate::targets::program_on_path("container", std::env::var_os("PATH").as_deref()) {
+                return Ok(None);
+            }
+            crate::targets::ensure_apple_container_runtime(&executor).map(Some)
+        });
+        let result = tokio::select! {
+            result = &mut startup => result
+                .context("Apple container startup task panicked")
+                .and_then(std::convert::identity),
+            () = cancellation.cancelled() => {
+                command_cancelled.store(true, Ordering::Release);
+                let _ = startup.await;
+                tracing::debug!("Apple container startup cancelled with the daemon");
+                return;
+            }
+        };
+        match result {
+            Ok(None) | Ok(Some(crate::targets::AppleContainerRuntime::Running)) => {}
+            Ok(Some(crate::targets::AppleContainerRuntime::Started)) => {
+                state.push_notice("", "Started the Apple container runtime.");
+            }
+            Err(error) if cancellation.is_cancelled() => {
+                tracing::debug!(
+                    error = format!("{error:#}"),
+                    "Apple container startup stopped with the daemon"
+                );
+            }
+            Err(error) if crate::controller::is_missing_command(&error) => {
+                tracing::debug!(
+                    error = format!("{error:#}"),
+                    "Apple container is not installed; skipping runtime startup"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = format!("{error:#}"),
+                    "could not start the Apple container runtime during daemon startup"
+                );
+                state.push_notice(
+                    "",
+                    format!(
+                        "Could not start the Apple container runtime: {error:#}. \
+                         Run `container system start` manually."
+                    ),
+                );
+            }
+        }
+    }))
 }
 
 pub(super) async fn refresh_runtime_controller(state: &RuntimeState) {

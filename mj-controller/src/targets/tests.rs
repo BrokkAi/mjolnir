@@ -132,6 +132,85 @@ fn podman_output(stdout: impl AsRef<[u8]>) -> CommandOutput {
     }
 }
 
+#[test]
+fn apple_container_runtime_starts_only_after_the_health_check_says_it_is_stopped() {
+    let executor = PodmanPreflightExecutor::with_outputs([
+        CommandOutput {
+            status: 1,
+            stdout: Vec::new(),
+            stderr: b"service is stopped".to_vec(),
+        },
+        CommandOutput {
+            status: 0,
+            stdout: b"launching services".to_vec(),
+            stderr: Vec::new(),
+        },
+        CommandOutput {
+            status: 0,
+            stdout: b"running".to_vec(),
+            stderr: Vec::new(),
+        },
+    ]);
+
+    assert_eq!(
+        ensure_apple_container_runtime(&executor).unwrap(),
+        AppleContainerRuntime::Started
+    );
+    let commands = executor.seen.borrow();
+    let commands = commands
+        .iter()
+        .map(|command| format!("{} {}", command.program, command.args.join(" ")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        commands,
+        [
+            "container system status",
+            "container system start --disable-kernel-install",
+            "container system status",
+        ]
+    );
+}
+
+#[test]
+fn apple_container_runtime_is_not_restarted_when_its_health_check_succeeds() {
+    let executor = PodmanPreflightExecutor::with_outputs([CommandOutput {
+        status: 0,
+        stdout: b"running".to_vec(),
+        stderr: Vec::new(),
+    }]);
+
+    assert_eq!(
+        ensure_apple_container_runtime(&executor).unwrap(),
+        AppleContainerRuntime::Running
+    );
+    let commands = executor.seen.borrow();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].args, ["system", "status"]);
+}
+
+#[test]
+fn apple_container_runtime_start_failure_keeps_the_cli_diagnostic() {
+    let executor = PodmanPreflightExecutor::with_outputs([
+        CommandOutput {
+            status: 1,
+            stdout: Vec::new(),
+            stderr: b"service is stopped".to_vec(),
+        },
+        CommandOutput {
+            status: 2,
+            stdout: b"launchd registration began".to_vec(),
+            stderr: b"no default kernel is configured".to_vec(),
+        },
+    ]);
+
+    let error = ensure_apple_container_runtime(&executor).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "container system start failed with status 2: launchd registration began\n\
+         no default kernel is configured"
+    );
+}
+
 /// A `podman info --format json` result with the fields the preflight reads.
 fn podman_info_json(
     rootless: bool,
