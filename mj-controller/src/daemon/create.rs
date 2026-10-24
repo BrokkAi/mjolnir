@@ -462,6 +462,10 @@ mod delegation_replay_tests {
     use crate::controller::test_support::{IsolatedTest, test_name};
 
     #[tokio::test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     async fn only_interactive_create_remembers_default_recent_and_subagents() {
         use mj_core::go::{GoPreferences, RecentLaunch};
         use mj_core::subagent::SubagentPolicy;
