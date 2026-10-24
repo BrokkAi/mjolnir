@@ -272,7 +272,7 @@ fn timeout_response(
 ) -> WaitResponse {
     WaitResponse {
         diagnostic: None,
-        pending_elicitations: Vec::new(),
+        pending_elicitations: session.pending_elicitations.clone(),
         usage: None,
         outcome: WaitOutcome::Timeout,
         stop_reason: None,

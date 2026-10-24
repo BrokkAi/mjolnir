@@ -1541,6 +1541,12 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
     if let Some(message) = &response.message {
         lines.push(message.clone());
     }
+    if response.outcome == WaitOutcome::Timeout && !response.pending_elicitations.is_empty() {
+        let session_id = &response.session.id;
+        lines.push(format!(
+            "input is pending; inspect it with `mj elicitations --session {session_id}`, answer with `mj respond --session {session_id} --elicitation <id> '<json>'`, or use `mj prompt --return-on-input`"
+        ));
+    }
     // Why the turn ended, when the worker recorded a reason.
     if let Some(diagnostic) = &response.diagnostic
         && response.outcome != WaitOutcome::Finished
@@ -3422,6 +3428,19 @@ mod tests {
             wait_report_lines(&busy)[0],
             "turn finished (completed, end of turn); the session is not idle: expecting the agent to continue"
         );
+        let mut waiting_for_answer = wait_response(
+            "timeout",
+            serde_json::json!({
+                "pending_elicitations": [{"id": "question-1", "message": "Approve?", "fields": []}]
+            }),
+        );
+        waiting_for_answer.session.id = "session-1".into();
+        // Hard-won: DSH campaign E-2: a prompt timeout hid the pending permission request and its response options.
+        assert!(wait_report_lines(&waiting_for_answer).iter().any(|line| {
+            line.contains("mj elicitations --session session-1")
+                && line.contains("mj respond --session session-1")
+                && line.contains("mj prompt --return-on-input")
+        }));
         assert_eq!(
             serde_json::to_value(&finished).unwrap()["stop_reason"],
             "EndTurn",

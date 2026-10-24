@@ -3191,7 +3191,9 @@ async fn wait_reports_a_timeout_rather_than_guessing_at_a_running_turn() {
         })]),
         ..FakeBackend::default()
     });
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |snapshot| {
+        snapshot.sessions[0].pending_elicitations = vec![input_request()];
+    });
 
     let response = app
         .oneshot(
@@ -3206,6 +3208,8 @@ async fn wait_reports_a_timeout_rather_than_guessing_at_a_running_turn() {
     let body = json_body(response).await;
     assert_eq!(body["outcome"], "timeout");
     assert_eq!(body["turn_id"], 5);
+    // Hard-won: DSH campaign E-2: timeout dropped the permission request, leaving the prompt caller with no way to know input was pending.
+    assert_eq!(body["pending_elicitations"][0]["id"], "question-1");
 }
 
 /// A wait in progress when the daemon shuts down answers at once. An upgrade
