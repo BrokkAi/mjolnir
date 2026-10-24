@@ -314,6 +314,15 @@ impl HarnessKind {
             );
             environment.insert("MIMOCODE_DISABLE_AUTOUPDATE".into(), "1".into());
         }
+        if self == Self::Kimi {
+            // Kimi treats a session lock recorded under another hostname, or
+            // under a live process with the recorded PID, as held forever.
+            // A home survives container replacement (a new hostname) and a
+            // killed turn leaves its lock behind, so the lock would refuse
+            // every later prompt. One harness owns each staged home, so the
+            // lock has no second writer to guard against.
+            environment.insert("KIMI_CODE_SESSION_LOCK".into(), "0".into());
+        }
     }
 
     /// Point this harness's own CLI at a profile's configured home, for the

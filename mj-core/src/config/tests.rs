@@ -769,6 +769,9 @@ fn every_harness_is_pointed_at_its_staged_home() {
                 home.join("config")
             );
         }
+        if kind == HarnessKind::Kimi {
+            assert_eq!(environment["KIMI_CODE_SESSION_LOCK"], "0");
+        }
     }
 }
 
