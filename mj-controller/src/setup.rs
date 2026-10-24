@@ -116,6 +116,41 @@ pub fn profiles_config(homes: &[DiscoveredHome]) -> Config {
     build_config(homes, None)
 }
 
+/// Point each discovered profile of a harness that reads an API key (DSH's
+/// `DEEPSEEK_API_KEY`) at the secret of that name, when `secrets.toml` beside
+/// `config_path` defines it. A key exported in Mjolnir's environment needs no
+/// entry, but one kept only in the secrets file reaches the harness only
+/// through `KEY = { from_secret = "KEY" }`, and without it the detected
+/// profile reports itself unauthenticated.
+pub fn reference_secret_api_keys(discovered: &mut Config, config_path: &Path) {
+    let Ok(secrets) =
+        mj_core::config::load_secrets(&mj_core::config::secrets_path_beside(config_path))
+    else {
+        return;
+    };
+    for profile in discovered.profiles.values_mut() {
+        let Some(key) = profile.kind.api_key_variable() else {
+            continue;
+        };
+        if profile.environment.sources().contains_key(key)
+            || !secrets
+                .get(key)
+                .is_some_and(|value| !value.trim().is_empty())
+        {
+            continue;
+        }
+        let mut sources = profile.environment.sources().clone();
+        sources.insert(
+            key.to_owned(),
+            mj_core::config::EnvironmentValue::FromSecret(key.to_owned()),
+        );
+        profile.environment = mj_core::config::with_secret_resolver(
+            mj_core::config::SecretResolver::beside(config_path),
+            || mj_core::config::Environment::from_sources(sources),
+        );
+    }
+}
+
 /// Read the concrete `Host` aliases from `~/.ssh/config`.
 ///
 /// This is a pure read: setup never runs `ssh` while discovering. `Include`

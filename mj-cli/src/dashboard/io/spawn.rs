@@ -629,6 +629,7 @@ pub(crate) fn spawn_setup_discovery(
             match scope {
                 DetectScope::Profiles => {
                     config = setup::profiles_config(&setup::discover_profiles(&executor));
+                    setup::reference_secret_api_keys(&mut config, &mj_core::config::config_path());
                 }
                 DetectScope::Runtimes => {
                     // The machines are other hosts, probed while this one is.

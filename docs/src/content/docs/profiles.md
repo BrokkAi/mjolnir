@@ -535,6 +535,9 @@ home = "/home/me/.dsh"
 DEEPSEEK_API_KEY = { from_secret = "DEEPSEEK_API_KEY" }
 ```
 
+When detection adds a DSH profile and `secrets.toml` beside `config.toml`
+defines `DEEPSEEK_API_KEY`, it writes that `environment` entry for you.
+
 There is no interactive login, and `mj login` refuses the profile. A profile
 without the key cannot start; the refused session and `mj doctor` say how to
 supply it. Other dsh-acp settings can go in `environment`:
