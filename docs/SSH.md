@@ -150,9 +150,8 @@ to opening masters, and to every command when sharing is off.
   on the Mac, run `container system start`, and check `container system status`.
   The SSH account must also find `container` on its noninteractive `PATH`. For
   zsh, put the directory containing it in `.zshenv`, which noninteractive
-  shells read, or add a system-wide `/etc/paths.d` entry. Verify the setup with
-  `ssh <destination> container --version`. Mjolnir checks these same commands
-  before offering or launching the runtime.
+  shells read. Verify the setup with `ssh <destination> container --version`.
+  Mjolnir checks these same commands before offering or launching the runtime.
 
 ## Machine and runtime configuration
 
