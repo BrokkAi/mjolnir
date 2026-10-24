@@ -140,7 +140,8 @@ session. See [Workspaces and bundles](/workspaces-bundles/).
 Mjolnir starts the account's shell once per worker to learn the environment a
 session should have, and it starts it the way a terminal does: as an interactive
 login shell. The startup files a terminal reads — `~/.zprofile` and `~/.zshrc`
-for zsh, `~/.bash_profile` and `~/.bashrc` for bash — are read too, so a tool
+for zsh; `~/.bash_profile` and `~/.bashrc` for bash; or `~/.tcshrc`/`~/.cshrc`
+and `~/.login` for tcsh/csh — are read too, so a tool
 that a version manager such as nvm, pyenv, asdf or mise puts on `PATH` is
 visible to sessions.
 

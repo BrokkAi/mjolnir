@@ -121,6 +121,11 @@ impl std::fmt::Debug for SensitiveCommandInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandSpec {
     pub program: String,
+    /// Override `argv[0]` when the child's login mode is encoded there rather
+    /// than in an argument. This is executor-local and is not serialized.
+    #[cfg(unix)]
+    #[serde(skip)]
+    pub(crate) arg0: Option<String>,
     pub args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
@@ -186,6 +191,8 @@ impl CommandSpec {
     ) -> Self {
         Self {
             program: program.into(),
+            #[cfg(unix)]
+            arg0: None,
             args: args.into_iter().map(Into::into).collect(),
             env: BTreeMap::new(),
             clear_env: false,
@@ -201,6 +208,17 @@ impl CommandSpec {
             ssh_session_probe: false,
             sensitive_stdin: None,
         }
+    }
+
+    /// Start the program with a specific `argv[0]`.
+    ///
+    /// POSIX shells use `-l`, but C shells recognize login mode from a leading
+    /// dash in `argv[0]` (for example, `-tcsh`). SSH does the same when it
+    /// starts an account's login shell.
+    #[cfg(unix)]
+    pub fn arg0(mut self, arg0: impl Into<String>) -> Self {
+        self.arg0 = Some(arg0.into());
+        self
     }
 
     pub fn purpose(mut self, purpose: impl Into<String>) -> Self {
@@ -1032,6 +1050,11 @@ impl CancellableProcessExecutor {
 
 fn configured_command(command: &CommandSpec) -> Command {
     let mut process = Command::new(&command.program);
+    #[cfg(unix)]
+    if let Some(arg0) = &command.arg0 {
+        use std::os::unix::process::CommandExt as _;
+        process.arg0(arg0);
+    }
     if command.clear_env {
         process.env_clear();
     }

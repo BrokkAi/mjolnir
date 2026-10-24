@@ -427,7 +427,8 @@ its `config.toml` names a custom model provider or its `auth.json` records
 On every bare runtime, whether on this machine, an SSH machine, or an EC2
 machine, each worker performs one bounded probe of the account's shell and
 starts it the way a terminal does: as an interactive login shell (`zsh -l -i`
-for zsh, `bash -l -i` for bash). The probe begins from a cleared environment, so
+for zsh, `bash -l -i` for bash, and login `argv[0]` with `-i` for tcsh or csh).
+The probe begins from a cleared environment, so
 nothing the process that launched Mjolnir exported leaks into the session, but
 it reads the same startup files a terminal reads. Tools that a version manager
 adds to `PATH` — nvm, pyenv, asdf, mise, volta, sdkman, or Homebrew on Linux —
@@ -498,7 +499,7 @@ For DSH, configure `kind = "dsh"`, for example with
 `home = "/home/me/.dsh"`. Detection accepts DeepSeek's own `dsh` CLI, its
 `~/.dsh` home, or `DEEPSEEK_API_KEY` in the environment Mjolnir started with,
 so a key alone is enough to be offered a profile. DSH runs BrokkAi's
-[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.2.3, a DeepSeek coding agent
+[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.3.0, a DeepSeek coding agent
 that speaks ACP itself, so there is no separate bridge. It is not the DeepSeek
 harness earlier releases offered as `kind = "deepseek"`; that kind still fails
 to load. The home is a `DSH_ACP_DATA_DIR` root. It holds an optional
@@ -887,7 +888,7 @@ MiMo Code installs from the pinned `@mimo-ai/cli` npm package. Its managed
 launch disables automatic updates so a running session never replaces its own
 binary.
 DSH is never installed. A launch resolves the target's own `dsh-acp` on
-`PATH`, or fetches the pinned `@brokkai/dsh-acp@0.2.3` package through `npx`,
+`PATH`, or fetches the pinned `@brokkai/dsh-acp@0.3.0` package through `npx`,
 so a bare target needs Node.js 22 or newer with npm and npx; the npm package
 bundles the release binaries. Linux and macOS, on x86-64 and ARM64, are
 supported. Linux needs glibc 2.34 or newer, so musl distributions such as

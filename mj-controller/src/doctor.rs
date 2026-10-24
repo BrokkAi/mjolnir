@@ -411,8 +411,9 @@ fn session_environment_check_from(
             join_english(&missing),
         ),
         "Install Node.js 22 or newer where your shell startup files set PATH (~/.zprofile or \
-         ~/.zshrc for zsh, ~/.bash_profile or ~/.bashrc for bash), or set an explicit \
-         [profiles.<id>.environment] PATH, then restart the worker or resume the session.",
+         ~/.zshrc for zsh; ~/.bash_profile or ~/.bashrc for bash; ~/.tcshrc or ~/.cshrc and \
+         ~/.login for tcsh/csh), or set an explicit [profiles.<id>.environment] PATH, then \
+         restart the worker or resume the session.",
     )
 }
 
