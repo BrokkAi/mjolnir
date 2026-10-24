@@ -2840,6 +2840,9 @@ fn recovery_from_in_place_closing_source_keeps_children_and_skips_stop_hook() {
         let directory = tempfile::tempdir().unwrap();
         IsolatedTest::new(name)
             .env("MJ_MOVE_IN_PLACE_DRAIN_RECOVERY_CHILD", "1")
+            // The debug recovery state machine nests Move, checkpoint, and
+            // relay futures beyond libtest's default 2 MiB test-thread stack.
+            .env("RUST_MIN_STACK", "8388608")
             .env(LATCH_CHECKPOINT_ONLY, "1")
             .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
             .isolated_store(directory.path())
