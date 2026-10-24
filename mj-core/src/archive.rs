@@ -40,6 +40,9 @@ pub const ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY: u32 = 8;
 pub const ARCHIVE_SCHEMA_VERSION_MESSAGES: u32 = 9;
 /// Durable private Git refs, including non-commit review baselines.
 pub const ARCHIVE_SCHEMA_VERSION_REVIEW_REFS: u32 = 10;
+/// Mjolnir's private Git refs: review baselines, review points and reviewed
+/// trees. They are bookkeeping, never pushed, and some name a bare tree.
+pub const MJOLNIR_REF_NAMESPACE: &str = "refs/mj/";
 pub const ARCHIVE_FORMAT: &str = "hel-session";
 pub const EVENT_FRONTIER_GENESIS_DIGEST: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
@@ -125,6 +128,17 @@ pub struct RepositoryMetadata {
     /// written exactly as before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_operation: Option<SavedGitOperation>,
+}
+
+impl RepositoryMetadata {
+    /// Saved refs that hold the session's own Git work: everything except
+    /// Mjolnir's private refs, which are never published and so must not
+    /// decide whether the work is.
+    pub fn work_refs(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.saved_refs
+            .iter()
+            .filter(|(name, _)| !name.starts_with(MJOLNIR_REF_NAMESPACE))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

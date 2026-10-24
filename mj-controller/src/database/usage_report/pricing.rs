@@ -35,6 +35,11 @@ fn rates(model: &str) -> Option<[u64; 4]> {
         .or_else(|| model.strip_prefix("moonshotai/"))
         .unwrap_or(model);
     let model = model.strip_suffix(":0").unwrap_or(model);
+    // Claude's context hint (`[1m]`); context premiums are excluded.
+    let model = match model.strip_suffix(']').and_then(|m| m.rsplit_once('[')) {
+        Some((base, _)) => base,
+        None => model,
+    };
     let base = model.strip_suffix("-latest").unwrap_or(model);
     let base = if let Some((name, date)) = base.rsplit_once('-') {
         if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) {
@@ -88,6 +93,10 @@ fn rates(model: &str) -> Option<[u64; 4]> {
         "kimi-k2.6" => [950, 4000, 160, 950],
         _ => return None,
     })
+}
+
+pub(super) fn is_priced(model: &str) -> bool {
+    rates(model).is_some()
 }
 
 pub(super) fn estimate(

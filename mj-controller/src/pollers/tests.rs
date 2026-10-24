@@ -392,13 +392,12 @@ fn stale_worker_diagnosis_is_not_published_after_a_terminal_poll_error() {
 /// quota endpoint reports usage pricing.
 fn probeless_request(id: &str) -> QuotaRefreshRequest {
     QuotaRefreshRequest {
-        native_openai: false,
         profile_id: id.into(),
         harness: mj_core::config::HarnessKind::Codex,
         source_home: PathBuf::from("/nonexistent-quota-home"),
         environment: Default::default(),
         cwd: PathBuf::from("."),
-        provider: Some(crate::quota::ProviderCredential {
+        codex_source: crate::quota::CodexQuotaSource::Provider(crate::quota::ProviderCredential {
             id: "other".into(),
             host: "example.invalid".into(),
             api_key: "key".into(),

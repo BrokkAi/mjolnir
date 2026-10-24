@@ -11,11 +11,33 @@ pub(crate) struct SubagentDiscovery {
 /// from the session record.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SubagentDraft {
+    /// The drafted intent. A harness without sub-agents of its own shows and
+    /// submits Native as None; see [`Self::selected`].
     pub(crate) policy: SubagentPolicy,
     chosen_policy: Option<Box<SubagentPolicy>>,
     last_mjolnir_policy: Option<Box<SubagentPolicy>>,
     pub(crate) combo: ComboBoxState<WizardControl>,
     pub(crate) discovery: Option<SubagentDiscovery>,
+    /// The harness of the profile the choice is for, once known.
+    harness: Option<mj_core::config::HarnessKind>,
+}
+
+/// One entry of the delegation combo box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DelegationMode {
+    Native,
+    Mjolnir,
+    None,
+}
+
+impl DelegationMode {
+    fn of(policy: &SubagentPolicy) -> Self {
+        match policy {
+            SubagentPolicy::Native => Self::Native,
+            SubagentPolicy::Mjolnir { .. } => Self::Mjolnir,
+            SubagentPolicy::None => Self::None,
+        }
+    }
 }
 
 impl SubagentDraft {
@@ -27,6 +49,37 @@ impl SubagentDraft {
         }
     }
 
+    /// The entries the combo box lists. Native is hidden for a harness
+    /// without sub-agents of its own, where it would do nothing.
+    fn modes(&self) -> &'static [DelegationMode] {
+        if self
+            .harness
+            .is_some_and(|harness| !harness.has_native_subagents())
+        {
+            &[DelegationMode::Mjolnir, DelegationMode::None]
+        } else {
+            &[
+                DelegationMode::Native,
+                DelegationMode::Mjolnir,
+                DelegationMode::None,
+            ]
+        }
+    }
+    /// `policy` as this choice shows it for the profile's harness.
+    pub(crate) fn shown(&self, policy: &SubagentPolicy) -> SubagentPolicy {
+        match self.harness {
+            Some(harness) => policy.as_choice_for(harness),
+            None => policy.clone(),
+        }
+    }
+    /// The policy the draft shows and submits.
+    pub(crate) fn selected(&self) -> SubagentPolicy {
+        self.shown(&self.policy)
+    }
+    /// Whether the combo box entry at `index` is Mjolnir.
+    pub(crate) fn is_mjolnir_index(&self, index: usize) -> bool {
+        self.modes().get(index) == Some(&DelegationMode::Mjolnir)
+    }
     pub(crate) fn policies(&self) -> Vec<String> {
         let remembered = self.last_mjolnir_policy.as_deref().unwrap_or(&self.policy);
         let label = |name: &str, choice: Option<&mj_core::config::SubagentChoice>| {
@@ -58,17 +111,27 @@ impl SubagentDraft {
         } else {
             format!("Mjolnir ({overrides})")
         };
-        vec!["Native".into(), mjolnir, "None".into()]
+        self.modes()
+            .iter()
+            .map(|mode| match mode {
+                DelegationMode::Native => "Native".to_owned(),
+                DelegationMode::Mjolnir => mjolnir.clone(),
+                DelegationMode::None => "None".to_owned(),
+            })
+            .collect()
     }
     pub(crate) fn policy_index(&self) -> usize {
-        match self.policy {
-            SubagentPolicy::Native => 0,
-            SubagentPolicy::Mjolnir { .. } => 1,
-            SubagentPolicy::None => 2,
-        }
+        let mode = DelegationMode::of(&self.selected());
+        self.modes()
+            .iter()
+            .position(|offered| *offered == mode)
+            .unwrap_or(0)
     }
     pub(crate) fn enabled_policies(&self) -> Vec<bool> {
-        vec![true, self.unavailable_reason().is_none(), true]
+        self.modes()
+            .iter()
+            .map(|mode| *mode != DelegationMode::Mjolnir || self.unavailable_reason().is_none())
+            .collect()
     }
     pub(crate) fn unavailable_reason(&self) -> Option<&str> {
         self.discovery
@@ -94,22 +157,24 @@ impl SubagentDraft {
             .flatten()
     }
     pub(crate) fn select_policy(&mut self, index: usize) -> bool {
-        if index == 1 && self.unavailable_reason().is_some() {
+        let Some(mode) = self.modes().get(index).copied() else {
+            return false;
+        };
+        if mode == DelegationMode::Mjolnir && self.unavailable_reason().is_some() {
             return false;
         }
         let policy =
-            match index {
-                0 => SubagentPolicy::Native,
-                1 => self.last_mjolnir_policy.as_deref().cloned().unwrap_or(
+            match mode {
+                DelegationMode::Native => SubagentPolicy::Native,
+                DelegationMode::Mjolnir => self.last_mjolnir_policy.as_deref().cloned().unwrap_or(
                     SubagentPolicy::Mjolnir {
                         straightforward: None,
                         subtle: None,
                     },
                 ),
-                2 => SubagentPolicy::None,
-                _ => return false,
+                DelegationMode::None => SubagentPolicy::None,
             };
-        let changed = self.policy != policy;
+        let changed = self.selected() != self.shown(&policy);
         self.chosen_policy = Some(Box::new(policy.clone()));
         if policy.uses_mjolnir() {
             self.last_mjolnir_policy = Some(Box::new(policy.clone()));
@@ -180,6 +245,7 @@ impl SubagentDraft {
         config: &Config,
         _snapshot: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
     ) {
+        self.harness = config.profiles.get(profile).map(|profile| profile.kind);
         self.discovery = Some(SubagentDiscovery {
             result: Some(
                 if !config
@@ -251,7 +317,7 @@ impl ResumeWizard {
     /// The displayed effective policy for comparison with a prepared Move.
     pub(crate) fn subagent_selection(&self, dashboard: &DashboardState) -> Option<SubagentPolicy> {
         self.subagent_choice_applies(dashboard)
-            .then(|| self.subagents.policy.clone())
+            .then(|| self.subagents.selected())
     }
 
     /// Move always shows delegation, including the reason Mjolnir is unavailable.
@@ -262,13 +328,15 @@ impl ResumeWizard {
     }
 
     /// The policy a Move request carries: `None` keeps the session's own, so
-    /// an untouched choice changes nothing.
+    /// an untouched choice changes nothing. A stored Native that the
+    /// destination shows as None is untouched, and keeps working there.
     pub(crate) fn subagent_change(&self, dashboard: &DashboardState) -> Option<SubagentPolicy> {
         let stored = dashboard
             .session_record(&self.session_id)
             .and_then(|session| session.subagents.clone())
             .unwrap_or_default();
-        (self.subagent_choice_applies(dashboard) && self.subagents.policy != stored)
-            .then(|| self.subagents.policy.clone())
+        let selected = self.subagents.selected();
+        (self.subagent_choice_applies(dashboard) && selected != self.subagents.shown(&stored))
+            .then_some(selected)
     }
 }

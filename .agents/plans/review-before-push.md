@@ -87,6 +87,13 @@ To see it working: set `[review] trigger = "push"`, start a Claude or Codex sess
   Rationale: the user asked why a move should drop reviewed-tree and session-start refs, and decided to standardize the review refs under one namespace and preserve the whole namespace, so a moved session keeps its review points, its start commit and its turn-review baseline.
   Date/Author: 2026-10-24, Jonathan Ellis.
 
+- Decision: the mj-agents `handback` tool carries `annotations.readOnlyHint: true` for every child, and reviewers keep reporting through it. Reviewer children run in plan mode; Claude Code's plan mode asked permission for `mcp__mj-agents__handback` (confirmed live: the question reached the reviewed agent and no verdict arrived), and dsh-acp hid all MCP tools in plan mode. dsh-acp 0.2.3 offers read-only MCP tools in plan mode, and the worker already approves calls to its own servers for DSH. Reading the reviewer's final message instead was rejected because a JSON reply is fragile.
+  Rationale: a report changes nothing in the workspace, so the hint is accurate, and one change fixes every harness whose plan mode follows it.
+  Date/Author: 2026-10-24, Jonathan Ellis.
+- Decision: a reviewer child's questions and permission requests follow the ordinary rule and go to the reviewed session's agent; there is no reviewer exception.
+  Rationale: reviewers have legitimate reasons to ask, for example to run `gh` to read a ticket the change refers to. Independence and the turn-review prompt hold were weighed and accepted.
+  Date/Author: 2026-10-24, Jonathan Ellis.
+
 ## Outcomes & Retrospective
 
 (2026-10-24) All six milestones are implemented and merged with released 2.55.0. `[review] trigger` offers off, turn and push. Turn and push reviews run their reviewer as a hidden child session; the plan second opinion and the worker sidecar are gone. In push mode, Claude Code, Codex and DSH primaries get `request_review`, the verdict arrives as a mailbox message, a clean verdict writes `refs/mj/reviewed/<tree>`, and a pre-push hook gated by `MJ_REVIEW_GATE=1` refuses unreviewed trees. Review refs live under `refs/mj/` and survive checkpoints and moves.

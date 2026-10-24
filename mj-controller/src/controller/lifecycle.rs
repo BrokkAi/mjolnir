@@ -1251,17 +1251,11 @@ impl Controller {
                     .context("remove managed raw-session worktree")?;
             }
         }
-        if let Some(checkpoint) = &session.checkpoint
-            && let Err(error) = std::fs::remove_file(&checkpoint.archive_path)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            return Err(error).with_context(|| {
-                format!(
-                    "remove session recovery archive {}",
-                    checkpoint.archive_path.display()
-                )
-            });
-        }
+        super::checkpoint::remove_session_checkpoint_archives(
+            &mj_core::config::sessions_dir(),
+            session_id,
+            session.checkpoint.as_ref(),
+        )?;
         mj_core::attachment::AttachmentStore::controller(session_id)?
             .remove_session_data()
             .context("remove session image attachments")?;
@@ -1386,17 +1380,11 @@ impl Controller {
                     cleanup_managed_worktree(executor, worktree, branch)
                         .context("remove managed raw-session worktree")?;
                 }
-                if let Some(checkpoint) = &session.checkpoint
-                    && let Err(error) = std::fs::remove_file(&checkpoint.archive_path)
-                    && error.kind() != std::io::ErrorKind::NotFound
-                {
-                    return Err(error).with_context(|| {
-                        format!(
-                            "remove session recovery archive {}",
-                            checkpoint.archive_path.display()
-                        )
-                    });
-                }
+                super::checkpoint::remove_session_checkpoint_archives(
+                    &mj_core::config::sessions_dir(),
+                    session_id,
+                    session.checkpoint.as_ref(),
+                )?;
                 mj_core::attachment::AttachmentStore::controller(session_id)?
                     .remove_session_data()
                     .context("remove session image attachments")?;

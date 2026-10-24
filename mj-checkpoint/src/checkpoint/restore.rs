@@ -252,7 +252,7 @@ pub(super) fn restore_repositories_from_archive(
                 .metadata
                 .saved_refs
                 .keys()
-                .any(|name| name.starts_with("refs/mj/"))
+                .any(|name| name.starts_with(mj_core::archive::MJOLNIR_REF_NAMESPACE))
         {
             continue;
         }

@@ -126,6 +126,29 @@ impl SubagentPolicy {
     pub fn parent_role(&self) -> Option<SubagentMcpRole> {
         self.uses_mjolnir().then_some(SubagentMcpRole::Parent)
     }
+    /// The policy a new session gets when its creator names none: its
+    /// harness's own delegation, or None for a harness that has none.
+    pub fn default_for(harness: crate::config::HarnessKind) -> Self {
+        Self::Native.as_choice_for(harness)
+    }
+    /// This policy as the delegation choice shows it for `harness`. A harness
+    /// without sub-agents of its own reads Native as None, because that is
+    /// what Native does there, so a session stored with Native keeps working.
+    pub fn as_choice_for(&self, harness: crate::config::HarnessKind) -> Self {
+        if self.is_native() && !harness.has_native_subagents() {
+            Self::None
+        } else {
+            self.clone()
+        }
+    }
+    /// Whether a new session with this policy becomes the shared choice the
+    /// next Create starts from. A harness without sub-agents of its own
+    /// changes it only by choosing Mjolnir, so choosing None there never
+    /// takes Native away from the next Claude or Codex session.
+    pub fn updates_remembered_choice(&self, harness: crate::config::HarnessKind) -> bool {
+        harness.supports_delegation_tools()
+            && (harness.has_native_subagents() || self.uses_mjolnir())
+    }
     pub fn for_launch(&self, harness: crate::config::HarnessKind, is_child: bool) -> Self {
         if !harness.supports_delegation_tools() {
             Self::Native

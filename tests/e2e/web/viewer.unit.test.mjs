@@ -543,23 +543,27 @@ test('phone review status exactly mirrors the shared status sentences', () => {
   const status = context.reviewStatusLineForTest;
 
   assert.equal(
-    status({ enabled: true, profile: 'reviewer' }, false),
+    status({ trigger: 'turn', profile: 'reviewer' }, false),
     'Reviewing every completed turn with [review] profile "reviewer"',
   );
   assert.equal(
-    status({ enabled: true }, false),
+    status({ trigger: 'turn' }, false),
     'Reviewing every completed turn with Auto',
   );
   assert.equal(
-    status({ enabled: false, profile: 'reviewer' }, false),
+    status({ trigger: 'off', profile: 'reviewer' }, false),
     'Automatic review is off; /review reviews one turn with "reviewer"',
   );
   assert.equal(
-    status({ enabled: false, profile: null }, false),
+    status({ trigger: 'off', profile: null }, false),
     'Automatic review is off; /review uses Auto',
   );
   assert.equal(
-    status({ enabled: false, profile: 'reviewer' }, true),
+    status({ trigger: 'push', profile: 'reviewer' }, false),
+    'Review trigger is before push',
+  );
+  assert.equal(
+    status({ trigger: 'off', profile: 'reviewer' }, true),
     'Automatic review is off; /review reviews one turn with "reviewer". A review is open now.',
   );
 });

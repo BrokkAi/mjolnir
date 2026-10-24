@@ -1059,7 +1059,7 @@ fn golden_dashboard_dialogs() {
 
     // Extend the full dialog golden through the Profiles menu and real controls.
     use mj_core::usage::{
-        ModelUsageEstimate, SessionUsageEstimate, SessionUsageReport, UsagePeriod,
+        ModelUsageEstimate, SessionUsageEstimate, SessionUsageReport, UnknownCost, UsagePeriod,
     };
     let mut usage = dashboard_with_session(running_session());
     usage.begin_support_pane_menu(crate::SupportPane::Quota);
@@ -1082,37 +1082,57 @@ fn golden_dashboard_dialogs() {
     assert_eq!(query, mj_core::usage::SessionUsageQuery::default());
     let report = SessionUsageReport {
         profiles: vec!["claude".into(), "codex".into()],
-        cost_usd_ticks: 72_050_000_000,
-        sessions: vec![SessionUsageEstimate {
-            session_id: "session-1".into(),
-            title: "Investigate recovery".into(),
-            profile: "codex".into(),
-            subagent_count: 2,
-            cost_usd_ticks: 72_050_000_000,
-            models: vec![
-                ModelUsageEstimate {
+        cost_usd_ticks: Err(UnknownCost),
+        sessions: vec![
+            SessionUsageEstimate {
+                session_id: "session-2".into(),
+                title: "Write release notes".into(),
+                profile: "claude".into(),
+                cost_usd_ticks: Ok(62_000_000_000),
+                models: vec![ModelUsageEstimate {
                     model: Some("claude-opus-5-5".into()),
-                    cost_usd_ticks: Some(71_000_000_000),
+                    cost_usd_ticks: Ok(62_000_000_000),
+                    ..Default::default()
+                }],
+                coverage: mj_core::storage::UsageCoverage {
+                    recorded_turns: 5,
+                    full_turn_reports: 3,
+                    missing_reports: 2,
                     ..Default::default()
                 },
-                ModelUsageEstimate {
-                    model: Some("gpt-6-luna".into()),
-                    cost_usd_ticks: Some(1_050_000_000),
-                    ..Default::default()
-                },
-                ModelUsageEstimate {
-                    model: Some("custom-model".into()),
-                    ..Default::default()
-                },
-            ],
-            coverage: mj_core::storage::UsageCoverage {
-                recorded_turns: 5,
-                full_turn_reports: 3,
-                missing_reports: 2,
                 ..Default::default()
             },
-            ..Default::default()
-        }],
+            SessionUsageEstimate {
+                session_id: "session-1".into(),
+                title: "Investigate recovery".into(),
+                profile: "codex".into(),
+                subagent_count: 2,
+                cost_usd_ticks: Err(UnknownCost),
+                models: vec![
+                    ModelUsageEstimate {
+                        model: Some("claude-opus-5-5".into()),
+                        cost_usd_ticks: Ok(71_000_000_000),
+                        ..Default::default()
+                    },
+                    ModelUsageEstimate {
+                        model: Some("gpt-6-luna".into()),
+                        cost_usd_ticks: Ok(1_050_000_000),
+                        ..Default::default()
+                    },
+                    ModelUsageEstimate {
+                        model: Some("custom-model".into()),
+                        cost_usd_ticks: Err(UnknownCost),
+                        ..Default::default()
+                    },
+                ],
+                coverage: mj_core::storage::UsageCoverage {
+                    recorded_turns: 4,
+                    full_turn_reports: 4,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ],
         ..Default::default()
     };
     usage.apply_session_usage_result(first, Ok(report.clone()));

@@ -23,17 +23,60 @@ pub use mj_client::quota::{API_LABEL, ProfileQuota, QuotaWindow, projects_exhaus
 
 #[derive(Debug, Clone)]
 pub struct QuotaRefreshRequest {
-    /// Provider configuration selected native OpenAI, not merely a Codex harness.
-    pub native_openai: bool,
     pub profile_id: String,
     pub harness: HarnessKind,
     pub source_home: std::path::PathBuf,
     pub environment: BTreeMap<String, String>,
     pub cwd: std::path::PathBuf,
-    /// The custom model provider this profile authenticates to with an API
-    /// key, when it has one. A profile using its harness's own login has
-    /// `None` here and keeps the harness's native quota path.
-    pub provider: Option<ProviderCredential>,
+    /// Where a Codex profile's quota comes from. Other harnesses ignore it.
+    pub codex_source: CodexQuotaSource,
+}
+
+/// Where a Codex profile's quota comes from, decided once from its provider
+/// configuration. Only Codex's own OpenAI login has ChatGPT rate-limit
+/// windows; every other provider must never be probed through that login,
+/// or it reports the ChatGPT account's quota as its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexQuotaSource {
+    /// No `model_provider`, or the built-in `openai` provider.
+    ChatGptLogin,
+    /// A custom provider whose API key and host Mjolnir can read; its quota
+    /// comes from the provider's own endpoint when it publishes one.
+    Provider(ProviderCredential),
+    /// Any other provider: a local or Bedrock built-in, or a custom provider
+    /// whose key Mjolnir cannot read. It has no allowance to report.
+    UsagePriced { provider: String },
+    /// The profile's Codex configuration could not be read.
+    Unreadable(String),
+}
+
+impl CodexQuotaSource {
+    /// The source for one configured profile. `mj doctor` reads the same
+    /// answer to say where each profile's quota comes from.
+    pub(crate) fn of_profile(profile: &HarnessProfile) -> Self {
+        let provider = match profile.codex_provider() {
+            Ok(None) => return Self::ChatGptLogin,
+            Ok(Some(provider)) => provider,
+            Err(error) => return Self::Unreadable(format!("{error:#}")),
+        };
+        if provider.built_in() == Some(BuiltInCodexProvider::OpenAi) {
+            return Self::ChatGptLogin;
+        }
+        match (
+            provider.custom(),
+            profile.codex_provider_api_key(),
+            provider.host(),
+        ) {
+            (Some(_), Some(api_key), Some(host)) => Self::Provider(ProviderCredential {
+                id: provider.id().to_owned(),
+                host,
+                api_key,
+            }),
+            _ => Self::UsagePriced {
+                provider: provider.id().to_owned(),
+            },
+        }
+    }
 }
 
 /// Where a profile's quota lives when the profile authenticates with an API
@@ -57,9 +100,21 @@ impl QuotaRefreshRequest {
                 .expect("serializable profile"),
         );
         hash.update(self.source_home.as_os_str().as_encoded_bytes());
-        if let Some(provider) = &self.provider {
-            hash.update(provider.host.as_bytes());
-            hash.update(provider.api_key.as_bytes());
+        // The ChatGPT login hashes nothing more, so its stored reports stay
+        // valid. Every other source gets its own key, so a report from a
+        // different source (including one read through the ChatGPT login
+        // before the source was decided correctly) is never reused.
+        match &self.codex_source {
+            CodexQuotaSource::ChatGptLogin => {}
+            CodexQuotaSource::Provider(provider) => {
+                hash.update(provider.host.as_bytes());
+                hash.update(provider.api_key.as_bytes());
+            }
+            CodexQuotaSource::UsagePriced { provider } => {
+                hash.update(b"usage-priced\0");
+                hash.update(provider.as_bytes());
+            }
+            CodexQuotaSource::Unreadable(_) => hash.update(b"unreadable\0"),
         }
         mj_core::hex::lower_hex(hash.finalize())
     }
@@ -78,48 +133,15 @@ impl QuotaRefreshRequest {
             mj_core::config::HarnessHost::current(),
             &mut environment,
         );
-        let configured_provider = profile.codex_provider();
         Self {
-            native_openai: profile.kind == HarnessKind::Codex
-                && match &configured_provider {
-                    Ok(None) => true,
-                    Ok(Some(provider)) => provider.built_in() == Some(BuiltInCodexProvider::OpenAi),
-                    Err(_) => false,
-                },
             profile_id: profile_id.to_owned(),
             harness: profile.kind,
             source_home: profile.home.clone(),
             environment,
             cwd,
-            provider: provider_credential_from(
-                profile,
-                configured_provider.ok().flatten().as_ref(),
-            ),
+            codex_source: CodexQuotaSource::of_profile(profile),
         }
     }
-}
-
-/// The provider credential a Codex profile's quota is read with, or `None`
-/// when the profile uses ChatGPT's own login. `mj doctor` reads the same
-/// answer to say where each profile's quota comes from.
-pub(crate) fn provider_credential(profile: &HarnessProfile) -> Option<ProviderCredential> {
-    provider_credential_from(profile, profile.codex_provider().ok().flatten().as_ref())
-}
-
-fn provider_credential_from(
-    profile: &HarnessProfile,
-    provider: Option<&mj_core::codex_provider::CodexProvider>,
-) -> Option<ProviderCredential> {
-    let provider = provider?;
-    // Only a custom provider has a key of its own; the built-in OpenAI
-    // provider uses Codex's ChatGPT login, which this never reads.
-    provider.custom()?;
-    let api_key = profile.codex_provider_api_key()?;
-    Some(ProviderCredential {
-        id: provider.id().to_owned(),
-        host: provider.host()?,
-        api_key,
-    })
 }
 
 /// How long a profile's probes are held when the provider answers 429 without
@@ -209,9 +231,14 @@ impl QuotaManager {
         self.reports.insert(report.profile_id.clone(), report);
     }
 
-    /// Forget a profile's report, for a profile whose configuration changed.
-    pub fn forget(&mut self, profile_id: &str) {
+    /// Forget a profile's report and stop its cached client, for a profile
+    /// whose configuration changed. The client's `codex app-server` was
+    /// started with the old home and environment.
+    pub async fn forget(&mut self, profile_id: &str) {
         self.reports.remove(profile_id);
+        if let Some(client) = self.codex_clients.remove(profile_id) {
+            client.shutdown().await;
+        }
     }
 
     /// Keep only the profiles in `keep`: drop the reports of the others and
@@ -382,15 +409,21 @@ async fn refresh_profile_with_cache_root(
         }
         _ => harness_authentication_marker(request.harness, &request.source_home),
     };
+    // Only the ChatGPT login uses a Codex app-server. A client cached while
+    // the profile used it is stopped here rather than handed back.
+    if request.codex_source != CodexQuotaSource::ChatGptLogin
+        && let Some(client) = codex_client.take()
+    {
+        client.shutdown().await;
+    }
     let credential_before = credential_marker_fingerprint(&credential_path).await;
     let QuotaRefreshRequest {
-        native_openai,
         profile_id,
         harness,
         source_home,
         environment,
         cwd,
-        provider,
+        codex_source,
     } = request;
     let environment = environment.into_iter().collect::<HashMap<_, _>>();
     let refreshed_at_epoch_seconds = SystemTime::now()
@@ -417,9 +450,10 @@ async fn refresh_profile_with_cache_root(
         // provider has no ChatGPT login to refresh and no ChatGPT rate-limit
         // windows to read. Its quota, when the provider publishes one, comes
         // from the provider's own endpoint.
-        HarnessKind::Codex if provider.is_some() => {
-            let provider = provider.expect("guarded by the match arm");
-            if crate::zai_usage::serves_quota(&provider.host) {
+        HarnessKind::Codex => match codex_source {
+            CodexQuotaSource::Provider(provider)
+                if crate::zai_usage::serves_quota(&provider.host) =>
+            {
                 crate::zai_usage::query(&provider.host, &provider.api_key)
                     .await
                     .map(|windows| ProfileQuota {
@@ -442,81 +476,85 @@ async fn refresh_profile_with_cache_root(
                         refreshed_at_epoch_seconds,
                         rate_limited_until_epoch_seconds: None,
                     })
-            } else {
+            }
+            CodexQuotaSource::Provider(_) | CodexQuotaSource::UsagePriced { .. } => {
                 Ok(usage_priced())
             }
-        }
-        HarnessKind::Codex => {
-            // A poll starts at most one app-server. A failed rotation drops its
-            // client. When that client was cached from an earlier poll, a new
-            // one may still read the quota, which is how a login that the old
-            // process gave up on recovers (#1224). When this poll started it,
-            // another start would only repeat the failure, so the next poll
-            // tries again instead.
-            let mut failed_rotation = None;
-            if codex_login_is_near_expiry(&credential_path).await {
-                let started_here = codex_client.is_none();
-                let login_refresh = codex_usage::refresh_login_with_cache_root(
-                    &mut codex_client,
-                    cwd.clone(),
-                    environment.clone(),
-                    cache_root.clone(),
-                )
-                .await;
-                match login_refresh {
-                    Ok(()) => tracing::info!(
-                        profile_id = %profile_id,
-                        "refreshed Codex login ahead of expiry"
-                    ),
-                    Err(failure) => {
-                        tracing::warn!(
+            CodexQuotaSource::Unreadable(error) => Err(anyhow::anyhow!(
+                "could not read the Codex configuration: {error}"
+            )),
+            CodexQuotaSource::ChatGptLogin => {
+                // A poll starts at most one app-server. A failed rotation drops its
+                // client. When that client was cached from an earlier poll, a new
+                // one may still read the quota, which is how a login that the old
+                // process gave up on recovers (#1224). When this poll started it,
+                // another start would only repeat the failure, so the next poll
+                // tries again instead.
+                let mut failed_rotation = None;
+                if codex_login_is_near_expiry(&credential_path).await {
+                    let started_here = codex_client.is_none();
+                    let login_refresh = codex_usage::refresh_login_with_cache_root(
+                        &mut codex_client,
+                        cwd.clone(),
+                        environment.clone(),
+                        cache_root.clone(),
+                    )
+                    .await;
+                    match login_refresh {
+                        Ok(()) => tracing::info!(
                             profile_id = %profile_id,
-                            error = %failure.detail,
-                            "could not refresh the Codex login ahead of expiry"
-                        );
-                        if started_here && codex_client.is_none() {
-                            failed_rotation = Some(failure.reason);
+                            "refreshed Codex login ahead of expiry"
+                        ),
+                        Err(failure) => {
+                            tracing::warn!(
+                                profile_id = %profile_id,
+                                error = %failure.detail,
+                                "could not refresh the Codex login ahead of expiry"
+                            );
+                            if started_here && codex_client.is_none() {
+                                failed_rotation = Some(failure.reason);
+                            }
                         }
                     }
                 }
-            }
-            let status = match failed_rotation {
-                Some(reason) => CodexUsageStatus::Unavailable(reason.to_owned()),
-                None => {
-                    codex_usage::refresh_with_cache_root(
-                        &mut codex_client,
-                        cwd,
-                        environment,
-                        cache_root,
-                    )
-                    .await
+                let status = match failed_rotation {
+                    Some(reason) => CodexUsageStatus::Unavailable(reason.to_owned()),
+                    None => {
+                        codex_usage::refresh_with_cache_root(
+                            &mut codex_client,
+                            cwd,
+                            environment,
+                            cache_root,
+                        )
+                        .await
+                    }
+                };
+                match status {
+                    CodexUsageStatus::Available(report) => Ok(ProfileQuota {
+                        banked_resets: report.banked_resets,
+                        profile_id: profile_id.clone(),
+                        harness,
+                        windows: [report.primary, report.secondary]
+                            .into_iter()
+                            .flatten()
+                            .map(|window| QuotaWindow {
+                                label: window.label,
+                                remaining_percent: Some(window.remaining_percent),
+                                used: None,
+                                limit: None,
+                                resets: window.resets_at.and_then(format_reset_local_seconds),
+                                resets_at_epoch_seconds: window.resets_at,
+                            })
+                            .collect(),
+                        extra: None,
+                        error: None,
+                        refreshed_at_epoch_seconds,
+                        rate_limited_until_epoch_seconds: None,
+                    }),
+                    CodexUsageStatus::Unavailable(error) => Err(anyhow::anyhow!(error)),
                 }
-            };
-            match status {
-                CodexUsageStatus::Available(report) => Ok(ProfileQuota {
-                    banked_resets: report.banked_resets.filter(|_| native_openai),
-                    profile_id: profile_id.clone(),
-                    harness,
-                    windows: [report.primary, report.secondary]
-                        .into_iter()
-                        .flatten()
-                        .map(|window| QuotaWindow {
-                            label: window.label,
-                            remaining_percent: Some(window.remaining_percent),
-                            used: None,
-                            limit: None,
-                            resets: window.resets_at.and_then(format_reset_local_seconds),
-                            resets_at_epoch_seconds: window.resets_at,
-                        })
-                        .collect(),
-                    extra: None,
-                    error: None,
-                    refreshed_at_epoch_seconds,
-                    rate_limited_until_epoch_seconds: None,
-                }),
-                CodexUsageStatus::Unavailable(error) => Err(anyhow::anyhow!(error)),
             }
-        }
+        },
         HarnessKind::Claude => claude_usage::query(source_home, environment)
             .await
             .map(|report| ProfileQuota {

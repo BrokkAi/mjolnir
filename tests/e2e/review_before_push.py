@@ -24,6 +24,8 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--instance", required=True)
     parser.add_argument("--model", default="gpt-6.1-sol")
+    parser.add_argument("--child-model",
+                        help="model for straightforward sub-agents; defaults to --model")
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("a named isolated instance is required")
@@ -91,7 +93,7 @@ enabled = true
 [subagents]
 max_concurrent = 2
 [subagents.straightforward]
-model = "gpt-6-luna"
+model = {json.dumps(args.child_model or args.model)}
 effort = "high"
 [subagents.subtle]
 model = {json.dumps(args.model)}

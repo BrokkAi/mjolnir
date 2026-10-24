@@ -124,7 +124,7 @@ async fn adopt_profiles(
             continue;
         }
         identities.insert(request.profile_id.clone(), identity);
-        quotas.forget(&request.profile_id);
+        quotas.forget(&request.profile_id).await;
         let load = cache.clone();
         let for_request = request.clone();
         let stored = match tokio::task::spawn_blocking(move || load(&for_request)).await {

@@ -424,19 +424,8 @@ impl Controller {
         &mj_core::config::ProjectBundle,
         Vec<(String, &mj_core::config::ProjectRepository)>,
     )> {
-        let bundle = self
-            .state
-            .sessions
-            .get(id)
-            .with_context(|| format!("unknown session {id}"))?
-            .project_bundle(&self.config)
-            .context("session bundle is missing")?;
-        let repositories = if self
-            .state
-            .checkout_for_record(id, &transfer.source)?
-            .project_directory()
-            .is_some()
-        {
+        let bundle = self.move_session_bundle(id)?;
+        let repositories = if self.move_source_is_host_checkout(id, transfer)? {
             let primary = bundle.primary().context("bundle primary is missing")?;
             vec![(HOST_CHECKOUT_REPOSITORY.to_owned(), primary)]
         } else {
@@ -447,6 +436,44 @@ impl Controller {
                 .collect()
         };
         Ok((bundle, repositories))
+    }
+
+    /// The id under which a Move's source captured the one repository that a
+    /// host checkout destination holds.
+    ///
+    /// A host checkout's layout calls that repository
+    /// [`HOST_CHECKOUT_REPOSITORY`]. A source that also ran in a host checkout
+    /// captured it under the same id. A source that ran in a bundle workspace
+    /// captured it under the bundle's id; the bundle has exactly one
+    /// repository, its primary, as every workspace-to-raw conversion requires.
+    fn move_host_checkout_source_id(
+        &self,
+        id: &str,
+        transfer: &WorkspaceTransfer,
+    ) -> Result<String> {
+        if self.move_source_is_host_checkout(id, transfer)? {
+            return Ok(HOST_CHECKOUT_REPOSITORY.to_owned());
+        }
+        Ok(self.move_session_bundle(id)?.primary_repo.clone())
+    }
+
+    /// Whether a Move's source ran in a host checkout, which is what decides
+    /// how its layout named the repositories it captured.
+    fn move_source_is_host_checkout(&self, id: &str, transfer: &WorkspaceTransfer) -> Result<bool> {
+        Ok(self
+            .state
+            .checkout_for_record(id, &transfer.source)?
+            .project_directory()
+            .is_some())
+    }
+
+    fn move_session_bundle(&self, id: &str) -> Result<&mj_core::config::ProjectBundle> {
+        self.state
+            .sessions
+            .get(id)
+            .with_context(|| format!("unknown session {id}"))?
+            .project_bundle(&self.config)
+            .context("session bundle is missing")
     }
 
     /// What a Move that rebuilds into a bundle workspace clones: the folders
@@ -949,11 +976,18 @@ impl Controller {
             &transfer.controller_stage,
             true,
         )?;
-        // A bundle workspace was cloned where `move_destination_bundle` said,
-        // under the bundle's ids; the transfer names each repository as the
-        // source did.
+        // The transfer names each repository as the source did. A host
+        // checkout holds one repository; a bundle workspace was cloned where
+        // `move_destination_bundle` said, under the bundle's ids.
         let repositories = if self.state.checkout(id)?.project_directory().is_some() {
+            let source_id = self.move_host_checkout_source_id(id, &transfer)?;
             repositories(&layout)
+                .into_iter()
+                .map(|repository| WorkspaceRepository {
+                    id: source_id.clone(),
+                    root: repository.root,
+                })
+                .collect()
         } else {
             self.move_destination_repositories(id, &transfer)?
                 .1

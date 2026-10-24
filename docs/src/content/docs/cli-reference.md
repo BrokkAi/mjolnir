@@ -356,8 +356,9 @@ mj new --workspace eval --bundle product --target builder \
   supplied, the selected profile must offer that exact effort for the model or
   the request fails.
 - `mj new --subagents native|mjolnir|none` selects delegation. Omitted defaults to
-  Native. `none` gives the session no delegation tools, native or Mjolnir; it
-  needs a Claude, Codex, or DSH profile and is not offered in the TUI or browser. Mjolnir requires a Claude, Codex, or DSH parent and a straightforward
+  Native, or to None for a DSH profile. DSH has no sub-agents of its own, so it
+  refuses `native` and accepts `mjolnir` or `none`. `none` gives the session no delegation tools, native or Mjolnir; it
+  needs a Claude, Codex, or DSH profile. Mjolnir requires a Claude, Codex, or DSH parent and a straightforward
   choice in `[subagents.straightforward]` or a session override. The subtle
   choice in `[subagents.subtle]` is optional. Configure global defaults in
   config.toml or TUI Settings → Sub-agents.

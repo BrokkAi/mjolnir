@@ -347,8 +347,8 @@ profile = "reviewer"
 | `trigger` | string enum | no | `"off"` | `"off"` disables automatic review, `"turn"` reviews eligible completed turns after queued work drains, and `"push"` reviews commits before push. An unchanged turn delta resolves without a review prompt. |
 | `tier` | string | no | unset | Deprecated compatibility field. Existing `quick` or `extended` values are accepted but ignored. |
 | `profile` | string | no | Auto (unset) | Auto selects an eligible profile by provider and quota. A named enabled review-capable profile is honored, including the primary profile. |
-| `model` | string | no | unset (harness default) | Reviewer model override for a named profile. Auto uses fixed model-family defaults. |
-| `effort` | string | no | unset (harness default) | Reviewer effort override for a named profile. Auto does not accept manual overrides. Required effort is checked against the selected model. |
+| `model` | string | no | unset (harness default) | Reviewer model override for a named profile. `[review]` refuses it with Auto, which uses fixed model-family defaults; a session's `--review-model` still works with Auto. |
+| `effort` | string | no | unset (harness default) | Reviewer effort override for a named profile. `[review]` refuses it with Auto; a session's `--review-effort` still works with Auto. Required effort is checked against the selected model. |
 
 Auto prefers
 another provider, falling back to another profile or the primary profile when
@@ -366,7 +366,8 @@ writes `trigger`, not `enabled`.
 set the trigger for one session, overriding `[review]`. `--review-model <model>`
 and `--review-effort <effort>` set reviewer choices. Without `--review`, either
 option selects `turn`. In Auto, Mjolnir picks an enabled profile that offers
-the model. `/review` remains available when the trigger is `off`.
+the model, including a profile whose provider has no Auto policy, such as DSH.
+`/review` remains available when the trigger is `off`.
 
 The deprecated `mj new --review-tier quick|extended` option still accepts
 either value and selects `turn` when used without `--review`, but the value is
@@ -494,8 +495,10 @@ command-line tool must match the version Mjolnir links.
 ## Sub-agents `[subagents]`
 
 A Claude, Codex, or DSH session can use Mjolnir's `spawn` tool. Create and Move offer
-Native or Mjolnir. Native uses the harness's own delegation; DSH has none, so
-Native gives a DSH session no delegation. Mjolnir needs a
+Native or Mjolnir. Native uses the harness's own delegation. DSH has none, so
+for a DSH profile they offer Mjolnir or None, starting on Mjolnir only when the
+last choice was Mjolnir and it is configured; a DSH session's None does not
+change the remembered choice that Claude and Codex sessions start from. Mjolnir needs a
 straightforward choice, configured in Settings → Sub-agents or config.toml, or a
 session override. The subtle choice is optional, but cannot be configured without
 straightforward:
@@ -533,7 +536,7 @@ choice. The parent is told to delegate straightforward work and to do work
 that needs judgment itself. Mjolnir chooses the eligible profile offering that task type's
 model and effort with the most quota. The agent cannot override the selection.
 Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to
-Native; `mj move --subagents native|mjolnir|none` retains the recorded policy when
+Native, or to None for DSH, which refuses `native`; `mj move --subagents native|mjolnir|none` retains the recorded policy when
 omitted, including any session override. `--subagent-straightforward M` and `--subagent-subtle M` independently override
 their matching task type and imply Mjolnir. An unspecified type uses its global
 choice, so one override can be combined with one global choice. Each model and

@@ -61,9 +61,9 @@ image needs Node.js 22, npm, and npx. Bake `@mimo-ai/cli@0.1.15` and set
 `MIMOCODE_DISABLE_AUTOUPDATE=1` for a stable managed runtime.
 
 DSH speaks ACP itself, so `dsh-acp` is both its bridge and its agent. Without
-`dsh-acp` on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.2.1`,
+`dsh-acp` on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.2.2`,
 which needs Node.js 22 or newer, npm, and npx; the npm package bundles the
-release binaries. To bake it in, run `npm install -g @brokkai/dsh-acp@0.2.1`
+release binaries. To bake it in, run `npm install -g @brokkai/dsh-acp@0.2.2`
 (Node.js 22 or newer), or put the `dsh-acp` binary from a release archive at
 <https://github.com/BrokkAi/dsh-acp/releases> on `PATH`. The Linux binaries
 need glibc 2.34 or newer, so musl images such as Alpine cannot run DSH.
@@ -85,7 +85,7 @@ user's shell environment.
 Muse Code requires both `muse-acp` on `PATH` and the native `muse` executable.
 Set `MUSE_CLI` to the native binary's absolute path. Install the pinned
 `@brokkai/muse-acp` adapter from npm, or let npx fetch it at launch, and use
-`scripts/install-muse.py` with `mj-worker/assets/muse/runtime.json` to install
+`scripts/install-muse.py` with `mj-core/assets/muse/runtime.json` to install
 the matching checksum-verified native binary as managed workers do. Copy the
 manifest and script into your image build and run the installer with the
 manifest path and destination bin directory. It needs Python 3.11 or newer and

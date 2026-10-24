@@ -422,31 +422,33 @@ dsh-acp mid-command, DSH usage in totals, real file names in changed files,
 a podman session on the republished image (dsh-acp 0.2.1), and a managed
 clone moved from localhost into podman that kept its conversation.
 
+### Second round (2026-10-23, later)
+
+- DSH sessions can use Mjolnir sub-agents; DSH offers only Mjolnir and None,
+  defaulting to Mjolnir when remembered and configured; a DSH session updates
+  the shared remembered choice only when it picks Mjolnir (`7feabd81c`,
+  `2a1d7e2fb`). DeepSeek's own `@deepseek-ai/dsh-subagent` packages plug into
+  DeepSeek's `dsh` CLI, not dsh-acp, and were not used.
+- Reverse of C-1: a container session moved to a local checkout failed unless
+  its repository was named `project` (`ce450f408`).
+- B-5: destroy now removes every checkpoint archive of the session, including
+  a Move's handoff archive (`2f1e81621`).
+- dsh-acp 0.2.2 (edit diff in permission requests, K2; one card per command,
+  K5) released and pinned (`0487a5706`).
+- D-10: a session-named review model now takes a review baseline for the
+  reviewer Auto will choose; one shared eligibility rule serves the chooser
+  and the baseline check (see git log for "Take a review baseline").
+
 ### Open
 
-- D-10: `can_review` ignores a session's `--review-model`; waits for the
-  review-trigger rework (session e8566ee4) to land, then needs the baseline
-  for both `turn` and `push`.
-- Reverse of C-1: a container session moved to localhost fails with "Move
-  destination repository missing" when the repository is not named
-  `project`.
-- E-3: Delegation "Native" does nothing for DSH; DSH sub-agent support is
-  being scoped.
-- dsh-acp polish for a later release: diff preview in edit permissions (K2),
-  the duplicate terminal card (K5, needs dsh-acp to embed its terminal), the
-  native title taken from the project-memory preamble (A-1).
-- General Mjolnir items seen with DSH: a session destroyed after a Move keeps
-  its checkpoint archive (B-5); `mj new`, `mj resume` and `mj wait` report
-  launch failures only in the session (D-1, K6, C-2); `mj prompt` says
+- DSH reviewer children cannot call `handback` in plan mode, so every DSH
+  turn review ends "finished without calling handback"; the review owner
+  (session e8566ee4) is fixing it for all harnesses (reviewer answer becomes
+  its final message; plan mode stays).
+- dsh-acp: the native session title is taken from the project-memory
+  preamble (A-1).
+- General Mjolnir items seen with DSH: `mj new`, `mj resume` and `mj wait`
+  report launch failures only in the session (D-1, K6, C-2); `mj prompt` says
   nothing while a permission form waits (E-2); `mj acp` cannot answer DSH
   permission requests (E-1, documented generically); usage and events
   disagree on a cancelled turn's outcome (B-4).
-
-### Not bugs, or by design
-
-- A-2: an attached image is delivered intact; DeepSeek's answers on a 16×16
-  image vary (direct and replayed requests answered correctly).
-- A-4: a named instance shares the user's SessionWiki index by design
-  (`session_index_dir_for`).
-- B-1: `mj set-config permission_mode=allow` is accepted like any advertised
-  selector and resets to `ask` on the next open.

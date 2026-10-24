@@ -6320,6 +6320,22 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     parent.title = "resumed parent".into();
     save_session_to(&path, &parent).unwrap();
     assert_eq!(load_state_from(&path).unwrap().last_subagent_policy, fixed);
+    // DSH has no sub-agents of its own: its None must not become what the
+    // next Claude or Codex session starts with, but its Mjolnir does.
+    let mut dsh = session("dsh-none", "project");
+    dsh.harness_kind = HarnessKind::Dsh;
+    dsh.subagents = Some(SubagentPolicy::None);
+    save_new_session_to(&path, &dsh, None).unwrap();
+    assert_eq!(load_state_from(&path).unwrap().last_subagent_policy, fixed);
+    let plain = SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    };
+    let mut dsh = session("dsh-mjolnir", "project");
+    dsh.harness_kind = HarnessKind::Dsh;
+    dsh.subagents = Some(plain.clone());
+    save_new_session_to(&path, &dsh, None).unwrap();
+    assert_eq!(load_state_from(&path).unwrap().last_subagent_policy, plain);
     let mut next = session("next", "project");
     next.subagents = Some(SubagentPolicy::None);
     save_new_session_to(&path, &next, None).unwrap();

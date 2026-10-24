@@ -44,18 +44,53 @@ fn an_inline_token_provider_credential_does_not_become_native_openai() {
     std::fs::write(path, config).unwrap();
     profile.environment.clear();
     let request = QuotaRefreshRequest::for_profile("custom", &profile, home.path().to_owned());
-    assert_eq!(
-        request
-            .provider
-            .as_ref()
-            .map(|provider| provider.api_key.as_str()),
-        Some("inline-key"),
-        "the inline token authorizes the provider's own quota work"
-    );
     assert!(
-        !request.native_openai,
-        "an inline-token custom provider is not Codex's own OpenAI login"
+        matches!(
+            &request.codex_source,
+            CodexQuotaSource::Provider(provider) if provider.api_key == "inline-key"
+        ),
+        "the inline token authorizes the provider's own quota work, not Codex's OpenAI login"
     );
+}
+
+// Hard-won: Ollama and keyless custom Codex profiles showed the ChatGPT account's quota
+#[tokio::test]
+async fn a_provider_without_a_readable_key_never_reads_the_chatgpt_quota() {
+    let home = tempfile::tempdir().unwrap();
+    let mut keyless = zai_profile(home.path(), "https://openrouter.invalid/api/v1");
+    keyless.environment.clear();
+    let ollama_home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        ollama_home.path().join("config.toml"),
+        "model_provider = \"ollama\"\n",
+    )
+    .unwrap();
+    let ollama = HarnessProfile {
+        home: ollama_home.path().to_path_buf(),
+        ..keyless.clone()
+    };
+    for (id, profile) in [("keyless", keyless), ("ollama", ollama)] {
+        let request = QuotaRefreshRequest::for_profile(id, &profile, home.path().to_path_buf());
+        assert!(
+            matches!(request.codex_source, CodexQuotaSource::UsagePriced { .. }),
+            "{id}: {:?}",
+            request.codex_source
+        );
+        let mut before_the_fix = request.clone();
+        before_the_fix.codex_source = CodexQuotaSource::ChatGptLogin;
+        assert_ne!(
+            request.cache_identity(),
+            before_the_fix.cache_identity(),
+            "{id}: a ChatGPT report stored for this profile must not be reused"
+        );
+        // A ChatGPT probe would start a Codex app-server here and fail.
+        let (outcome, _) = refresh_profile_with_cache_root(request, None, None).await;
+        assert!(
+            outcome.report.is_usage_priced(),
+            "{id}: {:?}",
+            outcome.report
+        );
+    }
 }
 
 // Hard-won: 6f73fe58: usage-billed custom providers were incorrectly shown as unavailable
@@ -307,13 +342,12 @@ fn codex_quota_request(
     environment: BTreeMap<String, String>,
 ) -> QuotaRefreshRequest {
     QuotaRefreshRequest {
-        native_openai: true,
         profile_id: "codex".into(),
         harness: HarnessKind::Codex,
         source_home: directory.to_path_buf(),
         environment,
         cwd: directory.to_path_buf(),
-        provider: None,
+        codex_source: CodexQuotaSource::ChatGptLogin,
     }
 }
 
@@ -472,6 +506,56 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
     );
 }
 
+/// A profile switched off the ChatGPT login stops the app-server cached for it
+/// instead of handing it back to be kept until the daemon exits.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cached_app_server_stops_when_the_profile_leaves_the_chatgpt_login() {
+    let directory = tempfile::tempdir().unwrap();
+    write_codex_auth(
+        directory.path(),
+        Duration::from_secs(10 * 3_600),
+        Duration::from_secs(3_600),
+    );
+    let (environment, _log) = fake_codex_app_server(
+        directory.path(),
+        r#"#!/bin/sh
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":1,"result":{}}'
+IFS= read -r line || exit 1
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":9,"windowDurationMins":300}}}}'
+IFS= read -r line
+"#,
+    );
+    let request = codex_quota_request(directory.path(), environment);
+    let (first, client) = refresh_profile_with_cache_root(
+        request.clone(),
+        None,
+        Some(managed_codex_cache_root(directory.path())),
+    )
+    .await;
+    assert_eq!(first.report.error, None);
+    assert!(client.is_some(), "the ChatGPT poll caches its app-server");
+
+    let switched = QuotaRefreshRequest {
+        codex_source: CodexQuotaSource::UsagePriced {
+            provider: "ollama".into(),
+        },
+        ..request
+    };
+    let (second, client) = refresh_profile_with_cache_root(
+        switched,
+        client,
+        Some(managed_codex_cache_root(directory.path())),
+    )
+    .await;
+    assert!(second.report.is_usage_priced());
+    assert!(client.is_none(), "the unused app-server is stopped");
+}
+
 /// A rotation that fails in an app-server this poll started ends the poll:
 /// starting another one for the quota read would repeat the failure (#1224).
 #[cfg(unix)]
@@ -614,7 +698,6 @@ async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
 
     let (outcome, _) = refresh_profile_with_cache_root(
         QuotaRefreshRequest {
-            native_openai: true,
             profile_id: "grok".into(),
             harness: HarnessKind::Grok,
             source_home: directory.path().to_path_buf(),
@@ -623,7 +706,7 @@ async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
                 directory.path().to_string_lossy().into_owned(),
             )]),
             cwd: directory.path().to_path_buf(),
-            provider: None,
+            codex_source: CodexQuotaSource::ChatGptLogin,
         },
         None,
         None,
@@ -678,13 +761,12 @@ async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let request = QuotaRefreshRequest {
-        native_openai: true,
         profile_id: "muse".into(),
         harness: HarnessKind::Muse,
         source_home: directory.path().to_path_buf(),
         environment: BTreeMap::from([("TBH_MINT_BASE_URL".into(), format!("http://{address}"))]),
         cwd: directory.path().to_path_buf(),
-        provider: None,
+        codex_source: CodexQuotaSource::ChatGptLogin,
     };
     let mut manager = QuotaManager::default();
     manager
@@ -781,13 +863,12 @@ async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::Captur
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let request = QuotaRefreshRequest {
-        native_openai: true,
         profile_id: "muse".into(),
         harness: HarnessKind::Muse,
         source_home: directory.path().to_path_buf(),
         environment: BTreeMap::from([("TBH_MINT_BASE_URL".into(), format!("http://{address}"))]),
         cwd: directory.path().to_path_buf(),
-        provider: None,
+        codex_source: CodexQuotaSource::ChatGptLogin,
     };
     // Lines logged at exactly info that contain `text`.
     let said = |text: &str| {
@@ -950,13 +1031,12 @@ async fn expired_claude_credentials_report_login_expired() {
 
     let (outcome, _) = refresh_profile_with_cache_root(
         QuotaRefreshRequest {
-            native_openai: true,
             profile_id: "claude2".into(),
             harness: HarnessKind::Claude,
             source_home: directory.path().to_path_buf(),
             environment: BTreeMap::new(),
             cwd: directory.path().to_path_buf(),
-            provider: None,
+            codex_source: CodexQuotaSource::ChatGptLogin,
         },
         None,
         None,
@@ -1282,7 +1362,6 @@ while IFS= read -r line; do :; done
 "#,
     );
     let request = QuotaRefreshRequest {
-        native_openai: true,
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,
         source_home: directory.path().to_path_buf(),
@@ -1297,7 +1376,7 @@ while IFS= read -r line; do :; done
             ),
         ]),
         cwd: directory.path().to_path_buf(),
-        provider: None,
+        codex_source: CodexQuotaSource::ChatGptLogin,
     };
 
     let mut quotas = QuotaManager {

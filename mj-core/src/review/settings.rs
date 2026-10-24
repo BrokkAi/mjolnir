@@ -42,6 +42,17 @@ impl ReviewProvider {
             Self::Other => None,
         }
     }
+
+    /// Whether Auto may choose a profile of this provider under `settings`,
+    /// the `[review]` configuration with the session's choice applied. Auto
+    /// picks a model itself only for a provider with a
+    /// [`main_policy`](Self::main_policy); a profile of any other provider
+    /// qualifies when the session names the model. The reviewer choice and
+    /// the launch's review baseline both ask this, so a launch never refuses
+    /// a baseline to a session whose review would choose a reviewer.
+    pub fn auto_eligible(self, settings: &crate::config::ReviewConfig) -> bool {
+        settings.model.is_some() || self.main_policy().is_some()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,16 +121,20 @@ pub fn model_version_cmp(left: &str, right: &str) -> std::cmp::Ordering {
         .then_with(|| left.cmp(right))
 }
 
-/// Startup baseline eligibility does not perform network or quota discovery.
-pub fn can_review(config: &crate::config::Config) -> bool {
-    if let Some(id) = config.review.profile.as_deref() {
+/// Whether a review can choose a reviewer for a session with `session`'s
+/// review choice, so its launch should take a review baseline. It applies
+/// the same per-profile rule as the reviewer choice and does not perform
+/// network or quota discovery.
+pub fn can_review(
+    config: &crate::config::Config,
+    session: Option<&crate::config::SessionReview>,
+) -> bool {
+    let settings = config.review.for_session(session);
+    if let Some(id) = settings.profile.as_deref() {
         return config.enabled_profile(id).is_some();
     }
-    config.enabled_profiles().any(|(_, p)| {
-        ReviewProvider::for_profile(p)
-            .ok()
-            .and_then(ReviewProvider::main_policy)
-            .is_some()
+    config.enabled_profiles().any(|(_, profile)| {
+        ReviewProvider::for_profile(profile).is_ok_and(|provider| provider.auto_eligible(&settings))
     })
 }
 
@@ -147,10 +162,10 @@ mod tests {
         );
         config.profiles.insert("only".into(), profile);
         assert!(
-            can_review(&config),
+            can_review(&config, None),
             "single-profile Auto supports manual review even with automation off"
         );
         config.profiles.get_mut("only").unwrap().enabled = false;
-        assert!(!can_review(&config));
+        assert!(!can_review(&config, None));
     }
 }
