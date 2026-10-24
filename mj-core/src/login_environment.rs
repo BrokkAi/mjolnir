@@ -235,13 +235,15 @@ impl Account {
 
 /// Reproduce the environment a terminal gives this account.
 ///
-/// `-l` reads the login startup files (`/etc/profile`, `~/.zprofile`) and `-i`
-/// reads the interactive ones (`~/.zshrc`, `~/.bashrc`), where version managers
-/// install themselves. A terminal starts a single shell that is both, so the
-/// probe starts the account's shell the same way.
+/// POSIX shells use `-l` to read login startup files (`/etc/profile`,
+/// `~/.zprofile`). C shells instead identify a login shell by a leading dash in
+/// `argv[0]` (`-tcsh` or `-csh`) and reject `-l`. In both families, `-i` reads
+/// the interactive startup files (`~/.zshrc`, `~/.bashrc`, `~/.tcshrc`) where
+/// version managers install themselves. A terminal starts a single shell that
+/// is both, so the probe starts the account's shell the same way.
 #[cfg(unix)]
 fn discover_account(account: Account, timeout: std::time::Duration) -> Result<Environment> {
-    use crate::targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
+    use crate::targets::{BoundedProcessExecutor, CommandExecutor};
     let mut nonce = [0u8; 16];
     getrandom::fill(&mut nonce)
         .map_err(|error| anyhow::anyhow!("create login capture marker: {error}"))?;
@@ -253,12 +255,7 @@ fn discover_account(account: Account, timeout: std::time::Duration) -> Result<En
     // Absolute env prevents a profile alias or PATH change from replacing the
     // exporter. exec avoids logout hooks being appended to the captured records.
     let script = format!("printf '\\000MJ_LOGIN_{nonce}\\000'; exec /usr/bin/env -0");
-    let shell = account
-        .shell
-        .to_str()
-        .context("target shell path is not UTF-8")?;
-    let mut command = CommandSpec::new(shell, ["-l", "-i", "-c", &script])
-        .purpose("initialize target shell environment");
+    let mut command = login_shell_command(&account.shell, &script)?;
     command.clear_env = true;
     command.cwd = Some(account.home.clone());
     command.env = account.environment()?;
@@ -270,6 +267,28 @@ fn discover_account(account: Account, timeout: std::time::Duration) -> Result<En
         output.status
     );
     parse(&output.stdout, marker.as_bytes())
+}
+
+#[cfg(unix)]
+fn login_shell_command(
+    shell: &std::path::Path,
+    script: &str,
+) -> Result<crate::targets::CommandSpec> {
+    let shell_text = shell.to_str().context("target shell path is not UTF-8")?;
+    Ok(match csh_login_argv0(shell) {
+        Some(arg0) => crate::targets::CommandSpec::new(shell_text, ["-i", "-c", script]).arg0(arg0),
+        None => crate::targets::CommandSpec::new(shell_text, ["-l", "-i", "-c", script]),
+    }
+    .purpose("initialize target shell environment"))
+}
+
+#[cfg(unix)]
+fn csh_login_argv0(shell: &std::path::Path) -> Option<&'static str> {
+    match shell.file_name()?.to_str()? {
+        "tcsh" => Some("-tcsh"),
+        "csh" => Some("-csh"),
+        _ => None,
+    }
 }
 
 #[cfg(unix)]
@@ -471,6 +490,55 @@ mod tests {
             "{}",
             environment["PATH"]
         );
+    }
+
+    #[test]
+    fn shell_probe_uses_each_shell_familys_login_form() {
+        let csh = login_shell_command(std::path::Path::new("/bin/tcsh"), "capture").unwrap();
+        assert_eq!(csh.arg0.as_deref(), Some("-tcsh"));
+        assert_eq!(csh.args, ["-i", "-c", "capture"]);
+
+        let posix = login_shell_command(std::path::Path::new("/bin/zsh"), "capture").unwrap();
+        assert_eq!(posix.arg0, None);
+        assert_eq!(posix.args, ["-l", "-i", "-c", "capture"]);
+    }
+
+    // Hard-won: 27b534a5: tcsh rejected the probe's POSIX -l option before it ran any startup file
+    #[test]
+    fn csh_login_probe_uses_login_argv0_and_reads_csh_startup_files() {
+        let shell = std::env::var_os("MJ_TEST_CSH")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                ["/bin/csh", "/bin/tcsh", "/usr/bin/csh", "/usr/bin/tcsh"]
+                    .into_iter()
+                    .map(std::path::PathBuf::from)
+                    .find(|path| path.is_file())
+            });
+        let Some(shell) = shell else {
+            return;
+        };
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".cshrc"),
+            "setenv CSH_RC_SETTING from-cshrc\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home.path().join(".login"),
+            "setenv CSH_LOGIN_SETTING from-login\n",
+        )
+        .unwrap();
+        let environment = discover_account(
+            Account {
+                user: "fixture-user".into(),
+                home: home.path().into(),
+                shell,
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(environment["CSH_RC_SETTING"], "from-cshrc");
+        assert_eq!(environment["CSH_LOGIN_SETTING"], "from-login");
     }
 
     #[test]

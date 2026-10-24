@@ -427,7 +427,8 @@ its `config.toml` names a custom model provider or its `auth.json` records
 On every bare runtime, whether on this machine, an SSH machine, or an EC2
 machine, each worker performs one bounded probe of the account's shell and
 starts it the way a terminal does: as an interactive login shell (`zsh -l -i`
-for zsh, `bash -l -i` for bash). The probe begins from a cleared environment, so
+for zsh, `bash -l -i` for bash, and login `argv[0]` with `-i` for tcsh or csh).
+The probe begins from a cleared environment, so
 nothing the process that launched Mjolnir exported leaks into the session, but
 it reads the same startup files a terminal reads. Tools that a version manager
 adds to `PATH` — nvm, pyenv, asdf, mise, volta, sdkman, or Homebrew on Linux —
