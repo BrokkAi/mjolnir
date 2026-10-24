@@ -1004,33 +1004,13 @@ impl Controller {
             let canonical = crate::database::store_catalog_project(bundle_id, &project, true)?;
             (canonical, Some(project))
         } else if let Some(directory) = project_directory.as_deref() {
-            let git = match template {
-                TargetTemplate::LocalBare => {
-                    executor
-                        .execute(
-                            &targets::CommandSpec::new(
-                                "git",
-                                [
-                                    "-C",
-                                    &directory.to_string_lossy(),
-                                    "rev-parse",
-                                    "--is-inside-work-tree",
-                                ],
-                            )
-                            .purpose("inspect raw project repository"),
-                        )?
-                        .status
-                        == 0
-                }
-                _ => true,
-            };
-            if git {
-                let (id, project) =
-                    crate::project_catalog::accept_directory(template, directory, executor)?;
-                (id, Some(project))
-            } else {
-                (bundle_id.to_owned(), None)
-            }
+            // A bare local session may run in any directory, including one that
+            // is not a Git checkout; such a project is identified by its path.
+            // A remote bare session must still be a repository, and its
+            // validation has already refused anything else.
+            let (id, project) =
+                crate::project_catalog::accept_directory(template, directory, executor)?;
+            (id, Some(project))
         } else {
             (bundle_id.to_owned(), None)
         };

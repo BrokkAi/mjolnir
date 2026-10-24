@@ -1496,6 +1496,7 @@ mod tests {
                 },
             )]
             .into(),
+            plain_directories: Default::default(),
         });
         let mut selection = mj_core::remote_git::ExactCheckout {
             repository_id: "project".into(),

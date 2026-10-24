@@ -24,6 +24,7 @@ pub(crate) fn snapshot(
         bundle: bundle.clone(),
         identities: BTreeMap::new(),
         network_sources: BTreeMap::new(),
+        plain_directories: Default::default(),
     };
     for repository in &bundle.repositories {
         let identity = if let Some(source) = &repository.github {
@@ -66,7 +67,7 @@ pub(crate) fn resolve_directory(
     match target {
         TargetTemplate::LocalBare => Ok((
             "local".into(),
-            mj_core::repository::resolve_directory(path, None, executor)?,
+            mj_core::repository::resolve_local_directory(path, executor)?,
         )),
         TargetTemplate::SshBare { ssh, .. } => {
             let host = mj_core::config::project_history_host(target)
@@ -86,7 +87,7 @@ pub(crate) fn resolve_directory(
     }
 }
 
-fn directory_snapshot(resolved: &ResolvedDirectory) -> ProjectBundleSnapshot {
+pub(crate) fn directory_snapshot(resolved: &ResolvedDirectory) -> ProjectBundleSnapshot {
     let id = crate::import::setup_style_id(&resolved.identity.name());
     ProjectBundleSnapshot {
         bundle: ProjectBundle {
@@ -99,8 +100,13 @@ fn directory_snapshot(resolved: &ResolvedDirectory) -> ProjectBundleSnapshot {
                 git_ref: None,
             }],
         },
-        identities: BTreeMap::from([(id, resolved.identity.clone())]),
+        identities: BTreeMap::from([(id.clone(), resolved.identity.clone())]),
         network_sources: BTreeMap::new(),
+        plain_directories: if resolved.plain_directory {
+            BTreeSet::from([id])
+        } else {
+            BTreeSet::new()
+        },
     }
 }
 
@@ -233,7 +239,14 @@ fn reconcile_config(
 /// Record a local directory found in history in the catalog. Discovery never
 /// writes `config.toml`: saved bundles are the ones the user created, and a
 /// discovered project becomes one only when the user chooses it.
+///
+/// Discovery stays strict about Git. Any directory a harness recorded is not
+/// necessarily a project - a person may have run an agent from a scratch
+/// folder - so only a checkout is listed automatically. A plain folder is
+/// still openable: the project-directory dialog accepts one when a person
+/// names it, which is a deliberate choice rather than a guess from history.
 fn discover_local(path: &Path, executor: &impl CommandExecutor) -> Result<()> {
+    mj_core::repository::resolve_directory(path, None, executor)?;
     accept_directory(&TargetTemplate::LocalBare, path, executor)?;
     Ok(())
 }

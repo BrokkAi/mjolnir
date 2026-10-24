@@ -820,6 +820,7 @@ fn restore_rewrites_grok_cwd_key_and_session_summary_for_target_workspace() {
             origin: "owner/app".into(),
             push_urls: Vec::new(),
             remote_workspace: false,
+            plain_directory: false,
             base_commit: "a".repeat(40),
             head_commit: "a".repeat(40),
             branch: Some("main".into()),
@@ -1152,6 +1153,7 @@ fn restore_rewrites_claude_project_artifacts_for_target_workspace() {
             origin: "owner/app".into(),
             push_urls: Vec::new(),
             remote_workspace: false,
+            plain_directory: false,
             base_commit: "a".repeat(40),
             head_commit: "a".repeat(40),
             branch: Some("main".into()),
@@ -1199,6 +1201,7 @@ fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
             origin: "owner/app".into(),
             push_urls: Vec::new(),
             remote_workspace: false,
+            plain_directory: false,
             base_commit: "a".repeat(40),
             head_commit: "a".repeat(40),
             branch: Some("main".into()),
@@ -1365,6 +1368,76 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
         },
         output,
     )
+}
+
+/// A plain project folder is the user's own directory, not a checkout: the
+/// archive says so, captures nothing about it, and a restore never touches it.
+#[test]
+fn a_plain_project_directory_is_recorded_but_never_captured_or_restored() {
+    /// Any Git use of a plain folder is a bug, so the runner refuses to answer.
+    struct NoGit;
+    impl GitCommandRunner for NoGit {
+        fn run(&self, _repository: &Path, command: &GitCommand) -> Result<GitOutput> {
+            panic!("plain project directory ran git {command:?}");
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, archive_path) = fixture(temp.path());
+    let plain = spec.workspace_root.join("notes");
+    fs::create_dir_all(plain.join("drafts")).unwrap();
+    fs::write(plain.join("todo.md"), b"# todo\n").unwrap();
+    fs::write(plain.join("drafts/one.md"), b"draft one\n").unwrap();
+    spec.repositories = vec![CheckpointRepositorySpec {
+        id: "notes".into(),
+        relative_destination: "notes".into(),
+        capture: CheckpointRepositoryCapture::PlainDirectory,
+        origin_override: None,
+    }];
+    spec.bundle.primary_repository = "notes".into();
+    export_checkpoint_with_git(&spec, &NoGit).unwrap();
+
+    let archive = read_archive_verified(&archive_path).unwrap();
+    let [repository] = archive.manifest.repositories.as_slice() else {
+        panic!("one repository was exported");
+    };
+    assert!(repository.metadata.plain_directory);
+    assert_eq!(
+        repository.metadata.relative_destination,
+        PathBuf::from("notes")
+    );
+    assert!(repository.metadata.head_commit.is_empty());
+    assert!(repository.metadata.origin.is_empty());
+    assert!(repository.metadata.saved_refs.is_empty());
+    assert!(
+        archive
+            .manifest
+            .payloads
+            .iter()
+            .filter(|payload| matches!(
+                payload.role,
+                PayloadRole::GitBundle { .. }
+                    | PayloadRole::GitStagedPatch { .. }
+                    | PayloadRole::GitUnstagedPatch { .. }
+                    | PayloadRole::GitUntrackedTar { .. }
+            ))
+            .all(|payload| payload.size == 0),
+        "a plain folder contributes no Git payload content"
+    );
+
+    // The user keeps working in the folder, and a restore must leave it alone:
+    // no checkout, no overwrite, no removal of anything added since.
+    fs::write(plain.join("todo.md"), b"# todo\n\nnew work\n").unwrap();
+    fs::write(plain.join("later.md"), b"written later\n").unwrap();
+    let restore_root = temp.path().join("restore-workspace");
+    fs::create_dir_all(restore_root.join("notes")).unwrap();
+    fs::copy(plain.join("todo.md"), restore_root.join("notes/todo.md")).unwrap();
+    restore_repositories(&archive_path, &restore_root, &NoGit).unwrap();
+    assert_eq!(
+        fs::read_to_string(restore_root.join("notes/todo.md")).unwrap(),
+        "# todo\n\nnew work\n"
+    );
+    assert!(!restore_root.join("notes/drafts").exists());
 }
 
 #[test]

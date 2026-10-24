@@ -1,5 +1,15 @@
 use super::*;
 
+/// Whether a bare session's project is a plain folder rather than a Git
+/// checkout, as recorded when the project was accepted.
+fn is_plain_project_directory(session: &mj_core::state::SessionRecord) -> bool {
+    session.project.as_ref().is_some_and(|project| {
+        project
+            .plain_directories
+            .contains(&project.bundle.primary_repo)
+    })
+}
+
 impl Controller {
     /// Report roots may be shared by several parents; the persisted child
     /// directory is the ownership boundary, never a scan of that shared root.
@@ -83,6 +93,13 @@ impl Controller {
                                 } else {
                                     CheckpointRepositoryCapture::DeltaFrom { base_commit }
                                 }
+                            }
+                            // A plain project directory is the user's own
+                            // folder rather than a repository, so there is no
+                            // Git state to record and no working file of it to
+                            // capture.
+                            _ if is_plain_project_directory(&session) => {
+                                CheckpointRepositoryCapture::PlainDirectory
                             }
                             _ => CheckpointRepositoryCapture::MetadataOnly,
                         },

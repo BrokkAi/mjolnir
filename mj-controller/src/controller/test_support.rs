@@ -141,6 +141,7 @@ pub(super) fn write_network_checkpoint_archive(
                 origin: "https://fetch.example.test/project.git".into(),
                 push_urls: vec!["https://push.example.test/project.git".into()],
                 remote_workspace: true,
+                plain_directory: false,
                 base_commit: "a".repeat(40),
                 head_commit: "a".repeat(40),
                 branch: Some(format!("mj/{session_id}")),

@@ -1037,6 +1037,16 @@ pub(super) fn plan_raw_to_workspace_with_checkout(
     let project_directory = checkout
         .project_directory()
         .context("a raw session has no project directory")?;
+    // A plain folder has no repository to clone from and no commits to carry,
+    // so it cannot become a bundle workspace. Say so instead of letting Git
+    // answer for a checkout that does not exist.
+    ensure!(
+        !project
+            .plain_directories
+            .contains(&project.bundle.primary_repo),
+        "{} is a plain directory, not a Git checkout, so it cannot move into a target",
+        project_directory.display()
+    );
     // The checkpoint describes the session's directory as if it were the
     // repository root, so only a whole checkout can move. Each branch checks
     // this against paths from one domain: the record's own paths for a managed

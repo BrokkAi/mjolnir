@@ -212,9 +212,50 @@ pub fn collect_git_metadata_snapshot(
             origin: identity.origin,
             push_urls: identity.push_urls,
             remote_workspace: false,
+            plain_directory: false,
             base_commit: identity.head_commit.clone(),
             head_commit: identity.head_commit,
             branch: identity.branch,
+        },
+        committed_bundle: Vec::new(),
+        staged_patch: Vec::new(),
+        unstaged_patch: Vec::new(),
+        untracked_tar: Vec::new(),
+        operation_payloads: None,
+    })
+}
+
+/// A snapshot of a bare local session's directory when it is not a Git
+/// checkout.
+///
+/// Nothing about the folder is captured: it is the user's own directory, not a
+/// managed checkout, so a restore never replaces its files. The metadata still
+/// names the directory so an archive describes the shape of the session it
+/// belongs to, and it carries no commit, so nothing claims Git provenance.
+pub fn collect_plain_directory_snapshot(spec: &GitCollectionSpec) -> Result<RepositorySnapshot> {
+    validate_component(&spec.id, "repository id")?;
+    validate_archive_relative_path(&spec.relative_destination)?;
+    ensure!(
+        spec.origin_override.is_none(),
+        "a plain project directory has no origin to override"
+    );
+    Ok(RepositorySnapshot {
+        metadata: RepositoryMetadata {
+            review_refs_metadata_only: false,
+            review_baseline_ref: None,
+            saved_refs: BTreeMap::new(),
+            stash_stack: Vec::new(),
+            git_operation: None,
+            id: spec.id.clone(),
+            relative_destination: spec.relative_destination.clone(),
+            checkout_subdirectory: None,
+            origin: String::new(),
+            push_urls: Vec::new(),
+            remote_workspace: false,
+            plain_directory: true,
+            base_commit: String::new(),
+            head_commit: String::new(),
+            branch: None,
         },
         committed_bundle: Vec::new(),
         staged_patch: Vec::new(),
@@ -1855,6 +1896,7 @@ fn collect_git_contents(
             origin: identity.origin,
             push_urls: identity.push_urls,
             remote_workspace: false,
+            plain_directory: false,
             base_commit,
             head_commit: identity.head_commit,
             branch: identity.branch,

@@ -91,9 +91,17 @@ before choosing a raw or `yolo` target.
 
 ## Bare runtimes
 
-A bare runtime selects an existing absolute Git project directory rather than a
+A bare runtime selects an existing absolute project directory rather than a
 bundle. They do not accept supplemental directory attachments or container
 resource sizing.
+
+On `local`, that directory need not be a Git checkout: a plain folder is a
+project in its own right, identified by its path, and the whole session works
+in it. Nothing about a plain folder is captured in a checkpoint and no restore
+touches its files, because the folder belongs to you and not to a managed
+checkout. A Git checkout is still required wherever Mjolnir has to move the
+project into a bundle workspace, and on SSH and EC2 targets, which address a
+project by the repository it shares with its sessions.
 
 ### Bare on this machine
 
@@ -284,7 +292,8 @@ commits, staged, unstaged, and untracked files are restored over the clone. A
 checkout with no network remote stays bare-only: add a remote (`git remote add
 origin <url>`) or keep resuming on a bare target. A subdirectory of a checkout,
 an SSH-hosted checkout, and a multi-repository bundle cannot become one
-checkout either way.
+checkout either way. A plain local folder has no repository to clone from, so
+it also stays bare-only.
 
 Muse Code supports one ACP workspace root, so it requires a single-repository
 bundle or one existing bare project directory, with no supplemental directories.

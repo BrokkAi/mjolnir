@@ -706,6 +706,29 @@ fn a_plain_local_directory_starts_without_creating_a_git_worktree() {
 }
 
 #[test]
+fn a_plain_local_directory_cannot_convert_into_a_bundle_workspace() {
+    let plain = tempfile::tempdir().unwrap();
+    let resolved =
+        mj_core::repository::resolve_local_directory(plain.path(), &ProcessExecutor).unwrap();
+    let project = crate::project_catalog::directory_snapshot(&resolved);
+    assert!(!project.plain_directories.is_empty());
+    let mut session = raw_session_on("localhost", plain.path().to_str().unwrap());
+    session.project = Some(project);
+    let config = resume_compatibility_config();
+
+    let checkout = session.checkout();
+    let error = plan_raw_to_workspace_for_session(&session, &checkout, &config, &ProcessExecutor)
+        .unwrap_err();
+
+    let detail = format!("{error:#}");
+    assert!(
+        detail.contains("is a plain directory, not a Git checkout"),
+        "{detail}"
+    );
+    assert!(detail.contains("cannot move into a target"), "{detail}");
+}
+
+#[test]
 fn managed_worktree_origin_uses_source_repository_while_checkout_is_retired() {
     struct OriginExecutor;
     impl CommandExecutor for OriginExecutor {
@@ -945,6 +968,7 @@ fn recorded_repository(head_commit: &str, branch: Option<&str>) -> RepositoryMet
         git_operation: None,
         push_urls: Vec::new(),
         remote_workspace: false,
+        plain_directory: false,
         id: "project".into(),
         relative_destination: PathBuf::from("project"),
         checkout_subdirectory: None,
@@ -2049,6 +2073,7 @@ fn a_failed_conversion_returns_the_session_to_its_checkout() {
                 .into_iter()
                 .collect(),
                 network_sources: Default::default(),
+                plain_directories: Default::default(),
             },
             source: fixture_network_source(),
             retire: previous.managed_worktree.clone(),

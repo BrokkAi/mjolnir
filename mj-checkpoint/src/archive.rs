@@ -658,6 +658,31 @@ fn prepare_archive_view_with_part_size(
                 repository.metadata.id
             );
         }
+        if repository.metadata.plain_directory {
+            // Nothing about a plain folder is captured, so any Git state here
+            // would be state a restore could not honestly reproduce.
+            ensure!(
+                !repository.metadata.remote_workspace
+                    && repository.metadata.checkout_subdirectory.is_none()
+                    && repository.metadata.origin.is_empty()
+                    && repository.metadata.push_urls.is_empty()
+                    && repository.metadata.base_commit.is_empty()
+                    && repository.metadata.head_commit.is_empty()
+                    && repository.metadata.branch.is_none()
+                    && !repository.metadata.review_refs_metadata_only
+                    && repository.metadata.review_baseline_ref.is_none()
+                    && repository.metadata.saved_refs.is_empty()
+                    && repository.metadata.stash_stack.is_empty()
+                    && repository.metadata.git_operation.is_none()
+                    && repository.committed_bundle.is_empty()
+                    && repository.staged_patch.is_empty()
+                    && repository.unstaged_patch.is_empty()
+                    && repository.untracked_tar.is_empty()
+                    && repository.operation_payloads.is_none(),
+                "repository '{}' is a plain directory but carries Git state",
+                repository.metadata.id
+            );
+        }
         validate_untracked_tar(&repository.untracked_tar)?;
         let root = format!("repositories/{}", repository.metadata.id);
         let operation = match (
@@ -2046,11 +2071,12 @@ pub use git::{
     NON_INTERACTIVE_GIT_SSH_COMMAND, PushBranchError, PushedBranch, REVIEW_BASELINE_REF,
     ReflogAnchor, ReflogEntry, ReviewPoint, SessionDiff, SessionExportError, SystemGit,
     capture_paths, capture_worktree_tree, collect_git_metadata_snapshot, collect_git_snapshot,
-    collect_git_snapshot_with_progress, diff_between_trees, empty_tree_id, has_origin_refs,
-    merge_trees, migrate_review_ref, numstat_between_trees, pin_review_tree, push_branch,
-    read_head_reflog, read_review_point, record_review_point, record_reviewed_tree,
-    remote_workspace_base, remove_departed_worktree_pins, restore_git_snapshot,
-    review_baseline_ref, session_diff, session_diff_details, validate_symlink_target,
+    collect_git_snapshot_with_progress, collect_plain_directory_snapshot, diff_between_trees,
+    empty_tree_id, has_origin_refs, merge_trees, migrate_review_ref, numstat_between_trees,
+    pin_review_tree, push_branch, read_head_reflog, read_review_point, record_review_point,
+    record_reviewed_tree, remote_workspace_base, remove_departed_worktree_pins,
+    restore_git_snapshot, review_baseline_ref, session_diff, session_diff_details,
+    validate_symlink_target,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};

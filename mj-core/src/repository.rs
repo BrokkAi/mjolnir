@@ -1,6 +1,6 @@
 //! Repository identity is independent of a checkout's location and push settings.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -16,6 +16,12 @@ pub struct ProjectBundleSnapshot {
     pub identities: BTreeMap<String, RepositoryIdentity>,
     #[serde(default)]
     pub network_sources: BTreeMap<String, crate::remote_git::NetworkGitSource>,
+    /// Repository IDs whose source is a plain folder rather than a Git
+    /// checkout. A bare local target accepts one; it is fixed here at
+    /// acceptance so a later `git init` in that folder cannot silently change
+    /// what the session's checkpoints and resumes mean.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub plain_directories: BTreeSet<String>,
 }
 
 impl ProjectBundleSnapshot {
@@ -24,6 +30,19 @@ impl ProjectBundleSnapshot {
             self.identities.len() == self.bundle.repositories.len(),
             "project identities do not cover its repositories"
         );
+        for id in &self.plain_directories {
+            anyhow::ensure!(
+                self.bundle
+                    .repositories
+                    .iter()
+                    .any(|repository| &repository.id == id),
+                "plain project directory {id:?} is not a project repository"
+            );
+            anyhow::ensure!(
+                matches!(self.identities.get(id), Some(RepositoryIdentity::Local(_))),
+                "plain project directory {id:?} has a non-local identity"
+            );
+        }
         let primary = self
             .identities
             .get(&self.bundle.primary_repo)
@@ -176,6 +195,9 @@ pub struct ResolvedDirectory {
     pub checkout_root: PathBuf,
     pub repository_root: PathBuf,
     pub identity: RepositoryIdentity,
+    /// The directory is not a Git checkout. Only a bare local target accepts
+    /// one; see [`resolve_local_directory`].
+    pub plain_directory: bool,
 }
 
 /// Expected absence when discovering historical directories. Other resolver
@@ -319,12 +341,97 @@ pub fn resolve_directory(
         checkout_root,
         repository_root,
         identity,
+        plain_directory: false,
     })
+}
+
+/// Resolve a directory a bare local session may run in.
+///
+/// A local directory that Git refuses as a repository is still a project the
+/// user can open: its identity is its canonical path, it has no checkout above
+/// it, and nothing about it can be cloned. Git failures other than that
+/// expected refusal remain errors, and only a local target qualifies - a
+/// remote directory still has to be a repository, because a remote project is
+/// addressed by the repository it shares with its sessions.
+pub fn resolve_local_directory(
+    path: &Path,
+    executor: &impl CommandExecutor,
+) -> Result<ResolvedDirectory> {
+    match resolve_directory(path, None, executor) {
+        Ok(resolved) => Ok(resolved),
+        Err(error)
+            if matches!(
+                error.downcast_ref::<RepositoryUnavailable>(),
+                Some(RepositoryUnavailable::NotRepository(_))
+            ) =>
+        {
+            let root = std::fs::canonicalize(path)
+                .with_context(|| format!("resolve project directory {}", path.display()))?;
+            Ok(ResolvedDirectory {
+                checkout_root: root.clone(),
+                repository_root: root.clone(),
+                identity: RepositoryIdentity::Local(root),
+                plain_directory: true,
+            })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_local_folder_that_is_not_a_repository_is_a_plain_project() {
+        use crate::targets::{CommandOutput, ProcessExecutor};
+
+        let executor = ProcessExecutor;
+        let directory = tempfile::tempdir().unwrap();
+        let plain = resolve_local_directory(directory.path(), &executor).unwrap();
+        assert!(plain.plain_directory);
+        assert_eq!(
+            plain.checkout_root,
+            std::fs::canonicalize(directory.path()).unwrap()
+        );
+        assert_eq!(plain.checkout_root, plain.repository_root);
+        assert_eq!(
+            plain.identity,
+            RepositoryIdentity::Local(plain.repository_root)
+        );
+
+        // Git failing for any reason other than the expected absence keeps the
+        // error: a repository that cannot be read is not a plain folder.
+        struct RefusedGit;
+        impl CommandExecutor for RefusedGit {
+            fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+                Ok(CommandOutput {
+                    status: 128,
+                    stdout: Vec::new(),
+                    stderr: b"fatal: detected dubious ownership in repository".to_vec(),
+                })
+            }
+        }
+        let refused = resolve_local_directory(directory.path(), &RefusedGit).unwrap_err();
+        assert!(refused.to_string().contains("dubious ownership"));
+
+        // A directory that is not there is still an error, not a project.
+        let missing =
+            resolve_local_directory(&directory.path().join("missing"), &executor).unwrap_err();
+        assert!(matches!(
+            missing.downcast_ref::<RepositoryUnavailable>(),
+            Some(RepositoryUnavailable::Directory(_))
+        ));
+
+        // A remote project is addressed by the repository it shares with its
+        // sessions, so a plain folder is refused there.
+        let remote =
+            resolve_directory(directory.path(), Some("example.test"), &executor).unwrap_err();
+        assert!(matches!(
+            remote.downcast_ref::<RepositoryUnavailable>(),
+            Some(RepositoryUnavailable::NotRepository(_))
+        ));
+    }
 
     #[test]
     fn unavailable_local_history_is_distinct_from_git_failures() {

@@ -102,6 +102,12 @@ pub struct RepositoryMetadata {
     /// also carry a base, but must not inherit managed push configuration.
     #[serde(default, skip_serializing_if = "is_false")]
     pub remote_workspace: bool,
+    /// The directory is not a Git checkout. A bare local session may run in a
+    /// plain folder of the user's own; nothing about such a directory is
+    /// captured, and a restore must leave it alone. The field is absent from
+    /// every archive written before plain folders were accepted.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub plain_directory: bool,
     /// Immutable launch base for managed network workspaces; raw DeltaFrom
     /// snapshots record their capture base. Legacy SessionDelta snapshots
     /// exclude origin refs instead and leave this empty.
