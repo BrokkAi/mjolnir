@@ -862,16 +862,18 @@ fn send_message_tool() -> Value {
     )
 }
 
-/// A child's only tool: its report to the session that started it.
+/// A child's only tool: its report to the session that started it. It is
+/// read-only: a report changes nothing in the workspace, and reviewer children
+/// run in plan mode, where harnesses refuse or ask before other MCP tools.
 fn child_tool_definitions() -> Vec<Value> {
-    vec![tool(
+    vec![read_only(tool(
         "handback",
         &format!(
             "Hand back once, as your last action. Repeats in one turn are refused. {}",
             mj_core::subagent::HANDBACK_REPORT_RULES
         ),
         json!({"type":"object","properties":{"message":{"type":"string","description":"Your report, at most 4,000 characters; details go in files in your report directory."}},"required":["message"],"additionalProperties":false}),
-    )]
+    ))]
 }
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
@@ -958,6 +960,13 @@ mod tests {
             .map(|tool| tool["name"].clone())
             .collect::<Vec<_>>();
         assert_eq!(read_only, vec![json!("list_agents")]);
+    }
+
+    #[test]
+    fn handback_is_read_only_so_plan_mode_reviewers_can_report() {
+        let tools = child_tool_definitions();
+        assert_eq!(tools[0]["name"], "handback");
+        assert_eq!(tools[0]["annotations"]["readOnlyHint"], true);
     }
 
     #[test]
