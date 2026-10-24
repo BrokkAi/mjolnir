@@ -112,6 +112,69 @@ pub fn verify_local_docker(executor: &impl CommandExecutor) -> Result<DockerPref
     verify_docker(None, executor)
 }
 
+/// What ensuring Apple's local runtime did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppleContainerRuntime {
+    /// The service was already answering health checks.
+    Running,
+    /// The service was stopped, and Mjolnir started it.
+    Started,
+}
+
+/// Ensure Apple's local container service is running.
+///
+/// Several launch surfaces can ask at once. One process-wide gate makes the
+/// check and start one decision, so two callers cannot both try to register
+/// the same launchd service. `--disable-kernel-install` keeps this unattended
+/// path from prompting for, or silently downloading, Apple's default kernel;
+/// the manual command documented for first-time setup remains interactive.
+pub fn ensure_apple_container_runtime(
+    executor: &impl CommandExecutor,
+) -> Result<AppleContainerRuntime> {
+    static ENSURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _ensuring = ENSURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let status = CommandSpec::new("container", ["system", "status"])
+        .purpose("check Apple container runtime")
+        .stage(ProvisionStage::Provisioning);
+    if executor.execute(&status)?.status == 0 {
+        return Ok(AppleContainerRuntime::Running);
+    }
+
+    let start = CommandSpec::new("container", ["system", "start", "--disable-kernel-install"])
+        .purpose("start Apple container runtime")
+        .stage(ProvisionStage::Provisioning);
+    let output = executor.execute(&start)?;
+    ensure!(
+        output.status == 0,
+        "container system start failed with status {}: {}",
+        output.status,
+        apple_container_output(&output)
+    );
+
+    let output = executor.execute(&status)?;
+    ensure!(
+        output.status == 0,
+        "container system status still failed after start with status {}: {}",
+        output.status,
+        apple_container_output(&output)
+    );
+    Ok(AppleContainerRuntime::Started)
+}
+
+fn apple_container_output(output: &CommandOutput) -> String {
+    [
+        String::from_utf8_lossy(&output.stdout).trim(),
+        String::from_utf8_lossy(&output.stderr).trim(),
+    ]
+    .into_iter()
+    .filter(|message| !message.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
 pub fn verify_ssh_docker(
     ssh: &SshTarget,
     executor: &impl CommandExecutor,
