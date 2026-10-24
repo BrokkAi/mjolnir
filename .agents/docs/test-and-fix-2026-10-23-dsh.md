@@ -439,16 +439,25 @@ clone moved from localhost into podman that kept its conversation.
   reviewer Auto will choose; one shared eligibility rule serves the chooser
   and the baseline check (see git log for "Take a review baseline").
 
+- DSH turn review: reviewer children run in plan mode and could not call
+  `handback`. The review owner marked `handback` read-only (`82eba5693`), and
+  dsh-acp 0.2.3 offers and allows read-only MCP tools in plan mode (pinned
+  `3cee6f635`). Verified live: a DSH reviewer handed back "patch is correct"
+  and the session showed "Review complete: no material findings".
+- `mj wait` prints a failed session's error, `mj sessions` points failed rows
+  to the details, and a `mj prompt` that times out while a permission form
+  waits names `mj elicitations`, `mj respond` and `--return-on-input`
+  (`e98820f9b` and its parent). B-4 is not a defect: `mj usage` keeps the
+  harness's raw stop reason; events normalize it.
+
 ### Open
 
-- DSH reviewer children cannot call `handback` in plan mode, so every DSH
-  turn review ends "finished without calling handback"; the review owner
-  (session e8566ee4) is fixing it for all harnesses (reviewer answer becomes
-  its final message; plan mode stays).
 - dsh-acp: the native session title is taken from the project-memory
   preamble (A-1).
-- General Mjolnir items seen with DSH: `mj new`, `mj resume` and `mj wait`
-  report launch failures only in the session (D-1, K6, C-2); `mj prompt` says
-  nothing while a permission form waits (E-2); `mj acp` cannot answer DSH
-  permission requests (E-1, documented generically); usage and events
-  disagree on a cancelled turn's outcome (B-4).
+- `mj new` and `mj resume` return once the request is accepted, so a launch
+  failure shows only in `mj wait` and the session (D-1, K6); changing their
+  exit codes would change how scripts behave. `mj acp` cannot answer DSH
+  permission requests (E-1, documented generically).
+- Startup detection (PR #1342) adds a `dsh` profile without a
+  `DEEPSEEK_API_KEY` reference, so a key kept in `secrets.toml` leaves the
+  profile "not authenticated".
