@@ -147,6 +147,24 @@ exit 64
         );
         std::thread::sleep(Duration::from_millis(25));
     }
+    // `start` creates `ready` before it exits. The status probe that verifies
+    // the started service is a third CLI invocation after that, so wait for it
+    // rather than reading concurrently with the daemon's next step.
+    loop {
+        let calls = fs::read_to_string(&log).unwrap_or_default();
+        if calls.lines().count() >= 3 {
+            break;
+        }
+        assert!(
+            daemon.try_wait().unwrap().is_none(),
+            "the daemon exited before verifying Apple container"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never verified Apple container after starting it"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
     let calls = fs::read_to_string(&log).unwrap();
     assert!(
         calls.starts_with("system status\nsystem start --disable-kernel-install\nsystem status\n"),
