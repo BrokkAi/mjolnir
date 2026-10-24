@@ -205,6 +205,7 @@ async fn restart_target_probe_only_allows_fallback_for_a_proven_missing_target()
         .unwrap(),
     );
     controller.state.sessions.insert(apple.id.clone(), apple);
+    // Hard-won: f6b68bcc9: SSH failure during Apple Restart was not classified as unreachable.
     let unreachable =
         restart::restart_target_availability(&controller, "apple-session", &StatusExecutor(255))
             .unwrap();

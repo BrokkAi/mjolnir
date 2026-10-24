@@ -148,9 +148,9 @@ to opening masters, and to every command when sharing is off.
   or newer, Apple silicon, and a running service**. Follow the [official
   installation instructions](https://github.com/apple/container#initial-install)
   on the Mac, run `container system start`, and check `container system status`.
-  The SSH account must also find `container` on its noninteractive `PATH`; put
-  the directory containing it in the login shell's environment, such as
-  `.zprofile` for zsh, and verify with
+  The SSH account must also find `container` on its noninteractive `PATH`. For
+  zsh, put the directory containing it in `.zshenv`, which noninteractive
+  shells read, or add a system-wide `/etc/paths.d` entry. Verify the setup with
   `ssh <destination> container --version`. Mjolnir checks these same commands
   before offering or launching the runtime.
 
@@ -221,7 +221,8 @@ so Homebrew's PATH setup belongs in that shell's login configuration, such as
 `.zprofile` for zsh. The worker uses the target account's login environment
 and then applies any configured profile environment overrides. Apple container
 commands run through noninteractive SSH, so `container` must also be on the
-PATH OpenSSH uses for a command session; verify it with
+PATH OpenSSH uses for a command session. For zsh, `.zshenv` covers both login
+and noninteractive shells; `.zprofile` alone does not. Verify the setup with
 `ssh <destination> container --version` before selecting the runtime.
 
 ```toml

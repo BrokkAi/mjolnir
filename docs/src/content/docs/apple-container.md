@@ -81,7 +81,9 @@ Install the runtime on the remote Mac by following the [installation
 instructions](https://github.com/apple/container#initial-install), then start
 its service there. The remote Mac needs the same runtime and macOS release as a
 local one. The SSH account must find `container` on the noninteractive `PATH`
-used by `ssh <destination> <command>`; check that before adding the machine:
+used by `ssh <destination> <command>`. For zsh, add it in `.zshenv`; `.zprofile`
+is not read by these command sessions. Check the setup before adding the
+machine:
 
 ```console
 ssh mac.example.com container --version
