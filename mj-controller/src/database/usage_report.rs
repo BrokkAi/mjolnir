@@ -8,15 +8,36 @@ use mj_core::usage::{
 mod model_catalog;
 mod pricing;
 
-pub fn load_session_usage_report(query: &SessionUsageQuery) -> Result<SessionUsageReport> {
-    load_from(
+/// `models` is each profile's newest advertised model list, used to price
+/// model aliases.
+pub fn load_session_usage_report(
+    query: &SessionUsageQuery,
+    models: BTreeMap<String, Vec<mj_core::acp::SessionConfigChoice>>,
+) -> Result<SessionUsageReport> {
+    load_with(
         &database_path(),
         query,
         chrono::Utc::now().timestamp_millis(),
+        &model_catalog::ModelCatalogs(models),
     )
 }
 
+#[cfg(test)]
 fn load_from(path: &Path, query: &SessionUsageQuery, now_ms: i64) -> Result<SessionUsageReport> {
+    load_with(
+        path,
+        query,
+        now_ms,
+        &model_catalog::ModelCatalogs::default(),
+    )
+}
+
+fn load_with(
+    path: &Path,
+    query: &SessionUsageQuery,
+    now_ms: i64,
+    catalogs: &model_catalog::ModelCatalogs,
+) -> Result<SessionUsageReport> {
     let mut connection = open_reader(path)?;
     let tx = connection.transaction()?;
     let since_ms = now_ms.saturating_sub(query.period.duration_ms());
@@ -48,7 +69,6 @@ fn load_from(path: &Path, query: &SessionUsageQuery, now_ms: i64) -> Result<Sess
         profiles.insert(profile?);
     }
     report.profiles = profiles.into_iter().collect();
-    let catalogs = model_catalog::ModelCatalogs::load(&tx)?;
     let wanted = query.profile.as_deref();
     for (session_id, title, profile, state) in roots {
         let suspended = !SessionState::from_stored(&state)
@@ -449,26 +469,14 @@ mod tests {
         }
         save_state_to(&path, &state)?;
         let connection = open(&path)?;
-        let catalog = serde_json::json!({"model":null,"observed_at":0,"efforts":[],"models":[
-            {"value":"default","name":"Default (recommended)","description":"Sonnet"},
-            {"value":"opus","name":"Opus 5.5","description":null},
-            {"value":"claude-fable-5-1[1m]","name":"Fable 5.1","description":null},
-            {"value":"claude-opus-5","name":"Opus 5","description":null}]});
-        super::super::profile_cache::save_profile_config_cache_with(
-            &connection,
-            "claude4",
-            "",
-            "fingerprint",
-            &catalog.to_string(),
-        )?;
-        // A provider catalog body shares the table and is not a model list.
-        super::super::profile_cache::save_profile_config_cache_with(
-            &connection,
-            "claude4",
-            "catalog:https://example.invalid",
-            "catalog:https://example.invalid",
-            "[]",
-        )?;
+        let catalogs = model_catalog::ModelCatalogs(BTreeMap::from([(
+            "claude4".to_owned(),
+            serde_json::from_value(serde_json::json!([
+                {"value":"default","name":"Default (recommended)","description":"Sonnet"},
+                {"value":"opus","name":"Opus 5.5","description":null},
+                {"value":"claude-fable-5-1[1m]","name":"Fable 5.1","description":null},
+                {"value":"claude-opus-5","name":"Opus 5","description":null}]))?,
+        )]));
         // Claude reports uncached input; caches are separate tallies.
         let usage = serde_json::json!({"scope":"turn","total_tokens":2_100_000,"input_tokens":1_000_000,
             "output_tokens":100_000,"cached_read_tokens":1_000_000,"cached_write_tokens":0});
@@ -495,7 +503,7 @@ mod tests {
         }
         drop(connection);
 
-        let report = load_from(&path, &SessionUsageQuery::default(), now)?;
+        let report = load_with(&path, &SessionUsageQuery::default(), now, &catalogs)?;
         let [aliases, unresolved] = &report.sessions[..] else {
             panic!("expected two sessions: {:?}", report.sessions);
         };

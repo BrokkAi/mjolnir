@@ -5,37 +5,14 @@
 //! list is used for every period, so an alias the harness has since moved is
 //! priced as its current model.
 use super::pricing;
-use anyhow::{Context, Result};
 use mj_core::acp::SessionConfigChoice;
-use mj_core::worker_launch::ProfileConfig;
-use rusqlite::Transaction;
 use std::collections::BTreeMap;
 
 /// The newest discovered model list of each profile.
-pub(super) struct ModelCatalogs(BTreeMap<String, Vec<SessionConfigChoice>>);
+#[derive(Default)]
+pub(super) struct ModelCatalogs(pub(super) BTreeMap<String, Vec<SessionConfigChoice>>);
 
 impl ModelCatalogs {
-    pub(super) fn load(tx: &Transaction<'_>) -> Result<Self> {
-        // Provider catalog bodies share the table under `catalog:` keys.
-        let mut rows = tx.prepare(
-            "SELECT profile, body FROM profile_config_cache
-            WHERE model NOT LIKE 'catalog:%' ORDER BY observed_at DESC",
-        )?;
-        let mut catalogs = BTreeMap::new();
-        for row in rows.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })? {
-            let (profile, body) = row?;
-            if catalogs.contains_key(&profile) {
-                continue;
-            }
-            let config: ProfileConfig = serde_json::from_str(&body)
-                .with_context(|| format!("decode discovered configuration of {profile}"))?;
-            catalogs.insert(profile, config.models);
-        }
-        Ok(Self(catalogs))
-    }
-
     /// The model id to price `model` as: itself when it has a rate, else the
     /// priced model its profile's catalog says it runs, else itself.
     pub(super) fn priced_model(&self, profile: Option<&str>, model: String) -> String {

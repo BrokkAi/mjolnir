@@ -618,6 +618,24 @@ fn choice_key(profile: &str, model: &Option<String>, fingerprint: &str) -> Choic
     )
 }
 
+/// Each profile's most recently observed model list.
+pub(crate) fn advertised_models() -> BTreeMap<String, Vec<mj_core::acp::SessionConfigChoice>> {
+    let choices = CHOICES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut newest = BTreeMap::<&str, &ProfileConfig>::new();
+    for ((profile, _, _), observed) in choices.iter() {
+        let entry = newest.entry(profile).or_insert(observed);
+        if observed.observed_at > entry.observed_at {
+            *entry = observed;
+        }
+    }
+    newest
+        .into_iter()
+        .map(|(profile, observed)| (profile.to_owned(), observed.models.clone()))
+        .collect()
+}
+
 fn load(profile: &str, model: &Option<String>, fingerprint: &str) -> Option<ProfileConfig> {
     CHOICES
         .lock()

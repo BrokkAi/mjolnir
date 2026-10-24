@@ -305,8 +305,11 @@ pub trait SubagentBackend: Send + Sync {
         query: mj_core::usage::SessionUsageQuery,
     ) -> BoxFuture<'_, AnyResult<mj_core::usage::SessionUsageReport>> {
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || crate::database::load_session_usage_report(&query))
-                .await?
+            let models = crate::controller::profile_config::advertised_models();
+            tokio::task::spawn_blocking(move || {
+                crate::database::load_session_usage_report(&query, models)
+            })
+            .await?
         })
     }
 
