@@ -14,6 +14,18 @@ use super::AcpSupervisorSpec;
 pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileConfig> {
     let policy = ExecutionPolicy::ConfiguredApprovals;
     let mut environment = spec.environment;
+    let managed_node = if super::harness_launch::needs_node_runtime(spec.harness, &environment)? {
+        super::harness::ensure_node_runtime(&mut environment)
+            .await
+            .with_context(|| {
+                format!(
+                    "prepare Node.js for {} discovery",
+                    spec.harness.display_name()
+                )
+            })?
+    } else {
+        None
+    };
     // The probe runs from a staged copy of the profile, like a session.
     spec.harness
         .configure_home_environment(&spec.profile_home, &mut environment);
@@ -97,7 +109,9 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
         verdict: None,
         stall_policy: None,
     };
-    probe(launch, spec.model).await
+    let result = probe(launch, spec.model).await;
+    drop(managed_node);
+    result
 }
 
 async fn probe(launch: LaunchSpec, model: Option<String>) -> Result<ProfileConfig> {

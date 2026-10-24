@@ -15,7 +15,13 @@ use crate::config::HarnessKind;
 pub const MANIFEST_FILE: &str = "mj-harness.json";
 pub const LEASE_FILE: &str = ".lease";
 pub const CODEX_CLI_ENTRYPOINT: &str = "node_modules/.bin/codex";
-const MANAGED_HARNESSES_DIR: &str = "mjolnir/harnesses";
+const MANAGED_RUNTIMES_DIR: &str = "mjolnir";
+const MANAGED_HARNESSES_DIR: &str = "harnesses";
+const MANAGED_NODE_DIR: &str = "node";
+
+/// The exact Node.js release Mjolnir installs when the target has no
+/// compatible runtime. Keep this in lockstep with `assets/node/runtime.json`.
+pub const NODE_VERSION: &str = "24.22.1";
 
 /// The install receipt written by the worker and checked by managed clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +54,18 @@ pub fn managed_harness_cache_root(
     xdg_cache_home: Option<&OsStr>,
     home: Option<&OsStr>,
 ) -> Result<PathBuf> {
+    Ok(managed_cache_base(xdg_cache_home, home)?.join(MANAGED_HARNESSES_DIR))
+}
+
+/// Resolve the cache directory that holds Mjolnir's pinned Node.js releases.
+pub fn managed_node_cache_root(
+    xdg_cache_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Result<PathBuf> {
+    Ok(managed_cache_base(xdg_cache_home, home)?.join(MANAGED_NODE_DIR))
+}
+
+fn managed_cache_base(xdg_cache_home: Option<&OsStr>, home: Option<&OsStr>) -> Result<PathBuf> {
     let base = match xdg_cache_home.filter(|path| !path.is_empty()) {
         Some(path) => PathBuf::from(path),
         None => PathBuf::from(
@@ -62,7 +80,7 @@ pub fn managed_harness_cache_root(
             base.display()
         );
     }
-    Ok(base.join(MANAGED_HARNESSES_DIR))
+    Ok(base.join(MANAGED_RUNTIMES_DIR))
 }
 
 /// Resolve the pinned install directory under a managed-harness cache root.
@@ -270,6 +288,22 @@ pub const fn npm_bridge(kind: HarnessKind) -> Option<NpmBridge> {
     }
 }
 
+/// Whether preparing this harness may need Node.js, npm, and npx.
+///
+/// Kimi, Grok, and OpenCode install and launch native executables. Codex,
+/// Claude, Muse, and MiMo install npm packages or adapters. DSH itself is not
+/// managed, but its fallback fetches the pinned package through npx.
+pub const fn harness_uses_node_runtime(kind: HarnessKind) -> bool {
+    matches!(
+        kind,
+        HarnessKind::Codex
+            | HarnessKind::Claude
+            | HarnessKind::Muse
+            | HarnessKind::Mimo
+            | HarnessKind::Dsh
+    )
+}
+
 impl NpmBridge {
     pub fn matches_launcher(&self, command: &std::path::Path, args: &[String]) -> bool {
         (command == std::path::Path::new(self.command) && args.is_empty())
@@ -426,11 +460,25 @@ mod tests {
         let home = std::env::temp_dir().join("mj-home");
         let xdg_root = managed_harness_cache_root(Some(xdg.as_os_str()), Some(home.as_os_str()))
             .expect("absolute XDG cache root");
-        assert_eq!(xdg_root, xdg.join(MANAGED_HARNESSES_DIR));
+        assert_eq!(
+            xdg_root,
+            xdg.join(MANAGED_RUNTIMES_DIR).join(MANAGED_HARNESSES_DIR)
+        );
 
         let home_root = managed_harness_cache_root(Some(OsStr::new("")), Some(home.as_os_str()))
             .expect("HOME fallback");
-        assert_eq!(home_root, home.join(".cache").join(MANAGED_HARNESSES_DIR));
+        assert_eq!(
+            home_root,
+            home.join(".cache")
+                .join(MANAGED_RUNTIMES_DIR)
+                .join(MANAGED_HARNESSES_DIR)
+        );
+        let node_root = managed_node_cache_root(Some(xdg.as_os_str()), Some(home.as_os_str()))
+            .expect("managed Node cache root");
+        assert_eq!(
+            node_root,
+            xdg.join(MANAGED_RUNTIMES_DIR).join(MANAGED_NODE_DIR)
+        );
 
         assert!(
             managed_harness_cache_root(Some(OsStr::new("relative-cache")), Some(home.as_os_str()))

@@ -138,7 +138,7 @@ pub(in crate::controller) fn preflight_harness(
             "git --version >/dev/null || { echo 'Git is missing or unusable; install Git and, on macOS, the Xcode Command Line Tools on the target' >&2; exit 1; }",
         ).purpose("preflight remote Git"))?;
     }
-    if !matches!(profile.kind, HarnessKind::Codex | HarnessKind::Claude) {
+    if !mj_core::harness_runtime::harness_uses_node_runtime(profile.kind) {
         return Ok(());
     }
     if !matches!(
@@ -147,15 +147,18 @@ pub(in crate::controller) fn preflight_harness(
     ) {
         return Ok(());
     }
-    // Mjolnir installs its own pinned copy of the agent with Node.js and npm,
-    // so the agent's own command is not a prerequisite. When Node.js or npm
-    // is missing, though, the failure first says whether the agent itself is
-    // missing too, because that is what a person on a fresh machine needs to
-    // hear (launch finding R13-1).
-    let cli = profile.kind.cli_binary_name();
-    let script = format!(
-        "status=0; if ! command -v node >/dev/null 2>&1; then echo 'Node.js is missing from PATH; install Node.js 22 or newer in the target environment' >&2; status=127; elif ! node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)'; then echo 'Node.js 22 or newer is required in the target environment' >&2; status=1; elif ! command -v npm >/dev/null 2>&1 || ! npm --version >/dev/null; then echo 'npm is missing or unusable; install npm in the target environment' >&2; status=127; fi; if [ \"$status\" -ne 0 ] && ! command -v {cli} >/dev/null 2>&1; then exit {HARNESS_CLI_MISSING_STATUS}; fi; exit \"$status\""
-    );
+    // Mjolnir installs its own pinned Node.js when the target has no
+    // compatible runtime. The worker performs that download, so the
+    // controller only needs to establish that one of the two paths exists
+    // before provisioning creates target state.
+    let script = if profile.kind == HarnessKind::Dsh {
+        format!(
+            "if command -v dsh-acp >/dev/null 2>&1; then exit 0; fi; {}",
+            node_or_downloader_preflight_script()
+        )
+    } else {
+        node_or_downloader_preflight_script().to_owned()
+    };
     let mut args = if profile.environment.contains_key("PATH") {
         vec![
             "-c".to_owned(),
@@ -182,7 +185,7 @@ pub(in crate::controller) fn preflight_harness(
         }
         _ => unreachable!(),
     };
-    let command = command.purpose("preflight managed harness Node.js and npm");
+    let command = command.purpose("preflight managed harness Node.js");
     let output = executor.execute(&command)?;
     if output.status == 0 {
         return Ok(());
@@ -193,22 +196,15 @@ pub(in crate::controller) fn preflight_harness(
     } else {
         anyhow::anyhow!(detail)
     };
-    let name = profile.kind.display_name();
-    Err(if output.status == HARNESS_CLI_MISSING_STATUS {
-        failure.context(format!(
-            "{name} is not installed on {destination}: `{cli}` is not on PATH. {}, sign in to it, then retry the launch",
-            profile.kind.install_advice()
-        ))
-    } else {
-        failure.context(format!(
-            "{name} launch preflight failed on {destination}; Node.js 22+ and npm must be available on the target PATH"
-        ))
-    })
+    Err(failure.context(format!(
+        "{} launch preflight failed on {destination}; install curl or provide Node.js 22+ with npm and npx on the target PATH",
+        profile.kind.display_name()
+    )))
 }
 
-/// The exit status the harness preflight script uses when Node.js or npm is
-/// unusable and the agent's own command is missing as well.
-const HARNESS_CLI_MISSING_STATUS: i32 = 3;
+fn node_or_downloader_preflight_script() -> &'static str {
+    "if command -v node >/dev/null 2>&1 && node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)' && command -v npm >/dev/null 2>&1 && npm --version >/dev/null 2>&1 && command -v npx >/dev/null 2>&1 && npx --version >/dev/null 2>&1; then exit 0; fi; if command -v curl >/dev/null 2>&1; then exit 0; fi; echo 'This target has no compatible Node.js 22+ runtime with npm and npx, and curl is unavailable to install Mjolnir pinned Node.js runtime' >&2; exit 127"
+}
 
 pub(super) const MJ_CONTAINER_ENVIRONMENT: &str = "## Mjolnir disposable environment\n\nThis session runs in a disposable Mjolnir container. When the session closes, Mjolnir checkpoints everything in project workspace directories under `/workspace`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then removes the container.\n\nEverything outside `/workspace`, including installed packages, `$HOME`, and `/tmp`, is ephemeral and will be lost. Keep durable results in the workspace or push them to a remote.\n\nNew workspaces start on their own session branch from the default network fetch remote’s default branch. Local unpublished commits and uncommitted files are not copied. Use normal git push to publish the current branch to the configured network push destination. Closing saves a checkpoint; it does not publish commits or update the original local checkout. Resumed sessions restore their saved work.\n";
 

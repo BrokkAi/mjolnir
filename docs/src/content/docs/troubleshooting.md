@@ -166,11 +166,12 @@ After changing a profile's environment, restart the worker or stop and resume
 the session; an already running worker does not continuously reread shell
 startup files. Bare sessions on this machine, SSH, and EC2 do not launch an
 ambient harness from this path: they use the exact Mjolnir-managed version,
-while `PATH` supplies its installer prerequisites. These targets require
-Node.js 22 and npm for Codex, Claude, and MiMo Code, curl and Bash for Kimi and
-Grok, or curl and tar for Muse and OpenCode. DSH is the exception: it has no
+while `PATH` supplies its installer prerequisites. Node-based harnesses reuse
+Node.js 22 or newer with npm and npx when present; otherwise Mjolnir installs
+its pinned Node.js with curl. Kimi and Grok require curl and Bash, Muse requires
+curl, and OpenCode requires curl and tar. DSH is the exception: it has no
 managed version and is never installed, and its launch needs `dsh-acp` on
-`PATH` or Node.js 22 with npm and npx to fetch the pinned npm package. Install
+`PATH` or the compatible/managed Node runtime for npm and npx. Install shell
 prerequisites on the host yourself; Mjolnir never invokes sudo for harness
 setup.
 

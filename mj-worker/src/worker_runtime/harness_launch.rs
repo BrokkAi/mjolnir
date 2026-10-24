@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use mj_core::config::{ExecutionPolicy, HarnessKind};
-use mj_core::harness_runtime::npm_bridge;
+use mj_core::harness_runtime::{harness_uses_node_runtime, npm_bridge};
 use mj_core::worker_launch::HarnessRuntimePolicy;
 
 use super::{AcpSupervisorSpec, harness};
@@ -16,6 +16,7 @@ pub struct PreparedHarnessLaunch {
     pub spec: AcpSupervisorSpec,
     pub(crate) environment: BTreeMap<String, String>,
     pub(crate) managed: Option<harness::ManagedHarness>,
+    pub(crate) managed_node: Option<harness::ManagedNodeRuntime>,
 }
 
 pub async fn prepare_harness_launch(
@@ -49,6 +50,23 @@ pub async fn prepare_harness_launch(
         environment.insert("PATH".into(), path.clone());
         spec.environment.insert("PATH".into(), path);
     }
+    let managed_node = if needs_node_runtime(harness, &environment)? {
+        let node = harness::ensure_node_runtime(&mut environment)
+            .await
+            .with_context(|| format!("prepare Node.js for {}", harness.display_name()))?;
+        if node.is_some() {
+            spec.environment.insert(
+                "PATH".into(),
+                environment
+                    .get("PATH")
+                    .cloned()
+                    .context("managed Node.js runtime did not produce PATH")?,
+            );
+        }
+        node
+    } else {
+        None
+    };
     let (prepared_spec, prepared_environment) =
         tokio::task::spawn_blocking(move || -> Result<_> {
             let before = environment.clone();
@@ -156,7 +174,20 @@ pub async fn prepare_harness_launch(
         spec,
         environment,
         managed,
+        managed_node,
     })
+}
+
+/// DSH can launch its own native binary. Its npm fallback is the only branch
+/// that needs Node.js. Other Node-using harnesses always need the runtime,
+/// even when their adapter is already installed.
+pub(super) fn needs_node_runtime(
+    harness: HarnessKind,
+    environment: &BTreeMap<String, String>,
+) -> Result<bool> {
+    Ok(harness_uses_node_runtime(harness)
+        && (harness != HarnessKind::Dsh
+            || find_command(Path::new("dsh-acp"), environment)?.is_none()))
 }
 
 /// Reviewer homes can be created after provisioning. Link their mbx lookup to

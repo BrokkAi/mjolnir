@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use crate::config::{ExecutionPolicy, HarnessKind};
 use crate::harness_runtime::{
     GROK_VERSION, HarnessPin, KIMI_VERSION, LEASE_FILE, MANIFEST_FILE, ManagedHarnessManifest,
-    managed_harness_cache_root, managed_harness_install_dir, managed_harness_manifest_matches,
+    NODE_VERSION, harness_uses_node_runtime, managed_harness_cache_root,
+    managed_harness_install_dir, managed_harness_manifest_matches, managed_node_cache_root,
     npm_bridge, pin,
 };
 use crate::worker_launch::HarnessRuntimePolicy;
@@ -21,6 +22,7 @@ const INSTALL_LOCK_FILE: &str = ".install.lock";
 const INSTALL_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const HARNESS_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MANAGED_INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const NODE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_INSTALLER_BYTES: usize = 8 * 1024 * 1024;
 
 const CODEX_PACKAGE_JSON: &[u8] = include_bytes!("../assets/harnesses/codex/package.json");
@@ -42,6 +44,22 @@ pub struct ManagedHarness {
     pub lease_path: PathBuf,
     pub cache_root: PathBuf,
     _lease: File,
+    _managed_node: Option<ManagedNodeRuntime>,
+}
+
+/// A shared managed Node.js installation leased for the lifetime of an ACP
+/// process. The lease prevents a corrupt-cache repair from replacing files
+/// beneath a live session.
+#[derive(Debug)]
+pub struct ManagedNodeRuntime {
+    path: PathBuf,
+    _lease: File,
+}
+
+impl ManagedNodeRuntime {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 pub fn spawn_gc_on(
@@ -167,6 +185,12 @@ async fn resolve_at_async(
     execution_policy: ExecutionPolicy,
     environment: &BTreeMap<String, String>,
 ) -> Result<ManagedHarness> {
+    let mut environment = environment.clone();
+    let managed_node = if harness_uses_node_runtime(harness) {
+        ensure_node_runtime(&mut environment).await?
+    } else {
+        None
+    };
     let selected = pin(harness);
     let harness_root = root.join(harness.id());
     std::fs::create_dir_all(&harness_root)
@@ -193,7 +217,7 @@ async fn resolve_at_async(
                 format!("remove incomplete managed harness {}", install.display())
             })?;
         }
-        install_into(&harness_root, &install, harness, selected, environment).await?;
+        install_into(&harness_root, &install, harness, selected, &environment).await?;
     }
     gc_harness_root(&harness_root, selected.install_id)?;
 
@@ -203,6 +227,15 @@ async fn resolve_at_async(
     drop(install_lock);
 
     let mut launch_environment = BTreeMap::new();
+    if managed_node.is_some() {
+        launch_environment.insert(
+            "PATH".into(),
+            environment
+                .get("PATH")
+                .cloned()
+                .context("managed Node runtime did not produce PATH")?,
+        );
+    }
     // The managed Muse install provides only the native server; the adapter
     // itself comes from its pinned npm package.
     if harness == HarnessKind::Muse {
@@ -282,6 +315,7 @@ async fn resolve_at_async(
         lease_path,
         cache_root: root.to_path_buf(),
         _lease: lease,
+        _managed_node: managed_node,
     })
 }
 
@@ -446,7 +480,6 @@ async fn install_npm(
     harness: HarnessKind,
     environment: &BTreeMap<String, String>,
 ) -> Result<()> {
-    require_node_22(environment).await?;
     std::fs::write(staging.join("package.json"), package_json)
         .context("write managed harness package.json")?;
     std::fs::write(staging.join("package-lock.json"), package_lock)
@@ -662,28 +695,286 @@ async fn download_verified_async(
     Ok(())
 }
 
-async fn require_node_22(environment: &BTreeMap<String, String>) -> Result<()> {
-    let mut node = tokio::process::Command::new("node");
-    node.args([
-        "-e",
-        "process.exit(Number(process.versions.node.split('.')[0]) >= 22 ? 0 : 1)",
-    ])
-    .env_clear()
-    .envs(environment);
-    run_bounded_checked(
-        &mut node,
-        "verify Node.js 22 or newer for managed harness installation",
-        HARNESS_COMMAND_TIMEOUT,
-    )
-    .await?;
-    let mut npm = tokio::process::Command::new("npm");
-    npm.arg("--version").env_clear().envs(environment);
-    run_bounded_checked(
-        &mut npm,
-        "verify npm for managed harness installation",
-        HARNESS_COMMAND_TIMEOUT,
+/// Select a Node.js runtime for an ACP launch.
+///
+/// A compatible `node`, `npm`, and `npx` already on PATH are retained
+/// unchanged. Otherwise the exact pinned Node.js distribution is installed in
+/// Mjolnir's shared cache and prepended to PATH for this launch. `Ok(None)`
+/// means the system runtime was retained; `Ok(Some(path))` names the managed
+/// installation.
+pub async fn ensure_node_runtime(
+    environment: &mut BTreeMap<String, String>,
+) -> Result<Option<ManagedNodeRuntime>> {
+    if system_node_is_compatible(environment).await {
+        return Ok(None);
+    }
+    let root = managed_node_cache_root(
+        environment.get("XDG_CACHE_HOME").map(OsStr::new),
+        environment.get("HOME").map(OsStr::new),
+    )?;
+    let metadata: serde_json::Value =
+        serde_json::from_str(include_str!("../assets/node/runtime.json"))?;
+    install_managed_node(&root, environment, &metadata)
+        .await
+        .map(Some)
+}
+
+#[cfg(test)]
+async fn ensure_node_runtime_from_metadata(
+    root: &Path,
+    environment: &mut BTreeMap<String, String>,
+    metadata: &serde_json::Value,
+) -> Result<Option<ManagedNodeRuntime>> {
+    if system_node_is_compatible(environment).await {
+        return Ok(None);
+    }
+    install_managed_node(root, environment, metadata)
+        .await
+        .map(Some)
+}
+
+async fn install_managed_node(
+    root: &Path,
+    environment: &mut BTreeMap<String, String>,
+    metadata: &serde_json::Value,
+) -> Result<ManagedNodeRuntime> {
+    anyhow::ensure!(
+        metadata["version"] == NODE_VERSION,
+        "Node.js download metadata does not match the managed runtime pin"
+    );
+    let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let platform = metadata["platforms"]
+        .get(&key)
+        .with_context(|| format!("Node.js does not have a managed runtime for {key}"))?;
+    let field = |name: &str| {
+        platform[name]
+            .as_str()
+            .with_context(|| format!("missing Node.js artifact field {name}"))
+    };
+    let target = field("target")?;
+    let folder = format!("node-v{NODE_VERSION}-{target}");
+    let install = root.join(&folder);
+
+    std::fs::create_dir_all(root)
+        .with_context(|| format!("create managed Node.js cache {}", root.display()))?;
+    let install_lock = open_lock(&root.join(INSTALL_LOCK_FILE))?;
+    lock_file(&install_lock, false, "managed Node.js installer").await?;
+    remove_abandoned_staging(root)?;
+
+    if !managed_node_is_usable(&install, environment).await? {
+        if install.exists() {
+            let lease = open_lock(&install.join(LEASE_FILE))?;
+            match lease.try_lock() {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => bail!(
+                    "managed Node.js repair deferred: {} is still in use",
+                    install.display()
+                ),
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(error).context("lock invalid managed Node.js for repair");
+                }
+            }
+            std::fs::remove_dir_all(&install).with_context(|| {
+                format!("remove incomplete managed Node.js {}", install.display())
+            })?;
+        }
+
+        let staging = tempfile::Builder::new()
+            .prefix(".install-")
+            .tempdir_in(root)
+            .with_context(|| format!("create Node.js staging directory in {}", root.display()))?;
+        let file = format!("{folder}.tar.gz");
+        let archive = staging.path().join(&file);
+        let url = format!("https://nodejs.org/dist/v{NODE_VERSION}/{file}");
+        download_verified_async(&url, &archive, field("sha256")?, environment).await?;
+        let staging_root = staging.path().to_path_buf();
+        let folder_for_extract = folder.clone();
+        tokio::task::spawn_blocking(move || {
+            extract_node_archive(&archive, &staging_root, &folder_for_extract)
+        })
+        .await
+        .context("Node.js extraction task failed")??;
+        let extracted = staging.path().join(&folder);
+        if !managed_node_is_usable(&extracted, environment).await? {
+            bail!(
+                "downloaded Node.js archive did not contain usable node, npm, and npx executables"
+            );
+        }
+        open_lock(&extracted.join(LEASE_FILE))?;
+        match std::fs::rename(&extracted, &install) {
+            Ok(()) => {}
+            Err(error) if install.exists() => {
+                if !managed_node_is_usable(&install, environment).await? {
+                    return Err(error)
+                        .with_context(|| format!("publish managed Node.js {}", install.display()));
+                }
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("publish managed Node.js {}", install.display()));
+            }
+        }
+    }
+    gc_node_root(root, &folder)?;
+    drop(install_lock);
+
+    let bin = install.join("bin");
+    prepend_path(environment, &bin)?;
+    let lease = open_lock(&install.join(LEASE_FILE))?;
+    lock_file(&lease, true, "managed Node.js lease").await?;
+    Ok(ManagedNodeRuntime {
+        path: install,
+        _lease: lease,
+    })
+}
+
+fn gc_node_root(root: &Path, keep: &str) -> Result<()> {
+    for entry in std::fs::read_dir(root)
+        .with_context(|| format!("scan managed Node.js cache {}", root.display()))?
+    {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name == keep || name.starts_with('.') || !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let lease = match open_lock(&entry.path().join(LEASE_FILE)) {
+            Ok(lease) => lease,
+            Err(error) => {
+                tracing::warn!(%error, path = %entry.path().display(), "could not inspect obsolete managed Node.js");
+                continue;
+            }
+        };
+        match lease.try_lock() {
+            Ok(()) => {
+                if let Err(error) = std::fs::remove_dir_all(entry.path()) {
+                    tracing::warn!(%error, path = %entry.path().display(), "could not remove obsolete managed Node.js");
+                }
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(error)) => {
+                tracing::warn!(%error, path = %entry.path().display(), "could not lock obsolete managed Node.js");
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn system_node_is_compatible(environment: &BTreeMap<String, String>) -> bool {
+    let Ok(output) = bounded_env_output(
+        tokio::process::Command::new("node").arg("--version"),
+        environment,
     )
     .await
+    else {
+        return false;
+    };
+    if !output.status.success()
+        || !node_version_is_supported(String::from_utf8_lossy(&output.stdout).trim())
+    {
+        return false;
+    }
+    for command in ["npm", "npx"] {
+        let Ok(output) = bounded_env_output(
+            tokio::process::Command::new(command).arg("--version"),
+            environment,
+        )
+        .await
+        else {
+            return false;
+        };
+        if !output.status.success() {
+            return false;
+        }
+    }
+    true
+}
+
+async fn managed_node_is_usable(
+    install: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<bool> {
+    let bin = install.join("bin");
+    if ["node", "npm", "npx"].iter().any(|name| {
+        let path = bin.join(name);
+        !entrypoint_is_executable(&path)
+    }) {
+        return Ok(false);
+    }
+    let mut probe_environment = environment.clone();
+    prepend_path(&mut probe_environment, &bin)?;
+    let mut node = tokio::process::Command::new(bin.join("node"));
+    node.arg("--version");
+    let output = bounded_env_output(&mut node, &probe_environment).await?;
+    if !output.status.success()
+        || !node_version_is_supported(String::from_utf8_lossy(&output.stdout).trim())
+    {
+        return Ok(false);
+    }
+    for name in ["npm", "npx"] {
+        let mut command = tokio::process::Command::new(bin.join(name));
+        command.arg("--version");
+        let output = bounded_env_output(&mut command, &probe_environment).await?;
+        if !output.status.success() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn bounded_env_output(
+    command: &mut tokio::process::Command,
+    environment: &BTreeMap<String, String>,
+) -> Result<std::process::Output> {
+    command.env_clear().envs(environment);
+    crate::subprocess::run_bounded(command, 64 * 1024, NODE_PROBE_TIMEOUT)
+        .await
+        .context("probe Node.js runtime")
+}
+
+fn node_version_is_supported(version: &str) -> bool {
+    version
+        .strip_prefix('v')
+        .and_then(|version| version.split('.').next())
+        .and_then(|major| major.parse::<u64>().ok())
+        .is_some_and(|major| major >= 22)
+}
+
+fn prepend_path(environment: &mut BTreeMap<String, String>, bin: &Path) -> Result<()> {
+    let existing = environment
+        .get("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(path))
+        .collect::<Vec<_>>();
+    if existing.first().is_some_and(|first| first == bin) {
+        return Ok(());
+    }
+    let path = std::iter::once(bin.to_path_buf()).chain(existing);
+    let path = std::env::join_paths(path)
+        .context("construct managed Node.js PATH")?
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("managed Node.js PATH is not UTF-8"))?;
+    environment.insert("PATH".into(), path);
+    Ok(())
+}
+
+fn extract_node_archive(archive: &Path, destination: &Path, folder: &str) -> Result<()> {
+    let archive = File::open(archive)
+        .with_context(|| format!("open Node.js archive {}", archive.display()))?;
+    let decoder = flate2::read::GzDecoder::new(archive);
+    let mut archive = tar::Archive::new(decoder);
+    archive
+        .unpack(destination)
+        .with_context(|| format!("extract Node.js archive into {}", destination.display()))?;
+    let extracted = destination.join(folder);
+    anyhow::ensure!(
+        extracted.is_dir(),
+        "Node.js archive did not extract the expected directory {}",
+        extracted.display()
+    );
+    Ok(())
 }
 
 async fn install_kimi(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
@@ -1085,6 +1376,14 @@ INSTALLER
     }
 
     #[test]
+    fn node_pin_matches_runtime_metadata() {
+        let metadata: serde_json::Value =
+            serde_json::from_str(include_str!("../assets/node/runtime.json"))
+                .expect("parse Node.js runtime metadata");
+        assert_eq!(metadata["version"], NODE_VERSION);
+    }
+
+    #[test]
     fn muse_pin_matches_runtime_metadata() {
         use crate::harness_runtime::{MUSE_ACP_PACKAGE, MUSE_ACP_VERSION, MUSE_VERSION};
         let metadata: serde_json::Value =
@@ -1114,6 +1413,16 @@ INSTALLER
             &tools.join("curl"),
             "#!/bin/sh\nwhile [ \"$1\" != '-o' ]; do shift; done\nshift\nprintf corrupted > \"$1\"\n",
         );
+        executable(
+            &tools.join("node"),
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.22.1; fi\n",
+        );
+        for command in ["npm", "npx"] {
+            executable(
+                &tools.join(command),
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 11.6.2; fi\n",
+            );
+        }
         let environment = BTreeMap::from([("PATH".into(), tools.to_string_lossy().into_owned())]);
         let output = temp.path().join("download");
         let error = download_verified(
@@ -1204,7 +1513,14 @@ INSTALLER
 
     fn fake_node_tools(root: &Path, installs: &Path) -> BTreeMap<String, String> {
         let bin = root.join("bin");
-        executable(&bin.join("node"), "#!/bin/sh\nexit 0\n");
+        executable(
+            &bin.join("node"),
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.22.1; fi\n",
+        );
+        executable(
+            &bin.join("npx"),
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 11.6.2; fi\n",
+        );
         executable(
             &bin.join("npm"),
             &format!(
@@ -1216,6 +1532,266 @@ INSTALLER
             "PATH".to_owned(),
             format!("{}:/usr/bin:/bin", bin.display()),
         )])
+    }
+
+    fn fake_node_archive(root: &Path) -> (PathBuf, serde_json::Value) {
+        let (key, target) = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("linux", "x86_64") => ("linux-x86_64", "linux-x64"),
+            ("linux", "aarch64") => ("linux-aarch64", "linux-arm64"),
+            ("macos", "x86_64") => ("macos-x86_64", "darwin-x64"),
+            ("macos", "aarch64") => ("macos-aarch64", "darwin-arm64"),
+            (os, arch) => panic!("managed Node.js test has no artifact for {os}-{arch}"),
+        };
+        let archive = root.join(format!("node-v{NODE_VERSION}-{target}.tar.gz"));
+        let encoder = flate2::write::GzEncoder::new(
+            File::create(&archive).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(encoder);
+        let root = format!("node-v{NODE_VERSION}-{target}");
+        for (path, body) in [
+            (
+                format!("{root}/bin/node"),
+                format!("#!/bin/sh\necho v{NODE_VERSION}\n"),
+            ),
+            (
+                format!("{root}/lib/node_modules/npm/bin/npm-cli.js"),
+                "#!/bin/sh\necho 11.6.2\n".to_owned(),
+            ),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, body.as_bytes())
+                .unwrap();
+        }
+        for name in ["npm", "npx"] {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_mode(0o777);
+            header.set_size(0);
+            header
+                .set_link_name("../lib/node_modules/npm/bin/npm-cli.js")
+                .unwrap();
+            header.set_cksum();
+            builder
+                .append_data(&mut header, format!("{root}/bin/{name}"), std::io::empty())
+                .unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap();
+        let digest = crate::worker_launch::worker_executable_digest(&archive).unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(include_str!("../assets/node/runtime.json")).unwrap();
+        metadata["platforms"][key]["sha256"] = serde_json::Value::String(digest);
+        (archive, metadata)
+    }
+
+    fn fake_curl_copying(archive: &Path, root: &Path) -> (PathBuf, BTreeMap<String, String>) {
+        let tools = root.join("tools");
+        executable(
+            &tools.join("curl"),
+            "#!/bin/sh\nwhile [ \"$1\" != '-o' ]; do shift; done\nshift\ncp \"$MJ_NODE_ARCHIVE\" \"$1\"\n",
+        );
+        (
+            tools.clone(),
+            BTreeMap::from([
+                (
+                    "PATH".to_owned(),
+                    format!("{}:/usr/bin:/bin", tools.display()),
+                ),
+                (
+                    "MJ_NODE_ARCHIVE".to_owned(),
+                    archive.to_string_lossy().into_owned(),
+                ),
+            ]),
+        )
+    }
+
+    fn run_async<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    #[test]
+    fn compatible_system_node_is_reused_without_downloading() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("downloaded");
+        executable(
+            &temp.path().join("bin/curl"),
+            &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        );
+        let mut environment = fake_node_tools(temp.path(), &temp.path().join("unused"));
+        let original_path = environment["PATH"].clone();
+
+        let runtime = run_async(ensure_node_runtime(&mut environment)).unwrap();
+
+        assert!(runtime.is_none());
+        assert_eq!(environment["PATH"], original_path);
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn missing_node_is_downloaded_verified_and_prepended_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let (archive, metadata) = fake_node_archive(temp.path());
+        let (_, mut environment) = fake_curl_copying(&archive, temp.path());
+        environment.insert(
+            "XDG_CACHE_HOME".into(),
+            temp.path().join("cache").to_string_lossy().into_owned(),
+        );
+        let root = temp.path().join("node");
+
+        let runtime = run_async(ensure_node_runtime_from_metadata(
+            &root,
+            &mut environment,
+            &metadata,
+        ))
+        .unwrap()
+        .expect("missing Node.js selects the managed installation");
+        let install = runtime.path().to_path_buf();
+        assert_eq!(
+            install.file_name().unwrap().to_string_lossy(),
+            format!("node-v{NODE_VERSION}-{}", environment_target())
+        );
+        for name in ["node", "npm", "npx"] {
+            assert!(install.join("bin").join(name).is_file());
+        }
+        assert_eq!(
+            std::env::split_paths(&environment["PATH"]).next(),
+            Some(install.join("bin"))
+        );
+        drop(runtime);
+
+        let first_path = environment["PATH"].clone();
+        let runtime = run_async(install_managed_node(&root, &mut environment, &metadata)).unwrap();
+        assert_eq!(runtime.path(), install);
+        assert_eq!(environment["PATH"], first_path);
+        assert!(std::fs::read_dir(&root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".install-")
+        }));
+    }
+
+    #[test]
+    fn unsupported_system_node_is_replaced_with_the_managed_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let (archive, metadata) = fake_node_archive(temp.path());
+        let (tools, curl_environment) = fake_curl_copying(&archive, temp.path());
+        let mut environment = curl_environment;
+        executable(
+            &tools.join("node"),
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v20.19.0; fi\n",
+        );
+        for command in ["npm", "npx"] {
+            executable(
+                &tools.join(command),
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 11.6.2; fi\n",
+            );
+        }
+
+        let runtime = run_async(ensure_node_runtime_from_metadata(
+            &temp.path().join("node"),
+            &mut environment,
+            &metadata,
+        ))
+        .unwrap()
+        .expect("Node.js 20 selects the managed installation");
+
+        assert_eq!(
+            std::env::split_paths(&environment["PATH"]).next(),
+            Some(runtime.path().join("bin"))
+        );
+    }
+
+    #[test]
+    fn managed_node_checksum_failure_never_publishes_an_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let (archive, mut metadata) = fake_node_archive(temp.path());
+        let (_, mut environment) = fake_curl_copying(&archive, temp.path());
+        metadata["platforms"][current_node_platform()]["sha256"] =
+            serde_json::Value::String("0".repeat(64));
+        let root = temp.path().join("node");
+
+        let error =
+            run_async(install_managed_node(&root, &mut environment, &metadata)).unwrap_err();
+
+        assert!(error.to_string().contains("checksum mismatch"), "{error:#}");
+        assert!(
+            std::fs::read_dir(&root).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("node-v")
+            }),
+            "a corrupt download must not leave a final Node.js install"
+        );
+    }
+
+    #[test]
+    fn concurrent_first_use_publishes_one_managed_node_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let (archive, metadata) = fake_node_archive(temp.path());
+        let (_, environment) = fake_curl_copying(&archive, temp.path());
+        let root = temp.path().join("node");
+        let barrier = Arc::new(Barrier::new(2));
+        let threads = (0..2)
+            .map(|_| {
+                let root = root.clone();
+                let metadata = metadata.clone();
+                let environment = environment.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let mut environment = environment;
+                    barrier.wait();
+                    run_async(install_managed_node(&root, &mut environment, &metadata)).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let runtimes = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(runtimes[0].path(), runtimes[1].path());
+        assert!(
+            std::fs::read_dir(&root).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".install-")
+            }),
+            "concurrent installers must not leave abandoned staging"
+        );
+    }
+
+    fn current_node_platform() -> &'static str {
+        match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("linux", "x86_64") => "linux-x86_64",
+            ("linux", "aarch64") => "linux-aarch64",
+            ("macos", "x86_64") => "macos-x86_64",
+            ("macos", "aarch64") => "macos-aarch64",
+            (os, arch) => panic!("managed Node.js test has no artifact for {os}-{arch}"),
+        }
+    }
+
+    fn environment_target() -> &'static str {
+        match current_node_platform() {
+            "linux-x86_64" => "linux-x64",
+            "linux-aarch64" => "linux-arm64",
+            "macos-x86_64" => "darwin-x64",
+            "macos-aarch64" => "darwin-arm64",
+            _ => unreachable!(),
+        }
     }
 
     #[test]
@@ -1311,11 +1887,12 @@ INSTALLER
             selected.install_id,
             selected.entrypoint,
         );
+        let environment = fake_node_tools(temp.path(), &temp.path().join("unused"));
         let managed = resolve_at(
             &cache,
             HarnessKind::Codex,
             ExecutionPolicy::ConfiguredApprovals,
-            &BTreeMap::new(),
+            &environment,
         )
         .unwrap();
         let supervisor = acquire_supervisor_lease(&managed.lease_path).unwrap();
@@ -1394,12 +1971,13 @@ INSTALLER
             &root.join(selected.install_id).join(selected.entrypoint),
             &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
         );
+        let environment = fake_node_tools(temp.path(), &temp.path().join("unused"));
 
         let managed = resolve_at(
             &cache,
             harness,
             ExecutionPolicy::ConfiguredApprovals,
-            &BTreeMap::new(),
+            &environment,
         )
         .unwrap();
 

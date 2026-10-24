@@ -825,7 +825,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
             .contains_key(&session_id)
     );
 
-    let executor = RecordingExecutor::failing("preflight managed harness Node.js and npm");
+    let executor = RecordingExecutor::failing("preflight managed harness Node.js");
     let error = futures::executor::block_on(controller.provision_session_with_failure_disposition(
         &session_id,
         &executor,
@@ -834,7 +834,10 @@ fn failed_node_preflight_retains_error_before_provisioning() {
     ))
     .unwrap_err();
     let reported = format!("{error:#}");
-    assert!(reported.contains("Node.js 22+ and npm"), "{reported}");
+    assert!(
+        reported.contains("install curl or provide Node.js 22+ with npm and npx"),
+        "{reported}"
+    );
     assert!(
         !executor
             .created_target

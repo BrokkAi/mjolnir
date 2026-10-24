@@ -1750,6 +1750,7 @@ async fn prepare_and_start_harness(
         .as_ref()
         .map(|managed| managed.cache_root.clone());
     let _managed_harness_lease = prepared_harness.managed;
+    let _managed_node_lease = prepared_harness.managed_node;
 
     let acp_budget = preparation_step(
         root,

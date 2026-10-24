@@ -30,6 +30,7 @@ include = [
     # Pinned managed harness packages and verified runtime manifests.
     "assets/harnesses/**",
     "assets/muse/runtime.json",
+    "assets/node/runtime.json",
     "assets/opencode/runtime.json",
     "Cargo.toml",
     "Cargo.lock",
@@ -66,6 +67,7 @@ serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 sha2.workspace = true
 similar = "2.7"
+tar.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["full"] }
 toml.workspace = true

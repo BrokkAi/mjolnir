@@ -1371,7 +1371,7 @@ fn settings_fixes_name_the_bound_settings_key() {
 // Hard-won: 527f018a: installed users were sent to a repository docs path and the Podman fix was printed twice.
 #[cfg(unix)]
 #[test]
-fn session_environment_reports_node_paths_and_warns_when_they_are_missing() {
+fn session_environment_reports_node_paths_and_installs_missing_with_curl() {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join("tools");
     std::fs::create_dir_all(&bin).unwrap();
@@ -1406,7 +1406,12 @@ fn session_environment_reports_node_paths_and_warns_when_they_are_missing() {
         Duration::from_millis(1200),
     );
     assert_eq!(warning.status, CheckStatus::Warning, "{warning:?}");
-    assert!(warning.detail.contains("has no npm."), "{}", warning.detail);
+    assert!(warning.detail.contains("has no npm,"), "{}", warning.detail);
+    assert!(
+        warning.detail.contains("it has no curl"),
+        "{}",
+        warning.detail
+    );
     assert!(
         warning
             .remediation
@@ -1414,6 +1419,19 @@ fn session_environment_reports_node_paths_and_warns_when_they_are_missing() {
             .unwrap_or_default()
             .contains("Node.js 22"),
         "{warning:?}"
+    );
+
+    std::fs::write(bin.join("curl"), b"").unwrap();
+    let managed = session_environment_check_from(
+        Path::new("/bin/zsh"),
+        &environment,
+        Duration::from_millis(1200),
+    );
+    assert_eq!(managed.status, CheckStatus::Ready, "{managed:?}");
+    assert!(
+        managed.detail.contains("will install its pinned Node.js"),
+        "{}",
+        managed.detail
     );
 
     std::fs::remove_file(bin.join("npx")).unwrap();
@@ -1506,11 +1524,12 @@ fn setup_instructions_name_mjolnir_and_the_local_bare_prerequisites() {
         let instructions = setup_instructions(platform);
         assert!(!instructions.contains("Hel"), "{instructions}");
         assert!(instructions.contains("## Local bare runtime"));
-        assert!(instructions.contains("Node.js 22 or newer and npm"));
+        assert!(instructions.contains("installs its own pinned Node.js"));
         assert!(instructions.ends_with('\n'));
         assert!(!instructions.contains("](#"), "{instructions}");
         assert!(!instructions.contains("keep-id:uid=,"));
         assert!(!instructions.contains("Disposable EC2"));
+        assert!(instructions.contains("installs its own pinned Node.js"));
     }
     let macos = setup_instructions(InstructionsPlatform::Macos);
     assert!(macos.contains("podman machine"), "{macos}");

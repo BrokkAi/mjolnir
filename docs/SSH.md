@@ -203,11 +203,13 @@ npm package includes its own architecture's worker.
 
 Enable Remote Login on the Mac and configure noninteractive SSH key access.
 Install working Git (including the Xcode Command Line Tools if using Apple's
-Git) and the tools your project needs. Codex and Claude also require Node.js
-22 or newer and npm. Mjolnir checks these through the account's login shell,
-so Homebrew's PATH setup belongs in that shell's login configuration, such as
-`.zprofile` for zsh. The worker uses the target account's login environment
-and then applies any configured profile environment overrides.
+Git), curl, and the tools your project needs. Node-based harnesses reuse
+Node.js 22 or newer with npm and npx when the login environment provides them;
+otherwise the worker downloads and verifies its pinned Node.js with curl.
+Mjolnir checks the runtime through the account's login shell, so Homebrew's
+PATH setup belongs in that shell's login configuration, such as `.zprofile`
+for zsh. The worker uses the target account's login environment and then
+applies any configured profile environment overrides.
 
 ```toml
 [machines.mac]
