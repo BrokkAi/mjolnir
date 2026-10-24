@@ -6310,7 +6310,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         subtle: None,
     };
     parent.subagents = Some(fixed.clone());
-    save_new_session_to(&path, &parent, None).unwrap();
+    save_new_session_to(&path, &parent, None, true).unwrap();
     let state = load_state_from(&path).unwrap();
     assert_eq!(state.last_subagent_policy, fixed);
     assert_eq!(state.sessions[&parent.id].subagents, Some(fixed.clone()));
@@ -6320,12 +6320,36 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     parent.title = "resumed parent".into();
     save_session_to(&path, &parent).unwrap();
     assert_eq!(load_state_from(&path).unwrap().last_subagent_policy, fixed);
+    // An explicit unattended create keeps the accepted session policy but
+    // cannot replace the interactive choice or host-size preselection.
+    let mut unattended = session("unattended", "project");
+    unattended.subagents = Some(SubagentPolicy::Native);
+    save_new_session_to(
+        &path,
+        &unattended,
+        Some((
+            "builder".into(),
+            HostContainerSize {
+                cpus: 16,
+                memory_bytes: 64,
+            },
+        )),
+        false,
+    )
+    .unwrap();
+    let state = load_state_from(&path).unwrap();
+    assert_eq!(state.last_subagent_policy, fixed);
+    assert_eq!(
+        state.sessions["unattended"].subagents,
+        Some(SubagentPolicy::Native)
+    );
+    assert!(!state.container_sizes.contains_key("builder"));
     // DSH has no sub-agents of its own: its None must not become what the
     // next Claude or Codex session starts with, but its Mjolnir does.
     let mut dsh = session("dsh-none", "project");
     dsh.harness_kind = HarnessKind::Dsh;
     dsh.subagents = Some(SubagentPolicy::None);
-    save_new_session_to(&path, &dsh, None).unwrap();
+    save_new_session_to(&path, &dsh, None, true).unwrap();
     assert_eq!(load_state_from(&path).unwrap().last_subagent_policy, fixed);
     let plain = SubagentPolicy::Mjolnir {
         straightforward: None,
@@ -6334,11 +6358,11 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     let mut dsh = session("dsh-mjolnir", "project");
     dsh.harness_kind = HarnessKind::Dsh;
     dsh.subagents = Some(plain.clone());
-    save_new_session_to(&path, &dsh, None).unwrap();
+    save_new_session_to(&path, &dsh, None, true).unwrap();
     assert_eq!(load_state_from(&path).unwrap().last_subagent_policy, plain);
     let mut next = session("next", "project");
     next.subagents = Some(SubagentPolicy::None);
-    save_new_session_to(&path, &next, None).unwrap();
+    save_new_session_to(&path, &next, None, true).unwrap();
     assert_eq!(
         load_state_from(&path).unwrap().last_subagent_policy,
         SubagentPolicy::None

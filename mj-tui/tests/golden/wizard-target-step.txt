@@ -510,6 +510,88 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   ╰──────────────────────────────────────────────────────╯
 
 
+=== new_session_prefers_interactive_choices_over_newer_unattended_sessions (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ≡ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________││                                                                                            │
+│No sessions yet                             ││                                                                                            │
+│Create new work or open a                                                                                                                 │
+│                                                                                                                                          │
+│                           ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
+│                           │                                                                                  │                           │
+│                           │   PROFILE   HARNESS      WEEKLY      5H                                          │                           │
+│                           │   claude-1  Claude Code  refreshing                                              │                           │
+│                           │   codex-1   Codex        refreshing                                              │                           │
+│                           │   codex-2   Codex        refreshing                                              │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │  ─────────────────────────╯
+│                           │                                                                                  │  ─────────────────────────╮
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │  ─────────────────────────╯
+│                           │   Cancel     Next                                                                │  ────────────────── ▁   ▄ ╮
+│                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
+│                                                                                                                 ─────────────────────────╯
+│                                                                                                                 ────────────────── ▁   ▄ ╮
+│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
+│                                            ││  claude-1  Claude Code  refreshing…                                                        │
+│                                            ││  codex-1   Codex        refreshing…                                                        │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+=== new_session_prefers_interactive_choices_over_newer_unattended_sessions (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ≡ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________││                                                                                            │
+│No sessions yet                             ││                                                                                            │
+│Create new work or open a                                                                                                                 │
+│                                                                                                                                          │
+│                           ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
+│                           │                                                                                  │                           │
+│                           │   TARGET  KIND          CPU     MEM (GiB)     STATUS                             │                           │
+│                           │   docker  local Podman  8       32            checking…                          │                           │
+│                           │   podman  local Podman  —       —             checking…                          │                           │
+│                           │                                                                                  │                           │
+│                           │ Host totals unavailable; resource limits cannot be checked.                      │                           │
+│                           │ ctrl+b shift+r recheck availability                                              │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │  ─────────────────────────╯
+│                           │                                                                                  │  ─────────────────────────╮
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │  ─────────────────────────╯
+│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
+│                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
+│                                                                                                                 ─────────────────────────╯
+│                                                                                                                 ────────────────── ▁   ▄ ╮
+│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
+│                                            ││  claude-1  Claude Code  refreshing…                                                        │
+│                                            ││  codex-1   Codex        refreshing…                                                        │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === new_session_skips_the_target_step_when_only_one_target_is_offered (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │

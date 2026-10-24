@@ -100,12 +100,11 @@ pub(crate) async fn events(args: EventsArgs, requested_workspace: Option<String>
 #[derive(Debug, Args)]
 pub(crate) struct NewArgs {
     /// Profile the session runs its harness from. Omit it to use the saved
-    /// default: the pair `mj go` saved, or else the one the first session was
-    /// created with.
+    /// default saved by an interactive launch. This command does not change it.
     #[arg(long)]
     profile: Option<String>,
     /// Target template the session is provisioned on. Omit it to use the
-    /// saved default, as for `--profile`.
+    /// saved default, as for `--profile`, without changing it.
     #[arg(long)]
     target: Option<String>,
     /// Existing bundle to run. Bare targets use `--project-directory` instead.

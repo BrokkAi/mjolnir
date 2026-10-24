@@ -51,10 +51,22 @@ pub struct GoWorkspace {
     pub last_session_id: Option<String>,
 }
 
+/// Latest interactive choices for the dashboard's next new-session form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentLaunch {
+    pub profile_id: String,
+    pub target_id: String,
+    pub bundle_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_directory: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoPreferences {
     version: u32,
     pub default: Option<GoRecipe>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent: Option<RecentLaunch>,
     projects: Vec<ProjectRecipe>,
     #[serde(default)]
     workspaces: Vec<GoWorkspace>,
@@ -65,6 +77,7 @@ impl Default for GoPreferences {
         Self {
             version: 2,
             default: None,
+            recent: None,
             projects: Vec::new(),
             workspaces: Vec::new(),
         }
@@ -72,6 +85,10 @@ impl Default for GoPreferences {
 }
 
 impl GoPreferences {
+    pub fn remember_recent(path: &Path, recent: RecentLaunch) -> Result<()> {
+        Self::update(path, |preferences| preferences.recent = Some(recent))
+    }
+
     pub fn workspaces(&self) -> impl Iterator<Item = &GoWorkspace> {
         self.workspaces.iter()
     }
@@ -193,14 +210,14 @@ impl GoPreferences {
             .or_else(|| self.default.clone())
     }
 
-    /// Record a profile and target a session was just created with as the
+    /// Record a profile and target an interactive session was created with as the
     /// default pair, when no default is saved yet.
     ///
-    /// Only the first creation sets it, the same rule `mj go` follows for a
-    /// folder it was not told to make global: a default the user chose, or
-    /// one an earlier session set, is not replaced by whichever pair was used
-    /// last. Without this only `mj go` saved a default, so `mj new` with no
-    /// `--profile` failed after sessions made anywhere else.
+    /// Only the first interactive creation sets it, the same rule `mj go` follows
+    /// for a folder it was not told to make global. A chosen default is never
+    /// replaced by whichever pair was used last. Without this only `mj go` saved
+    /// a default, so `mj new` with no `--profile` failed after sessions made
+    /// through another interactive surface.
     pub fn remember_first_pair(path: &Path, profile_id: &str, target_id: &str) -> Result<()> {
         if Self::load(path)?.default.is_some() {
             return Ok(());
@@ -258,7 +275,7 @@ mod tests {
 
     // Hard-won: 0877ce6d: mj new failed after a session was created through another surface
     #[test]
-    fn the_first_session_created_anywhere_sets_the_default_pair_and_later_ones_do_not() {
+    fn the_first_interactive_session_sets_the_default_pair_and_later_ones_do_not() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("go.json");
         GoPreferences::remember_first_pair(&path, "fake", "localhost").unwrap();
@@ -268,6 +285,25 @@ mod tests {
             (default.profile_id.as_str(), default.target_id.as_str()),
             ("fake", "localhost")
         );
+
+        for bundle in ["first", "latest"] {
+            GoPreferences::remember_recent(
+                &path,
+                RecentLaunch {
+                    profile_id: "other".into(),
+                    target_id: "podman".into(),
+                    bundle_id: bundle.into(),
+                    project_directory: None,
+                },
+            )
+            .unwrap();
+        }
+        let preferences = GoPreferences::load(&path).unwrap();
+        assert_eq!(preferences.default.unwrap().profile_id, "fake");
+        assert_eq!(preferences.recent.unwrap().bundle_id, "latest");
+        let version: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(version["version"], 2);
 
         // A default `mj go` saved is left alone.
         let temp = tempfile::tempdir().unwrap();

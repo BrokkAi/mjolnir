@@ -572,6 +572,8 @@ fn unique_id(base: &str, mut is_used: impl FnMut(&str) -> bool) -> String {
 }
 
 pub struct SessionLaunchOptions {
+    /// Allow this interactive launch to seed later new-session forms.
+    pub remember_launch_choices: bool,
     pub create_managed_worktree: Option<bool>,
     /// Full commit ID to start the bundle's primary repository at.
     pub at: Option<String>,
@@ -874,6 +876,7 @@ impl Controller {
         executor: &impl CommandExecutor,
     ) -> Result<String> {
         let SessionLaunchOptions {
+            remember_launch_choices,
             create_managed_worktree,
             at,
             branch,
@@ -1033,7 +1036,8 @@ impl Controller {
         };
         validate_resource_allocation(template, resource_allocation.as_ref())?;
         let selected_container_size =
-            selected_host_container_size(template, resource_allocation.as_ref());
+            selected_host_container_size(template, resource_allocation.as_ref())
+                .filter(|_| remember_launch_choices);
         if !additional_mounts.is_empty() && mount_history_host(template).is_none() {
             bail!("attached resources are unsupported for this target");
         }
@@ -1090,9 +1094,13 @@ impl Controller {
         // Creation authors the whole record, so it writes the whole row. The
         // record reaches memory only once it is durable: a session this process
         // alone knows about is one the database can never resume or clean up.
-        crate::database::save_new_session(&record, selected_container_size.clone())?;
+        crate::database::save_new_session(
+            &record,
+            selected_container_size.clone(),
+            remember_launch_choices,
+        )?;
         let policy = record.subagents.clone().unwrap_or_default();
-        if policy.updates_remembered_choice(record.harness_kind) {
+        if remember_launch_choices && policy.updates_remembered_choice(record.harness_kind) {
             self.state.last_subagent_policy = policy;
         }
         self.state.sessions.insert(id.clone(), record);

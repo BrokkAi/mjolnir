@@ -1563,6 +1563,7 @@ pub(crate) fn spawn_dashboard_create_session(
                 daemon::connect_or_start()
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
+                        remember_launch_choices: true,
                         review,
                         no_project_memory: false,
                         no_github_events: false,

@@ -267,6 +267,8 @@ impl RuntimeState {
         let _upgrade_work = crate::upgrade::activity("session admission")?;
         request.subagents = Some(policy);
         let path_cancelled = control.cancelled.clone();
+        let remember_launch_choices = request.remember_launch_choices;
+        let preferences_owner = self.clone();
         let registered = blocking(move || {
             let mut controller = Controller::load()?;
             let path_executor = crate::targets::CancellableProcessExecutor::new(path_cancelled)
@@ -288,6 +290,7 @@ impl RuntimeState {
                 &request.target_template_id,
                 request.title,
                 SessionLaunchOptions {
+                    remember_launch_choices: request.remember_launch_choices,
                     create_managed_worktree: request.create_managed_worktree,
                     at: request.at,
                     branch: request.branch,
@@ -305,16 +308,38 @@ impl RuntimeState {
                     session_title_override: request.session_title_override,
                 },
             )?;
-            // Every surface creates sessions through here, so the dashboard,
-            // the phone, `mj new`, and `mj acp` all leave a default pair
-            // behind for the next caller that names none. A preference that
-            // cannot be written does not undo a session that was created.
-            if let Err(error) = mj_core::go::GoPreferences::remember_first_pair(
-                &mj_core::go::GoPreferences::path(),
-                &request.profile_id,
-                &request.target_template_id,
-            ) {
+            // Only interactive launches seed defaults. A failed preference write
+            // does not undo a session that was created.
+            if request.remember_launch_choices
+                && let Err(error) = mj_core::go::GoPreferences::remember_first_pair(
+                    &mj_core::go::GoPreferences::path(),
+                    &request.profile_id,
+                    &request.target_template_id,
+                )
+            {
                 tracing::warn!(%error, "could not save the default profile and target");
+            }
+            if request.remember_launch_choices {
+                let _preferences_update = preferences_owner
+                    .recent_launch_update
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let recent = mj_core::go::RecentLaunch {
+                    profile_id: request.profile_id.clone(),
+                    target_id: request.target_template_id.clone(),
+                    bundle_id: controller.state.sessions[&session_id].bundle_id.clone(),
+                    project_directory: controller.state.sessions[&session_id]
+                        .project_directory
+                        .clone(),
+                };
+                if let Err(error) = mj_core::go::GoPreferences::remember_recent(
+                    &mj_core::go::GoPreferences::path(),
+                    recent.clone(),
+                ) {
+                    tracing::warn!(%error, "could not save recent interactive launch choices");
+                } else {
+                    preferences_owner.recent_launch.send_replace(Some(recent));
+                }
             }
             let session = controller
                 .state
@@ -375,13 +400,18 @@ impl RuntimeState {
                     session_id.clone(),
                 );
                 let provision = controller
-                    .provision_session_controlled_with_commit(&session_id, &executor, || {
-                        ensure!(
-                            control.grant_commit(),
-                            "session creation cancelled before commit"
-                        );
-                        Ok(())
-                    })
+                    .provision_session_controlled_with_commit(
+                        &session_id,
+                        &executor,
+                        || {
+                            ensure!(
+                                control.grant_commit(),
+                                "session creation cancelled before commit"
+                            );
+                            Ok(())
+                        },
+                        remember_launch_choices,
+                    )
                     .await;
                 if let Some(error) = publication_error {
                     return match provision {
@@ -432,6 +462,142 @@ mod delegation_replay_tests {
     use crate::controller::test_support::{IsolatedTest, test_name};
 
     #[tokio::test]
+    async fn only_interactive_create_remembers_default_recent_and_subagents() {
+        use mj_core::go::{GoPreferences, RecentLaunch};
+        use mj_core::subagent::SubagentPolicy;
+        const CHILD: &str = "MJ_TEST_INTERACTIVE_LAUNCH_CHOICES";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "only_interactive_create_remembers_default_recent_and_subagents",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "interactive-launch-choices")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let project = tempfile::tempdir().unwrap();
+        let mut config = mj_core::config::Config::default();
+        config.profiles.insert(
+            "codex".into(),
+            mj_core::config::HarnessProfile {
+                enabled: true,
+                kind: mj_core::config::HarnessKind::Codex,
+                home: mj_core::config::data_dir().join("unused-profile-home"),
+                environment: Default::default(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+                codex_profile: None,
+                legacy_subagents: None,
+            },
+        );
+        config.targets.insert(
+            "localhost".into(),
+            mj_core::config::TargetTemplate::LocalBare,
+        );
+        config.save().unwrap();
+        let workspace = crate::database::create_workspace("launch choices").unwrap();
+        let mut state = crate::database::load_state().unwrap();
+        state.last_subagent_policy = SubagentPolicy::None;
+        crate::database::save_state(&state).unwrap();
+        let runtime = crate::daemon::tests::test_runtime_state();
+        let path = GoPreferences::path();
+        for remember in [false, true, false] {
+            let before = std::fs::read(&path).ok();
+            let recent_before = runtime
+                .runtime_publication()
+                .unwrap()
+                .metadata
+                .recent_launch;
+            let policy_before = crate::database::load_state().unwrap().last_subagent_policy;
+            let request = mj_client::daemon::CreateSessionRequest {
+                remember_launch_choices: remember,
+                create_managed_worktree: Some(false),
+                at: None,
+                branch: None,
+                base: None,
+                no_later_history: false,
+                subagents: Some(SubagentPolicy::Native),
+                review: None,
+                no_project_memory: false,
+                no_github_events: false,
+                initial_prompt: None,
+                workspace_id: workspace.id.clone(),
+                profile_id: "codex".into(),
+                bundle_id: mj_core::config::raw_project_context_id(
+                    &project.path().to_string_lossy(),
+                ),
+                project_directory: Some(project.path().to_owned()),
+                target_template_id: "localhost".into(),
+                additional_mounts: Vec::new(),
+                resource_allocation: None,
+                title: "launch choices".into(),
+                session_title_override: None,
+            };
+            let (publish, publication) = tokio::sync::oneshot::channel();
+            let control = super::LifecycleControl::default();
+            let registered = runtime
+                .start_create_session_controlled(request, control.clone(), publication)
+                .await
+                .unwrap();
+            if remember {
+                let saved = GoPreferences::load(&path).unwrap();
+                let default = saved.default.unwrap();
+                assert_eq!(
+                    (default.profile_id.as_str(), default.target_id.as_str()),
+                    ("codex", "localhost")
+                );
+                assert_eq!(
+                    saved.recent,
+                    Some(RecentLaunch {
+                        profile_id: "codex".into(),
+                        target_id: "localhost".into(),
+                        bundle_id: registered.session.bundle_id.clone(),
+                        project_directory: registered.session.project_directory.clone(),
+                    })
+                );
+                assert_eq!(
+                    crate::database::load_state().unwrap().last_subagent_policy,
+                    SubagentPolicy::Native
+                );
+                assert_eq!(
+                    runtime
+                        .runtime_publication()
+                        .unwrap()
+                        .metadata
+                        .recent_launch,
+                    saved.recent
+                );
+            } else {
+                assert_eq!(std::fs::read(&path).ok(), before);
+                assert_eq!(
+                    runtime
+                        .runtime_publication()
+                        .unwrap()
+                        .metadata
+                        .recent_launch,
+                    recent_before
+                );
+                assert_eq!(
+                    crate::database::load_state().unwrap().last_subagent_policy,
+                    policy_before
+                );
+            }
+            control.request_cancel();
+            drop(publish);
+            assert!(
+                runtime
+                    .wait_create_session(&registered.session.id)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn unconfigured_mjolnir_creation_is_refused_before_registration_or_provisioning() {
         const CHILD: &str = "MJ_TEST_MULTI_MODEL_CREATION_REFUSAL";
         if std::env::var_os(CHILD).is_none() {
@@ -475,6 +641,7 @@ mod delegation_replay_tests {
         crate::database::save_session(&legacy).unwrap();
         let runtime = crate::daemon::tests::test_runtime_state();
         let request = mj_client::daemon::CreateSessionRequest {
+            remember_launch_choices: false,
             create_managed_worktree: None,
             at: None,
             branch: None,

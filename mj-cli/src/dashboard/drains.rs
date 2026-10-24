@@ -282,6 +282,7 @@ impl DashboardContext {
         );
         self.dashboard.set_workspace_names(update.workspace_names);
         self.dashboard.set_launch_recency(update.launch_recency);
+        self.dashboard.set_recent_launch(update.recent_launch);
         self.dashboard
             .set_container_upgrade_sessions(update.container_upgrade_sessions);
         self.dashboard.set_target_storage(update.storage);

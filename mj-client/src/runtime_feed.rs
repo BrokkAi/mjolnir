@@ -76,6 +76,9 @@ pub struct RuntimeMetadata {
     /// sessions, but the defaults follow every session, stopped ones too.
     #[serde(default)]
     pub launch_recency: Vec<LaunchRecency>,
+    /// Latest interactive launch on the daemon host, independent of session history.
+    #[serde(default)]
+    pub recent_launch: Option<mj_core::go::RecentLaunch>,
     /// The daemon's Restart verdict; surfaces warn before replacing these containers.
     #[serde(default)]
     pub container_upgrade_sessions: std::collections::BTreeSet<String>,

@@ -114,6 +114,7 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         grant_commit: impl FnOnce() -> Result<()>,
+        remember_launch_choices: bool,
     ) -> Result<()> {
         crate::worker_lifecycle::run(
             session_id,
@@ -131,6 +132,7 @@ impl Controller {
                         executor,
                         github_token.as_deref(),
                         ProvisioningFailureDisposition::Discard,
+                        remember_launch_choices,
                     )
                     .await?;
                 let setup = execute_concurrent_lanes(
@@ -501,6 +503,9 @@ impl Controller {
                 executor,
                 github_token,
                 failure_disposition,
+                // Resume is the only production caller; it reopens a
+                // directory the user already chose, so it keeps the history.
+                true,
             )
             .await?;
         match execute_repository_setup(&repositories, executor) {
@@ -518,6 +523,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         github_token: Option<&str>,
         failure_disposition: ProvisioningFailureDisposition,
+        remember_launch_choices: bool,
     ) -> Result<targets::CommandPlan> {
         crate::worker_lifecycle::run(session_id, "provision session target with failure disposition", executor, async {
         let session = self
@@ -843,7 +849,7 @@ impl Controller {
             }
             result => result,
         };
-        if result.is_ok() {
+        if result.is_ok() && remember_launch_choices {
             let target_template_id = self
                 .state
                 .sessions

@@ -1693,12 +1693,15 @@ async fn new_session_mounts_cross_preflight_and_creation_boundaries() {
     let response = tokio::spawn(post_action(app, cookie(), body.to_string()));
     let request = actions.recv().await.unwrap();
     let ControllerAction::New {
-        additional_mounts, ..
+        additional_mounts,
+        remember_launch_choices,
+        ..
     } = &request.action
     else {
         panic!("expected New");
     };
     assert_eq!(additional_mounts, &expected);
+    assert!(*remember_launch_choices);
     request
         .reply
         .send(ActionOutcome::Accepted {
@@ -2683,6 +2686,7 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     let (config, state) = sample_config_state();
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
+        remember_launch_choices: true,
         review: None,
         no_project_memory: false,
         no_github_events: false,
@@ -2748,6 +2752,7 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
         |target_id: &str,
          resource_allocation: Option<mj_core::state::SessionResourceAllocation>| {
             ControllerAction::New {
+                remember_launch_choices: true,
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,

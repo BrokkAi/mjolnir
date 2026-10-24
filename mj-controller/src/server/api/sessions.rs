@@ -210,6 +210,7 @@ pub(super) async fn start_session(
         }
     }
     let mut action = ControllerAction::New {
+        remember_launch_choices: false,
         create_managed_worktree: request.create_managed_worktree,
         at: request.at.clone(),
         branch: request.branch.clone(),

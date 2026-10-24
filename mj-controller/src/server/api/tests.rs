@@ -2208,6 +2208,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
     assert_eq!(
         request.action,
         ControllerAction::New {
+            remember_launch_choices: false,
             review: None,
             no_project_memory: false,
             no_github_events: true,

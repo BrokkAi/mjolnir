@@ -283,6 +283,13 @@ pub(super) async fn action(
     State(state): State<ServerState>,
     Json(mut action): Json<ControllerAction>,
 ) -> Result<StatusCode, ApiError> {
+    if let ControllerAction::New {
+        remember_launch_choices,
+        ..
+    } = &mut action
+    {
+        *remember_launch_choices = true;
+    }
     validate_action_live(&state, &action).await?;
     identify_raw_project(&mut action);
     let action = decode_prompt_images_off_task(action).await?;
@@ -600,6 +607,7 @@ pub(super) async fn preflight_new(
 ) -> Result<Json<PreflightNew>, ApiError> {
     let project_validation = request.project_directory.is_some();
     let action = ControllerAction::New {
+        remember_launch_choices: false,
         subagents: None,
         review: None,
         no_project_memory: false,

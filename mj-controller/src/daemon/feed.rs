@@ -352,6 +352,7 @@ impl RuntimeState {
             .get()
             .map(|catalog| catalog.snapshot())
             .unwrap_or_default();
+        full.metadata.recent_launch = self.recent_launch.borrow().clone();
         full.metadata.launch_recency = if launch_inputs_changed(&history.full, &full) {
             mj_client::runtime_feed::launch_recency(&full.records)
         } else {

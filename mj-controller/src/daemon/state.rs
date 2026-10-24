@@ -91,6 +91,8 @@ impl RuntimeState {
             owner: Mutex::new(RuntimeStateOwner::new(controller)),
             report_backend: std::sync::OnceLock::new(),
             credential_targets: Arc::new(tokio::sync::watch::channel(Vec::new()).0),
+            recent_launch: tokio::sync::watch::channel(None).0,
+            recent_launch_update: Mutex::new(()),
             feed: Mutex::new(feed::RuntimeHistory::default()),
             committed: None,
             workspace_closes: Mutex::new(BTreeMap::new()),
@@ -253,6 +255,7 @@ impl RuntimeState {
         let _startup_admission = self.startup_enqueue.lock().await;
         let registered = self
             .start_create_session(CreateSessionRequest {
+                remember_launch_choices: false,
                 at: None,
                 branch: None,
                 base: None,

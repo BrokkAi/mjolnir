@@ -1590,6 +1590,7 @@ fn prompt_action() -> ControllerAction {
 
 fn new_action() -> ControllerAction {
     ControllerAction::New {
+        remember_launch_choices: true,
         review: None,
         no_project_memory: false,
         no_github_events: false,

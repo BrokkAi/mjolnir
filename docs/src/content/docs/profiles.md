@@ -25,7 +25,7 @@ requires a Claude, Codex, or DSH profile and a configured Straightforward task.
 DSH has no sub-agents of its own, so for a DSH profile they offer **Mjolnir** or
 **None** instead. A DSH session starts on Mjolnir when the last choice was
 Mjolnir and Straightforward is configured, and on None otherwise. Its choice
-becomes the remembered one only when it is Mjolnir, so choosing None for DSH
+becomes the remembered one on interactive creation only when it is Mjolnir, so choosing None for DSH
 does not change what the next Claude or Codex session starts with.
 Existing sessions keep their recorded policy; leaving Move's choice unchanged
 retains it.

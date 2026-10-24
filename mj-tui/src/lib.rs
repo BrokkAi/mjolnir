@@ -913,6 +913,7 @@ pub struct DashboardState {
     /// What new-session defaults are chosen from. The feed carries only live
     /// sessions, so this summary of every session arrives beside them.
     pub(crate) launch_recency: Vec<mj_client::runtime_feed::LaunchRecency>,
+    pub(crate) recent_launch: Option<mj_core::go::RecentLaunch>,
     /// The daemon's verdict, delivered with its records in the same runtime frame.
     pub(crate) container_upgrade_sessions: BTreeSet<String>,
     pub(crate) session_operations: Tracked<BTreeMap<String, SessionOperationDisplay>>,
@@ -1231,6 +1232,7 @@ impl DashboardState {
             checkpoint_archive_sizes: BTreeMap::new(),
             stopped_records: Default::default(),
             launch_recency,
+            recent_launch: None,
             container_upgrade_sessions: BTreeSet::new(),
             go: None,
             simple_mode: false,

@@ -1627,6 +1627,7 @@ impl DashboardContext {
         let worker_shutdown = remote_worker.shutdown;
         let runtime_state_rx = remote_worker.state;
         dashboard.set_move_snapshot(runtime_state_rx.borrow().moves.clone());
+        dashboard.set_recent_launch(runtime_state_rx.borrow().recent_launch.clone());
         let runtime_reviews_rx = remote_worker.reviews;
         let runtime_review_views: BTreeMap<String, mj_controller::review_host::RuntimeReviewView> =
             runtime_reviews_rx
@@ -1796,8 +1797,7 @@ pub(crate) struct LoadedDashboard {
     layouts: BTreeMap<String, PaneSizes>,
     conversation_layouts: BTreeMap<String, ConversationLayout>,
     queued_prompts: BTreeMap<String, Vec<mj_core::relay::QueuedPrompt>>,
-    /// New-session defaults, taken from every session before the stopped
-    /// ones were set aside.
+    /// Project ordering and legacy preselection, before stopped sessions are set aside.
     launch_recency: Vec<mj_client::runtime_feed::LaunchRecency>,
 }
 

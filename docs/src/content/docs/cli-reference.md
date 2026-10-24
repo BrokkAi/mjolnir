@@ -350,6 +350,10 @@ mj new --workspace eval --bundle product --target builder \
 
 - `mj new` without `--profile` or `--target` uses the saved default for the
   missing one (the pair `GET /api/v1/options` reports as `default`).
+  `mj new` never changes that default, the remembered sub-agent choice, or
+  what the dashboard's next new-session form preselects. Only interactive
+  launches (the dashboard, `mj go`, `mj simple`, and the web or phone form)
+  do.
 - `mj new --model <name>` chooses the highest-quota enabled, usable profile
   offering that exact model and starts the session on it. It conflicts with
   `--profile`; the saved default profile breaks quota ties. If `--effort` is

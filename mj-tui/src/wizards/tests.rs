@@ -3683,6 +3683,52 @@ fn new_wizard(dashboard: &DashboardState) -> &NewWizard {
     wizard
 }
 
+fn new_session_prefers_interactive_choices_over_newer_unattended_sessions() {
+    let mut config = config();
+    config
+        .targets
+        .insert("docker".into(), config.targets["podman"].clone());
+    config
+        .bundles
+        .insert("interactive-project".into(), config.bundles["hel"].clone());
+    let latest = stopped_session();
+    let state = State {
+        sessions: [(latest.id.clone(), latest)].into_iter().collect(),
+        ..State::default()
+    };
+    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
+    dashboard.set_recent_launch(Some(mj_core::go::RecentLaunch {
+        profile_id: "claude-1".into(),
+        target_id: "docker".into(),
+        bundle_id: "interactive-project".into(),
+        project_directory: None,
+    }));
+    // Project ordering still follows session history, independently of selection.
+    assert_eq!(
+        bundle_ids_by_recent_creation(&dashboard.config, &dashboard.launch_recency)[0],
+        "hel"
+    );
+    open_new_session_wizard(&mut dashboard);
+    let wizard = new_wizard(&dashboard);
+    assert_eq!(
+        dashboard
+            .config
+            .enabled_profiles()
+            .nth(wizard.profile)
+            .unwrap()
+            .0,
+        "claude-1"
+    );
+    assert_eq!(nth_key(&dashboard.config.targets, wizard.target), "docker");
+    assert_eq!(
+        nth_bundle_key(&dashboard.config, &dashboard.launch_recency, wizard.bundle),
+        "interactive-project"
+    );
+    captured_drawn(&mut dashboard, 140, 40);
+    dashboard.handle_key(key(KeyCode::Enter));
+    captured_drawn(&mut dashboard, 140, 40);
+}
+
 /// A machine no runtime runs on has no row, so the target step is kept to
 /// name it and say why, even when one target is all it offers.
 fn a_machine_without_a_runtime_keeps_the_target_step_and_says_why() {
@@ -5512,6 +5558,10 @@ fn golden_wizard_target_step() {
         (
             "new_session_wizard_keeps_its_frame_across_steps",
             new_session_wizard_keeps_its_frame_across_steps as fn(),
+        ),
+        (
+            "new_session_prefers_interactive_choices_over_newer_unattended_sessions",
+            new_session_prefers_interactive_choices_over_newer_unattended_sessions,
         ),
         (
             "new_session_skips_the_target_step_when_only_one_target_is_offered",

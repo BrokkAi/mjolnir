@@ -703,6 +703,7 @@ fn bundle_creation_skips_unreadable_configured_repositories() {
 
 fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {
     SessionLaunchOptions {
+        remember_launch_choices: true,
         review: None,
         no_project_memory: false,
         no_github_events: false,

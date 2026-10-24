@@ -1287,6 +1287,10 @@ impl DashboardState {
         self.container_upgrade_sessions = sessions;
     }
 
+    pub fn set_recent_launch(&mut self, recent: Option<mj_core::go::RecentLaunch>) {
+        self.recent_launch = recent;
+    }
+
     pub fn set_launch_recency(&mut self, recency: Vec<mj_client::runtime_feed::LaunchRecency>) {
         self.launch_recency = recency;
     }

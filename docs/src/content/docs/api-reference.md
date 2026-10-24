@@ -356,6 +356,11 @@ default that [`GET /api/v1/options`](#list-launch-options) reports. Supply `bund
 `project_directory`, or both: a directory with no bundle is bundled the way the
 viewer's own form does it.
 
+Sessions started through this route do not change the saved default, the
+remembered sub-agent choice, or what a new-session form preselects next. Only
+interactive launches (the dashboard, `mj go`, `mj simple`, and the web or phone
+form) remember choices. `mj acp`, sub-agents and archive restores do not.
+
 When `model` is supplied without `profile_id`, Mjolnir checks every enabled,
 usable profile and chooses the one offering the exact model and, when named,
 the exact effort. It ranks by remaining quota, using the saved default profile

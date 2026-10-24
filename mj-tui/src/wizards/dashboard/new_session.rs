@@ -101,9 +101,15 @@ impl DashboardState {
                         .launch_project_directory
                         .as_ref()
                         .filter(|_| matches!(target, TargetTemplate::LocalBare));
+                    let recent = self
+                        .recent_launch
+                        .as_ref()
+                        .filter(|recent| recent.target_id == target_template_id)
+                        .and_then(|recent| recent.project_directory.as_ref());
                     if self.go.is_none()
                         && wizard.project_directory.is_empty()
-                        && let Some(directory) = launch.or(wizard.project_history.first())
+                        && let Some(directory) =
+                            launch.or(recent).or(wizard.project_history.first())
                     {
                         wizard.project_directory = directory.to_string_lossy().into_owned().into();
                     }

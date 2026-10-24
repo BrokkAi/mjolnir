@@ -18,7 +18,17 @@ impl DashboardState {
             self.begin_settings_section("profiles", None);
             return DashboardAction::None;
         }
-        let recent = most_recent_configured_session(&self.config, &self.launch_recency);
+        let interactive = self.recent_launch.as_ref().map(|recent| LaunchRecency {
+            bundle_id: recent.bundle_id.clone(),
+            last_profile: recent.profile_id.clone(),
+            target_template_id: recent.target_id.clone(),
+            newest_created_at: String::new(),
+        });
+        let recent = if let Some(recent) = interactive.as_ref() {
+            most_recent_configured_session(&self.config, std::slice::from_ref(recent))
+        } else {
+            most_recent_configured_session(&self.config, &self.launch_recency)
+        };
         let profile = recent
             .and_then(|session| {
                 self.config

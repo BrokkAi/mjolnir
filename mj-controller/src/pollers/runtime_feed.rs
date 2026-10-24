@@ -34,9 +34,10 @@ pub struct RuntimeStateUpdate {
     /// keep a daemon-created child out of the real workspace without a full
     /// state reload.
     pub subagents: SnapshotMap<String, SubagentRecord>,
-    /// What new-session defaults are chosen from; see
+    /// Session creation history for project-list ordering and the legacy fallback; see
     /// [`mj_client::runtime_feed::LaunchRecency`].
     pub launch_recency: Vec<mj_client::runtime_feed::LaunchRecency>,
+    pub recent_launch: Option<mj_core::go::RecentLaunch>,
     pub container_upgrade_sessions: std::collections::BTreeSet<String>,
     /// The daemon storage owner's verdict per target host.
     pub storage: Vec<mj_core::targets::storage::TargetStorageView>,

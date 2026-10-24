@@ -129,6 +129,7 @@ pub(super) async fn apply_phone_action(
 ) -> Result<()> {
     match action {
         ControllerAction::New {
+            remember_launch_choices,
             workspace_id,
             profile_id,
             bundle_id,
@@ -184,6 +185,7 @@ pub(super) async fn apply_phone_action(
                 .daemon_runtime
                 .start_create_session_controlled(
                     CreateSessionRequest {
+                        remember_launch_choices,
                         create_managed_worktree,
                         at,
                         branch,

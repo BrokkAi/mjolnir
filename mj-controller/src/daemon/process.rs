@@ -1189,15 +1189,27 @@ pub(super) fn spawn_manager_target_refresher(
                     let _config_mutation = state.config_mutation.lock().await;
                     let mut cache = auth.clone();
                     let staging = inputs.clone();
+                    let preference_owner = state.clone();
                     let refreshed = tokio::task::spawn_blocking(move || {
                         crate::database::check_read_compatibility()?;
                         let config = Config::load()?;
+                        let recent_changed = {
+                            // Serialize the cache refresh with create's persisted write so
+                            // a refresh cannot reinstall an older file snapshot.
+                            let _preferences_update = preference_owner.recent_launch_update.lock().unwrap_or_else(PoisonError::into_inner);
+                            let recent = mj_core::go::GoPreferences::load(&mj_core::go::GoPreferences::path())?.recent;
+                            preference_owner.recent_launch.send_if_modified(|held| {
+                                if *held == recent { return false; }
+                                *held = recent;
+                                true
+                            })
+                        };
                         cache.refresh(&config);
                         let staged = staging.staged_credentials();
-                        Ok::<_, anyhow::Error>((config, cache, staged))
+                        Ok::<_, anyhow::Error>((config, cache, staged, recent_changed))
                     }).await;
                     match refreshed {
-                        Ok(Ok((config, cache, staged))) => {
+                        Ok(Ok((config, cache, staged, recent_changed))) => {
                             staged_sources = Some((inputs.clone(), staged));
                             auth = cache;
                             auth_profiles = Some(config.profiles.clone());
@@ -1209,7 +1221,7 @@ pub(super) fn spawn_manager_target_refresher(
                                 owner.install_config(config);
                                 changed
                             };
-                            if changed { state.publish_revision(); }
+                            if changed || recent_changed { state.publish_revision(); }
                         }
                         Ok(Err(error)) => {
                             if error.chain().any(|cause| cause.downcast_ref::<StoreSchemaMismatch>().is_some()) {

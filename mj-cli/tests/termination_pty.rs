@@ -924,6 +924,10 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
         b"New session \xc2\xb7 2/3 local project",
         Instant::now() + TIMEOUT,
     );
+    // Hard-won: 10e6a4981: recent launch metadata can prefill the second form before this input.
+    master
+        .write_all(b"\x15")
+        .expect("replace the remembered project directory");
     master
         .write_all(project.to_string_lossy().as_bytes())
         .unwrap();

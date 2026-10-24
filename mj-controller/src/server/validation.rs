@@ -415,6 +415,7 @@ fn validate_action_against(
 ) -> Result<(), ApiError> {
     match action {
         ControllerAction::New {
+            remember_launch_choices: _,
             workspace_id,
             profile_id,
             bundle_id,

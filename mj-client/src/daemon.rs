@@ -340,6 +340,9 @@ pub struct ResumeSessionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateSessionRequest {
+    /// Allow this interactive launch to seed later new-session forms.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remember_launch_choices: bool,
     #[serde(default)]
     pub create_managed_worktree: Option<bool>,
     /// Full commit object ID to start the workspace at: an exact checkout of
@@ -2408,7 +2411,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Lifecycle stages can name the harness preparation step a worker reports.
 // A pending form can say it is a tool permission and whether it offers Skip.
 // A usage report cost is a Result whose Err means the cost is unknown.
-pub const PROTOCOL_VERSION: u32 = 60;
+// Creation and runtime metadata carry interactive launch-choice provenance.
+pub const PROTOCOL_VERSION: u32 = 61;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

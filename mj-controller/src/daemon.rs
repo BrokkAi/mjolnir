@@ -200,6 +200,8 @@ pub struct RuntimeState {
     pub(crate) credential_targets:
         Arc<tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>>,
     feed: Mutex<feed::RuntimeHistory>,
+    recent_launch: tokio::sync::watch::Sender<Option<mj_core::go::RecentLaunch>>,
+    recent_launch_update: Mutex<()>,
     committed: Option<
         tokio::sync::watch::Receiver<
             std::result::Result<Arc<crate::database::CommittedState>, Arc<str>>,

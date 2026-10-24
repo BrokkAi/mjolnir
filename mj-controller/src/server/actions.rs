@@ -26,6 +26,8 @@ pub enum ControllerAction {
         command: mj_core::relay::RelayCommand,
     },
     New {
+        #[serde(skip)]
+        remember_launch_choices: bool,
         #[serde(default)]
         create_managed_worktree: Option<bool>,
         /// Full commit object ID to start the bundle's primary repository at.
