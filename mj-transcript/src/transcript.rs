@@ -10,8 +10,10 @@ use serde_json::Value;
 use tree_sitter::{Node, Parser};
 const TOOL_SUMMARY_SOURCE_BYTES: usize = 64 * 1024;
 const TOOL_SUMMARY_MAX_NESTING: usize = 16;
+/// Stands for a command whose name is an expansion, such as `$E cargo test`.
+const UNNAMED_COMMAND_SUMMARY: &str = "…";
 /// Parser-rule version stored with cached tool summaries.
-pub const TOOL_SUMMARY_VERSION: u8 = 7;
+pub const TOOL_SUMMARY_VERSION: u8 = 8;
 
 /// Reduce a tool call to what a reader still needs, once a verified checkpoint
 /// holds the whole of it.
@@ -524,7 +526,12 @@ fn summarize_shell(source: &str, nesting: usize) -> Option<String> {
     ) {
         return None;
     }
-    if commands.is_empty() {
+    // A script whose every command is named by an expansion says nothing the
+    // tool's title does not.
+    if commands
+        .iter()
+        .all(|command| command.summary == UNNAMED_COMMAND_SUMMARY)
+    {
         return None;
     }
     commands.sort_by_key(|command| command.start);
@@ -617,15 +624,18 @@ fn collect_shell_tokens(
         return true;
     }
     if kind == "command" {
-        if let Some(summary) = summarize_command_node(node, source, nesting) {
-            commands.push(ShellCommandToken {
-                start: node.start_byte(),
-                end: node.end_byte(),
-                summary,
-            });
-            return true;
-        }
-        return false;
+        commands.push(ShellCommandToken {
+            start: node.start_byte(),
+            end: node.end_byte(),
+            summary: summarize_command_node(node, source, nesting)
+                .unwrap_or_else(|| UNNAMED_COMMAND_SUMMARY.to_owned()),
+        });
+        return true;
+    }
+    if kind == "variable_assignment" {
+        return collect_assignment_substitutions(
+            node, source, nesting, commands, operators, subshells,
+        );
     }
     if is_shell_operator(node) {
         operators.push(ShellOperatorToken {
@@ -645,6 +655,30 @@ fn collect_shell_tokens(
     let mut cursor = node.walk();
     node.children(&mut cursor)
         .all(|child| collect_shell_tokens(child, source, nesting, commands, operators, subshells))
+}
+
+/// An assignment that is a statement of its own, such as
+/// `T=$(git grep -l x)`, runs the commands substituted into its value.
+/// An assignment before a command is part of that command and never gets here.
+fn collect_assignment_substitutions(
+    node: Node<'_>,
+    source: &str,
+    nesting: usize,
+    commands: &mut Vec<ShellCommandToken>,
+    operators: &mut Vec<ShellOperatorToken>,
+    subshells: &mut Vec<ShellSubshell>,
+) -> bool {
+    let mut cursor = node.walk();
+    node.children(&mut cursor).all(|child| {
+        if child.kind() == "command_substitution" {
+            let mut cursor = child.walk();
+            child.children(&mut cursor).all(|grandchild| {
+                collect_shell_tokens(grandchild, source, nesting, commands, operators, subshells)
+            })
+        } else {
+            collect_assignment_substitutions(child, source, nesting, commands, operators, subshells)
+        }
+    })
 }
 
 fn shell_separator_between(
@@ -1964,6 +1998,37 @@ mod tests {
             .kind(ToolKind::Execute)
             .raw_input(json!({"command": "$command status"}));
         assert_eq!(tool_call_presentation(&dynamic_name).summary, "Bash");
+    }
+
+    /// One command named by an expansion does not hide the rest of the
+    /// script, and an assignment on its own reads as what it substitutes.
+    #[test]
+    fn shell_summary_keeps_the_commands_around_an_unnamed_one() {
+        let presentation = |command: &str| {
+            tool_call_presentation(
+                &ToolCall::new("call", "Bash")
+                    .kind(ToolKind::Execute)
+                    .raw_input(json!({ "command": command })),
+            )
+            .summary
+        };
+        let cases = [
+            (
+                "T=$(git grep -l 'facts' -- tests | head -1); echo \"file: $T\"; \
+                 S=$(echo $T | cut -d/ -f2); E=\"env -u CARGO\"; \
+                 $E X=1 cargo nextest run --test $S 2>&1 | grep -E 'FAIL'; \
+                 $E cargo clippy 2>&1 | grep -E '^error' | head -3",
+                "git grep | head ; echo ; echo | cut ; … | grep ; … | grep | head",
+            ),
+            ("export T=\"$(git rev-parse HEAD)\"", "git rev-parse"),
+            ("A=1 B=$(date)", "date"),
+            ("cd dir && $runner test", "cd && …"),
+            ("FOO=bar env -i echo $(printf hi)", "env"),
+            ("E=x", "Bash"),
+        ];
+        for (command, summary) in cases {
+            assert_eq!(presentation(command), summary, "{command}");
+        }
     }
 
     #[test]
