@@ -585,10 +585,20 @@ pub(crate) struct IsolatedTest {
 }
 
 impl IsolatedTest {
+    /// A child runs one whole flow on one test thread. An in-place Move, for
+    /// example, polls the checkpoint and provisioning chain inline, whose
+    /// debug-build frames are tens of kilobytes each; at the 8 MiB default
+    /// that sits within a few pages of the limit, so an unrelated change can
+    /// overflow a child that passed before. Give the child room instead of
+    /// leaving every isolated test to the edge of its stack.
+    const CHILD_STACK_BYTES: &'static str = "33554432";
+
     pub(crate) fn new(name: impl Into<String>) -> Self {
         let name = name.into();
         let mut command = Command::new(std::env::current_exe().expect("this test binary"));
-        command.args(["--exact", &name, "--nocapture"]);
+        command
+            .args(["--exact", &name, "--nocapture"])
+            .env("RUST_MIN_STACK", Self::CHILD_STACK_BYTES);
         Self { name, command }
     }
 
