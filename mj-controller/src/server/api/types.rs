@@ -952,7 +952,7 @@ pub struct LaunchTarget {
     pub id: String,
     /// The runtime kind, such as `local-bare` or `ssh-podman`.
     pub kind: String,
-    /// Whether this target needs an existing Git directory on its machine
+    /// Whether this target needs an existing project directory on its machine
     /// instead of provisioning repositories into a workspace.
     pub requires_project_directory: bool,
     pub availability: LaunchAvailability,

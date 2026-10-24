@@ -653,6 +653,12 @@ fn a_launch_base_on_a_plain_directory_fails_instead_of_being_ignored() {
 fn local_bare_validation_accepts_projects_and_plain_directories_but_rejects_missing_paths() {
     let project = committed_repository();
     let plain = tempfile::tempdir().unwrap();
+    let unborn = tempfile::tempdir().unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .arg(unborn.path())
+        .status()
+        .unwrap();
     let mut config = Config::default();
     config
         .targets
@@ -666,6 +672,9 @@ fn local_bare_validation_accepts_projects_and_plain_directories_but_rejects_miss
         .unwrap();
     controller
         .validate_project_directory("localhost", plain.path(), &ProcessExecutor)
+        .unwrap();
+    controller
+        .validate_project_directory("localhost", unborn.path(), &ProcessExecutor)
         .unwrap();
     assert!(
         controller
@@ -713,8 +722,19 @@ fn a_plain_local_directory_cannot_convert_into_a_bundle_workspace() {
     let project = crate::project_catalog::directory_snapshot(&resolved);
     assert!(!project.plain_directories.is_empty());
     let mut session = raw_session_on("localhost", plain.path().to_str().unwrap());
+    session.target_template_id = "local-bare".into();
     session.project = Some(project);
     let config = resume_compatibility_config();
+
+    let detail = resume_compatibility(&session, &config, "podman").unwrap_err();
+    assert!(
+        detail.contains("without a committed Git checkout"),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("resume it on a local bare target"),
+        "{detail}"
+    );
 
     let checkout = session.checkout();
     let error = plan_raw_to_workspace_for_session(&session, &checkout, &config, &ProcessExecutor)
@@ -722,7 +742,7 @@ fn a_plain_local_directory_cannot_convert_into_a_bundle_workspace() {
 
     let detail = format!("{error:#}");
     assert!(
-        detail.contains("is a plain directory, not a Git checkout"),
+        detail.contains("without a committed Git checkout"),
         "{detail}"
     );
     assert!(detail.contains("cannot move into a target"), "{detail}");

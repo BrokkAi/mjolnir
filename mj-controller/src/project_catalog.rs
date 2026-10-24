@@ -246,7 +246,12 @@ fn reconcile_config(
 /// still openable: the project-directory dialog accepts one when a person
 /// names it, which is a deliberate choice rather than a guess from history.
 fn discover_local(path: &Path, executor: &impl CommandExecutor) -> Result<()> {
-    mj_core::repository::resolve_directory(path, None, executor)?;
+    let resolved = mj_core::repository::resolve_local_directory(path, executor)?;
+    if resolved.plain_directory {
+        return Err(
+            mj_core::repository::RepositoryUnavailable::NotRepository(path.to_owned()).into(),
+        );
+    }
     accept_directory(&TargetTemplate::LocalBare, path, executor)?;
     Ok(())
 }
@@ -612,6 +617,9 @@ mod tests {
                 "origin",
                 "https://github.com/Example/new-name.git",
             ],
+            vec!["config", "user.name", "Discovery Test"],
+            vec!["config", "user.email", "discovery@example.invalid"],
+            vec!["commit", "--allow-empty", "-qm", "initial"],
         ] {
             let mut command = CommandSpec::new("git", ["-C", &checkout.to_string_lossy()])
                 .purpose("initialize discovery recovery checkout");
@@ -843,13 +851,18 @@ mod tests {
         index.execute_batch("CREATE TABLE threads(id TEXT,rollout_path TEXT,updated_at INTEGER,name TEXT,title TEXT,cwd TEXT,git_branch TEXT,history_mode TEXT,archived INTEGER,source TEXT,preview TEXT)").unwrap();
         let initialize = |path: &Path| {
             std::fs::create_dir_all(path).unwrap();
-            let output = ProcessExecutor
-                .execute(
-                    &CommandSpec::new("git", ["-C", &path.to_string_lossy(), "init", "-q"])
-                        .purpose("initialize discovery fixture"),
-                )
-                .unwrap();
-            assert_eq!(output.status, 0);
+            for args in [
+                vec!["init", "-q"],
+                vec!["config", "user.name", "Discovery Test"],
+                vec!["config", "user.email", "discovery@example.invalid"],
+                vec!["commit", "--allow-empty", "-qm", "initial"],
+            ] {
+                let mut command = CommandSpec::new("git", ["-C", &path.to_string_lossy()])
+                    .purpose("initialize discovery fixture");
+                command.args.extend(args.into_iter().map(str::to_owned));
+                let output = ProcessExecutor.execute(&command).unwrap();
+                assert_eq!(output.status, 0);
+            }
         };
         for i in 0..12 {
             let project = root.path().join(format!("project-{i:02}"));

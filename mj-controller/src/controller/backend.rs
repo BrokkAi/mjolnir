@@ -37,6 +37,13 @@ impl Controller {
             .context("target is still starting")?;
         let backend = backend_locator(locator, session, &self.config)?;
         let launch = self.current_worker_launch_config(session_id, &backend)?;
+        if session
+            .project
+            .as_ref()
+            .is_some_and(mj_core::repository::ProjectBundleSnapshot::primary_is_plain_directory)
+        {
+            return Ok((launch.cwd, "not a git checkout".to_owned()));
+        }
         let output = executor.execute(&targets::command_on_locator(
             &backend,
             session_id,
@@ -60,9 +67,9 @@ impl Controller {
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("not a git repository") {
-                // A plain folder opened through `mj go` has no branch. Say so
-                // briefly rather than echoing multi-line git stderr, which wraps
-                // the banner.
+                // An older or untracked session can still be a plain folder.
+                // Say so briefly rather than echoing multi-line git stderr,
+                // which wraps the banner.
                 "not a git checkout".to_owned()
             } else {
                 format!(

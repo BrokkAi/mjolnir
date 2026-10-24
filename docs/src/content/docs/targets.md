@@ -7,7 +7,7 @@ A runtime is a named execution template under `[targets.<id>]`, and it names
 the machine it runs on under `[machines.<id>]`. A session combines one
 [profile](/profiles/), one target, and either a configured
 [bundle](/workspaces-bundles/#bundles-define-managed-projects) or an existing
-Git project directory. The target decides where work runs, what isolation
+project directory. The target decides where work runs, what isolation
 contains unrestricted agent actions, how the workspace is created, and what is
 removed after a verified stop.
 
@@ -92,15 +92,17 @@ before choosing a raw or `yolo` target.
 ## Bare runtimes
 
 A bare runtime selects an existing absolute project directory rather than a
-bundle. They do not accept supplemental directory attachments or container
-resource sizing.
+bundle. A local bare runtime accepts a plain folder; an SSH bare runtime
+requires a Git project. Bare runtimes do not accept supplemental directory
+attachments or container resource sizing.
 
-On `local`, that directory need not be a Git checkout: a plain folder is a
-project in its own right, identified by its path, and the whole session works
-in it. Nothing about a plain folder is captured in a checkpoint and no restore
-touches its files, because the folder belongs to you and not to a managed
-checkout. A Git checkout is still required wherever Mjolnir has to move the
-project into a bundle workspace, and on SSH and EC2 targets, which address a
+On `local`, that directory need not be a Git checkout, Git need not be
+installed, and a new repository does not need its first commit. Such a folder
+is a project in its own right, identified by its path, and the whole session
+works in it. Nothing about it is captured in a checkpoint and no restore touches
+its files, because the folder belongs to you and not to a managed checkout. A
+committed Git checkout is still required wherever Mjolnir has to clone or move
+the project into a bundle workspace, and on SSH and EC2 targets, which address a
 project by the repository it shares with its sessions.
 
 ### Bare on this machine

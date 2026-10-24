@@ -374,7 +374,7 @@ pub fn restore_single_repository_onto_branch(
     };
     ensure!(
         !repository.metadata.plain_directory,
-        "this session's project is a plain directory, not a Git checkout, so it cannot be restored into one"
+        "this session's project is a directory without a committed Git checkout, so it cannot be restored into one"
     );
     let mut snapshot = archived_repository_snapshot(&archive, repository)?;
     let archived_branch = snapshot.metadata.branch.replace(branch.to_owned());
@@ -406,7 +406,7 @@ pub fn restore_single_repository_into_checkout(
     };
     ensure!(
         !repository.metadata.plain_directory,
-        "this session's project is a plain directory, not a Git checkout, so it cannot be restored into one"
+        "this session's project is a directory without a committed Git checkout, so it cannot be restored into one"
     );
     let mut snapshot = archived_repository_snapshot(&archive, repository)?;
     snapshot.metadata.remote_workspace = false;

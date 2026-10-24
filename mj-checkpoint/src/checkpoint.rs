@@ -100,10 +100,10 @@ pub enum CheckpointRepositoryCapture {
     /// Preserve Git provenance and durable review refs. The existing worktree
     /// remains the source for working files and ordinary Git history.
     MetadataOnly,
-    /// The directory is not a Git checkout. Its files belong to the user's own
-    /// directory on a bare local target, exactly as a raw checkout's do, so
-    /// the snapshot records no Git state, runs no Git command, and never
-    /// rewrites a working file.
+    /// The directory has no committed Git checkout. Its files belong to the
+    /// user's own directory on a bare local target, exactly as a raw
+    /// checkout's do, so the snapshot records no Git state, runs no Git
+    /// command, and never rewrites a working file.
     PlainDirectory,
 }
 

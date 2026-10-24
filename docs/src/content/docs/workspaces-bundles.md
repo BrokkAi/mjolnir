@@ -197,11 +197,12 @@ Isolated sessions begin at the fetch remote's default branch. Local unpublished
 commits and working-tree changes are excluded; the review shows the source before
 launch. `git_ref` is obsolete and is rejected with migration guidance.
 
-Bare runtimes work differently. A new bare session, on this machine or on an
-SSH machine, selects an existing absolute Git project directory instead of a
-configured bundle. Its directory is represented internally as a project with
-one repository; the selected directory remains the session's working directory.
-Its history and memory share repository identity with a managed project of one.
+Bare runtimes work differently. A new bare session selects an existing absolute
+directory instead of a configured bundle. A local bare directory may be a plain
+folder; an SSH bare directory must be a committed Git project. The selected
+directory remains the session's working directory. A Git-backed session's
+history and memory share repository identity with a managed project of one;
+plain local folders use their canonical path as project identity.
 The final review offers **Create isolated checkout**, on by default for a
 primary checkout and off for an existing linked worktree. When checked,
 Mjolnir creates a session-specific independent clone under `.mj/clones/` and

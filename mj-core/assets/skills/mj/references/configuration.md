@@ -952,14 +952,15 @@ permissions = "guardian"
 | --- | --- | --- | --- | --- |
 | `permissions` | string enum | only on an SSH machine | `"guardian"` | `guardian` preserves harness approvals; `yolo` disables sandbox checks (and approval checks, except Muse keeps its auto-review on). It has no meaning on `local`, where the harness keeps its configured approvals, or on an EC2 machine. |
 
-The new-session wizard asks for an existing absolute Git project directory on
-the runtime's machine. On `local` supported harnesses retain configured
-approvals because there is no container or instance boundary; Muse's guardian
-is muse-acp's auto-review, see [Harness limitations](/profiles/#harness-limitations). On an SSH machine
-the wizard separately asks for an existing absolute remote Git directory; when
-**Create isolated checkout** is checked on the final review, the new checkout is
-created below the repository's own `.mj/clones/` tree. A bare runtime on an
-EC2 machine launches one instance per session. See
+The new-session wizard asks for an existing absolute project directory on the
+runtime's machine. A local bare directory may be a plain folder and does not
+require Git. On `local` supported harnesses retain configured approvals because
+there is no container or instance boundary; Muse's guardian is muse-acp's
+auto-review, see [Harness limitations](/profiles/#harness-limitations). On an
+SSH machine the wizard separately asks for an existing absolute remote Git
+directory; when **Create isolated checkout** is checked on the final review,
+the new checkout is created below the repository's own `.mj/clones/` tree. A
+bare runtime on an EC2 machine launches one instance per session. See
 [SSH and SSH Podman](/ssh/) and [AWS EC2](/aws/).
 
 ### Common container fields

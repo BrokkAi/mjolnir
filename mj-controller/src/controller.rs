@@ -1004,8 +1004,9 @@ impl Controller {
             let canonical = crate::database::store_catalog_project(bundle_id, &project, true)?;
             (canonical, Some(project))
         } else if let Some(directory) = project_directory.as_deref() {
-            // A bare local session may run in any directory, including one that
-            // is not a Git checkout; such a project is identified by its path.
+            // A bare local session may run in any directory, including one
+            // without a committed Git checkout; such a project is identified
+            // by its path.
             // A remote bare session must still be a repository, and its
             // validation has already refused anything else.
             let (id, project) =
