@@ -53,12 +53,17 @@ pub struct ManagedHarness {
 #[derive(Debug)]
 pub struct ManagedNodeRuntime {
     path: PathBuf,
+    lease_path: PathBuf,
     _lease: File,
 }
 
 impl ManagedNodeRuntime {
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn lease_path(&self) -> &Path {
+        &self.lease_path
     }
 }
 
@@ -815,15 +820,17 @@ async fn install_managed_node(
             }
         }
     }
+    let lease_path = install.join(LEASE_FILE);
+    let lease = open_lock(&lease_path)?;
+    lock_file(&lease, true, "managed Node.js lease").await?;
     gc_node_root(root, &folder)?;
     drop(install_lock);
 
     let bin = install.join("bin");
     prepend_path(environment, &bin)?;
-    let lease = open_lock(&install.join(LEASE_FILE))?;
-    lock_file(&lease, true, "managed Node.js lease").await?;
     Ok(ManagedNodeRuntime {
         path: install,
+        lease_path,
         _lease: lease,
     })
 }

@@ -54,7 +54,8 @@ pub async fn prepare_harness_launch(
         let node = harness::ensure_node_runtime(&mut environment)
             .await
             .with_context(|| format!("prepare Node.js for {}", harness.display_name()))?;
-        if node.is_some() {
+        if let Some(node) = &node {
+            spec.node_lease = Some(node.lease_path().to_path_buf());
             spec.environment.insert(
                 "PATH".into(),
                 environment
@@ -185,9 +186,16 @@ pub(super) fn needs_node_runtime(
     harness: HarnessKind,
     environment: &BTreeMap<String, String>,
 ) -> Result<bool> {
-    Ok(harness_uses_node_runtime(harness)
-        && (harness != HarnessKind::Dsh
-            || find_command(Path::new("dsh-acp"), environment)?.is_none()))
+    let dsh_is_native = if harness == HarnessKind::Dsh {
+        if environment.contains_key("PATH") {
+            find_command(Path::new("dsh-acp"), environment)?.is_some()
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    Ok(harness_uses_node_runtime(harness) && !dsh_is_native)
 }
 
 /// Reviewer homes can be created after provisioning. Link their mbx lookup to
@@ -312,6 +320,22 @@ pub(super) fn find_command(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dsh_without_path_uses_the_managed_node_runtime() {
+        assert!(
+            needs_node_runtime(HarnessKind::Dsh, &BTreeMap::new()).unwrap(),
+            "a missing PATH must select the managed Node fallback, not fail discovery"
+        );
+
+        let tools = tempfile::tempdir().unwrap();
+        mj_core::test_hooks::install_fake_command(tools.path(), "dsh-acp", "#!/bin/sh\nexit 0\n");
+        let environment = BTreeMap::from([(
+            "PATH".to_owned(),
+            tools.path().to_string_lossy().into_owned(),
+        )]);
+        assert!(!needs_node_runtime(HarnessKind::Dsh, &environment).unwrap());
+    }
 
     #[cfg(unix)]
     #[tokio::test]

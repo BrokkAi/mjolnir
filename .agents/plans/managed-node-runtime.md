@@ -23,6 +23,8 @@ This change does not add a managed `uv` runtime. No ACP harness or bridge in thi
 - [x] (2026-10-24 21:35Z) Run focused tests, affected worker and controller suites, and workspace clippy.
 - [x] (2026-10-24 21:37Z) Verify the official Linux x64 artifact checksum, rerun focused Node tests, and classify the pre-existing core subprocess failure.
 - [x] (2026-10-24 21:39Z) Commit the validated change on the current branch as `ff83bea41`.
+- [x] (2026-10-24 21:51Z) Verify and fix all three independent review findings for discovery ordering, supervisor lease retention, and install-lock ordering.
+- [x] (2026-10-24 21:51Z) Re-run the full worker suite and workspace clippy after the review corrections.
 
 ## Surprises & Discoveries
 
@@ -36,6 +38,12 @@ This change does not add a managed `uv` runtime. No ACP harness or bridge in thi
   Evidence: the worker launch helper now asks whether DSH's native executable is present before selecting the npm fallback, and controller preflight accepts it independently.
 - Observation: The full `brokk-mj-core` suite leaves one unrelated existing test failing in this container: `subprocess::tests::spawn_detached_leaves_no_zombie_under_a_spawner_that_keeps_running` observes a zombie for ten seconds because PID 1 does not reap it here.
   Evidence: the test also fails in isolation with `process 23797 never left the process table (last state: Some('Z'))`; this change does not touch `mj-core/src/subprocess.rs`. All 17 runnable `harness_install` tests pass.
+- Observation: The review finding about discovery was correct. `discover_profile_config` checked the launch-only environment before merging the account's login environment, so nvm Node paths and `HOME` could be absent.
+  Evidence: `discover_profile_config` now calls `login_environment::with_overrides` before the Node decision and reuses that resolved environment for the probe.
+- Observation: The review finding about the Node lease was correct. The parent worker dropped its lease when preparation returned, while the supervisor spec carried only the harness lease.
+  Evidence: `AcpSupervisorSpec` now carries an optional `node_lease`, the supervisor acquires it before launching the bridge, and a regression proves an exclusive contender is blocked while the supervised child runs.
+- Observation: The review finding about install-lock ordering was correct. The cache-wide install lock was released before the new Node lease was acquired, leaving a mixed-version GC window.
+  Evidence: `install_managed_node` now acquires and shared-locks the Node lease before calling `gc_node_root` and before dropping the install lock.
 
 ## Decision Log
 
@@ -57,6 +65,15 @@ This change does not add a managed `uv` runtime. No ACP harness or bridge in thi
 - Decision: Do not require Node for DSH when a native `dsh-acp` executable is present.
   Rationale: Only DSH's npx fallback needs Node. The native executable remains a complete launch path and must not acquire a new curl dependency.
   Date/Author: 2026-10-24, Codex
+- Decision: Resolve discovery's login environment before checking the native DSH executable or selecting managed Node.
+  Rationale: Profile discovery starts before a session launch and must see the same nvm, Homebrew, PATH, HOME, and XDG settings as the eventual worker. Missing PATH is treated as a reason to use managed Node rather than an error.
+  Date/Author: 2026-10-24, Codex
+- Decision: Serialize the Node lease path into the optional `node_lease` supervisor field and keep the older field shape readable.
+  Rationale: The supervisor process outlives launch preparation and owns bridge-process cleanup, so it is the correct owner of both runtime leases. `serde(default)` preserves old supervisor specs.
+  Date/Author: 2026-10-24, Codex
+- Decision: Acquire the Node shared lease while still holding the cache-wide install lock.
+  Rationale: Publication, selection, and protection become one serialized transition. A newer pinned worker cannot garbage-collect the published runtime in a gap before its first process leases it.
+  Date/Author: 2026-10-24, Codex
 
 ## Outcomes & Retrospective
 
@@ -68,7 +85,7 @@ installation, and child processes use the same runtime. DSH keeps its native
 fast path. Documentation and doctor no longer instruct people to install Node
 on every target.
 
-The worker suite passed 695 unit tests and every integration suite; the
+The worker suite passed 697 unit tests and every integration suite; the
 controller suite passed 2,086 tests. The core change passed all 17 runnable
 harness-install tests and workspace clippy. The main validation limitation is
 environmental rather than feature-related:
@@ -138,7 +155,7 @@ Observed results on 2026-10-24:
     6 passed
 
     cargo test -p brokk-mj-worker
-    695 unit tests passed; every integration suite passed
+    697 unit tests passed; every integration suite passed
 
     cargo test -p brokk-mj-controller
     2086 passed; 17 ignored
@@ -185,5 +202,5 @@ The returned value is `Some(ManagedNodeRuntime)` when Mjolnir selected its manag
 
 Use `flate2` (already a dependency), add the workspace `tar` dependency, and use existing `crate::subprocess::run_bounded*`, checksum, atomic-directory publication, PATH, tracing, and test-hook conventions. Use `curl` through the target/session environment because the controller does not necessarily have direct network access to the worker target.
 
-Revision note, 2026-10-24 21:39Z: recorded the validated commit and completed
-the plan.
+Revision note, 2026-10-24 21:51Z: verified and fixed all three review findings;
+recorded the expanded worker validation and lease-lifetime regressions.
