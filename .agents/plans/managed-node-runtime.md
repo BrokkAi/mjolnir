@@ -25,6 +25,7 @@ This change does not add a managed `uv` runtime. No ACP harness or bridge in thi
 - [x] (2026-10-24 21:39Z) Commit the validated change on the current branch as `ff83bea41`.
 - [x] (2026-10-24 21:51Z) Verify and fix all three independent review findings for discovery ordering, supervisor lease retention, and install-lock ordering.
 - [x] (2026-10-24 21:51Z) Re-run the full worker suite and workspace clippy after the review corrections.
+- [x] (2026-10-24 21:59Z) Verify and fix the follow-up finding that per-supervisor Node leases leave bridge-replacement gaps.
 
 ## Surprises & Discoveries
 
@@ -44,6 +45,8 @@ This change does not add a managed `uv` runtime. No ACP harness or bridge in thi
   Evidence: `AcpSupervisorSpec` now carries an optional `node_lease`, the supervisor acquires it before launching the bridge, and a regression proves an exclusive contender is blocked while the supervised child runs.
 - Observation: The review finding about install-lock ordering was correct. The cache-wide install lock was released before the new Node lease was acquired, leaving a mixed-version GC window.
   Evidence: `install_managed_node` now acquires and shared-locks the Node lease before calling `gc_node_root` and before dropping the install lock.
+- Observation: The follow-up review finding was also correct. The long-lived worker ACP task can start replacement supervisors after the previous supervisor exits, and a lease held only inside each supervisor does not cover those transitions.
+  Evidence: `RunningHarness`, which remains resident for the complete ACP runtime, now owns both the managed harness and managed Node leases; individual supervisors still acquire their own Node lease to cover worker failure.
 
 ## Decision Log
 
@@ -74,6 +77,9 @@ This change does not add a managed `uv` runtime. No ACP harness or bridge in thi
 - Decision: Acquire the Node shared lease while still holding the cache-wide install lock.
   Rationale: Publication, selection, and protection become one serialized transition. A newer pinned worker cannot garbage-collect the published runtime in a gap before its first process leases it.
   Date/Author: 2026-10-24, Codex
+- Decision: Keep the selected managed-harness and managed-Node leases in `RunningHarness`, not only in supervisor processes.
+  Rationale: `RunningHarness` is the worker-side owner of the ACP runtime across bridge and supervisor replacement. Holding the leases there removes transition gaps structurally. The supervisor retains its own Node lease as a second owner so a supervisor surviving a worker failure is also protected.
+  Date/Author: 2026-10-24, Codex
 
 ## Outcomes & Retrospective
 
@@ -81,9 +87,11 @@ Mjolnir now has one owner for selecting a Node.js runtime. Compatible system
 tools remain untouched; missing or too-old tools are replaced by a
 checksum-verified, exact-version managed installation shared by sessions. The
 PATH and lease travel with the launch so npm shebangs, npx fallbacks, harness
-installation, and child processes use the same runtime. DSH keeps its native
-fast path. Documentation and doctor no longer instruct people to install Node
-on every target.
+installation, and child processes use the same runtime. The long-lived
+`RunningHarness` owner retains the Node lease across bridge replacement, while
+each supervisor also holds its own lease if it outlives the worker. DSH keeps
+its native fast path. Documentation and doctor no longer instruct people to
+install Node on every target.
 
 The worker suite passed 697 unit tests and every integration suite; the
 controller suite passed 2,086 tests. The core change passed all 17 runnable
@@ -202,5 +210,6 @@ The returned value is `Some(ManagedNodeRuntime)` when Mjolnir selected its manag
 
 Use `flate2` (already a dependency), add the workspace `tar` dependency, and use existing `crate::subprocess::run_bounded*`, checksum, atomic-directory publication, PATH, tracing, and test-hook conventions. Use `curl` through the target/session environment because the controller does not necessarily have direct network access to the worker target.
 
-Revision note, 2026-10-24 21:51Z: verified and fixed all three review findings;
-recorded the expanded worker validation and lease-lifetime regressions.
+Revision note, 2026-10-24 21:59Z: verified that per-supervisor ownership still
+had replacement gaps and moved the runtime leases into long-lived
+`RunningHarness` state.
