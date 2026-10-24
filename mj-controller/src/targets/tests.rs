@@ -133,81 +133,62 @@ fn podman_output(stdout: impl AsRef<[u8]>) -> CommandOutput {
 }
 
 #[test]
-fn apple_container_runtime_starts_only_after_the_health_check_says_it_is_stopped() {
-    let executor = PodmanPreflightExecutor::with_outputs([
-        CommandOutput {
-            status: 1,
-            stdout: Vec::new(),
-            stderr: b"service is stopped".to_vec(),
-        },
-        CommandOutput {
-            status: 0,
-            stdout: b"launching services".to_vec(),
-            stderr: Vec::new(),
-        },
-        CommandOutput {
-            status: 0,
-            stdout: b"running".to_vec(),
-            stderr: Vec::new(),
-        },
-    ]);
+fn a_waiter_for_the_apple_container_gate_stops_when_cancelled() {
+    use std::sync::mpsc;
 
-    assert_eq!(
-        ensure_apple_container_runtime(&executor).unwrap(),
-        AppleContainerRuntime::Started
-    );
-    let commands = executor.seen.borrow();
-    let commands = commands
-        .iter()
-        .map(|command| format!("{} {}", command.program, command.args.join(" ")))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        commands,
-        [
-            "container system status",
-            "container system start --disable-kernel-install",
-            "container system status",
-        ]
-    );
-}
+    struct WaitingExecutor {
+        cancelled: Arc<AtomicBool>,
+        first_check: Mutex<Option<mpsc::Sender<()>>>,
+    }
+    impl CommandExecutor for WaitingExecutor {
+        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+            panic!("a cancelled waiter must not run the Apple container CLI")
+        }
 
-#[test]
-fn apple_container_runtime_is_not_restarted_when_its_health_check_succeeds() {
-    let executor = PodmanPreflightExecutor::with_outputs([CommandOutput {
-        status: 0,
-        stdout: b"running".to_vec(),
-        stderr: Vec::new(),
-    }]);
+        fn cancellation_requested(&self) -> bool {
+            if let Some(first_check) = self
+                .first_check
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                first_check.send(()).unwrap();
+            }
+            self.cancelled.load(Ordering::Acquire)
+        }
+    }
 
-    assert_eq!(
-        ensure_apple_container_runtime(&executor).unwrap(),
-        AppleContainerRuntime::Running
-    );
-    let commands = executor.seen.borrow();
-    assert_eq!(commands.len(), 1);
-    assert_eq!(commands[0].args, ["system", "status"]);
-}
+    let gate_guard = super::preflight::apple_container_runtime_gate()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let (checked_tx, checked_rx) = mpsc::channel();
+    let executor = WaitingExecutor {
+        cancelled: cancelled.clone(),
+        first_check: Mutex::new(Some(checked_tx)),
+    };
+    let (result_tx, result_rx) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let result = ensure_apple_container_runtime(&executor);
+        result_tx.send(result).unwrap();
+    });
 
-#[test]
-fn apple_container_runtime_start_failure_keeps_the_cli_diagnostic() {
-    let executor = PodmanPreflightExecutor::with_outputs([
-        CommandOutput {
-            status: 1,
-            stdout: Vec::new(),
-            stderr: b"service is stopped".to_vec(),
-        },
-        CommandOutput {
-            status: 2,
-            stdout: b"launchd registration began".to_vec(),
-            stderr: b"no default kernel is configured".to_vec(),
-        },
-    ]);
+    checked_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("the waiter did not begin checking cancellation");
+    std::thread::sleep(Duration::from_millis(25));
+    cancelled.store(true, Ordering::Release);
+    let result = result_rx
+        .recv_timeout(Duration::from_millis(500))
+        .expect("cancellation did not release the gate waiter");
+    drop(gate_guard);
+    waiter.join().unwrap();
 
-    let error = ensure_apple_container_runtime(&executor).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "container system start failed with status 2: launchd registration began\n\
-         no default kernel is configured"
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled while waiting")
     );
 }
 

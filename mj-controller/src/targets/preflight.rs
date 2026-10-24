@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ManagedResourceKind {
@@ -112,6 +113,14 @@ pub fn verify_local_docker(executor: &impl CommandExecutor) -> Result<DockerPref
     verify_docker(None, executor)
 }
 
+static APPLE_CONTAINER_ENSURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The single gate shared by startup, launch readiness, and image refresh.
+#[cfg(test)]
+pub(super) fn apple_container_runtime_gate() -> &'static std::sync::Mutex<()> {
+    &APPLE_CONTAINER_ENSURE
+}
+
 /// What ensuring Apple's local runtime did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppleContainerRuntime {
@@ -131,10 +140,28 @@ pub enum AppleContainerRuntime {
 pub fn ensure_apple_container_runtime(
     executor: &impl CommandExecutor,
 ) -> Result<AppleContainerRuntime> {
-    static ENSURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _ensuring = ENSURE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // A launch can own this gate through the unbounded ProcessExecutor used by
+    // the options API. Daemon shutdown joins the cancellable startup and image
+    // refresh callers, so they must be able to leave while waiting for it.
+    let mut backoff = Duration::from_millis(1);
+    let _ensuring = loop {
+        ensure!(
+            !executor.cancellation_requested(),
+            "operation cancelled while waiting to check Apple container runtime"
+        );
+        match APPLE_CONTAINER_ENSURE.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_millis(50));
+            }
+        }
+    };
+    ensure!(
+        !executor.cancellation_requested(),
+        "operation cancelled while checking Apple container runtime"
+    );
 
     let status = CommandSpec::new("container", ["system", "status"])
         .purpose("check Apple container runtime")

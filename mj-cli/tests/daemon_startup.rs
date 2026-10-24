@@ -33,6 +33,130 @@ fn upgrade_command(storage: &common::DaemonStorage) -> Command {
     command
 }
 
+/// A configured Apple runtime is started by the real daemon startup path.
+/// The fake CLI holds its start operation until this test observes a
+/// successful management request, proving that the daemon does not wait for
+/// the external service before it begins serving.
+#[cfg(target_os = "macos")]
+#[test]
+fn daemon_starts_a_stopped_apple_container_runtime_without_delaying_serving() {
+    use std::time::{Duration, Instant};
+
+    let storage = upgrade_storage();
+    let data = storage.path().join("data");
+    let config = storage.path().join("config");
+    fs::create_dir_all(&data).unwrap();
+    let tools = storage.path().join("bin");
+    fs::create_dir(&tools).unwrap();
+    let log = storage.path().join("container-calls.log");
+    let started = storage.path().join("container-started");
+    let ready = storage.path().join("container-ready");
+    let release = storage.path().join("container-release");
+    mj_core::test_hooks::install_fake_command(
+        &tools,
+        "container",
+        r#"printf '%s\n' "$*" >> "$MJ_TEST_CONTAINER_LOG"
+if [ "$1 $2" = "system status" ]; then
+  if [ -f "$MJ_TEST_CONTAINER_READY" ]; then
+    exit 0
+  fi
+  printf 'service is stopped\n' >&2
+  exit 1
+fi
+if [ "$1 $2" = "system start" ] && [ "$3" = "--disable-kernel-install" ]; then
+  : > "$MJ_TEST_CONTAINER_STARTED"
+  while [ ! -f "$MJ_TEST_CONTAINER_RELEASE" ]; do
+    /bin/sleep 0.05
+  done
+  : > "$MJ_TEST_CONTAINER_READY"
+  exit 0
+fi
+exit 64
+"#,
+    );
+    let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", tools.display());
+    let mut daemon = common::own_test_daemons(&mut Command::new(env!("CARGO_BIN_EXE_mj")))
+        .arg("daemon-run")
+        .env("MJ_DATA_DIR", &data)
+        .env("MJ_CONFIG_DIR", &config)
+        .env("PATH", path)
+        .env("MJ_TEST_CONTAINER_LOG", &log)
+        .env("MJ_TEST_CONTAINER_STARTED", &started)
+        .env("MJ_TEST_CONTAINER_READY", &ready)
+        .env("MJ_TEST_CONTAINER_RELEASE", &release)
+        .env("MJOLNIR_NO_UPDATE_CHECK", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !started.exists() {
+        assert!(
+            daemon.try_wait().unwrap().is_none(),
+            "the daemon exited before starting Apple container"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never asked to start Apple container"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    // The fake start remains blocked. A management response therefore proves
+    // the real daemon startup task ran beside, not inside, its serving path.
+    loop {
+        let mut status = Command::new(env!("CARGO_BIN_EXE_mj"));
+        let output = common::own_test_daemons(&mut status)
+            .args(["daemon", "status"])
+            .env("MJ_DATA_DIR", &data)
+            .env("MJ_CONFIG_DIR", &config)
+            .env("MJOLNIR_NO_UPDATE_CHECK", "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        if output.status.success() && String::from_utf8_lossy(&output.stdout).contains(" started ")
+        {
+            break;
+        }
+        assert!(
+            daemon.try_wait().unwrap().is_none(),
+            "the daemon exited before it began serving"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never began serving while Apple container started"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        !ready.exists(),
+        "the fake container service completed before the serving check"
+    );
+
+    fs::write(&release, b"").unwrap();
+    while !ready.exists() {
+        assert!(
+            daemon.try_wait().unwrap().is_none(),
+            "the daemon exited while starting Apple container"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never completed Apple container startup"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let calls = fs::read_to_string(&log).unwrap();
+    assert!(
+        calls.starts_with("system status\nsystem start --disable-kernel-install\nsystem status\n"),
+        "unexpected container CLI sequence:\n{calls}"
+    );
+
+    drop(storage);
+    assert!(daemon.wait().unwrap().success());
+}
+
 /// Run one concurrent upgrade client with its output in a file and a deadline.
 ///
 /// A client whose output pipe a detached daemon inherited never reaches EOF,
