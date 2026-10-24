@@ -60,6 +60,11 @@ An older configuration with `enabled = true` still loads as `trigger = "turn"`; 
 
 The choice is stored with the session and kept when it resumes. A session created without these flags follows `[review]`.
 
+Review needs a committed Git checkout to capture changes. A local bare session
+whose directory is not a committed checkout must use `--review off`; enabling
+automatic review for that session is refused, and `/review` reports that it
+cannot capture the directory's changes.
+
 ## What the reviewer reads
 
 The reviewer follows the Codex `/review` rubric and returns Codex's JSON review format. Mj renders that output as readable findings text before displaying or storing it. An empty findings list is a clean review; findings include their title, location, and explanation.

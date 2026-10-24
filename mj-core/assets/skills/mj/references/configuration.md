@@ -743,9 +743,11 @@ from an isolated clone. Repository destinations may not be equal, ancestors,
 or descendants of one another.
 
 Bundles are used by container and EC2 sessions. New bare sessions select an
-existing Git project directory instead. `git_ref` is no longer accepted; remove
-it and use the source remote's default branch. See [Workspaces and bundles](/workspaces-bundles/)
-for network remotes, isolated clones, and project memory.
+existing directory instead: a local bare directory may be a plain folder, while
+an SSH bare directory must be a committed Git project. `git_ref` is no longer
+accepted; remove it and use the source remote's default branch. See
+[Workspaces and bundles](/workspaces-bundles/) for network remotes, isolated
+clones, and project memory.
 
 ## Machines `[machines.<id>]`
 
@@ -962,6 +964,10 @@ directory; when **Create isolated checkout** is checked on the final review,
 the new checkout is created below the repository's own `.mj/clones/` tree. A
 bare runtime on an EC2 machine launches one instance per session. See
 [SSH and SSH Podman](/ssh/) and [AWS EC2](/aws/).
+
+Review needs a committed Git checkout to capture changes. Create a local
+directory session with `mj new --review off`; automatic review for a plain
+directory is refused, and `/review` explains that it cannot capture changes.
 
 ### Common container fields
 

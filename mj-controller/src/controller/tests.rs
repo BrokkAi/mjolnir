@@ -873,13 +873,25 @@ fn registration_records_a_plain_local_directory_as_its_project() {
     config
         .targets
         .insert("local".into(), TargetTemplate::LocalBare);
+    config.review.trigger = mj_core::config::ReviewTrigger::Turn;
+    config.review.profile = Some("codex".into());
     let mut controller = Controller {
         config,
         state: State::default(),
     };
     let mut options = launch_options(Vec::new());
     options.project_directory = Some(workspace.path().to_owned());
+    let error = controller
+        .register_session_with_resources("codex", "project", "local", "plain", options)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("cannot be reviewed"),
+        "{error:#}"
+    );
 
+    let mut options = launch_options(Vec::new());
+    options.project_directory = Some(workspace.path().to_owned());
+    options.review = Some(mj_core::config::SessionReview::Off);
     let id = controller
         .register_session_with_resources("codex", "project", "local", "plain", options)
         .unwrap();

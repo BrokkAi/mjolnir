@@ -116,6 +116,14 @@ pub(crate) fn accept_directory(
     executor: &impl CommandExecutor,
 ) -> Result<(String, ProjectBundleSnapshot)> {
     let (host, resolved) = resolve_directory(target, directory, executor)?;
+    accept_resolved_directory(host, directory, resolved)
+}
+
+pub(crate) fn accept_resolved_directory(
+    host: String,
+    directory: &Path,
+    resolved: ResolvedDirectory,
+) -> Result<(String, ProjectBundleSnapshot)> {
     let project = directory_snapshot(&resolved);
     let id = database::store_directory_project(&project)?;
     database::store_project_location(&ProjectLocation {

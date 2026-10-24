@@ -17,6 +17,13 @@ pub trait ReviewEnvironment: Send + Sync {
         false
     }
 
+    /// Refuses a session whose project source cannot be reviewed even before
+    /// asking the worker to capture a delta. Blocking: production reads the
+    /// accepted project snapshot from the controller database.
+    fn review_refusal(&self, _session_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
     fn resolve<'a>(
         &'a self,
         handle: ManagedSessionHandle,
@@ -138,6 +145,46 @@ impl ControllerEnvironment {
 }
 
 impl ReviewEnvironment for ControllerEnvironment {
+    fn review_refusal(&self, session_id: &str) -> Result<(), String> {
+        let controller =
+            crate::controller::Controller::load().map_err(|error| format!("{error:#}"))?;
+        let session = controller
+            .state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| format!("unknown session {session_id:?}"))?;
+        let recorded_plain = session
+            .project
+            .as_ref()
+            .is_some_and(mj_core::repository::ProjectBundleSnapshot::primary_is_plain_directory);
+        // Sessions created before plain directories became an accepted project
+        // shape have no snapshot to consult. Classify their current directory
+        // when they still name a local bare target, so they cannot silently
+        // bypass review either.
+        let legacy_plain = session.project.is_none()
+            && matches!(
+                controller.config.targets.get(&session.target_template_id),
+                Some(mj_core::config::TargetTemplate::LocalBare)
+            )
+            && if let Some(directory) = session.project_directory.as_deref() {
+                mj_core::repository::resolve_local_directory(
+                    directory,
+                    &crate::targets::BoundedProcessExecutor::new(std::time::Duration::from_secs(5)),
+                )
+                .map_err(|error| format!("{error:#}"))?
+                .plain_directory
+            } else {
+                false
+            };
+        if recorded_plain || legacy_plain {
+            return Err(
+                "this session works in a directory without a committed Git checkout, so Mjolnir cannot capture changes to review"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
     fn enqueue_verdict(
         &self,
         session_id: &str,
