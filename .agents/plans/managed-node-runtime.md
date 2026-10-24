@@ -22,7 +22,7 @@ This change does not add a managed `uv` runtime. No ACP harness or bridge in thi
 - [x] (2026-10-24 21:25Z) Update human documentation and setup guidance.
 - [x] (2026-10-24 21:35Z) Run focused tests, affected worker and controller suites, and workspace clippy.
 - [x] (2026-10-24 21:37Z) Verify the official Linux x64 artifact checksum, rerun focused Node tests, and classify the pre-existing core subprocess failure.
-- [ ] Commit the validated change on the current branch.
+- [x] (2026-10-24 21:39Z) Commit the validated change on the current branch as `ff83bea41`.
 
 ## Surprises & Discoveries
 
@@ -74,7 +74,8 @@ harness-install tests and workspace clippy. The main validation limitation is
 environmental rather than feature-related:
 `subprocess::tests::spawn_detached_leaves_no_zombie_under_a_spawner_that_keeps_running`
 assumes an init process reaps a reparented zombie, which this container's PID 1
-does not do. The failure reproduces without these changes. The commit remains.
+does not do. The failure reproduces without these changes. The feature was
+committed as `ff83bea41`.
 
 ## Context and Orientation
 
@@ -184,5 +185,5 @@ The returned value is `Some(ManagedNodeRuntime)` when Mjolnir selected its manag
 
 Use `flate2` (already a dependency), add the workspace `tar` dependency, and use existing `crate::subprocess::run_bounded*`, checksum, atomic-directory publication, PATH, tracing, and test-hook conventions. Use `curl` through the target/session environment because the controller does not necessarily have direct network access to the worker target.
 
-Revision note, 2026-10-24 21:37Z: recorded completed validation, the official
-artifact checksum check, and the unrelated core test limitation.
+Revision note, 2026-10-24 21:39Z: recorded the validated commit and completed
+the plan.
