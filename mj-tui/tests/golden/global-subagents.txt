@@ -8,9 +8,9 @@
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
 │  │ No messages yet  │   Maximum concurrent children                                                             6  │                     │
-│  │                  │   Additional eligible profiles                                           0 of 3 selected  ›  │                     │
-│                     │   Straightforward                                                             2 settings  ›  │                     │
+│  │                  │   Straightforward                                                             2 settings  ›  │                     │
 │                     │   Subtle                                                                      2 settings  ›  │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │

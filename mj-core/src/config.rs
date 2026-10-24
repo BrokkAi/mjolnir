@@ -391,9 +391,10 @@ pub struct SubagentConfig {
         skip_serializing_if = "is_default_subagent_limit"
     )]
     pub max_concurrent: usize,
-    /// Profiles available in addition to the parent's own enabled profile.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub eligible_profiles: BTreeMap<String, bool>,
+    /// Old allowlist, accepted for compatibility and dropped when saved.
+    #[serde(default, rename = "eligible_profiles", skip_serializing)]
+    #[doc(hidden)]
+    pub legacy_eligible_profiles: BTreeMap<String, bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -411,7 +412,7 @@ impl Default for SubagentConfig {
             subtle: None,
             enabled: false,
             max_concurrent: default_subagent_limit(),
-            eligible_profiles: BTreeMap::new(),
+            legacy_eligible_profiles: BTreeMap::new(),
         }
     }
 }
@@ -449,12 +450,11 @@ impl SubagentConfig {
     /// only that key is still a default section and stays out of the file.
     fn is_default(&self) -> bool {
         self.max_concurrent == default_subagent_limit()
-            && self.eligible_profiles.is_empty()
             && self.straightforward.is_none()
             && self.subtle.is_none()
     }
 
-    fn validate(&self, profiles: &BTreeMap<String, HarnessProfile>) -> Result<()> {
+    fn validate(&self) -> Result<()> {
         for task_type in [
             crate::subagent::SubagentTaskType::Straightforward,
             crate::subagent::SubagentTaskType::Subtle,
@@ -474,35 +474,7 @@ impl SubagentConfig {
         if !(1..=64).contains(&self.max_concurrent) {
             bail!("[subagents] `max_concurrent` must be between 1 and 64");
         }
-        for profile_id in self
-            .eligible_profiles
-            .iter()
-            .filter_map(|(profile_id, eligible)| eligible.then_some(profile_id))
-        {
-            validate_id("sub-agent profile", profile_id)?;
-            match profiles.get(profile_id) {
-                // A disabled profile is simply not offered for sub-agent use
-                // (see `profile_is_eligible` and the spawn gate), so it does not
-                // stop the daemon from starting; `mj doctor` warns about the
-                // contradiction instead. A profile that is not defined at all is
-                // a configuration mistake, so it still fails to load.
-                Some(_) => {}
-                None => bail!(
-                    "[subagents] eligible profile {profile_id:?} is not defined in this config"
-                ),
-            }
-        }
         Ok(())
-    }
-
-    #[must_use]
-    pub fn profile_is_eligible(&self, parent: &str, candidate: &str) -> bool {
-        parent == candidate
-            || self
-                .eligible_profiles
-                .get(candidate)
-                .copied()
-                .unwrap_or(false)
     }
 }
 
@@ -573,21 +545,16 @@ impl Config {
     /// profile environments. Policies and unrelated preferences are absent.
     pub fn subagent_discovery_key(&self, parent: &str, model: Option<&str>) -> String {
         use sha2::{Digest, Sha256};
-        let inputs = serde_json::to_vec(&(parent, model, self.subagent_discovery_inputs(parent)))
+        let inputs = serde_json::to_vec(&(parent, model, self.subagent_discovery_inputs()))
             .expect("discovery inputs serialize");
         crate::hex::lower_hex(Sha256::digest(inputs))
     }
 
-    /// The eligible installations that determine a parent's delegation choices.
-    pub fn subagent_discovery_inputs(
-        &self,
-        parent: &str,
-    ) -> BTreeMap<String, ProfileDiscoveryInputs> {
+    /// Enabled installations determine sub-agent choices.
+    pub fn subagent_discovery_inputs(&self) -> BTreeMap<String, ProfileDiscoveryInputs> {
         self.profiles
             .iter()
-            .filter(|(id, profile)| {
-                profile.enabled && self.subagents.profile_is_eligible(parent, id)
-            })
+            .filter(|(_, profile)| profile.enabled)
             .map(|(id, profile)| (id.clone(), profile.discovery_inputs()))
             .collect()
     }
@@ -1250,7 +1217,7 @@ impl Config {
         // profile reports the profile's own error first.
         self.review.validate(&self.profiles)?;
         self.sessionwiki.validate()?;
-        self.subagents.validate(&self.profiles)?;
+        self.subagents.validate()?;
         for (id, bundle) in &self.bundles {
             bundle.validate(id)?;
         }

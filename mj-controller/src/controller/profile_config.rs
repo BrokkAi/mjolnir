@@ -10,7 +10,7 @@ use mj_core::config::{Config, HarnessProfile};
 use mj_core::worker_launch::{ProfileConfig, ProfileProbeSpec};
 use tokio_util::sync::CancellationToken;
 
-/// Pre-session choices use the same eligibility predicate as delegation.
+/// Pre-session choices use the same enabled-profile set as delegation.
 /// Discovery remains supervised and cached; independent profiles run concurrently.
 pub async fn subagent_options(
     parent: String,
@@ -53,7 +53,7 @@ pub(crate) async fn discover_for(
 }
 
 /// Validate the session's straightforward choice, and its subtle choice when
-/// it has one, against eligible profiles. Subtle is optional; straightforward
+/// it has one, against enabled profiles. Subtle is optional; straightforward
 /// is not.
 pub async fn validate_session_subagent_policy(
     config: &Config,
@@ -131,7 +131,7 @@ where
     let candidates = config
         .profiles
         .iter()
-        .filter(|(id, profile)| profile.enabled && config.subagents.profile_is_eligible(parent, id))
+        .filter(|(_, profile)| profile.enabled)
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
     let mut options = mj_core::subagent::SubagentOptions::default();

@@ -414,15 +414,6 @@ impl Controller {
             crate::database::load_subagent(&parent.id)?.is_none(),
             "sub-agents cannot spawn other sub-agents"
         );
-        ensure!(
-            reviewer
-                || self
-                    .config
-                    .subagents
-                    .profile_is_eligible(&parent.last_profile, &request.profile_id),
-            "profile {:?} is not eligible for sub-agent use",
-            request.profile_id
-        );
         let profile = self
             .config
             .enabled_profile(&request.profile_id)

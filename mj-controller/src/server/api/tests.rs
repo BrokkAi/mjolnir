@@ -2328,7 +2328,7 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
 }
 
 #[tokio::test]
-async fn subagent_model_selection_stays_within_eligible_profiles() {
+async fn subagent_model_selection_uses_any_enabled_profile() {
     let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend {
         subagent_configuration: Some(mj_core::config::SubagentConfig {
             straightforward: Some(mj_core::config::SubagentChoice {
@@ -2354,7 +2354,15 @@ async fn subagent_model_selection_stays_within_eligible_profiles() {
             unavailable: Vec::new(),
         }),
         subagent_model_candidates: Some(SubagentCandidates {
-            offered: vec![model_candidate("codex-1", 5, "luna")],
+            offered: vec![
+                model_candidate("codex-1", 5, "luna"),
+                model_candidate_for_harness(
+                    "claude4",
+                    98,
+                    "luna",
+                    mj_core::config::HarnessKind::Claude,
+                ),
+            ],
             unavailable: Vec::new(),
         }),
         ..FakeBackend::default()
@@ -2372,7 +2380,7 @@ async fn subagent_model_selection_stays_within_eligible_profiles() {
     .await
     .unwrap();
 
-    assert_eq!(selection.profile_id, "codex-1");
+    assert_eq!(selection.profile_id, "claude4");
 }
 
 #[tokio::test]

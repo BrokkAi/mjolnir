@@ -377,7 +377,7 @@ mj new --workspace eval --bundle product --target builder \
   `subtle`. With only straightforward, the spawn tool has no task type,
   every child uses the straightforward choice, and the parent is told to
   delegate straightforward work.
-  Mjolnir chooses an eligible profile offering its model and effort by quota.
+  Mjolnir chooses an enabled profile offering its model and effort by quota.
 - `mj new --review off|turn|push` sets the session's trigger, overriding
   `[review]`. `mj import <harness>` takes the same option for the session it
   adopts. `--review-model <name>` and `--review-effort <name>` set reviewer

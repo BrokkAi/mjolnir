@@ -198,7 +198,7 @@ pub fn run_with_config_path(
         checks.push(check);
     }
     checks.extend(harness_checks(config, executor));
-    checks.extend(subagent_eligibility_checks(config));
+    checks.extend(subagent_policy_checks(config));
     checks.extend(secret_checks(config, config_path));
     let podman = podman_checks(config, executor, options.smoke, &apple_platform);
     let docker = docker_checks(config, executor, options.smoke);
@@ -814,7 +814,7 @@ fn harness_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
         .iter()
         .map(|(id, profile)| {
             let mut check = harness_profile_check(id, profile, executor);
-            check.detail = format!("{} {}", profile_summary(config, id, profile), check.detail);
+            check.detail = format!("{} {}", profile_summary(profile), check.detail);
             check
         })
         .collect()
@@ -955,20 +955,14 @@ fn aws_harness_authentication_check(
 }
 
 /// One sentence saying what a profile is: its harness, where its quota comes
-/// from, and whether other sessions' sub-agents may use it. Quota ranking and
+/// from, and whether sub-agents may use it. Quota ranking and
 /// delegation both depend on these, and none of them shows in the profile's
 /// own table in config.toml.
-fn profile_summary(config: &Config, id: &str, profile: &HarnessProfile) -> String {
-    let delegation = if config
-        .subagents
-        .eligible_profiles
-        .get(id)
-        .copied()
-        .unwrap_or(false)
-    {
-        "any session's sub-agents may use it"
+fn profile_summary(profile: &HarnessProfile) -> String {
+    let delegation = if profile.enabled {
+        "sub-agents may use it"
     } else {
-        "only its own sessions' sub-agents may use it"
+        "disabled, so sub-agents do not use it"
     };
     format!(
         "{}; {}; {delegation}.",
@@ -1107,41 +1101,12 @@ fn plain_text_credential_check(
     ))
 }
 
-/// The sub-agent policy in one line, then a warning for each profile that is
-/// both listed for sub-agent use and disabled.
-///
-/// The daemon keeps running with such a profile and simply does not offer it
-/// to a parent, because the delegation candidates and the spawn gate both
-/// require an enabled profile. This surfaces the contradiction so the eligible
-/// list and the profile's `enabled` flag can be reconciled. An eligible id
-/// that names no profile never reaches here: the configuration fails to load,
-/// and the configuration check reports it.
-fn subagent_eligibility_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
+/// Report the shared sub-agent limit and enabled-profile behavior.
+fn subagent_policy_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
     let Ok(config) = config else {
         return Vec::new();
     };
-    let mut checks = vec![subagent_policy_check(config)];
-    checks.extend(
-        config
-            .subagents
-            .eligible_profiles
-            .iter()
-            .filter(|(_, eligible)| **eligible)
-            .filter_map(|(id, _)| match config.profiles.get(id) {
-                Some(profile) if !profile.enabled => Some(DoctorCheck::warning(
-                    format!("subagents.{id}"),
-                    format!("Sub-agent profile {id}"),
-                    format!(
-                        "Profile {id:?} is listed in [subagents.eligible_profiles] but is disabled, so it is not offered for sub-agent use."
-                    ),
-                    format!(
-                        "Re-enable profile {id:?}, or remove it from [subagents.eligible_profiles]."
-                    ),
-                )),
-                _ => None,
-            }),
-    );
-    checks
+    vec![subagent_policy_check(config)]
 }
 
 /// How many sub-agents a session may start, and on which profiles. Whether a
@@ -1149,19 +1114,8 @@ fn subagent_eligibility_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
 /// a global policy, so this check only describes the shared limits.
 fn subagent_policy_check(config: &Config) -> DoctorCheck {
     let subagents = &config.subagents;
-    let eligible = subagents
-        .eligible_profiles
-        .iter()
-        .filter(|(_, eligible)| **eligible)
-        .map(|(id, _)| id.as_str())
-        .collect::<Vec<_>>();
-    let others = if eligible.is_empty() {
-        "no other profile".to_owned()
-    } else {
-        eligible.join(", ")
-    };
     let detail = format!(
-        "Claude, Codex, and DSH sessions may opt in, up to {} sub-agents at once per session. A session's sub-agents may use its own profile and: {others}.",
+        "Claude, Codex, and DSH sessions may opt in, up to {} sub-agents at once per session. Sub-agents may use any enabled profile that offers the configured model and effort.",
         subagents.max_concurrent
     );
     DoctorCheck::ready("subagents.policy", "Sub-agent policy", detail)

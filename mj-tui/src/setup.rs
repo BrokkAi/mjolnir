@@ -299,26 +299,6 @@ fn pointer(path: &[String]) -> String {
         .collect()
 }
 
-fn populate_subagent_profile_choices(draft: &mut Value) {
-    let selected = draft["subagents"]["eligible_profiles"]
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-    let profiles = draft["profiles"]
-        .as_object()
-        .map(|profiles| profiles.keys().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-    let choices = draft["subagents"]["eligible_profiles"]
-        .as_object_mut()
-        .expect("expanded sub-agent profile choices are an object");
-    for profile_id in profiles {
-        choices.entry(profile_id).or_insert(Value::Bool(false));
-    }
-    for (profile_id, value) in selected {
-        choices.insert(profile_id, value);
-    }
-}
-
 fn machine_host_label(machine_id: &str, machine: &mj_core::config::Machine) -> String {
     match machine {
         mj_core::config::Machine::Local { .. } => "the local machine".to_owned(),
@@ -366,9 +346,6 @@ fn config_from_draft(mut draft: Value) -> Result<Config, serde_json::Error> {
         {
             draft["subagents"].as_object_mut().unwrap().remove(task);
         }
-    }
-    if let Some(choices) = draft["subagents"]["eligible_profiles"].as_object_mut() {
-        choices.retain(|_, eligible| eligible.as_bool().unwrap_or(false));
     }
     // The Machines page always shows this machine. Until it carries a setting
     // of its own it is the implied machine, not an entry, so it does not turn
@@ -731,12 +708,6 @@ fn value_summary(
     let mut child_path = path.to_vec();
     child_path.push(key.to_owned());
     let summary = match value {
-        // The eligible profiles are a page of checkboxes, one per profile, so
-        // the row counts the checked ones instead of counting settings.
-        Value::Object(entries) if child_path == ["subagents", "eligible_profiles"] => {
-            let selected = entries.values().filter(|value| **value == true).count();
-            format!("{selected} of {} selected  ›", entries.len())
-        }
         Value::Object(entries) => {
             format!("{}  ›", counted(entries.len(), "setting", "settings"))
         }
@@ -892,7 +863,6 @@ impl SetupDialog {
         let original = draft.to_string();
         ensure_local_machine(&mut draft);
         schema::expand(&mut draft, &mut Vec::new());
-        populate_subagent_profile_choices(&mut draft);
         let saved_profile_values = draft
             .get("profiles")
             .and_then(Value::as_object)
@@ -974,7 +944,6 @@ impl SetupDialog {
         let mut saved = serde_json::to_value(config).expect("configuration serializes");
         ensure_local_machine(&mut saved);
         schema::expand(&mut saved, &mut Vec::new());
-        populate_subagent_profile_choices(&mut saved);
         self.saved_profile_values = saved
             .get("profiles")
             .and_then(Value::as_object)
@@ -2370,22 +2339,12 @@ impl DashboardState {
         let Mode::Setup(dialog) = &mut self.mode else {
             return None;
         };
-        let mut config = config_from_draft(dialog.draft.clone()).ok()?;
-        // A global picker sees every enabled installation, rather than one parent's eligibility.
-        config.subagents.eligible_profiles = config
-            .enabled_profiles()
-            .map(|(id, _)| (id.to_owned(), true))
-            .collect();
-        let parent = config
-            .enabled_profiles()
-            .next()
-            .map(|(id, _)| id.to_owned())
-            .unwrap_or_default();
+        let config = config_from_draft(dialog.draft.clone()).ok()?;
         for task in ["straightforward", "subtle"] {
             let model = dialog.draft["subagents"][task]["model"].as_str();
-            let mut options = self.profile_capabilities.options(&config, &parent, None);
+            let mut options = self.profile_capabilities.options(&config, None);
             if let Some(options) = &mut options
-                && let Some(efforts) = self.profile_capabilities.options(&config, &parent, model)
+                && let Some(efforts) = self.profile_capabilities.options(&config, model)
             {
                 options.efforts = efforts.efforts;
                 options.unavailable = efforts.unavailable;
@@ -3221,7 +3180,6 @@ impl DashboardState {
                     }
                 }
                 schema::expand(&mut dialog.draft, &mut Vec::new());
-                populate_subagent_profile_choices(&mut dialog.draft);
                 let found_any = match scope {
                     DetectScope::Profiles => !config.profiles.is_empty(),
                     DetectScope::Runtimes => !config.targets.is_empty() || found_on_machines,

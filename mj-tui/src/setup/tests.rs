@@ -198,23 +198,6 @@ fn turning_jev_off_says_running_sessions_follow_after_a_resume_or_restart() {
     assert!(!dashboard.notice().unwrap().contains("Jev"));
 }
 
-/// The additional eligible profiles are a set of checkboxes, so their row
-/// says how many are chosen rather than reading like an off switch.
-/// Launch campaign finding C-3.
-// Hard-won: e03accb6: the eligible-profiles summary hid that it was a multi-select.
-#[test]
-fn the_eligible_profiles_row_reads_as_a_multi_select() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_settings_section("subagents", None);
-    let lines = drawn(&mut dashboard, 140, 40);
-    let row = lines
-        .iter()
-        .find(|line| line.contains("Additional eligible profiles"))
-        .unwrap_or_else(|| panic!("missing row: {lines:#?}"));
-    assert!(!row.contains("Off"), "{row:?}");
-    assert!(row.contains("selected"), "{row:?}");
-}
-
 #[test]
 fn clicking_a_checkbox_setting_label_toggles_once_without_keyboard_selection_toggling() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -3267,7 +3250,6 @@ fn every_setting_description_fits_its_two_rows() {
         &["sessionwiki"],
         &["sessionwiki", "archive_after_days"],
         &["subagents"],
-        &["subagents", "eligible_profiles"],
         &["machines", "m", "build_cache"],
         &["machines", "m", "build_cache", "directory"],
         &["machines", "m", "build_cache", "tools_directory"],

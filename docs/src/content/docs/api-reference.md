@@ -82,7 +82,7 @@ A failure is a JSON object with an `error` sentence:
 Some refusals also carry a `code` that names the reason, so a client can add
 advice that fits its own interface. The sentence names no interface. Today the
 only code is `subagent_choice_unavailable`: a new session asked for a
-global task-type sub-agent model or effort that no eligible profile offers.
+global task-type sub-agent model or effort that no enabled profile offers.
 
 | Status | Meaning |
 | --- | --- |
@@ -477,7 +477,7 @@ is optional:
 omitted type uses its global choice. A session may override one type and use
 global configuration for the other. Omit `effort` to use the harness default;
 `adaptive` is invalid. The selected model and effort must be available to the
-parent's eligible profiles.
+enabled profiles.
 An unavailable choice answers `422` with code `subagent_choice_unavailable`.
 Move can explicitly change the policy; omission retains it. Legacy `none`
 policies and child sessions remain readable. Per-profile defaults are ignored.
@@ -487,7 +487,7 @@ and `instructions`. Optional `task_type` is `straightforward` or `subtle`;
 omission uses Straightforward for older callers. `subtle` fails with `409` when
 the session has no subtle choice. `working_directory` is
 optional. The daemon resolves the session override or global task choice and
-selects an eligible profile by quota. Spawn no longer accepts `profile_id`, `model`, or
+selects an enabled profile by quota. Spawn no longer accepts `profile_id`, `model`, or
 `effort` overrides. Without a session override, if global choices become unconfigured, spawn fails
 with a message naming the missing configuration section and matching CLI flag.
 

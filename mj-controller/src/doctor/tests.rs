@@ -169,10 +169,6 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     let missing_ssh_check = ssh_podman_limits_check("missing-ssh", &ssh, &missing_ssh);
     let mut config = Config::default();
     config.subagents.max_concurrent = 3;
-    config
-        .subagents
-        .eligible_profiles
-        .insert("disabled-reviewer".to_owned(), true);
     config.profiles.insert(
         "disabled-reviewer".to_owned(),
         HarnessProfile {
@@ -186,7 +182,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
             codex_profile: None,
         },
     );
-    let subagent_checks = subagent_eligibility_checks(Ok(&config));
+    let subagent_checks = subagent_policy_checks(Ok(&config));
     let mut checks = vec![aws_check, docker_check, podman_check, missing_ssh_check];
     checks.extend(subagent_checks);
 
