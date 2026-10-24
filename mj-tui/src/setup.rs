@@ -2644,13 +2644,15 @@ impl DashboardState {
                 if dialog.selected != index {
                     dialog.selected = index;
                 }
+                // Checkboxes and dropdowns act on one click, as they do
+                // elsewhere; rows that navigate keep select-then-open.
                 if matches!(&event, Event::Mouse(mouse) if mouse.kind == MouseEventKind::Up(MouseButton::Left))
                     && dialog.selected_path().is_some_and(|path| {
+                        let value = dialog.draft.pointer(&pointer(&path));
                         is_build_cache_field(&path, "enabled")
-                            || dialog
-                                .draft
-                                .pointer(&pointer(&path))
-                                .is_some_and(Value::is_boolean)
+                            || value.is_some_and(Value::is_boolean)
+                            || (value.is_some_and(|value| !value.is_object() && !value.is_array())
+                                && !schema::choices(&storage_path(&path), &dialog.draft).is_empty())
                     })
                 {
                     dialog.open_selected();

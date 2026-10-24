@@ -245,6 +245,50 @@ fn clicking_a_checkbox_setting_label_toggles_once_without_keyboard_selection_tog
     assert_eq!(dialog.draft["profiles"]["codex-1"]["enabled"], true);
 }
 
+fn click(dashboard: &mut DashboardState, label: &str) {
+    let lines = drawn(dashboard, 140, 40);
+    let (column, row) = point(&lines, label);
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        dashboard.handle_mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        drawn(dashboard, 140, 40);
+    }
+}
+
+/// A row whose value is picked from a list opens its dropdown on one click,
+/// while a row that leads to another page still only selects on one click.
+#[test]
+fn one_click_opens_a_dropdown_setting_but_only_selects_a_page_row() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    click(&mut dashboard, "Interface");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert!(dialog.path.is_empty(), "one click only selects a page row");
+
+    for (section, task) in [("interface", None), ("subagents", Some("straightforward"))] {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_settings_section(section, None);
+        if let Some(task) = task {
+            choose(&mut dashboard, task);
+        }
+        let label = if task.is_some() { "Model" } else { "Theme" };
+        click(&mut dashboard, label);
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        let editor = dialog
+            .editor
+            .as_ref()
+            .expect("one click opens the dropdown");
+        assert!(editor.combo.is_open(SetupControl::Choices));
+    }
+}
+
 #[test]
 fn signing_in_to_the_selected_profile_is_a_settings_action() {
     let mut dashboard = dashboard_with_session(stopped_session());
