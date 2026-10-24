@@ -672,10 +672,12 @@ fn parse_field(field_id: &str, value: &Value, required: bool) -> Result<Elicitat
                     format: optional_text(schema, "format")?,
                 }
             } else {
-                ElicitationFieldKind::SingleSelect {
-                    options,
-                    default: optional_text(schema, "default")?,
-                }
+                let default = optional_text(schema, "default")?.or_else(|| {
+                    recommended_options(&options)
+                        .next()
+                        .map(|option| option.value.clone())
+                });
+                ElicitationFieldKind::SingleSelect { options, default }
             }
         }
         "array" => {
@@ -687,9 +689,14 @@ fn parse_field(field_id: &str, value: &Value, required: bool) -> Result<Elicitat
             )?;
             let options = parse_options(items, "anyOf").or_else(|_| parse_enum_options(items))?;
             ensure!(!options.is_empty(), "multi-select field has no options");
+            let default = optional_string_array(schema, "default")?.unwrap_or_else(|| {
+                recommended_options(&options)
+                    .map(|option| option.value.clone())
+                    .collect()
+            });
             ElicitationFieldKind::MultiSelect {
                 options,
-                default: optional_string_array(schema, "default")?.unwrap_or_default(),
+                default,
                 min_items: optional_usize(schema, "minItems")?,
                 max_items: optional_usize(schema, "maxItems")?,
             }
@@ -718,6 +725,19 @@ fn parse_field(field_id: &str, value: &Value, required: bool) -> Result<Elicitat
         custom_answer_for,
         custom_answer_option,
         kind,
+    })
+}
+
+/// Options labelled "(Recommended)", the way Claude's AskUserQuestion marks
+/// the answer it suggests. A select with no default of its own starts with
+/// these picked, rather than with the first one only under the cursor.
+fn recommended_options(options: &[ElicitationOption]) -> impl Iterator<Item = &ElicitationOption> {
+    options.iter().filter(|option| {
+        option
+            .title
+            .trim_end()
+            .to_lowercase()
+            .ends_with("(recommended)")
     })
 }
 
@@ -966,6 +986,69 @@ mod tests {
         );
         // Claude's "Other" goes beside a pick, or answers on its own.
         assert_eq!(request.fields[1].companion_role(), CompanionRole::Alongside);
+    }
+
+    #[test]
+    fn a_select_without_a_default_defaults_to_its_recommended_options() {
+        let request = ElicitationRequest::from_acp_params(
+            "elicit-recommended",
+            json!({
+                "sessionId": "session-1",
+                "mode": "form",
+                "message": "Choose",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "recommended": {
+                            "type": "string",
+                            "oneOf": [
+                                {"const": "keep", "title": "Keep it (Recommended)"},
+                                {"const": "drop", "title": "Drop it"}
+                            ]
+                        },
+                        "own_default": {
+                            "type": "string",
+                            "default": "drop",
+                            "oneOf": [
+                                {"const": "keep", "title": "Keep it (recommended)"},
+                                {"const": "drop", "title": "Drop it"}
+                            ]
+                        },
+                        "unmarked": {
+                            "type": "string",
+                            "oneOf": [{"const": "keep", "title": "Keep it"}]
+                        },
+                        "targets": {
+                            "type": "array",
+                            "items": {"anyOf": [
+                                {"const": "linux", "title": "linux"},
+                                {"const": "macos", "title": "macos (Recommended)"}
+                            ]}
+                        }
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        let single_default = |id: &str| {
+            let field = request.fields.iter().find(|field| field.id == id).unwrap();
+            let ElicitationFieldKind::SingleSelect { default, .. } = &field.kind else {
+                panic!("expected single-select field");
+            };
+            default.clone()
+        };
+        assert_eq!(single_default("recommended").as_deref(), Some("keep"));
+        assert_eq!(single_default("own_default").as_deref(), Some("drop"));
+        assert_eq!(single_default("unmarked"), None);
+        let targets = request.fields.iter().find(|field| field.id == "targets");
+        let Some(ElicitationField {
+            kind: ElicitationFieldKind::MultiSelect { default, .. },
+            ..
+        }) = targets
+        else {
+            panic!("expected multi-select field");
+        };
+        assert_eq!(default, &["macos"]);
     }
 
     // Hard-won: 86ab9abd: Muse forms showed q0 and Sessions rows showed the tool name

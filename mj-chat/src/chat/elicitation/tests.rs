@@ -944,6 +944,25 @@ fn golden_elicitation_dialog() {
 }
 
 #[test]
+fn a_claude_question_starts_with_its_recommended_option_picked() {
+    let mut params: serde_json::Value =
+        serde_json::from_str(include_str!("testdata/claude-ask-user-question.json")).unwrap();
+    params["requestedSchema"]["properties"]["question_0"]["oneOf"][1]["title"] =
+        "Memcached (Recommended)".into();
+    let dialog = ElicitationDialog::new(
+        ElicitationRequest::from_acp_params("claude-recommended", params).unwrap(),
+    );
+    assert_eq!(dialog.option_cursors[0], 1, "the cursor starts on the pick");
+    assert_eq!(
+        dialog.question_content(0),
+        Ok(BTreeMap::from([(
+            "question_0".into(),
+            ElicitationValue::String("Memcached".into())
+        )]))
+    );
+}
+
+#[test]
 fn custom_answer_uses_the_adapter_field_instead_of_the_stale_selection() {
     let mut dialog = ElicitationDialog::new(paired_request(1, false));
     dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
