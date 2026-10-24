@@ -255,11 +255,17 @@ fn discover_account(account: Account, timeout: std::time::Duration) -> Result<En
     // Absolute env prevents a profile alias or PATH change from replacing the
     // exporter. exec avoids logout hooks being appended to the captured records.
     let script = format!("printf '\\000MJ_LOGIN_{nonce}\\000'; exec /usr/bin/env -0");
-    let mut command = login_shell_command(&account.shell, &script)?;
-    command.clear_env = true;
-    command.cwd = Some(account.home.clone());
-    command.env = account.environment()?;
-    let output = BoundedProcessExecutor::new(timeout).execute(&command)?;
+    let mut probe = login_shell_command(&account.shell, &script)?;
+    probe.command.clear_env = true;
+    probe.command.cwd = Some(account.home.clone());
+    probe.command.env = account.environment()?;
+    let executor = BoundedProcessExecutor::new(timeout);
+    let output = if probe.script_on_stdin {
+        let mut input = std::io::Cursor::new(script.as_bytes());
+        executor.execute_with_stdin(&probe.command, &mut input)?
+    } else {
+        executor.execute(&probe.command)?
+    };
     // Startup output can contain secrets. Never include it in errors or logs.
     anyhow::ensure!(
         output.status == 0,
@@ -270,16 +276,30 @@ fn discover_account(account: Account, timeout: std::time::Duration) -> Result<En
 }
 
 #[cfg(unix)]
-fn login_shell_command(
-    shell: &std::path::Path,
-    script: &str,
-) -> Result<crate::targets::CommandSpec> {
+struct LoginShellProbe {
+    command: crate::targets::CommandSpec,
+    script_on_stdin: bool,
+}
+
+#[cfg(unix)]
+fn login_shell_command(shell: &std::path::Path, script: &str) -> Result<LoginShellProbe> {
     let shell_text = shell.to_str().context("target shell path is not UTF-8")?;
-    Ok(match csh_login_argv0(shell) {
-        Some(arg0) => crate::targets::CommandSpec::new(shell_text, ["-i", "-c", script]).arg0(arg0),
-        None => crate::targets::CommandSpec::new(shell_text, ["-l", "-i", "-c", script]),
-    }
-    .purpose("initialize target shell environment"))
+    let (command, script_on_stdin) = match csh_login_argv0(shell) {
+        // `-c` leaves `$?prompt` unset while startup files run, even with
+        // `-i`. C-shell files commonly guard terminal setup with that flag.
+        Some(arg0) => (
+            crate::targets::CommandSpec::new(shell_text, ["-i", "-s"]).arg0(arg0),
+            true,
+        ),
+        None => (
+            crate::targets::CommandSpec::new(shell_text, ["-l", "-i", "-c", script]),
+            false,
+        ),
+    };
+    Ok(LoginShellProbe {
+        command: command.purpose("initialize target shell environment"),
+        script_on_stdin,
+    })
 }
 
 #[cfg(unix)]
@@ -495,15 +515,18 @@ mod tests {
     #[test]
     fn shell_probe_uses_each_shell_familys_login_form() {
         let csh = login_shell_command(std::path::Path::new("/bin/tcsh"), "capture").unwrap();
-        assert_eq!(csh.arg0.as_deref(), Some("-tcsh"));
-        assert_eq!(csh.args, ["-i", "-c", "capture"]);
+        assert_eq!(csh.command.arg0.as_deref(), Some("-tcsh"));
+        assert_eq!(csh.command.args, ["-i", "-s"]);
+        assert!(csh.script_on_stdin);
 
         let posix = login_shell_command(std::path::Path::new("/bin/zsh"), "capture").unwrap();
-        assert_eq!(posix.arg0, None);
-        assert_eq!(posix.args, ["-l", "-i", "-c", "capture"]);
+        assert_eq!(posix.command.arg0, None);
+        assert_eq!(posix.command.args, ["-l", "-i", "-c", "capture"]);
+        assert!(!posix.script_on_stdin);
     }
 
     // Hard-won: 27b534a5: tcsh rejected the probe's POSIX -l option before it ran any startup file
+    // Hard-won: 90fe3a484: tcsh left prompt unset during .cshrc when the probe used -i -c
     #[test]
     fn csh_login_probe_uses_login_argv0_and_reads_csh_startup_files() {
         let shell = std::env::var_os("MJ_TEST_CSH")
@@ -520,7 +543,11 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(
             home.path().join(".cshrc"),
-            "setenv CSH_RC_SETTING from-cshrc\n",
+            "if ( $?prompt ) then\n\
+             setenv CSH_RC_SETTING from-cshrc\n\
+             else\n\
+             setenv CSH_RC_SETTING prompt-not-set\n\
+             endif\n",
         )
         .unwrap();
         std::fs::write(
