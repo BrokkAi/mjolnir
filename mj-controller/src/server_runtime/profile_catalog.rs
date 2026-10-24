@@ -25,6 +25,10 @@ type ModelProbe = dyn Fn(String, String) -> BoxFuture<'static, Result<ProfileCon
 type Attempt = Shared<BoxFuture<'static, Result<ProfileConfig, AttemptError>>>;
 type CacheKey = (String, Option<String>);
 
+/// How often ready entries are checked against the choice lifetime. An
+/// entry is probed again at most this long after it expires.
+const REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
 /// A failed attempt: its reason, and whether a later attempt could succeed.
 #[derive(Clone)]
 struct AttemptError {
@@ -75,6 +79,9 @@ struct Inner {
     live: Option<Config>,
     definitions: BTreeMap<String, Definition>,
     entries: BTreeMap<CacheKey, Entry>,
+    /// Probes replacing out-of-date ready entries, which stay served
+    /// until a probe succeeds.
+    refreshing: BTreeMap<CacheKey, Attempt>,
 }
 
 pub(crate) struct ProfileCatalog {
@@ -158,8 +165,9 @@ impl ProfileCatalog {
 
     /// Adoption updates eligibility without invalidating capability entries.
     pub(crate) fn sync(self: &Arc<Self>, config: &Config) {
-        let changed = {
+        let (changed, first) = {
             let mut inner = self.lock();
+            let first = inner.live.is_none();
             let changed = inner.live.as_ref() != Some(config);
             if let Some(old) = &inner.live {
                 for (id, profile) in old.enabled_profiles() {
@@ -174,8 +182,11 @@ impl ProfileCatalog {
                 }
             }
             inner.live = Some(config.clone());
-            changed
+            (changed, first)
         };
+        if first {
+            self.start_refreshing();
+        }
         self.ensure(config);
         if changed {
             self.publish();
@@ -234,22 +245,7 @@ impl ProfileCatalog {
                     .definitions
                     .insert(identity.clone(), definition.clone());
                 if let Some(Entry::Ready(choices)) = inner.entries.get(&key).cloned() {
-                    for model in &choices.models {
-                        let model_key = (identity.clone(), Some(model.value.clone()));
-                        if !inner.entries.contains_key(&model_key) {
-                            if choices.model.as_ref() == Some(&model.value) {
-                                inner
-                                    .entries
-                                    .insert(model_key, Entry::Ready(choices.clone()));
-                            } else {
-                                let pending = self.attempt(&definition, Some(model.value.clone()));
-                                inner
-                                    .entries
-                                    .insert(model_key.clone(), Entry::Pending(pending.clone()));
-                                started.push((model_key, pending));
-                            }
-                        }
-                    }
+                    started.extend(self.claim_models(&mut inner, &definition, &identity, &choices));
                 }
                 if let Some(attempt) = attempt {
                     inner
@@ -307,6 +303,143 @@ impl ProfileCatalog {
             }
         }
         if !started.is_empty() {
+            self.publish();
+        }
+        for (key, attempt) in started {
+            self.spawn(key, attempt);
+        }
+    }
+
+    /// Claim an entry for each model `choices` lists that has none. The
+    /// current model's efforts are already known; any other model is probed.
+    fn claim_models(
+        &self,
+        inner: &mut Inner,
+        definition: &Definition,
+        identity: &str,
+        choices: &ProfileConfig,
+    ) -> Vec<(CacheKey, Attempt)> {
+        let mut started = Vec::new();
+        for model in &choices.models {
+            let model_key = (identity.to_owned(), Some(model.value.clone()));
+            if inner.entries.contains_key(&model_key) {
+                continue;
+            }
+            if choices.model.as_ref() == Some(&model.value) {
+                inner
+                    .entries
+                    .insert(model_key, Entry::Ready(choices.clone()));
+            } else {
+                let pending = self.attempt(definition, Some(model.value.clone()));
+                inner
+                    .entries
+                    .insert(model_key.clone(), Entry::Pending(pending.clone()));
+                started.push((model_key, pending));
+            }
+        }
+        started
+    }
+
+    /// Check ready entries against the choice lifetime until shutdown.
+    fn start_refreshing(self: &Arc<Self>) {
+        let catalog = Arc::downgrade(self);
+        let cancellation = self.cancellation.clone();
+        tokio::spawn(async move {
+            // Startup discovery is already current; the first check waits.
+            let mut tick = tokio::time::interval_at(
+                tokio::time::Instant::now() + REFRESH_CHECK_INTERVAL,
+                REFRESH_CHECK_INTERVAL,
+            );
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = cancellation.cancelled() => return,
+                    _ = tick.tick() => {}
+                }
+                let Some(catalog) = catalog.upgrade() else {
+                    return;
+                };
+                catalog.refresh(|choices| !crate::controller::profile_config::is_current(choices));
+            }
+        });
+    }
+
+    /// Probe again every ready entry that `expired` selects. Readers keep
+    /// the entry until a probe succeeds; a failed probe leaves it in place.
+    fn refresh(self: &Arc<Self>, expired: impl Fn(&ProfileConfig) -> bool) {
+        let mut started = Vec::new();
+        {
+            let mut inner = self.lock();
+            let keys = inner
+                .entries
+                .iter()
+                .filter(|(key, entry)| {
+                    matches!(entry, Entry::Ready(choices) if expired(choices))
+                        && !inner.refreshing.contains_key(*key)
+                })
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            for key in keys {
+                let Some(definition) = inner
+                    .definitions
+                    .get(&key.0)
+                    .filter(|definition| !definition.cancellation.is_cancelled())
+                    .cloned()
+                else {
+                    continue;
+                };
+                let attempt = self.attempt(&definition, key.1.clone());
+                inner.refreshing.insert(key.clone(), attempt.clone());
+                started.push((key, attempt, definition.cancellation));
+            }
+        }
+        for (key, attempt, cancellation) in started {
+            tokio::spawn(self.clone().drive_refresh(key, attempt, cancellation));
+        }
+    }
+
+    async fn drive_refresh(
+        self: Arc<Self>,
+        key: CacheKey,
+        attempt: Attempt,
+        cancellation: CancellationToken,
+    ) {
+        let result = tokio::select! {
+            _ = cancellation.cancelled() => None,
+            result = attempt.clone() => Some(result),
+        };
+        let (changed, started) = {
+            let mut inner = self.lock();
+            if !inner
+                .refreshing
+                .get(&key)
+                .is_some_and(|current| current.ptr_eq(&attempt))
+            {
+                return;
+            }
+            inner.refreshing.remove(&key);
+            let Some(Ok(choices)) = result else {
+                return;
+            };
+            let Some(Entry::Ready(previous)) = inner.entries.get(&key).cloned() else {
+                return;
+            };
+            inner
+                .entries
+                .insert(key.clone(), Entry::Ready(choices.clone()));
+            let mut started = Vec::new();
+            if key.1.is_none() {
+                let definition = inner.definitions[&key.0].clone();
+                started = self.claim_models(&mut inner, &definition, &key.0, &choices);
+            }
+            let changed = !started.is_empty()
+                || ProfileConfig {
+                    observed_at: choices.observed_at,
+                    ..previous
+                } != choices;
+            (changed, started)
+        };
+        if changed {
             self.publish();
         }
         for (key, attempt) in started {
@@ -377,25 +510,12 @@ impl ProfileCatalog {
                                 .insert(key.clone(), Entry::Ready(choices.clone()));
                             if key.1.is_none() {
                                 let definition = inner.definitions[&key.0].clone();
-                                for model in &choices.models {
-                                    let model_key = (key.0.clone(), Some(model.value.clone()));
-                                    if inner.entries.contains_key(&model_key) {
-                                        continue;
-                                    }
-                                    if choices.model.as_ref() == Some(&model.value) {
-                                        inner
-                                            .entries
-                                            .insert(model_key, Entry::Ready(choices.clone()));
-                                    } else {
-                                        let pending =
-                                            self.attempt(&definition, Some(model.value.clone()));
-                                        inner.entries.insert(
-                                            model_key.clone(),
-                                            Entry::Pending(pending.clone()),
-                                        );
-                                        started.push((model_key, pending));
-                                    }
-                                }
+                                started.extend(self.claim_models(
+                                    &mut inner,
+                                    &definition,
+                                    &key.0,
+                                    choices,
+                                ));
                             }
                         }
                         Err(AttemptError { message, retryable }) => {
@@ -1098,6 +1218,41 @@ mod tests {
         );
         catalog.options_for(&live, "parent", None).await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn expired_entries_are_probed_again_and_kept_until_a_probe_succeeds() {
+        let calls = calls();
+        let failing = Arc::new(AtomicBool::new(false));
+        let catalog = ProfileCatalog::with_probe(flag_probe(failing.clone(), calls.clone()));
+        let config = test_config(&[("parent", HarnessKind::Codex)], &[]);
+        catalog.sync_now(&config).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        catalog.refresh(|_| false);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "current entries stay");
+
+        failing.store(true, Ordering::SeqCst);
+        catalog.refresh(|_| true);
+        while !catalog.lock().refreshing.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        // The default entry and the current model's copy are both probed.
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            catalog.capabilities(&["parent".into()]).await.unwrap()[0]
+                .model
+                .as_deref(),
+            Some("parent-model"),
+            "a failed refresh keeps serving the old choices"
+        );
+
+        failing.store(false, Ordering::SeqCst);
+        catalog.refresh(|_| true);
+        while !catalog.lock().refreshing.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+        assert!(catalog.capabilities(&["parent".into()]).await.is_ok());
     }
 
     #[tokio::test(start_paused = true)]

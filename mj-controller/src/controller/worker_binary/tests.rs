@@ -2501,21 +2501,25 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
     }
 }
 
-/// A catalog cache backed by an isolated copy of Mjolnir's own
-/// `profile_config_cache` table, so the fallback path is exercised against
-/// the real schema without touching the live store.
-struct IsolatedCatalogCache(std::path::PathBuf);
+/// A catalog cache of the test's own, so the fallback path never touches the
+/// daemon's shared one.
+#[derive(Default)]
+struct IsolatedCatalogCache(std::sync::Mutex<BTreeMap<(String, String), String>>);
 
 impl CatalogCache for IsolatedCatalogCache {
     fn load(&self, profile_id: &str, key: &str) -> Option<String> {
-        crate::database::load_profile_config_cache_from(&self.0, profile_id, key, key)
-            .ok()
-            .flatten()
+        self.0
+            .lock()
+            .unwrap()
+            .get(&(profile_id.to_owned(), key.to_owned()))
+            .cloned()
     }
 
     fn store(&self, profile_id: &str, key: &str, body: &str) {
-        crate::database::save_profile_config_cache_at(&self.0, profile_id, key, key, body)
-            .expect("write the isolated catalog cache");
+        self.0
+            .lock()
+            .unwrap()
+            .insert((profile_id.to_owned(), key.to_owned()), body.to_owned());
     }
 }
 
@@ -2590,9 +2594,8 @@ fn staging_a_muse_profile_hands_its_saved_model_list_to_the_session_data_directo
 fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from() {
     let home = tempfile::tempdir().unwrap();
     let staged = tempfile::tempdir().unwrap();
-    let cache = tempfile::tempdir().unwrap();
     let profile = zai_profile(home.path());
-    let cache = IsolatedCatalogCache(cache.path().join("cache.sqlite3"));
+    let cache = IsolatedCatalogCache::default();
     let asked = std::cell::RefCell::new(Vec::new());
 
     // The one staging call every session, reviewer and probe makes.
@@ -2665,7 +2668,6 @@ fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from(
 fn staging_a_codex_profile_overlay_layers_it_over_the_base_configuration() {
     let home = tempfile::tempdir().unwrap();
     let staged = tempfile::tempdir().unwrap();
-    let cache = tempfile::tempdir().unwrap();
     let mut profile = zai_profile(home.path());
     profile.codex_profile = Some("ds".to_owned());
     let base = "model = \"gpt-5.5\"\n\n[mcp_servers.base]\ncommand = \"base-server\"\n\n[tui]\nnotifications = true\n";
@@ -2675,7 +2677,7 @@ fn staging_a_codex_profile_overlay_layers_it_over_the_base_configuration() {
         format!("{ZAI_CONFIG}\n[mcp_servers.overlay]\ncommand = \"overlay-server\"\n"),
     )
     .unwrap();
-    let cache = IsolatedCatalogCache(cache.path().join("cache.sqlite3"));
+    let cache = IsolatedCatalogCache::default();
     let asked = std::cell::RefCell::new(Vec::new());
 
     profile.ensure_ready("codex-ds").unwrap();
@@ -2728,7 +2730,6 @@ fn staging_a_codex_profile_overlay_layers_it_over_the_base_configuration() {
 fn a_profile_authored_catalog_is_discarded_and_the_staged_key_replaces_its_own() {
     let home = tempfile::tempdir().unwrap();
     let staged = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
     let profile = deepseek_profile(home.path());
     // A catalog of the profile's own, named the way Codex names one.
     std::fs::write(
@@ -2751,7 +2752,7 @@ fn a_profile_authored_catalog_is_discarded_and_the_staged_key_replaces_its_own()
         &profile,
         staged.path(),
         &|_, _| Ok(DEEPSEEK_LIST.as_bytes().to_vec()),
-        &IsolatedCatalogCache(store.path().join("cache.sqlite3")),
+        &IsolatedCatalogCache::default(),
     )
     .expect("a profile-authored catalog is merged, not refused");
 
@@ -2788,9 +2789,8 @@ fn a_profile_authored_catalog_is_discarded_and_the_staged_key_replaces_its_own()
 fn a_failed_catalog_fetch_falls_back_to_the_last_cached_catalog() {
     let home = tempfile::tempdir().unwrap();
     let staged = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
     let profile = zai_profile(home.path());
-    let cache = IsolatedCatalogCache(store.path().join("cache.sqlite3"));
+    let cache = IsolatedCatalogCache::default();
 
     stage_codex_catalog(
         "glm",
@@ -2817,13 +2817,12 @@ fn a_failed_catalog_fetch_falls_back_to_the_last_cached_catalog() {
 
     // With nothing cached for a different provider, the launch fails and
     // says which profile and URL could not be reached.
-    let empty = tempfile::tempdir().unwrap();
     let error = stage_codex_catalog(
         "glm",
         &profile,
         staged.path(),
         &|_, _| bail!("the provider is unreachable"),
-        &IsolatedCatalogCache(empty.path().join("empty.sqlite3")),
+        &IsolatedCatalogCache::default(),
     )
     .expect_err("no catalog and no cache cannot launch")
     .to_string();
@@ -2832,46 +2831,6 @@ fn a_failed_catalog_fetch_falls_back_to_the_last_cached_catalog() {
 }
 
 // Hard-won: 55b8ea7: provider catalog and discovered model rows evicted each other from SQLite
-#[test]
-fn caching_a_catalog_keeps_the_discovered_configuration_of_the_default_model() {
-    let home = tempfile::tempdir().unwrap();
-    let staged = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
-    let path = store.path().join("cache.sqlite3");
-    let profile = zai_profile(home.path());
-    // What `mj models` answers for the profile's default model: the discovered
-    // configuration is kept under the empty model key.
-    crate::database::save_profile_config_cache_at(
-        &path,
-        "glm",
-        "",
-        "profile-key",
-        "{\"discovered\":true}",
-    )
-    .unwrap();
-
-    stage_codex_catalog(
-        "glm",
-        &profile,
-        staged.path(),
-        &|_, _| Ok(ZAI_CATALOG.as_bytes().to_vec()),
-        &IsolatedCatalogCache(path.clone()),
-    )
-    .unwrap();
-
-    assert_eq!(
-        crate::database::load_profile_config_cache_from(&path, "glm", "", "profile-key").unwrap(),
-        Some("{\"discovered\":true}".to_owned()),
-        "a staged catalog must not evict the discovered configuration",
-    );
-    assert!(
-        IsolatedCatalogCache(path)
-            .load("glm", &catalog_cache_key("https://api.z.ai/api/v1"))
-            .is_some(),
-        "the catalog must still be there to fall back on",
-    );
-}
-
 const DEEPSEEK_CONFIG: &str = "model = \"deepseek-v4-pro\"\n\
                                model_provider = \"deepseek\"\n\
                                \n\
@@ -2904,14 +2863,13 @@ fn stage_catalog_for(
     profile: &mj_core::config::HarnessProfile,
     body: &str,
     staged: &Path,
-    store: &Path,
 ) -> Result<mj_core::codex_catalog::CodexCatalog> {
     stage_codex_catalog(
         "deepseek",
         profile,
         staged,
         &|_, _| Ok(body.as_bytes().to_vec()),
-        &IsolatedCatalogCache(store.to_path_buf()),
+        &IsolatedCatalogCache::default(),
     )?;
     mj_core::codex_catalog::parse(&std::fs::read(staged.join("models.json")).unwrap())
 }
@@ -2920,7 +2878,6 @@ fn stage_catalog_for(
 fn a_plain_model_list_becomes_a_catalog_the_profiles_overrides_refine() {
     let home = tempfile::tempdir().unwrap();
     let staged = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
     let profile = deepseek_profile(home.path());
     std::fs::write(
         home.path().join("models.json"),
@@ -2931,13 +2888,8 @@ fn a_plain_model_list_becomes_a_catalog_the_profiles_overrides_refine() {
     )
     .unwrap();
 
-    let catalog = stage_catalog_for(
-        &profile,
-        DEEPSEEK_LIST,
-        staged.path(),
-        &store.path().join("cache.sqlite3"),
-    )
-    .expect("an OpenAI-format model list stages a catalog");
+    let catalog = stage_catalog_for(&profile, DEEPSEEK_LIST, staged.path())
+        .expect("an OpenAI-format model list stages a catalog");
 
     assert_eq!(
         catalog.slugs(),
@@ -2962,7 +2914,6 @@ fn a_plain_model_list_becomes_a_catalog_the_profiles_overrides_refine() {
 fn an_inline_token_provider_stages_its_catalog_and_guardian_reviewer() {
     let home = tempfile::tempdir().unwrap();
     let staged = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
     std::fs::write(
         home.path().join("config.toml"),
         "model = \"deepseek-flash\"\n\
@@ -2996,7 +2947,7 @@ fn an_inline_token_provider_stages_its_catalog_and_guardian_reviewer() {
             asked.borrow_mut().push((url.to_owned(), key.to_owned()));
             Ok(DEEPSEEK_LIST.as_bytes().to_vec())
         },
-        &IsolatedCatalogCache(store.path().join("cache.sqlite3")),
+        &IsolatedCatalogCache::default(),
     )
     .unwrap();
 

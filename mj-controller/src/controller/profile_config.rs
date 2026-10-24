@@ -1,7 +1,7 @@
-//! Automatically populated, persistent profile capabilities.
+//! Automatically populated profile capabilities, cached for the life of the daemon.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use crate::targets::{CancellableProcessExecutor, CommandExecutor, CommandSpec, TargetLocator};
@@ -370,14 +370,12 @@ pub(crate) async fn observe(
             ObservationCheck::NoProbe => {
                 // Nothing else will ever fill the profile's default entry, so
                 // the first session observed stands in for it.
-                if crate::database::load_profile_config_cache(&profile_id, "", &fingerprint)?
-                    .is_none()
-                {
-                    store(&profile_id, &fingerprint, &None, &choices)?;
+                if load(&profile_id, &None, &fingerprint).is_none() {
+                    store(&profile_id, &fingerprint, &None, &choices);
                 }
             }
         }
-        store(&profile_id, &fingerprint, &choices.model, &choices)?;
+        store(&profile_id, &fingerprint, &choices.model, &choices);
         job_stored.store(true, std::sync::atomic::Ordering::Release);
         Ok(choices)
     })
@@ -385,7 +383,7 @@ pub(crate) async fn observe(
     Ok(stored.load(std::sync::atomic::Ordering::Acquire))
 }
 
-/// Persistent identity follows configured definitions only. Harness-home
+/// Cache identity follows configured definitions only. Harness-home
 /// files and refreshed credentials do not invalidate advertised choices.
 fn fingerprint(profile: &HarnessProfile) -> String {
     profile.capabilities_key("")
@@ -435,15 +433,8 @@ fn discover_from_config(
     let fingerprint = fingerprint(profile);
     resolve_cached(
         refresh,
-        || {
-            crate::database::load_profile_config_cache(
-                profile_id,
-                model.as_deref().unwrap_or_default(),
-                &fingerprint,
-            )?
-            .map(|body| serde_json::from_str(&body).context("read cached profile configuration"))
-            .transpose()
-        },
+        is_current,
+        || Ok(load(profile_id, &model, &fingerprint)),
         || {
             probe_profile(
                 profile_id,
@@ -455,25 +446,58 @@ fn discover_from_config(
         },
         |choices| {
             if model.is_none() || choices.model == model {
-                store(profile_id, &fingerprint, &model, choices)?;
+                store(profile_id, &fingerprint, &model, choices);
             }
-            store(profile_id, &fingerprint, &choices.model, choices)
+            store(profile_id, &fingerprint, &choices.model, choices);
+            Ok(())
         },
     )
 }
 
+/// How long discovered choices are served before discovery probes again.
+/// Providers add and retire models without any change Mjolnir can see.
+pub(crate) const CHOICES_LIFETIME: Duration = Duration::from_secs(60 * 60);
+
+/// Whether `choices` were observed within [`CHOICES_LIFETIME`].
+pub(crate) fn is_current(choices: &ProfileConfig) -> bool {
+    is_current_at(choices, chrono::Utc::now().timestamp())
+}
+
+fn is_current_at(choices: &ProfileConfig, now: i64) -> bool {
+    now.saturating_sub(choices.observed_at) < CHOICES_LIFETIME.as_secs() as i64
+}
+
+/// Serve current cached choices, or probe. An out-of-date entry is still
+/// served when the probe fails, so an offline or signed-out provider keeps
+/// its last known choices instead of losing them.
 fn resolve_cached(
     refresh: bool,
+    current: impl FnOnce(&ProfileConfig) -> bool,
     load: impl FnOnce() -> Result<Option<ProfileConfig>>,
     probe: impl FnOnce() -> Result<ProfileConfig>,
     save: impl FnOnce(&ProfileConfig) -> Result<()>,
 ) -> Result<ProfileConfig> {
-    if !refresh && let Some(choices) = load()? {
-        return Ok(choices);
+    let cached = if refresh { None } else { load()? };
+    if let Some(choices) = &cached
+        && current(choices)
+    {
+        return Ok(choices.clone());
     }
-    let choices = probe()?;
-    save(&choices)?;
-    Ok(choices)
+    match probe() {
+        Ok(choices) => {
+            save(&choices)?;
+            Ok(choices)
+        }
+        Err(error) => match cached {
+            Some(choices) => {
+                if !discovery_is_unsupported(&error) {
+                    tracing::warn!(error = %format!("{error:#}"), "profile discovery failed; serving out-of-date cached choices");
+                }
+                Ok(choices)
+            }
+            None => Err(error),
+        },
+    }
 }
 
 /// Discovery that no retry can make succeed: this machine runs no local
@@ -571,18 +595,34 @@ fn probe_profile(
     Ok(choices)
 }
 
-fn store(
-    profile: &str,
-    fingerprint: &str,
-    model: &Option<String>,
-    choices: &ProfileConfig,
-) -> Result<()> {
-    crate::database::save_profile_config_cache(
+/// Discovered choices by profile, model (empty for the profile's default)
+/// and definition fingerprint. They live only as long as the daemon, so a
+/// restart always discovers again.
+type ChoiceKey = (String, String, String);
+static CHOICES: LazyLock<Mutex<BTreeMap<ChoiceKey, ProfileConfig>>> =
+    LazyLock::new(Default::default);
+
+fn choice_key(profile: &str, model: &Option<String>, fingerprint: &str) -> ChoiceKey {
+    (
         profile.to_owned(),
         model.clone().unwrap_or_default(),
         fingerprint.to_owned(),
-        serde_json::to_string(choices)?,
     )
+}
+
+fn load(profile: &str, model: &Option<String>, fingerprint: &str) -> Option<ProfileConfig> {
+    CHOICES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&choice_key(profile, model, fingerprint))
+        .cloned()
+}
+
+fn store(profile: &str, fingerprint: &str, model: &Option<String>, choices: &ProfileConfig) {
+    CHOICES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(choice_key(profile, model, fingerprint), choices.clone());
 }
 
 #[cfg(test)]
@@ -745,10 +785,10 @@ mod tests {
             model: Some("chosen".into()),
             models: vec![choice("chosen")],
             efforts: vec![choice("high")],
-            observed_at: 1,
+            observed_at: chrono::Utc::now().timestamp(),
         };
-        store("unsaved", &key, &None, &catalog).unwrap();
-        store("unsaved", &key, &catalog.model, &catalog).unwrap();
+        store("unsaved", &key, &None, &catalog);
+        store("unsaved", &key, &catalog.model, &catalog);
         let mut draft = Config::default();
         draft.profiles.insert("unsaved".into(), profile);
         assert!(!draft.subagents.is_configured());
@@ -1059,6 +1099,7 @@ mod tests {
                 move |_| {
                     resolve_cached(
                         false,
+                        |_| true,
                         || Ok(cache.lock().unwrap().clone()),
                         || {
                             calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1097,6 +1138,7 @@ mod tests {
         let lookup = |fail: bool| {
             resolve_cached(
                 false,
+                |_| true,
                 || Ok(cache.borrow().clone()),
                 || {
                     calls.set(calls.get() + 1);
@@ -1121,6 +1163,7 @@ mod tests {
         assert_eq!(
             resolve_cached(
                 true,
+                |_| true,
                 || Ok(cache.borrow().clone()),
                 || Ok(ProfileConfig {
                     observed_at: 2,
@@ -1134,9 +1177,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn choices_expire_after_an_hour() {
+        let lifetime = CHOICES_LIFETIME.as_secs() as i64;
+        let at = |observed_at| ProfileConfig {
+            model: None,
+            models: vec![],
+            efforts: vec![],
+            observed_at,
+        };
+        assert!(is_current_at(&at(1_000), 1_000 + lifetime - 1));
+        assert!(!is_current_at(&at(1_000), 1_000 + lifetime));
+    }
+
+    #[test]
+    fn out_of_date_choices_are_probed_again_and_kept_when_the_probe_fails() {
+        let stale = ProfileConfig {
+            model: Some("old".into()),
+            models: vec![],
+            efforts: vec![],
+            observed_at: 1,
+        };
+        let fresh = ProfileConfig {
+            model: Some("new".into()),
+            observed_at: 2,
+            ..stale.clone()
+        };
+        let saved = RefCell::new(None);
+        let resolved = resolve_cached(
+            false,
+            |choices| choices.observed_at > 1,
+            || Ok(Some(stale.clone())),
+            || Ok(fresh.clone()),
+            |choices| {
+                *saved.borrow_mut() = Some(choices.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(resolved, fresh);
+        assert_eq!(saved.borrow().as_ref(), Some(&fresh));
+        let resolved = resolve_cached(
+            false,
+            |_| false,
+            || Ok(Some(stale.clone())),
+            || anyhow::bail!("provider offline"),
+            |_| panic!("a failed probe saves nothing"),
+        )
+        .unwrap();
+        assert_eq!(resolved, stale);
+    }
+
     /// Muse models and efforts change server-side without a managed-pin bump,
     /// so caching a worker's observed catalogue hides options people expect.
-    /// Muse observations must leave the persistent cache untouched while other
+    /// Muse observations must leave the cache untouched while other
     /// harnesses keep caching theirs.
     #[tokio::test]
     async fn muse_worker_observations_are_never_cached() {
@@ -1281,9 +1375,8 @@ mod tests {
             observed_at: 1,
         };
         let muse_fingerprint = fingerprint(config.enabled_profile("muse").unwrap());
-        store("muse", &muse_fingerprint, &None, &stale).unwrap();
-        let cached_before =
-            crate::database::load_profile_config_cache("muse", "", &muse_fingerprint).unwrap();
+        store("muse", &muse_fingerprint, &None, &stale);
+        let cached_before = load("muse", &None, &muse_fingerprint);
 
         assert!(
             !observe(
@@ -1296,17 +1389,13 @@ mod tests {
             .unwrap(),
             "a Muse observation caches nothing"
         );
-        assert_eq!(
-            crate::database::load_profile_config_cache("muse", "", &muse_fingerprint).unwrap(),
-            cached_before,
-        );
+        assert_eq!(load("muse", &None, &muse_fingerprint), cached_before,);
         assert!(
-            crate::database::load_profile_config_cache(
+            load(
                 "muse",
-                "muse-spark-1.3-contributor",
+                &Some("muse-spark-1.3-contributor".into()),
                 &muse_fingerprint,
             )
-            .unwrap()
             .is_none(),
             "a Muse observation stores no model-keyed row either"
         );
@@ -1323,11 +1412,7 @@ mod tests {
             .unwrap()
         );
         let codex_fingerprint = fingerprint(config.enabled_profile("codex").unwrap());
-        assert!(
-            crate::database::load_profile_config_cache("codex", "", &codex_fingerprint)
-                .unwrap()
-                .is_some()
-        );
+        assert!(load("codex", &None, &codex_fingerprint).is_some());
     }
     #[tokio::test]
     async fn create_and_move_mjolnir_policy_refuse_unconfigured_and_unsupported_parents() {

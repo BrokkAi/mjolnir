@@ -4842,40 +4842,6 @@ fn transcript_paging_by_sequence_returns_a_rewritten_agent_message_once() {
 }
 
 #[test]
-fn profile_configuration_cache_survives_reopen_and_age_but_requires_matching_identity() {
-    let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("cache.sqlite3");
-    let connection = open(&path).unwrap();
-    save_profile_config_cache_with(&connection, "kimi", "model-1", "pin-1", "choices").unwrap();
-    drop(connection);
-    assert_eq!(
-        load_profile_config_cache_from(&path, "kimi", "model-1", "pin-1")
-            .unwrap()
-            .as_deref(),
-        Some("choices")
-    );
-    assert!(
-        load_profile_config_cache_from(&path, "kimi", "model-2", "pin-1")
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        load_profile_config_cache_from(&path, "kimi", "model-1", "pin-2")
-            .unwrap()
-            .is_none()
-    );
-    open(&path)
-        .unwrap()
-        .execute("UPDATE profile_config_cache SET observed_at = 0", [])
-        .unwrap();
-    assert!(
-        load_profile_config_cache_from(&path, "kimi", "model-1", "pin-1")
-            .unwrap()
-            .is_some()
-    );
-}
-
-#[test]
 fn filtered_transcript_pages_include_ties_and_advance_across_gaps() {
     use mj_core::transcript::TranscriptRole;
     let dir = tempfile::tempdir().unwrap();

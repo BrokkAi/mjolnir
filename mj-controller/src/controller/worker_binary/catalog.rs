@@ -10,45 +10,43 @@ pub(in crate::controller) type CatalogFetch<'a> = &'a dyn Fn(&str, &str) -> Resu
 /// unchanged on any target.
 pub(super) const STAGED_CATALOG_FILE: &str = "models.json";
 
-/// The `profile_config_cache` row one provider's fetched catalog is kept in.
-///
-/// That table is keyed by profile and model, and a discovered `ProfileConfig`
-/// for a profile's default model already occupies the empty model key, so a
-/// catalog body stored under it would evict the discovered configuration and
-/// be evicted by it in turn. A provider's base URL is not a model slug, so
-/// naming the row after it keeps the two apart and gives every provider a row
-/// of its own.
+/// The key one provider's fetched catalog is remembered under. Every
+/// provider has its own, named after its base URL.
 pub(in crate::controller) fn catalog_cache_key(base_url: &str) -> String {
     format!("catalog:{base_url}")
 }
 
 /// Where a fetched catalog is remembered so a provider outage cannot block a
-/// launch. The live store is one implementation; a test can supply another.
-/// `key` is [`catalog_cache_key`] of the provider the body came from.
+/// launch. The daemon's memory is one implementation; a test can supply
+/// another. `key` is [`catalog_cache_key`] of the provider the body came from.
 pub(in crate::controller) trait CatalogCache {
     fn load(&self, profile_id: &str, key: &str) -> Option<String>;
     fn store(&self, profile_id: &str, key: &str, body: &str);
 }
 
-/// The catalog cache backed by Mjolnir's own `profile_config_cache` table.
+/// Catalogs fetched by this daemon, by profile and [`catalog_cache_key`].
+/// They live only as long as the daemon.
+static CATALOGS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::BTreeMap<(String, String), String>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// The catalog cache shared by everything in this daemon.
 pub(in crate::controller) struct SharedCatalogCache;
 
 impl CatalogCache for SharedCatalogCache {
     fn load(&self, profile_id: &str, key: &str) -> Option<String> {
-        crate::database::load_profile_config_cache(profile_id, key, key)
-            .ok()
-            .flatten()
+        CATALOGS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&(profile_id.to_owned(), key.to_owned()))
+            .cloned()
     }
 
     fn store(&self, profile_id: &str, key: &str, body: &str) {
-        if let Err(error) = crate::database::save_profile_config_cache(
-            profile_id.to_owned(),
-            key.to_owned(),
-            key.to_owned(),
-            body.to_owned(),
-        ) {
-            tracing::warn!(profile_id, "could not cache the model catalog: {error:#}");
-        }
+        CATALOGS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert((profile_id.to_owned(), key.to_owned()), body.to_owned());
     }
 }
 
