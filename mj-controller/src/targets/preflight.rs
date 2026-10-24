@@ -125,6 +125,127 @@ pub fn verify_ssh_docker(
     })
 }
 
+/// What a reachable Apple container host reported about itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppleContainerPreflight {
+    /// The macOS release, as `sw_vers -productVersion` prints it.
+    pub macos_version: String,
+    /// What `container --version` prints, when the CLI answers it.
+    pub version: String,
+}
+
+/// Verify that an SSH host can run Apple containers.
+///
+/// Apple's `container` CLI drives a per-host VM disk image, so a session's
+/// workspace lives on the SSH host exactly as a local one lives on this Mac.
+/// There is no daemon socket to reach over a tunnel, which is why this target
+/// exists as its own kind instead of a tunnel to a local runtime.
+///
+/// Platform support comes first: a Linux host has no `container` command and
+/// no reason to be told to install one.
+pub fn verify_ssh_apple_container(
+    ssh: &SshTarget,
+    executor: &impl CommandExecutor,
+) -> Result<AppleContainerPreflight> {
+    validate_ssh(ssh)?;
+    let destination = &ssh.destination;
+    let probe = |args: [&str; 2], purpose: &'static str| {
+        ssh_validation_command(ssh, vec![args[0].to_owned(), args[1].to_owned()], purpose)
+            .stage(ProvisionStage::Provisioning)
+    };
+    let reported = |command: &CommandSpec| -> Result<String> {
+        let output = executor.execute(command).with_context(|| {
+            format!(
+                "Apple container preflight on {destination} could not run `{}`",
+                command.purpose
+            )
+        })?;
+        ensure!(
+            output.status == 0,
+            "Apple container preflight failed on {destination}: `{}` exited with status {}: {}",
+            command.purpose,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+
+    let uname = reported(&probe(
+        ["uname", "-sm"],
+        "detect the Apple container host platform",
+    ))?;
+    let platform = TargetPlatform::parse(&uname).with_context(|| {
+        format!("Apple container preflight failed on {destination}: the host reported {uname:?}")
+    })?;
+    ensure!(
+        platform.os == TargetOs::Darwin,
+        "Apple container preflight failed on {destination}: Apple container runs only on macOS, and this host reports {:?}.",
+        uname
+    );
+    ensure!(
+        platform.architecture == "aarch64",
+        "Apple container preflight failed on {destination}: Apple container requires Apple silicon, and this host reports {uname:?}."
+    );
+
+    let macos_version = reported(&probe(
+        ["sw_vers", "-productVersion"],
+        "detect the remote macOS release",
+    ))?;
+    let major: u32 = macos_version
+        .split('.')
+        .next()
+        .and_then(|major| major.parse().ok())
+        .with_context(|| {
+            format!(
+                "Apple container preflight failed on {destination}: `sw_vers -productVersion` printed {macos_version:?}"
+            )
+        })?;
+    ensure!(
+        major >= APPLE_CONTAINER_MINIMUM_MACOS,
+        "Apple container preflight failed on {destination}: Apple container requires macOS {APPLE_CONTAINER_MINIMUM_MACOS} or newer, and this host runs {macos_version}."
+    );
+
+    let version = reported(&probe(
+        ["container", "--version"],
+        "check the remote Apple container installation",
+    ))?;
+    // `container system status` exits nonzero while the daemon is stopped, so
+    // it is checked for its status rather than its words.
+    let status = ssh_validation_command(
+        ssh,
+        vec![
+            "container".to_owned(),
+            "system".to_owned(),
+            "status".to_owned(),
+        ],
+        "check the remote Apple container daemon",
+    )
+    .stage(ProvisionStage::Provisioning);
+    let output = executor.execute(&status).with_context(|| {
+        format!("Apple container preflight on {destination} could not query the daemon")
+    })?;
+    ensure!(
+        output.status == 0,
+        "Apple container preflight failed on {destination}: the Apple container daemon is not running ({}). Start it there with `container system start`.",
+        [
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim(),
+        ]
+        .into_iter()
+        .filter(|message| !message.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+    );
+    Ok(AppleContainerPreflight {
+        macos_version,
+        version,
+    })
+}
+
+/// The oldest macOS release Apple's official signed `container` package
+/// supports.
+pub const APPLE_CONTAINER_MINIMUM_MACOS: u32 = 26;
+
 /// Why the local Docker daemon cannot overlay host directories, or `None`
 /// when it runs on this Linux host and sees them directly.
 ///

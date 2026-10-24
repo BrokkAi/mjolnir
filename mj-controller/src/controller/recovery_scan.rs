@@ -398,6 +398,18 @@ fn same_resource(left: &TargetLocator, right: &TargetLocator) -> bool {
             },
         ) => left == right,
         (
+            TargetLocator::SshAppleContainer {
+                host: left_host,
+                container_id: left_container,
+                ..
+            },
+            TargetLocator::SshAppleContainer {
+                host: right_host,
+                container_id: right_container,
+                ..
+            },
+        ) => left_host == right_host && left_container == right_container,
+        (
             TargetLocator::AwsEc2 {
                 instance_id: left, ..
             },
@@ -509,6 +521,7 @@ fn adopted_container_workspace(
             | targets::TargetLocator::AppleContainer { .. }
             | targets::TargetLocator::SshPodman { .. }
             | targets::TargetLocator::SshDocker { .. }
+            | targets::TargetLocator::SshAppleContainer { .. }
     ) {
         return None;
     }
@@ -684,6 +697,21 @@ fn scan_target_workers(
                 executor,
                 ssh_spec(ssh, [remote]),
                 "scan remote Docker workers",
+            )?;
+            candidates_from_container_json(target_id, template, &output.stdout)?
+        }
+        TargetTemplate::SshAppleContainer { ssh, .. } => {
+            let remote = targets::join_remote_command(&[
+                "container".into(),
+                "list".into(),
+                "--all".into(),
+                "--format".into(),
+                "json".into(),
+            ]);
+            let output = execute_scan(
+                executor,
+                ssh_spec(ssh, [remote]),
+                "scan remote Apple container workers",
             )?;
             candidates_from_container_json(target_id, template, &output.stdout)?
         }
@@ -895,6 +923,13 @@ fn candidates_from_container_json(
                     host: ssh.host.clone(),
                     container_id: generated,
                 },
+                TargetTemplate::SshAppleContainer { ssh, .. } => {
+                    TargetLocator::SshAppleContainer {
+                        borrowed_from: None,
+                        host: ssh.host.clone(),
+                        container_id: generated,
+                    }
+                }
                 _ => return None,
             };
             Some(RecoveryCandidate {
@@ -1205,6 +1240,21 @@ fn recovery_backend_locator(
             borrowed_from: None,
             container_id: container_id.clone(),
         },
+        (
+            TargetTemplate::SshAppleContainer { ssh, .. },
+            TargetLocator::SshAppleContainer {
+                host, container_id, ..
+            },
+        ) => {
+            if host != &ssh.host {
+                bail!("recovery SSH Apple container host does not match target template")
+            }
+            targets::TargetLocator::SshAppleContainer {
+                borrowed_from: None,
+                ssh: SshTarget::from(ssh),
+                container_id: container_id.clone(),
+            }
+        }
         (
             TargetTemplate::SshPodman { ssh, .. },
             TargetLocator::SshPodman {

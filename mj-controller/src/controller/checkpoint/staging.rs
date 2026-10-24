@@ -368,12 +368,13 @@ pub(in crate::controller) fn upload_checkpoint_spec(
         }
         | targets::TargetLocator::SshDocker {
             ssh, container_id, ..
+        }
+        | targets::TargetLocator::SshAppleContainer {
+            ssh, container_id, ..
         } => {
-            let engine = match locator {
-                targets::TargetLocator::SshPodman { .. } => "podman",
-                targets::TargetLocator::SshDocker { .. } => "docker",
-                _ => unreachable!("matched remote container target"),
-            };
+            let engine = locator
+                .container_engine()
+                .expect("matched a remote container target");
             let staging = format!(
                 "{}/{session_id}-checkpoint.json",
                 targets::REMOTE_UPLOAD_STAGING

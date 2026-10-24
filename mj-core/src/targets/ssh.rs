@@ -648,6 +648,11 @@ pub fn verify_locator(locator: &TargetLocator, session_id: &str) -> Result<()> {
             container_id,
             borrowed_from,
             ..
+        }
+        | TargetLocator::SshAppleContainer {
+            container_id,
+            borrowed_from,
+            ..
         } => match borrowed_from {
             Some(owner) => {
                 validate_session_id(owner)?;
@@ -711,7 +716,8 @@ pub fn is_borrowed(locator: &TargetLocator) -> bool {
         | TargetLocator::LocalDocker { borrowed_from, .. }
         | TargetLocator::AppleContainer { borrowed_from, .. }
         | TargetLocator::SshPodman { borrowed_from, .. }
-        | TargetLocator::SshDocker { borrowed_from, .. } => borrowed_from.is_some(),
+        | TargetLocator::SshDocker { borrowed_from, .. }
+        | TargetLocator::SshAppleContainer { borrowed_from, .. } => borrowed_from.is_some(),
         TargetLocator::SshBare { worker_id, .. } => worker_id.is_some(),
         TargetLocator::LocalBare { .. } | TargetLocator::AwsEc2 { .. } => false,
     }

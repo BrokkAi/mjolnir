@@ -46,18 +46,28 @@ fn close_plan_scoped(
         !is_borrowed(locator),
         "refusing to operate on a target borrowed from another session; act on the owning session instead"
     );
+    // A remote container closes exactly as the local one does, with every
+    // command run on the host that holds it.
     if let TargetLocator::SshDocker {
+        ssh, container_id, ..
+    }
+    | TargetLocator::SshAppleContainer {
         ssh, container_id, ..
     } = locator
     {
-        let local = close_plan_scoped(
-            &TargetLocator::LocalDocker {
+        let local_locator = match locator {
+            TargetLocator::SshAppleContainer { container_id, .. } => {
+                TargetLocator::AppleContainer {
+                    borrowed_from: None,
+                    container_id: container_id.clone(),
+                }
+            }
+            _ => TargetLocator::LocalDocker {
                 borrowed_from: None,
                 container_id: container_id.clone(),
             },
-            session_id,
-            remove_shared_cache,
-        )?;
+        };
+        let local = close_plan_scoped(&local_locator, session_id, remove_shared_cache)?;
         return Ok(CommandPlan {
             description: local.description,
             commands: local
@@ -100,7 +110,9 @@ fn close_plan_scoped(
             )
         }
         TargetLocator::LocalPodman { .. } => unreachable!("handled above"),
-        TargetLocator::SshDocker { .. } => unreachable!("handled above"),
+        TargetLocator::SshDocker { .. } | TargetLocator::SshAppleContainer { .. } => {
+            unreachable!("handled above")
+        }
         TargetLocator::LocalDocker { container_id, .. } => {
             let script = r#"status=0
 engine=docker
@@ -479,7 +491,7 @@ pub fn cleanup_target_is_confirmed_absent(
         "refusing to operate on a target borrowed from another session; act on the owning session instead"
     );
     let (command, status_is_answer) = match locator {
-        TargetLocator::AppleContainer { .. } => (
+        TargetLocator::AppleContainer { .. } | TargetLocator::SshAppleContainer { .. } => (
             CommandSpec::new("container", ["list", "--all", "--quiet"])
                 .purpose("confirm exact Apple session container is absent"),
             false,
@@ -518,7 +530,9 @@ pub fn cleanup_target_is_confirmed_absent(
         _ => return Ok(false),
     };
     let command = match locator {
-        TargetLocator::SshDocker { ssh, .. } => command_over_ssh(command, ssh),
+        TargetLocator::SshDocker { ssh, .. } | TargetLocator::SshAppleContainer { ssh, .. } => {
+            command_over_ssh(command, ssh)
+        }
         _ => command,
     };
     let output = executor.execute(&command)?;
@@ -543,7 +557,9 @@ pub fn cleanup_target_is_confirmed_absent(
         );
     }
     let listed = String::from_utf8(output.stdout).context("decode Apple container list")?;
-    let TargetLocator::AppleContainer { container_id, .. } = locator else {
+    let (TargetLocator::AppleContainer { container_id, .. }
+    | TargetLocator::SshAppleContainer { container_id, .. }) = locator
+    else {
         unreachable!("engine selected from locator")
     };
     Ok(!listed.lines().any(|id| id.trim() == container_id))

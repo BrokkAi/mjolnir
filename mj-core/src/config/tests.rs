@@ -2489,6 +2489,80 @@ fn a_version_ten_config_becomes_machines_and_runtimes_on_the_next_save() {
 }
 
 #[test]
+fn an_apple_container_runtime_names_an_ssh_machine_and_survives_a_round_trip() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let source = format!(
+        r#"version = {CONFIG_VERSION}
+[machines.mac]
+kind = "ssh"
+host = "mac.example.com"
+[targets.mac-apple]
+kind = "apple-container"
+machine = "mac"
+image = "example.invalid/agent:latest"
+"#
+    );
+    fs::write(&path, &source).unwrap();
+    let config = Config::load_from(&path).unwrap();
+    let TargetTemplate::SshAppleContainer { ssh, container } = &config.targets["mac-apple"] else {
+        panic!("apple-container on an ssh machine must fuse into the remote kind");
+    };
+    assert_eq!(ssh.host, "mac.example.com");
+    assert_eq!(container.image, "example.invalid/agent:latest");
+    // The runtime half is still `apple-container`, so a saved file never
+    // mentions the fused kind.
+    assert_eq!(
+        runtime_kind_name(&config.targets["mac-apple"]),
+        "apple-container"
+    );
+    config.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("kind = \"apple-container\""), "{saved}");
+    assert!(saved.contains("machine = \"mac\""), "{saved}");
+    assert!(!saved.contains("ssh-apple-container"), "{saved}");
+    assert_eq!(Config::load_from(&path).unwrap().targets, config.targets);
+}
+
+/// The engine is the same whether it runs here or over SSH, so the remote
+/// runtime accepts and refuses exactly what the local one does.
+#[test]
+fn a_remote_apple_container_target_validates_like_the_local_one() {
+    let parse = |kind: &str, extra: &str| -> Result<TargetTemplate> {
+        Ok(toml::from_str(&format!(
+            r#"kind = "{kind}"
+host = "mac.example.com"
+image = "example.invalid/agent:latest"
+{extra}"#
+        ))?)
+    };
+    for (kind, id) in [
+        ("ssh-apple-container", "mac-apple"),
+        ("apple-container", "apple"),
+    ] {
+        let target = parse(kind, "").unwrap();
+        target.validate(id).unwrap();
+        assert!(target.container().is_some(), "{kind}");
+        // Apple's runtime keeps its workspace inside its VM disk image, so
+        // Podman's workspace-storage override is refused on both.
+        let error = parse(kind, "workspace_storage = { kind = \"container-layer\" }")
+            .unwrap()
+            .validate(id)
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("only supported by Podman"),
+            "{kind}: {error:#}"
+        );
+        // Both accept `platform`, which only reaches the engine as
+        // `--platform`.
+        parse(kind, "platform = \"linux/arm64\"")
+            .unwrap()
+            .validate(id)
+            .unwrap_or_else(|error| panic!("{kind}: {error:#}"));
+    }
+}
+
+#[test]
 fn the_current_version_refuses_the_old_fused_kinds() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");

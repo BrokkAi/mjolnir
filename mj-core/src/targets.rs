@@ -1447,7 +1447,9 @@ impl CommandPlan {
                 ];
                 command.args.extend(args);
             }
-            TargetTemplate::SshPodman { .. } | TargetTemplate::SshDocker { .. } => {
+            TargetTemplate::SshPodman { .. }
+            | TargetTemplate::SshDocker { .. }
+            | TargetTemplate::SshAppleContainer { .. } => {
                 let remote = command
                     .args
                     .last_mut()
@@ -1799,6 +1801,7 @@ pub enum ImageHost {
     AppleContainer,
     SshPodman(SshTarget),
     SshDocker(SshTarget),
+    SshAppleContainer(SshTarget),
 }
 
 impl ImageHost {
@@ -1806,7 +1809,7 @@ impl ImageHost {
         match self {
             Self::LocalPodman | Self::SshPodman(_) => "podman",
             Self::LocalDocker | Self::SshDocker(_) => "docker",
-            Self::AppleContainer => "container",
+            Self::AppleContainer | Self::SshAppleContainer(_) => "container",
         }
     }
 
@@ -1818,6 +1821,7 @@ impl ImageHost {
             Self::AppleContainer => "apple container".to_owned(),
             Self::SshPodman(ssh) => format!("podman on {}", ssh.destination),
             Self::SshDocker(ssh) => format!("docker on {}", ssh.destination),
+            Self::SshAppleContainer(ssh) => format!("apple container on {}", ssh.destination),
         }
     }
 
@@ -1827,7 +1831,9 @@ impl ImageHost {
             Self::LocalPodman | Self::LocalDocker | Self::AppleContainer => {
                 CommandSpec::new(args[0].clone(), args[1..].iter().cloned())
             }
-            Self::SshPodman(ssh) | Self::SshDocker(ssh) => ssh_command_owned(ssh, args),
+            Self::SshPodman(ssh) | Self::SshDocker(ssh) | Self::SshAppleContainer(ssh) => {
+                ssh_command_owned(ssh, args)
+            }
         }
         .purpose(purpose)
     }
@@ -1888,7 +1894,10 @@ pub fn image_refresh(
     // Apple's `container` CLI has no `--format` on `image inspect`: the exit
     // status is what says the image is present, and the printed description
     // stands in for the id when comparing before and after a pull.
-    let apple = matches!(host, ImageHost::AppleContainer);
+    let apple = matches!(
+        host,
+        ImageHost::AppleContainer | ImageHost::SshAppleContainer(_)
+    );
     let mut image_id_args = vec![engine.to_owned(), "image".to_owned(), "inspect".to_owned()];
     if !apple {
         image_id_args.push("--format".to_owned());
@@ -1986,6 +1995,10 @@ pub enum TargetTemplate {
         ssh: SshTarget,
         container: ContainerTemplate,
     },
+    SshAppleContainer {
+        ssh: SshTarget,
+        container: ContainerTemplate,
+    },
 }
 
 fn default_ssh_prefix() -> String {
@@ -2073,6 +2086,15 @@ pub enum TargetLocator {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         borrowed_from: Option<String>,
     },
+    SshAppleContainer {
+        ssh: SshTarget,
+        container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
+    },
 }
 
 impl TargetTemplate {
@@ -2080,7 +2102,7 @@ impl TargetTemplate {
         match self {
             Self::LocalPodman(_) | Self::SshPodman { .. } => Some("podman"),
             Self::LocalDocker(_) | Self::SshDocker { .. } => Some("docker"),
-            Self::AppleContainer(_) => Some("container"),
+            Self::AppleContainer(_) | Self::SshAppleContainer { .. } => Some("container"),
             _ => None,
         }
     }
@@ -2097,6 +2119,9 @@ impl TargetTemplate {
             }
             Self::SshDocker { ssh, container } => {
                 Some((ImageHost::SshDocker(ssh.clone()), container))
+            }
+            Self::SshAppleContainer { ssh, container } => {
+                Some((ImageHost::SshAppleContainer(ssh.clone()), container))
             }
             Self::LocalBare | Self::AwsEc2(_) | Self::SshBare { .. } => None,
         }
@@ -2115,6 +2140,7 @@ impl TargetLocator {
             Self::SshBare { .. } => "ssh-bare",
             Self::SshPodman { .. } => "ssh-podman",
             Self::SshDocker { .. } => "ssh-docker",
+            Self::SshAppleContainer { .. } => "ssh-apple-container",
         }
     }
 
@@ -2122,7 +2148,7 @@ impl TargetLocator {
         match self {
             Self::LocalPodman { .. } | Self::SshPodman { .. } => Some("podman"),
             Self::LocalDocker { .. } | Self::SshDocker { .. } => Some("docker"),
-            Self::AppleContainer { .. } => Some("container"),
+            Self::AppleContainer { .. } | Self::SshAppleContainer { .. } => Some("container"),
             _ => None,
         }
     }
@@ -2260,7 +2286,8 @@ pub fn workspace_for(template: &TargetTemplate, session_id: &str) -> Result<Stri
         | TargetTemplate::LocalDocker(_)
         | TargetTemplate::AppleContainer(_)
         | TargetTemplate::SshPodman { .. }
-        | TargetTemplate::SshDocker { .. } => {
+        | TargetTemplate::SshDocker { .. }
+        | TargetTemplate::SshAppleContainer { .. } => {
             bail!("container targets use the session's recorded container workspace")
         }
         TargetTemplate::AwsEc2(_) => Ok(aws_workspace(session_id)),
@@ -2319,6 +2346,9 @@ pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpe
         }
         | TargetLocator::SshDocker {
             ssh, container_id, ..
+        }
+        | TargetLocator::SshAppleContainer {
+            ssh, container_id, ..
         } => {
             let mut remote = vec![
                 locator
@@ -2342,7 +2372,10 @@ pub fn worker_root(locator: &TargetLocator, session_id: &str) -> Result<String> 
         | TargetLocator::LocalDocker { .. }
         | TargetLocator::AppleContainer { .. }
         | TargetLocator::SshPodman { .. }
-        | TargetLocator::SshDocker { .. } => format!("/var/lib/hel/workers/{session_id}"),
+        | TargetLocator::SshDocker { .. }
+        | TargetLocator::SshAppleContainer { .. } => {
+            format!("/var/lib/hel/workers/{session_id}")
+        }
         TargetLocator::AwsEc2 { .. } => format!(".local/share/hel/workers/{session_id}"),
         TargetLocator::SshBare { worker_id, .. } => format!(
             ".local/share/hel/workers/{}",

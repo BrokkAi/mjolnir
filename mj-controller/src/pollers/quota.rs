@@ -312,7 +312,7 @@ pub(super) fn local_engine_installed(host: &ImageHost, path: Option<&std::ffi::O
         ImageHost::LocalPodman | ImageHost::LocalDocker | ImageHost::AppleContainer => {
             crate::targets::program_on_path(host.engine(), path)
         }
-        ImageHost::SshPodman(_) | ImageHost::SshDocker(_) => true,
+        ImageHost::SshPodman(_) | ImageHost::SshDocker(_) | ImageHost::SshAppleContainer(_) => true,
     }
 }
 

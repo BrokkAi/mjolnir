@@ -1073,8 +1073,10 @@ memory = "32g"
 EXAMPLE = "value"
 ```
 
-All common fields except a non-default `workspace_storage` are supported. Apple
-`container` runs only on this machine. See [Apple container](/apple-container/).
+All common fields except a non-default `workspace_storage` are supported. With
+`machine = "local"` the container runs on this Mac; with an `ssh` machine it
+runs on that remote Apple-silicon Mac, which must run macOS 26 or newer. See
+[Apple container](/apple-container/).
 
 ### Files written before version 12
 

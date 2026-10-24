@@ -259,6 +259,7 @@ fn supported_host(target: &targets::TargetTemplate) -> Option<(CacheHost, Target
             container.build_cache.clone().unwrap_or_default()
         }
         targets::TargetTemplate::AppleContainer(_)
+        | targets::TargetTemplate::SshAppleContainer { .. }
         | targets::TargetTemplate::LocalBare
         | targets::TargetTemplate::AwsEc2(_)
         | targets::TargetTemplate::SshBare { .. } => return None,
@@ -1334,7 +1335,10 @@ pub(super) fn host_for_locator(target: &targets::TargetLocator) -> Option<CacheH
             Some(CacheHost::Local)
         }
         targets::TargetLocator::SshPodman { ssh, .. }
-        | targets::TargetLocator::SshDocker { ssh, .. } => Some(CacheHost::Ssh(ssh.clone())),
+        | targets::TargetLocator::SshDocker { ssh, .. }
+        | targets::TargetLocator::SshAppleContainer { ssh, .. } => {
+            Some(CacheHost::Ssh(ssh.clone()))
+        }
         _ => None,
     }
 }

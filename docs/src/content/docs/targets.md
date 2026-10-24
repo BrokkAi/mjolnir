@@ -36,6 +36,7 @@ command exercises container creation and removal.
 | `podman` | an `ssh` machine | rootless container | Bundle | remote-host copy-on-write or read-only mounts | CPU and memory | Remote container and workspace storage are removed after verified stop. |
 | `docker` | `local` with a Linux Docker daemon (including a VM on macOS), or an `ssh` machine | Docker container | Bundle | copy-on-write or read-only OverlayFS views | CPU and memory | Container and managed workspace volume are removed after verified stop. |
 | `apple-container` | `local` (Apple-silicon macOS 26+) | Apple container VM | Bundle | read-only mounts | CPU and memory | Container is removed after verified stop. |
+| `apple-container` | an `ssh` machine (Apple-silicon macOS 26+) | Apple container VM on the remote Mac | Bundle | remote-host read-only mounts | CPU and memory | Remote container is removed after verified stop. |
 
 “Verified stop” means Mjolnir has created a recovery archive and checked its
 SHA-256 on the controller before tearing the resource down. See
@@ -216,6 +217,24 @@ Apple's `container` CLI requires Apple silicon and macOS 26 or newer.
 Supplemental directories are mounted read-only; writable OverlayFS views and
 Podman workspace-storage overrides are unavailable. See
 [Apple container](/apple-container/).
+
+An `apple-container` runtime on an `ssh` machine runs on that Mac. This lets a
+Linux controller, or an Intel Mac, reach the Apple-silicon Mac beside it:
+
+```toml
+[machines.mac]
+kind = "ssh"
+host = "mac.example.com"
+user = "dev"
+
+[targets.mac-apple]
+kind = "apple-container"
+machine = "mac"
+```
+
+Settings › Runtimes offers that runtime when the probe finds Apple-silicon
+macOS 26 or newer with a running Apple container daemon; `mj doctor` checks it
+the way it checks a local one.
 
 ### Podman on an SSH machine
 
