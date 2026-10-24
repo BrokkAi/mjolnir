@@ -1474,6 +1474,11 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
         return vec!["session suspended".to_owned()];
     }
     let mut lines = Vec::new();
+    if response.outcome == WaitOutcome::Error
+        && let Some(error) = &response.session.error
+    {
+        lines.push(format!("session error: {error}"));
+    }
     // No number: `turn_id` is where the turn's prompt sits in the transcript,
     // not a count of anything a reader can use, so it stays in --json (I2-5).
     let mut summary = format!("turn {}", outcome_name(response.outcome));
@@ -1870,6 +1875,12 @@ pub(crate) async fn sessions(
             listed_state(session),
             session.title
         );
+        if session.has_error {
+            println!(
+                "  error details: run `mj sessions --session {}`",
+                session.id
+            );
+        }
     }
     Ok(())
 }
@@ -3252,6 +3263,14 @@ mod tests {
             lines.iter().any(|line| line.contains("job_output-7")),
             "the reason is printed: {lines:?}"
         );
+
+        // Hard-won: DSH campaign C-2: failed startup details were present in the session but absent from `mj wait`.
+        let mut startup_failure = wait_response("error", serde_json::json!({}));
+        startup_failure.session.error =
+            Some("install the harness in the target environment".into());
+        assert!(wait_report_lines(&startup_failure).iter().any(|line| {
+            line == "session error: install the harness in the target environment"
+        }));
 
         // A turn that finished normally is not annotated with a diagnostic it
         // may still carry from an earlier attempt.
