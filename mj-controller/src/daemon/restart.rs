@@ -967,6 +967,9 @@ pub(super) fn restart_target_availability(
         let output = executor
             .execute(&list)
             .context("list retained Apple target before Restart")?;
+        if output.status == 255 && locator_is_remote(&locator) {
+            return Ok(RestartTargetAvailability::Unreachable);
+        }
         ensure!(
             output.status == 0,
             "could not confirm Apple target availability before Restart (status {}): {}",

@@ -284,12 +284,13 @@ permissions, launch-template contract, and connectivity.
 
 ## Bundles, clones, and workspace roots
 
-Managed targets—Podman, Docker, Apple Container, SSH Podman, and EC2—clone a
-configured bundle into a new session workspace. `primary_repo` is the agent's
-working directory and every other repository is an additional ACP workspace
-root. Every repository clones its network fetch remote's default branch. A
-controller-side `local` path supplies only its configured network fetch and
-push destinations; no Git connection back to that checkout is created.
+Managed targets—Podman, Docker, Apple Container, SSH Podman, SSH Docker, Apple
+Container over SSH, and EC2—clone a configured bundle into a new session
+workspace. `primary_repo` is the agent's working directory and every other
+repository is an additional ACP workspace root. Every repository clones its
+network fetch remote's default branch. A controller-side `local` path supplies
+only its configured network fetch and push destinations; no Git connection
+back to this checkout is created.
 
 Local and SSH bare sessions instead choose an existing project directory.
 A single-repository isolated session can move into a raw local worktree when

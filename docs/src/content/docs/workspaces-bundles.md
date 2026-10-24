@@ -102,10 +102,10 @@ Workspaces are stored in `mj.sqlite3`, not `config.toml`. Do not add a
 
 ## Bundles define managed projects
 
-Container, SSH Podman, and EC2 targets start from a bundle. A bundle can contain
-one repository or assemble several repositories into a virtual monorepo. Its
-`primary_repo` becomes the ACP session working directory; every other member is
-provided to the harness as an additional workspace root.
+Container, SSH container, and EC2 targets start from a bundle. A bundle can
+contain one repository or assemble several repositories into a virtual
+monorepo. Its `primary_repo` becomes the ACP session working directory; every
+other member is provided to the harness as an additional workspace root.
 
 ```toml
 [bundles.product]

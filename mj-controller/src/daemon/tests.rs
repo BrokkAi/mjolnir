@@ -187,6 +187,32 @@ async fn restart_target_probe_only_allows_fallback_for_a_proven_missing_target()
             .unwrap();
     assert_eq!(availability, restart::RestartTargetAvailability::Reachable);
     assert!(!restart::fallback_is_safe(availability));
+
+    let mut apple = runtime_test_session("apple-session", "workspace", SessionState::Closing);
+    apple.target_template_id = "mac-apple".into();
+    apple.target = Some(mj_core::state::TargetLocator::SshAppleContainer {
+        borrowed_from: None,
+        host: "mac.test".into(),
+        container_id: mj_core::targets::resource_name("apple-session").unwrap(),
+    });
+    controller.config.targets.insert(
+        "mac-apple".into(),
+        serde_json::from_value(serde_json::json!({
+            "kind": "ssh-apple-container",
+            "host": "mac.test",
+            "image": "example.invalid/agent:latest"
+        }))
+        .unwrap(),
+    );
+    controller.state.sessions.insert(apple.id.clone(), apple);
+    let unreachable =
+        restart::restart_target_availability(&controller, "apple-session", &StatusExecutor(255))
+            .unwrap();
+    assert_eq!(
+        unreachable,
+        restart::RestartTargetAvailability::Unreachable,
+        "a lost SSH connection must preserve the retained Apple container"
+    );
 }
 
 // Hard-won: 7b694803: Alt-X cancelled target teardown after its verified-checkpoint gate.

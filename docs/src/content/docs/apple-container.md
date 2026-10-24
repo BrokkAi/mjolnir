@@ -77,12 +77,23 @@ kind = "apple-container"
 machine = "mac"
 ```
 
-The remote Mac needs the same runtime and macOS release as a local one. When
-you save that machine, Mjolnir probes it over SSH — `uname -sm`,
+Install the runtime on the remote Mac by following the [installation
+instructions](https://github.com/apple/container#initial-install), then start
+its service there. The remote Mac needs the same runtime and macOS release as a
+local one. The SSH account must find `container` on the noninteractive `PATH`
+used by `ssh <destination> <command>`; check that before adding the machine:
+
+```console
+ssh mac.example.com container --version
+ssh mac.example.com container system status
+```
+
+When you save that machine, Mjolnir probes it over SSH — `uname -sm`,
 `sw_vers -productVersion`, `container --version`, and `container system status`
 — and offers the runtime in **Settings → Runtimes** when all four answer.
 `mj doctor` checks it the same way. Every command for the session runs on that
-Mac; the controller needs `ssh` but no local container runtime.
+Mac; the controller needs `ssh` but no local container runtime. The Mac and its
+container service stay running when sessions stop.
 
 ## Verify it end to end
 

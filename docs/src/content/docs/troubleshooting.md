@@ -235,6 +235,11 @@ Then follow the target-specific result:
 - **Apple container:** the controller must be Apple silicon on macOS 26 or
   newer. If doctor reports a stopped service, run `container system start`.
   See [Apple container](/apple-container/).
+- **Apple container over SSH:** run `ssh <destination> container --version`
+  and `ssh <destination> container system status` as the configured user.
+  Install the signed package, start the service, use macOS 26 or newer on Apple
+  silicon, and make sure noninteractive SSH can find `container` on `PATH`. See
+  [Apple container](/apple-container/).
 - **SSH Podman:** run the Podman prerequisite and image checks on the remote
   host as the same user selected by SSH. See [SSH and SSH Podman](/ssh/).
 - **EC2:** verify the configured AWS profile, region, launch template, SSH

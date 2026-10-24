@@ -1,6 +1,6 @@
 ---
 title: Custom container images
-description: What a container image must provide to work as a Mjolnir Podman, Docker, Apple container, or SSH Podman target.
+description: What a container image must provide to work with any local or SSH container runtime.
 ---
 
 mj can run a session in any container image that meets a small contract.
