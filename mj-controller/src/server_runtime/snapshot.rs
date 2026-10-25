@@ -83,10 +83,9 @@ pub(super) fn track_capacity_targets(
 /// Project the capacity readings for the phone.
 pub(super) fn viewer_capacity(
     state: &std::collections::BTreeMap<String, PhoneCapacity>,
-    controller_state: &mj_core::state::State,
-    reservations: &std::collections::BTreeMap<
+    container_capacities: &std::collections::BTreeMap<
         String,
-        crate::daemon::capacity::ContainerCapacityReservation,
+        mj_client::runtime_feed::RuntimeContainerCapacity,
     >,
 ) -> Vec<crate::server::ViewerTargetCapacity> {
     let now = std::time::SystemTime::now()
@@ -99,21 +98,9 @@ pub(super) fn viewer_capacity(
         .map(|entry| {
             let usage = entry.usage.as_ref();
             let hosts = mj_core::targets::storage::capacity_storage_hosts(&entry.target, usage);
-            let container_capacity = usage
-                .filter(|_| entry.target.kind == crate::targets::DeploymentCapacityKind::Host)
-                .map(|usage| {
-                    crate::daemon::capacity::capacity_with_reservations(
-                        &crate::daemon::capacity::ContainerCapacityInput {
-                            target_ids: entry.target.target_ids.clone(),
-                            total: mj_core::state::HostContainerSize {
-                                cpus: usage.logical_cores,
-                                memory_bytes: usage.memory_total_bytes,
-                            },
-                        },
-                        controller_state.sessions.values(),
-                        reservations,
-                    )
-                });
+            let container_capacity = container_capacities
+                .get(&entry.target.id)
+                .map(|capacity| capacity.capacity);
             crate::server::ViewerTargetCapacity {
                 storage: crate::server::ViewerTargetStorage::list(
                     &mj_core::targets::storage::views_for(&storage, &hosts),

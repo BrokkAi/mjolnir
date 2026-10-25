@@ -33,12 +33,17 @@ pub(super) fn load_controller_for_resume(request: &ResumeSessionRequest) -> Resu
 }
 
 impl RuntimeState {
-    async fn reserve_move_container_capacity(
+    async fn reserve_container_capacity_for_move(
         self: &Arc<Self>,
         request: &MoveSessionRequest,
     ) -> Result<Option<capacity::ContainerCapacityLease>> {
+        // An in-place Move replaces only the harness in the existing
+        // environment, so it creates no additional container commitment.
+        if request.preparation.in_place {
+            return Ok(None);
+        }
         let selection = &request.preparation.selection;
-        let (target_id, allocation, container_target) = {
+        let (target_id, allocation, container_target, source) = {
             let owner = self.owner();
             let controller = owner.controller();
             let source = controller
@@ -56,6 +61,7 @@ impl RuntimeState {
                 .targets
                 .get(&target_id)
                 .with_context(|| format!("unknown target {target_id:?}"))?;
+            let container_target = mj_core::config::is_container_target(template);
             let allocation = if selection.clear_resource_allocation {
                 None
             } else {
@@ -64,14 +70,32 @@ impl RuntimeState {
                     .clone()
                     .or_else(|| source.resource_allocation.clone())
             };
-            (
-                target_id,
-                allocation,
-                mj_core::config::is_container_target(template),
-            )
+            let source_commitment = if container_target
+                && mj_core::state::session_owns_container(source)
+            {
+                self.capacity_feed()
+                    .and_then(|feed| feed.target_for(&source.target_template_id))
+                    .filter(|target| target.kind == crate::targets::DeploymentCapacityKind::Host)
+                    .map(|target| capacity::ContainerCapacityCommitment {
+                        target_ids: target.target_ids,
+                        allocation: source.resource_allocation.clone(),
+                    })
+            } else {
+                None
+            };
+            (target_id, allocation, container_target, source_commitment)
         };
         if !container_target || self.capacity_feed().is_none() {
             return Ok(None);
+        }
+        let admission = self.container_admission.lock().await;
+        if self
+            .container_capacity_reservations()
+            .contains_key(&selection.session_id)
+        {
+            let lease = self.joined_container_capacity_lease(&selection.session_id);
+            drop(admission);
+            return Ok(Some(lease));
         }
         let Some(input) = self.cached_container_capacity_input(&target_id) else {
             return Err(anyhow::Error::new(
@@ -89,15 +113,21 @@ impl RuntimeState {
                 .with_code("container-size-required"),
             ));
         };
-        let admission = self.container_admission.lock().await;
         let capacity = {
             let owner = self.owner();
-            self.capacity_with_reservations(&input, owner.controller().state.sessions.values())
+            let replaced = BTreeSet::from([selection.session_id.clone()]);
+            capacity::capacity_with_reservations_after(
+                &input,
+                owner.controller().state.sessions.values(),
+                &self.container_capacity_reservations(),
+                &replaced,
+            )
         };
         if !capacity.fits(&allocation) {
             return Err(super::create::capacity_refusal(capacity, &allocation));
         }
-        let lease = self.reserve_container_capacity(&selection.session_id, &input, allocation);
+        let lease =
+            self.reserve_move_capacity_lease(&selection.session_id, &input, allocation, source);
         drop(admission);
         Ok(Some(lease))
     }
@@ -171,7 +201,7 @@ impl RuntimeState {
         self: &Arc<Self>,
         request: MoveSessionRequest,
     ) -> Result<()> {
-        let capacity = self.reserve_move_container_capacity(&request).await?;
+        let capacity = self.reserve_container_capacity_for_move(&request).await?;
         self.admit_move_session(request, capacity).map(|_| ())
     }
 
@@ -236,7 +266,7 @@ impl RuntimeState {
         let selection = request.preparation.selection.clone();
         let operation_id = request.preparation.operation_id.clone();
         let session_id = selection.session_id.clone();
-        let capacity = self.reserve_move_container_capacity(&request).await?;
+        let capacity = self.reserve_container_capacity_for_move(&request).await?;
         let result = self.admit_move_session(request, capacity)?;
         let channel = result.clone();
         let result = Self::wait_lifecycle_result(result).await;

@@ -544,19 +544,29 @@ impl DashboardState {
         &self,
         target_id: &str,
     ) -> Option<mj_core::state::HostContainerCapacity> {
-        let detail = self
-            .capacity_details
+        self.container_capacities
             .values()
-            .find(|detail| detail.target.target_ids.iter().any(|id| id == target_id))?;
-        let usage = detail.usage.as_ref()?;
-        Some(mj_core::state::host_container_capacity(
-            mj_core::state::HostContainerSize {
-                cpus: usage.logical_cores,
-                memory_bytes: usage.memory_total_bytes,
-            },
-            &detail.target.target_ids,
-            self.state.sessions.values(),
-        ))
+            .find(|capacity| capacity.target_ids.iter().any(|id| id == target_id))
+            .map(|capacity| capacity.capacity)
+    }
+
+    pub fn set_container_capacities(
+        &mut self,
+        capacities: BTreeMap<String, mj_client::runtime_feed::RuntimeContainerCapacity>,
+    ) {
+        let mut affected = std::collections::BTreeSet::new();
+        for (target_id, capacity) in &self.container_capacities {
+            if capacities.get(target_id) != Some(capacity) {
+                affected.extend(capacity.target_ids.iter().cloned());
+            }
+        }
+        for (target_id, capacity) in &capacities {
+            if self.container_capacities.get(target_id) != Some(capacity) {
+                affected.extend(capacity.target_ids.iter().cloned());
+            }
+        }
+        self.container_capacities = capacities;
+        self.refresh_wizard_resource_limits(&affected.into_iter().collect::<Vec<_>>());
     }
 
     pub(super) fn validate_wizard_resources<W: WizardDraft>(&self, wizard: &mut W) {

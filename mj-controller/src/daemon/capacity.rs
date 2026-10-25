@@ -16,9 +16,18 @@ pub(crate) struct ContainerCapacityInput {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct ContainerCapacityCommitment {
+    pub(crate) target_ids: Vec<String>,
+    pub(crate) allocation: Option<mj_core::state::SessionResourceAllocation>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ContainerCapacityReservation {
+    /// Destination deployment target and allocation.
     pub(crate) target_ids: Vec<String>,
     pub(crate) allocation: mj_core::state::SessionResourceAllocation,
+    /// The running source a same- or cross-host Move has not retired yet.
+    pub(crate) source: Option<ContainerCapacityCommitment>,
 }
 
 /// Owns one in-memory resume or move reservation until the lifecycle either
@@ -26,15 +35,18 @@ pub(crate) struct ContainerCapacityReservation {
 pub(crate) struct ContainerCapacityLease {
     state: Arc<RuntimeState>,
     session_id: String,
+    owner: bool,
 }
 
 impl Drop for ContainerCapacityLease {
     fn drop(&mut self) {
-        self.state
-            .container_reservations
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.session_id);
+        if self.owner {
+            self.state
+                .container_reservations
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&self.session_id);
+        }
     }
 }
 
@@ -189,17 +201,63 @@ impl RuntimeState {
         input: &ContainerCapacityInput,
         allocation: mj_core::state::SessionResourceAllocation,
     ) -> ContainerCapacityLease {
-        self.container_reservations
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(session_id.to_owned())
-            .or_insert_with(|| ContainerCapacityReservation {
-                target_ids: input.target_ids.clone(),
-                allocation,
-            });
+        self.reserve_container_capacity_with_source(session_id, input, allocation, None)
+    }
+
+    pub(crate) fn reserve_move_capacity_lease(
+        self: &Arc<Self>,
+        session_id: &str,
+        input: &ContainerCapacityInput,
+        allocation: mj_core::state::SessionResourceAllocation,
+        source: Option<ContainerCapacityCommitment>,
+    ) -> ContainerCapacityLease {
+        self.reserve_container_capacity_with_source(session_id, input, allocation, source)
+    }
+
+    pub(crate) fn joined_container_capacity_lease(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> ContainerCapacityLease {
+        debug_assert!(
+            self.container_reservations
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains_key(session_id)
+        );
         ContainerCapacityLease {
             state: self.clone(),
             session_id: session_id.to_owned(),
+            owner: false,
+        }
+    }
+
+    fn reserve_container_capacity_with_source(
+        self: &Arc<Self>,
+        session_id: &str,
+        input: &ContainerCapacityInput,
+        allocation: mj_core::state::SessionResourceAllocation,
+        source: Option<ContainerCapacityCommitment>,
+    ) -> ContainerCapacityLease {
+        let mut reservations = self
+            .container_reservations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let owner = if let std::collections::btree_map::Entry::Vacant(entry) =
+            reservations.entry(session_id.to_owned())
+        {
+            entry.insert(ContainerCapacityReservation {
+                target_ids: input.target_ids.clone(),
+                allocation,
+                source,
+            });
+            true
+        } else {
+            false
+        };
+        ContainerCapacityLease {
+            state: self.clone(),
+            session_id: session_id.to_owned(),
+            owner,
         }
     }
 
@@ -282,11 +340,26 @@ pub(crate) fn capacity_with_reservations<'a>(
     sessions: impl IntoIterator<Item = &'a SessionRecord>,
     reservations: &BTreeMap<String, ContainerCapacityReservation>,
 ) -> mj_core::state::HostContainerCapacity {
-    let reserved_ids = reservations
+    capacity_with_reservations_after(input, sessions, reservations, &BTreeSet::new())
+}
+
+/// Capacity with reservations and sessions that are about to be replaced
+/// removed from the durable counts.
+pub(crate) fn capacity_with_reservations_after<'a>(
+    input: &ContainerCapacityInput,
+    sessions: impl IntoIterator<Item = &'a SessionRecord>,
+    reservations: &BTreeMap<String, ContainerCapacityReservation>,
+    additionally_replaced: &BTreeSet<String>,
+) -> mj_core::state::HostContainerCapacity {
+    let matching = reservations
         .iter()
-        .filter(|(_, reservation)| same_target_group(&reservation.target_ids, &input.target_ids))
+        .filter(|(_, reservation)| reservation_affects_group(reservation, &input.target_ids))
+        .collect::<Vec<_>>();
+    let mut reserved_ids = matching
+        .iter()
         .map(|(session_id, _)| session_id.as_str())
         .collect::<BTreeSet<_>>();
+    reserved_ids.extend(additionally_replaced.iter().map(String::as_str));
     let mut capacity = mj_core::state::host_container_capacity(
         input.total,
         &input.target_ids,
@@ -294,31 +367,142 @@ pub(crate) fn capacity_with_reservations<'a>(
             .into_iter()
             .filter(|session| !reserved_ids.contains(session.id.as_str())),
     );
-    for reservation in reservations
-        .values()
-        .filter(|reservation| same_target_group(&reservation.target_ids, &input.target_ids))
-    {
-        let mj_core::state::SessionResourceAllocation::Container { cpus, memory_bytes } =
-            &reservation.allocation
-        else {
-            continue;
+    let mut complete = capacity.complete;
+    for (_, reservation) in matching {
+        let destination_matches = same_target_group(&reservation.target_ids, &input.target_ids);
+        let destination =
+            destination_matches.then_some(container_commitment(&reservation.allocation));
+        let source = reservation
+            .source
+            .as_ref()
+            .filter(|source| same_target_group(&source.target_ids, &input.target_ids))
+            .map(|source| source.allocation.as_ref().and_then(container_commitment));
+        match (source, destination) {
+            (Some(Some(source)), Some(Some(destination))) => {
+                // Until the source stop is durable both containers can own
+                // host resources. Hold the larger allocation, then keep it
+                // through the rest of the lifecycle rather than releasing
+                // headroom on a phase transition.
+                add_container_commitment(
+                    &mut capacity,
+                    source.cpus.max(destination.cpus),
+                    source.memory_bytes.max(destination.memory_bytes),
+                );
+            }
+            (Some(Some(source)), None) => {
+                add_container_commitment(&mut capacity, source.cpus, source.memory_bytes);
+            }
+            (Some(None), _) => complete = false,
+            (None, Some(Some(destination))) => {
+                add_container_commitment(&mut capacity, destination.cpus, destination.memory_bytes);
+            }
+            (Some(Some(_)), Some(None)) | (None, Some(None)) | (None, None) => {
+                complete = false;
+            }
+        }
+    }
+    if !complete {
+        let usable = mj_core::state::HostContainerSize {
+            cpus: input.total.cpus.saturating_sub(capacity.reserved.cpus),
+            memory_bytes: input
+                .total
+                .memory_bytes
+                .saturating_sub(capacity.reserved.memory_bytes),
         };
-        capacity.committed.cpus = capacity.committed.cpus.saturating_add(*cpus);
-        capacity.committed.memory_bytes = capacity
-            .committed
-            .memory_bytes
-            .saturating_add(*memory_bytes);
-        capacity.remaining.cpus = capacity.remaining.cpus.saturating_sub(*cpus);
-        capacity.remaining.memory_bytes = capacity
-            .remaining
-            .memory_bytes
-            .saturating_sub(*memory_bytes);
+        capacity.complete = false;
+        capacity.committed = usable;
+        capacity.remaining = mj_core::state::HostContainerSize {
+            cpus: 0,
+            memory_bytes: 0,
+        };
     }
     capacity
 }
 
+fn container_commitment(
+    allocation: &mj_core::state::SessionResourceAllocation,
+) -> Option<mj_core::state::HostContainerSize> {
+    match allocation {
+        mj_core::state::SessionResourceAllocation::Container { cpus, memory_bytes } => {
+            Some(mj_core::state::HostContainerSize {
+                cpus: *cpus,
+                memory_bytes: *memory_bytes,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn add_container_commitment(
+    capacity: &mut mj_core::state::HostContainerCapacity,
+    cpus: u64,
+    memory_bytes: u64,
+) {
+    capacity.committed.cpus = capacity.committed.cpus.saturating_add(cpus);
+    capacity.committed.memory_bytes = capacity.committed.memory_bytes.saturating_add(memory_bytes);
+    capacity.remaining.cpus = capacity.remaining.cpus.saturating_sub(cpus);
+    capacity.remaining.memory_bytes = capacity.remaining.memory_bytes.saturating_sub(memory_bytes);
+}
+
+fn reservation_affects_group(
+    reservation: &ContainerCapacityReservation,
+    target_ids: &[String],
+) -> bool {
+    same_target_group(&reservation.target_ids, target_ids)
+        || reservation
+            .source
+            .as_ref()
+            .is_some_and(|source| same_target_group(&source.target_ids, target_ids))
+}
+
 fn same_target_group(left: &[String], right: &[String]) -> bool {
     left.len() == right.len() && left.iter().all(|target_id| right.contains(target_id))
+}
+
+fn container_capacity_projection_for(
+    state: &RuntimeState,
+    sessions: &mj_core::state::State,
+) -> BTreeMap<String, mj_client::runtime_feed::RuntimeContainerCapacity> {
+    let Some(feed) = state.capacity_feed() else {
+        return BTreeMap::new();
+    };
+    let reservations = state.container_capacity_reservations();
+    let latest = feed.latest.borrow();
+    feed.targets
+        .borrow()
+        .iter()
+        .filter(|target| target.kind == crate::targets::DeploymentCapacityKind::Host)
+        .filter_map(|target| {
+            let usage = latest.get(&target.id)?;
+            let capacity = capacity_with_reservations(
+                &ContainerCapacityInput {
+                    target_ids: target.target_ids.clone(),
+                    total: mj_core::state::HostContainerSize {
+                        cpus: usage.logical_cores,
+                        memory_bytes: usage.memory_total_bytes,
+                    },
+                },
+                sessions.sessions.values(),
+                &reservations,
+            );
+            Some((
+                target.id.clone(),
+                mj_client::runtime_feed::RuntimeContainerCapacity {
+                    target_ids: target.target_ids.clone(),
+                    capacity,
+                },
+            ))
+        })
+        .collect()
+}
+
+impl RuntimeState {
+    pub(crate) fn container_capacity_projection(
+        &self,
+        sessions: &mj_core::state::State,
+    ) -> BTreeMap<String, mj_client::runtime_feed::RuntimeContainerCapacity> {
+        container_capacity_projection_for(self, sessions)
+    }
 }
 
 pub(super) fn spawn_capacity_service(
@@ -400,6 +584,9 @@ pub(super) fn spawn_capacity_service(
                         latest_tx.send_modify(|latest| {
                             latest.insert(reading.target_id.clone(), usage.clone());
                         });
+                        // The runtime feed carries this reservation-adjusted
+                        // headroom to terminal surfaces.
+                        state.publish_revision();
                     }
                     // No subscriber is not an error: the web viewer may be off.
                     let _ = updates.send(reading);
@@ -459,6 +646,7 @@ mod tests {
                     cpus: 4,
                     memory_bytes: 8 << 30,
                 },
+                source: None,
             },
         )]);
         let input = ContainerCapacityInput {
@@ -479,5 +667,251 @@ mod tests {
             }
         );
         assert!(!capacity.fits(&reservations[&active.id].allocation));
+    }
+
+    // Hard-won: d27eb9f56: a same-host Move released its running source too early.
+    #[test]
+    fn same_host_move_holds_the_larger_source_allocation() {
+        let mut source = crate::controller::test_support::checkpoint_test_session("moving-session");
+        source.state = mj_core::state::SessionState::Running;
+        source.target_template_id = "podman".into();
+        source.target = Some(mj_core::state::TargetLocator::LocalPodman {
+            container_id: "container".into(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        });
+        source.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
+            cpus: 8,
+            memory_bytes: 16 << 30,
+        });
+        let input = ContainerCapacityInput {
+            target_ids: vec!["podman".into()],
+            total: mj_core::state::HostContainerSize {
+                cpus: 10,
+                memory_bytes: 40 << 30,
+            },
+        };
+        let reservations = BTreeMap::from([(
+            source.id.clone(),
+            ContainerCapacityReservation {
+                target_ids: vec!["podman".into()],
+                allocation: mj_core::state::SessionResourceAllocation::Container {
+                    cpus: 2,
+                    memory_bytes: 4 << 30,
+                },
+                source: Some(ContainerCapacityCommitment {
+                    target_ids: vec!["podman".into()],
+                    allocation: source.resource_allocation.clone(),
+                }),
+            },
+        )]);
+
+        let capacity = capacity_with_reservations(&input, [&source], &reservations);
+
+        assert_eq!(capacity.committed.cpus, 8);
+        assert_eq!(capacity.remaining.cpus, 2);
+        assert!(
+            !capacity.fits(&mj_core::state::SessionResourceAllocation::Container {
+                cpus: 8,
+                memory_bytes: 16 << 30,
+            })
+        );
+    }
+
+    // Hard-won: d27eb9f56: a cross-host Move could release its source host early.
+    #[test]
+    fn cross_host_move_charges_each_deployment_host_once() {
+        let mut source = crate::controller::test_support::checkpoint_test_session("moving-session");
+        source.state = mj_core::state::SessionState::Running;
+        source.target_template_id = "podman".into();
+        source.target = Some(mj_core::state::TargetLocator::LocalPodman {
+            container_id: "container".into(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        });
+        source.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
+            cpus: 8,
+            memory_bytes: 16 << 30,
+        });
+        let reservations = BTreeMap::from([(
+            source.id.clone(),
+            ContainerCapacityReservation {
+                target_ids: vec!["docker".into()],
+                allocation: mj_core::state::SessionResourceAllocation::Container {
+                    cpus: 4,
+                    memory_bytes: 8 << 30,
+                },
+                source: Some(ContainerCapacityCommitment {
+                    target_ids: vec!["podman".into()],
+                    allocation: source.resource_allocation.clone(),
+                }),
+            },
+        )]);
+        let input = |target_id: &str| ContainerCapacityInput {
+            target_ids: vec![target_id.into()],
+            total: mj_core::state::HostContainerSize {
+                cpus: 10,
+                memory_bytes: 40 << 30,
+            },
+        };
+
+        let source_capacity =
+            capacity_with_reservations(&input("podman"), [&source], &reservations);
+        let destination_capacity =
+            capacity_with_reservations(&input("docker"), [&source], &reservations);
+
+        assert_eq!(source_capacity.committed.cpus, 8);
+        assert_eq!(destination_capacity.committed.cpus, 4);
+    }
+
+    // Hard-won: d27eb9f56: destination admission counted a same-host source twice.
+    #[test]
+    fn same_host_move_admission_does_not_double_count_the_source() {
+        let mut source = crate::controller::test_support::checkpoint_test_session("moving-session");
+        source.state = mj_core::state::SessionState::Running;
+        source.target_template_id = "podman".into();
+        source.target = Some(mj_core::state::TargetLocator::LocalPodman {
+            container_id: "container".into(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        });
+        source.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
+            cpus: 8,
+            memory_bytes: 16 << 30,
+        });
+        let input = ContainerCapacityInput {
+            target_ids: vec!["podman".into()],
+            total: mj_core::state::HostContainerSize {
+                cpus: 10,
+                memory_bytes: 40 << 30,
+            },
+        };
+        let replaced = BTreeSet::from([source.id.clone()]);
+
+        let capacity =
+            capacity_with_reservations_after(&input, [&source], &BTreeMap::new(), &replaced);
+
+        assert!(
+            capacity.fits(&mj_core::state::SessionResourceAllocation::Container {
+                cpus: 9,
+                memory_bytes: 18 << 30,
+            })
+        );
+    }
+
+    // Hard-won: d27eb9f56: a joined web Move lease deleted the owner's reservation.
+    #[tokio::test]
+    async fn joined_lease_cannot_remove_the_owning_reservation() {
+        let state = crate::daemon::tests::test_runtime_state();
+        let input = ContainerCapacityInput {
+            target_ids: vec!["podman".into()],
+            total: mj_core::state::HostContainerSize {
+                cpus: 8,
+                memory_bytes: 16 << 30,
+            },
+        };
+        let allocation = mj_core::state::SessionResourceAllocation::Container {
+            cpus: 2,
+            memory_bytes: 4 << 30,
+        };
+
+        let owner = state.reserve_container_capacity("session", &input, allocation.clone());
+        let joined = state.reserve_container_capacity("session", &input, allocation);
+        drop(joined);
+        assert!(
+            state
+                .container_capacity_reservations()
+                .contains_key("session")
+        );
+        drop(owner);
+        assert!(
+            !state
+                .container_capacity_reservations()
+                .contains_key("session")
+        );
+    }
+
+    // Hard-won: d27eb9f56: the terminal feed omitted daemon-only reservations.
+    #[tokio::test]
+    async fn runtime_capacity_projection_includes_the_move_reservation() {
+        let state = crate::daemon::tests::test_runtime_state();
+        let target = crate::targets::DeploymentCapacityTarget {
+            id: "local".into(),
+            host: "local".into(),
+            target_ids: vec!["podman".into()],
+            kind: crate::targets::DeploymentCapacityKind::Host,
+            local: true,
+            probes: Vec::new(),
+            local_storage_paths: Vec::new(),
+            probe_error: None,
+        };
+        let usage = crate::targets::DeploymentCapacityUsage {
+            cpu_percent: Some(20),
+            memory_used_bytes: 8 << 30,
+            memory_total_bytes: 40 << 30,
+            logical_cores: 10,
+            disk_total_bytes: None,
+            storage: Vec::new(),
+        };
+        let (targets, _targets_rx) = tokio::sync::watch::channel(vec![target]);
+        let (updates, _) = tokio::sync::broadcast::channel(1);
+        let (_latest, latest_rx) =
+            tokio::sync::watch::channel(BTreeMap::from([("local".to_owned(), usage)]));
+        let (refresh, _) = tokio::sync::mpsc::channel(1);
+        assert!(
+            state
+                .capacity
+                .set(CapacityFeed {
+                    targets: targets.subscribe(),
+                    updates,
+                    latest: latest_rx,
+                    refresh,
+                })
+                .is_ok()
+        );
+        let input = ContainerCapacityInput {
+            target_ids: vec!["podman".into()],
+            total: mj_core::state::HostContainerSize {
+                cpus: 10,
+                memory_bytes: 40 << 30,
+            },
+        };
+        let mut source = crate::controller::test_support::checkpoint_test_session("moving-session");
+        source.state = mj_core::state::SessionState::Running;
+        source.target_template_id = "podman".into();
+        source.target = Some(mj_core::state::TargetLocator::LocalPodman {
+            container_id: "container".into(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        });
+        source.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
+            cpus: 8,
+            memory_bytes: 16 << 30,
+        });
+        let mut sessions = mj_core::state::State::default();
+        sessions.sessions.insert(source.id.clone(), source.clone());
+        let _lease = state.reserve_move_capacity_lease(
+            &source.id,
+            &input,
+            mj_core::state::SessionResourceAllocation::Container {
+                cpus: 9,
+                memory_bytes: 18 << 30,
+            },
+            Some(ContainerCapacityCommitment {
+                target_ids: vec!["podman".into()],
+                allocation: source.resource_allocation,
+            }),
+        );
+
+        let projection = state.container_capacity_projection(&sessions);
+
+        assert_eq!(
+            projection["local"].capacity.committed,
+            mj_core::state::HostContainerSize {
+                cpus: 9,
+                memory_bytes: 18 << 30,
+            }
+        );
+        assert_eq!(projection["local"].capacity.remaining.cpus, 1);
     }
 }

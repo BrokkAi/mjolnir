@@ -1629,6 +1629,21 @@ pub fn reserved_container_capacity(total: HostContainerSize) -> HostContainerSiz
     }
 }
 
+/// Whether an active session owns a container whose CPU and RAM are charged
+/// to its deployment host. A borrowed child runs inside its parent's limit.
+pub fn session_owns_container(session: &SessionRecord) -> bool {
+    if !session.state.is_active() {
+        return false;
+    }
+    match &session.target {
+        Some(target) => target.owns_container(),
+        None => matches!(
+            session.state,
+            SessionState::Provisioning | SessionState::StartupCleanup
+        ),
+    }
+}
+
 /// Sum the owning container allocations for one physical host.
 ///
 /// A new or resuming owner has no target locator while provisioning, so those
@@ -1651,17 +1666,7 @@ pub fn host_container_capacity<'a>(
     };
     let mut complete = true;
     for session in sessions {
-        if !target_ids.contains(&session.target_template_id) || !session.state.is_active() {
-            continue;
-        }
-        let owns_container = match &session.target {
-            Some(target) => target.owns_container(),
-            None => matches!(
-                session.state,
-                SessionState::Provisioning | SessionState::StartupCleanup
-            ),
-        };
-        if !owns_container {
+        if !target_ids.contains(&session.target_template_id) || !session_owns_container(session) {
             continue;
         }
         let Some(SessionResourceAllocation::Container { cpus, memory_bytes }) =

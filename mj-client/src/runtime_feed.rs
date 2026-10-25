@@ -40,6 +40,13 @@ pub struct RuntimeProjection {
     pub transcripts: SnapshotMap<String, SessionTail>,
 }
 
+/// The daemon's hard container budget for one probed deployment host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeContainerCapacity {
+    pub target_ids: Vec<String>,
+    pub capacity: mj_core::state::HostContainerCapacity,
+}
+
 /// Configuration and bounded active-operation views are separate from history.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeMetadata {
@@ -72,6 +79,11 @@ pub struct RuntimeMetadata {
     /// sends none.
     #[serde(default)]
     pub storage: Vec<mj_core::targets::storage::TargetStorageView>,
+    /// Hard container headroom for each probed deployment host. The daemon
+    /// includes in-memory resume and move reservations; terminal surfaces
+    /// must not recompute this from records they happen to have loaded.
+    #[serde(default)]
+    pub container_capacities: BTreeMap<String, RuntimeContainerCapacity>,
     /// What new-session defaults are chosen from. The feed carries only live
     /// sessions, but the defaults follow every session, stopped ones too.
     #[serde(default)]

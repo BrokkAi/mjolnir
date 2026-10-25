@@ -95,6 +95,7 @@ pub(crate) async fn run_server(
         &capacity_targets_rx.borrow_and_update(),
         &mut capacity_state,
     );
+    let container_capacities = daemon_runtime.container_capacity_projection(&controller.state);
     let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(publication.snapshot(
         &controller,
         &workspace_updates.borrow().clone(),
@@ -111,11 +112,7 @@ pub(crate) async fn run_server(
             project_sources: &project_sources,
             operations: &operations,
             move_recoveries: &move_recoveries,
-            capacity: &viewer_capacity(
-                &capacity_state,
-                &controller.state,
-                &daemon_runtime.container_capacity_reservations(),
-            ),
+            capacity: &viewer_capacity(&capacity_state, &container_capacities),
             launch_failures: &launch_failures,
             reviews: &review_views(&daemon_runtime),
         },
@@ -341,6 +338,8 @@ pub(crate) async fn run_server(
                 operations = runtime.metadata.lifecycles.iter()
                     .map(|view| (view.session_id.clone(), viewer_operation(view)))
                     .collect();
+                let container_capacities =
+                    daemon_runtime.container_capacity_projection(&controller.state);
                 let snapshot = publication.snapshot(
                     &controller,
                     &workspace_updates.borrow().clone(),
@@ -357,11 +356,7 @@ pub(crate) async fn run_server(
                         project_sources: &project_sources,
                         operations: &operations,
                         move_recoveries: &move_recoveries,
-                        capacity: &viewer_capacity(
-                            &capacity_state,
-                            &controller.state,
-                            &daemon_runtime.container_capacity_reservations(),
-                        ),
+                        capacity: &viewer_capacity(&capacity_state, &container_capacities),
                         launch_failures: &launch_failures,
                         reviews: &review_views(&daemon_runtime),
                     },

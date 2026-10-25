@@ -26,6 +26,7 @@ The admission calculation treats RAM as a hard, non-compressible commitment. It 
 - [x] (2026-10-25) Independent review fixes: cover resume and move admission, restore the separate 8-vCPU EC2 default, keep the new-session floor out of resume, avoid zero placeholders for unknown capacity, and floor displayed limits.
 - [x] (2026-10-25) Commit the validated change on the current branch.
 - [x] (2026-10-25) Commit the independently reviewed fixes on the current branch.
+- [x] (2026-10-25) Fix the second review's joined Move lease, same-host Move accounting, and terminal reservation projection regressions.
 
 ## Surprises & Discoveries
 
@@ -64,6 +65,15 @@ The admission calculation treats RAM as a hard, non-compressible commitment. It 
 
 - Observation: A nearest-tenth display could overstate a hard byte limit. The shared formatter now floors to a tenth, and both web and controller messages use that same conservative formatting.
   Evidence: `(8 GiB - 1 byte)` displays as `7.9 GiB`.
+
+- Observation: The web surface reserves a Move before acknowledging it, then its spawned action calls the same Move again. Lifecycle joining skips the second action's closure, so a second unconditional lease had no owner and deleted the first reservation.
+  Evidence: `start_move_session` reserves before admission and `ControllerAction::Move` later enters `move_session`; only the first closure owns the capacity lease.
+
+- Observation: A same-host Move keeps its source running while it starts. Removing the source record as soon as the lease existed released too much headroom, while admitting the destination against both source and destination together rejected valid growth.
+  Evidence: the same-host 8-to-2 CPU transition allowed an 8-CPU new session, and an 8-to-9 CPU transition exceeded a 10-core host only because the source was counted twice.
+
+- Observation: The terminal had its own raw capacity poller and recomputed hard headroom from the records it happened to hold, so it could not see daemon-only resume and Move leases.
+  Evidence: `DashboardState::host_container_capacity` used raw usage plus local records even when the daemon published a reservation-adjusted viewer projection.
 
 ## Decision Log
 
@@ -135,6 +145,18 @@ The admission calculation treats RAM as a hard, non-compressible commitment. It 
   Rationale: A displayed hard limit must not be larger than the bytes available. Entering the displayed value must remain admissible.
   Date/Author: 2026-10-25 / Codex
 
+- Decision: Make capacity-lease ownership explicit; a joining caller gets a non-owning lease and cannot remove the reservation.
+  Rationale: A web Move is intentionally reserved twice across acknowledgement and action dispatch, but those calls join one lifecycle. Only the caller that inserted the reservation may drop it.
+  Date/Author: 2026-10-25 / Codex
+
+- Decision: Skip capacity admission for in-place Moves, and model a non-in-place Move as source plus destination commitments.
+  Rationale: An in-place Move reuses the existing environment and adds no capacity. Same-host Moves hold the larger allocation until the lifecycle ends because the source and destination phases must never expose a temporary gap; cross-host Moves charge each physical host separately. Destination admission removes the moving session from the old source count before applying the destination allocation.
+  Date/Author: 2026-10-25 / Codex
+
+- Decision: Publish daemon-computed container capacity through `RuntimeMetadata` for terminal surfaces.
+  Rationale: The daemon is the only owner of in-memory leases and the shared reserve policy. The TUI may retain raw CPU and memory utilization for display, but it must not derive admission headroom from partial records.
+  Date/Author: 2026-10-25 / Codex
+
 ## Outcomes & Retrospective
 
 The feature is implemented. New container sessions default to 4 CPUs and 8 GiB, require at least 2 CPUs and 4 GiB, and are admitted only when their allocation fits the host's aggregate CPU and hard RAM budget. The web viewer and TUI show RAM left from physical totals minus a 20 percent OS reserve and owning-container commitments; borrowed sub-agent containers are excluded. The refusal names the remaining resources, explains that the person may explicitly suspend or stop a session, and states that Mjolnir will not do so automatically.
@@ -143,7 +165,9 @@ The explicit sizing checkbox is carried through both interactive surfaces, the H
 
 After independent review, all five findings reproduced and were fixed. New-session admission, resume, and user-started moves to container targets now use the serialized host budget; resume and move leases cover their pre-provisioning work. EC2 again prefers 8 vCPUs independently of the 4-CPU container default. Resume keeps legacy allocations below the new-session floor. Unknown capacity is reported as unavailable rather than zero. Displayed GiB limits are conservatively floored.
 
-Validation completed: the controller suite passed 2101 tests with 17 ignored, the TUI suite passed 542 tests with 2 ignored, the client suite passed 42 unit tests plus its integration test, the CLI unit suite passed 225 tests, all changed crates passed clippy with warnings denied, the deterministic web suite passed 108 tests with 3 environment skips, all 57 web unit tests passed, and the documentation Astro check passed with zero diagnostics. The full core and CLI integration suites each encountered the pre-existing container process-reaping failures described above; targeted capacity, database, API, protocol, web, and TUI tests all pass.
+A second independent review found three further real regressions. Joined web Move leases can no longer delete the owning reservation. Non-in-place Moves now retain their source accounting until source teardown: same-host transitions hold the larger source or destination allocation, cross-host transitions charge both hosts, and in-place transitions require no additional reservation. Destination admission excludes the old source record once, so growth is not double-counted. The runtime feed now carries the daemon's reservation-adjusted host capacity to the TUI, so both new-session validation and target cards use the same headroom as web and daemon admission.
+
+Validation completed: the controller suite passed 2105 tests with 17 ignored, the TUI suite passed 543 tests with 2 ignored, the client suite passed 42 unit tests plus its integration test, the CLI unit suite passed 225 tests, and its ACP integration binary passed 3 tests. The workspace clippy run passed with warnings denied, the deterministic web suite passed 108 tests with 3 environment skips, all 57 web unit tests passed, and the documentation Astro check reported zero diagnostics. The full core suite passed 536 tests and hit only the pre-existing container process-reaping failure described above. The CLI `daemon_startup` binary passed 6 tests and hit 10 of the same pre-existing fixture-daemon cleanup failures. Targeted capacity, database, API, protocol, runtime-feed, web, and TUI tests all pass.
 
 ## Context and Orientation
 
@@ -327,3 +351,4 @@ The web and TUI receive `HostContainerCapacity` rather than recomputing reserve 
 - 2026-10-25: Initial plan created after design discussion. It records the user's choices for 4 CPU / 8 GiB defaults, hard non-compressible RAM accounting, no automatic shutdown, and a per-launch checkbox for saving the host's default size.
 - 2026-10-25: Implementation completed. The plan now records the separate minimum-admission validator, additive wire projection, complete validation results, and the environment-only zombie failures. No schema migration was needed because capacity commitments are derived from durable sessions and borrowed-container ownership.
 - 2026-10-25: Independent review confirmed all five findings. Added resume/move leases, separated EC2 and container preferences, scoped the minimum to new sessions, corrected unknown-capacity rendering, and switched hard-limit formatting to floor instead of round.
+- 2026-10-25: A second independent review confirmed three additional findings. Added non-owning joined leases, source-aware Move capacity reservations with in-place bypass and same-host max accounting, and daemon-computed capacity in the terminal runtime feed.
