@@ -43,6 +43,14 @@ def running(pid: int) -> bool:
     return stat.rsplit(")", 1)[1].split()[0] != "Z"
 
 
+def zombie(pid: int) -> bool:
+    try:
+        stat = pathlib.Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        return False
+    return stat.rsplit(")", 1)[1].split()[0] == "Z"
+
+
 def eventually(predicate, timeout: float = 30.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -168,6 +176,17 @@ class LabCleanupTest(unittest.TestCase):
         self.assertFalse(running(sleeper))
         self.assertTrue(runtime.exists(), "the watchdog removed a runtime the driver kept")
         self.assertNotIn("watchdog", json.loads((root / "trace.json").read_text()))
+
+    # Hard-won: 6ba4e2bf8: PID 1 kept a cleanly stopped reliability daemon as a zombie.
+    def test_daemon_stop_accepts_an_exited_zombie(self) -> None:
+        lab = Lab(HEL, "cleanup-test", 1, watchdog=False)
+        self.addCleanup(self.discard, lab.root)
+        daemon = subprocess.Popen([sys.executable, "-c", "pass"])
+        self.addCleanup(daemon.wait)
+        self.assertTrue(eventually(lambda: zombie(daemon.pid)), "child did not become a zombie")
+
+        lab.daemon_pid = daemon.pid
+        lab.stop_daemon()
 
     # Hard-won: 01c181f: the cleanup runbook missed re-execed workers and removed no runtime state.
     def test_finishing_a_luna_lab_stops_its_processes_and_removes_its_runtime(self) -> None:
