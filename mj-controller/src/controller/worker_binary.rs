@@ -72,6 +72,8 @@ pub(crate) use image_worker::image_worker_label;
 pub(super) use image_worker::*;
 mod install;
 pub(super) use install::*;
+mod store;
+use store::*;
 mod upgrade;
 pub(crate) use upgrade::*;
 mod process;

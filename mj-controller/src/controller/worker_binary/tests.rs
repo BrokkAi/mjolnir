@@ -435,6 +435,7 @@ fn failed_worker_staging_leaves_no_partial_upload_and_sweeps_stale_ones() {
     .unwrap();
     assert!(!stale.exists(), "a stale partial upload survived staging");
     executor.fail.set(true);
+    std::fs::write(&source, stamped_worker(b"different-replacement-worker")).unwrap();
     let error = stage_worker_binary_for_upgrade(
         &executor,
         &locator,
@@ -1404,7 +1405,6 @@ struct PodmanInstallFixture {
     ownership: PathBuf,
     profile_stage: PathBuf,
     locator: targets::TargetLocator,
-    digest: String,
 }
 fn podman_install_fixture() -> PodmanInstallFixture {
     let root = tempfile::tempdir().unwrap();
@@ -1416,7 +1416,6 @@ fn podman_install_fixture() -> PodmanInstallFixture {
     std::fs::write(&ownership, b"{}").unwrap();
     let profile_stage = root.path().join("profile");
     std::fs::create_dir_all(&profile_stage).unwrap();
-    let digest = lower_hex(Sha256::digest(stamped_worker(b"worker-binary-bytes")));
     PodmanInstallFixture {
         _root: root,
         worker_binary,
@@ -1429,10 +1428,9 @@ fn podman_install_fixture() -> PodmanInstallFixture {
                 destination: "user@example.test".into(),
                 ssh_args: Vec::new(),
             },
-            container_id: "container-1".into(),
+            container_id: "a".repeat(64),
             workspace_storage: Default::default(),
         },
-        digest,
     }
 }
 fn rendered(commands: &[CommandSpec]) -> Vec<String> {
@@ -1442,10 +1440,8 @@ fn rendered(commands: &[CommandSpec]) -> Vec<String> {
         .collect()
 }
 
-/// An SSH host that remembers which files exist, so consecutive installs see
-/// the cache an earlier install left behind. A `test -f` succeeds only for a
-/// path the host holds, and an `mv` adds its destination, which is how a
-/// completed upload enters the cache.
+/// An SSH host that remembers published store paths and returns their
+/// digest on later probes, including a container's transport-cache lookup.
 #[derive(Default)]
 struct SshHostExecutor {
     commands: RefCell<Vec<CommandSpec>>,
@@ -1455,25 +1451,26 @@ impl CommandExecutor for SshHostExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.commands.borrow_mut().push(command.clone());
         let mut status = 0;
-        if command.program == "ssh" {
-            let remote = command.args.last().cloned().unwrap_or_default();
-            let words = remote
-                .split(' ')
-                .map(|word| word.trim_matches('\''))
-                .collect::<Vec<_>>();
-            match words.as_slice() {
-                ["test", "-f", path] if !self.host_files.borrow().contains(*path) => status = 1,
-                ["mv", _, destination] => {
-                    self.host_files
-                        .borrow_mut()
-                        .insert((*destination).to_owned());
-                }
-                _ => {}
+        let mut stdout = Vec::new();
+        let remote = command.args.last().cloned().unwrap_or_default();
+        if command.purpose == "publish shared Mjolnir worker" {
+            let words = remote.split_whitespace().collect::<Vec<_>>();
+            let directory = words[words.len() - 2].trim_matches('\'');
+            self.host_files
+                .borrow_mut()
+                .insert(format!("{directory}/hel"));
+        } else if command.purpose == "verify shared Mjolnir worker" {
+            let path = remote.split_whitespace().last().unwrap().trim_matches('\'');
+            if self.host_files.borrow().contains(path) {
+                let digest = path.rsplit('/').nth(1).unwrap();
+                stdout = format!("{digest}  {path}\n").into_bytes();
+            } else {
+                status = 1;
             }
         }
         Ok(CommandOutput {
             status,
-            stdout: Vec::new(),
+            stdout,
             stderr: Vec::new(),
         })
     }
@@ -1484,7 +1481,7 @@ fn install_on_ssh_host(
     locator: &targets::TargetLocator,
     session: &str,
 ) -> Vec<String> {
-    let root = session_worker_root(session);
+    let root = targets::worker_root(locator, session).unwrap();
     install_worker_files(
         executor,
         locator,
@@ -1527,81 +1524,43 @@ fn worker_uploads(lines: &[String], fixture: &PodmanInstallFixture) -> Vec<Strin
         .cloned()
         .collect()
 }
-fn position_of(lines: &[String], needle: &str) -> usize {
-    lines
-        .iter()
-        .position(|line| line.contains(needle))
-        .unwrap_or_else(|| panic!("expected {needle:?} in {lines:#?}"))
-}
 /// R3-4 (J-16): every SSH-bare session uploaded its own 139 MB worker, so ten
 /// parallel creates on one host each held a daemon action slot for minutes.
 /// The binary now crosses the network once per build and host; each session
-/// still gets its own copy in its own worker root.
+/// gets a link in its own worker root.
 // Hard-won: 62a232f: every SSH-bare session uploaded its full 139 MB worker and stalled creates
 #[test]
-fn ssh_bare_installs_upload_the_worker_once_per_host_and_copy_it_per_session() {
+fn ssh_bare_installs_upload_the_worker_once_per_host_and_link_it_per_session() {
     let fixture = podman_install_fixture();
     let executor = SshHostExecutor::default();
     let first = "0123456789abcdef0123456789abcdef";
     let second = "fedcba9876543210fedcba9876543210";
-    let cache_dir = format!(".cache/mjolnir/workers/{}", fixture.digest);
-    let cached = format!("{cache_dir}/hel");
-    assert_eq!(
-        targets::worker_root(&bare_locator_on_the_container_host(first), first).unwrap(),
-        session_worker_root(first)
-    );
-
     let lines = install_on_ssh_host(
         &executor,
         &fixture,
         &bare_locator_on_the_container_host(first),
         first,
     );
-    let partial = format!("{cache_dir}/hel.partial-{first}");
-    assert_eq!(
-        worker_uploads(&lines, &fixture),
-        [format!(
-            "scp {} user@example.test:{partial}",
-            fixture.worker_binary.display()
-        )],
-        "the first session on a host uploads the worker once, to its own \
-         partial name in the cache, got {lines:#?}"
-    );
-    let probe = position_of(&lines, &format!("'test' '-f' '{cached}'"));
-    let publish = position_of(&lines, &format!("'mv' '{partial}' '{cached}'"));
-    let root = session_worker_root(first);
-    let copy = position_of(&lines, &format!("'cp' '{cached}' '{root}/hel'"));
-    let executable = position_of(&lines, &format!("'chmod' '700' '{root}/hel'"));
-    assert!(
-        probe < publish && publish < copy && copy < executable,
-        "probe, publish, copy, then chmod, got {lines:#?}"
-    );
-
+    assert_eq!(worker_uploads(&lines, &fixture).len(), 1, "{lines:#?}");
+    assert!(lines.iter().any(|line| line.contains("worker-binaries/")));
     let lines = install_on_ssh_host(
         &executor,
         &fixture,
         &bare_locator_on_the_container_host(second),
         second,
     );
+    assert!(worker_uploads(&lines, &fixture).is_empty(), "{lines:#?}");
     assert!(
-        worker_uploads(&lines, &fixture).is_empty(),
-        "the second session on the host must not upload the worker again, got {lines:#?}"
+        lines
+            .iter()
+            .any(|line| line.contains("ln --") && line.contains("mv -f --"))
     );
-    assert!(
-        !lines.iter().any(|line| line.contains("'mv'")),
-        "a cache hit renames nothing, got {lines:#?}"
-    );
-    position_of(&lines, &format!("'test' '-f' '{cached}'"));
-    let root = session_worker_root(second);
-    let copy = position_of(&lines, &format!("'cp' '{cached}' '{root}/hel'"));
-    let executable = position_of(&lines, &format!("'chmod' '700' '{root}/hel'"));
-    assert!(copy < executable, "copy before chmod, got {lines:#?}");
     for name in ["launch.json", "ownership.json"] {
-        assert!(
-            lines.iter().any(|line| line.starts_with("scp ")
-                && line.ends_with(&format!("user@example.test:{root}/{name}"))),
-            "{name} is still uploaded per session, got {lines:#?}"
-        );
+        assert!(lines.iter().any(|line| line.starts_with("scp ")
+            && line.ends_with(&format!(
+                "user@example.test:{}/{name}",
+                session_worker_root(second)
+            ))));
     }
 }
 // Hard-won: 62a232f: SSH-bare and SSH-container installs duplicated the host worker cache
@@ -1960,6 +1919,12 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
             "cwd": "/tmp", "execution_policy": "configured_approvals", "run_mode": "checkpoint_only"
         }))?;
         launch.write(&fixture.launch_config)?;
+        let cache = mj_core::target_path::text(&store_root(&locator, &session)?);
+        let unused = format!("{cache}/{}/hel", "c".repeat(64));
+        as_root(&format!(
+            "mkdir -p {cache}/{} && cp /opt/mjolnir/mj-worker {unused} && chown -R hel:hel {cache} && touch -t 200001010000 {unused}",
+            "c".repeat(64)
+        ))?;
         install_worker_files(
             &ProcessExecutor,
             &locator,
@@ -1972,6 +1937,7 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
             &fixture.profile_stage,
             None,
         )?;
+        as_root(&format!("test ! -e {unused}"))?;
         execute_checked(
             &ProcessExecutor,
             CommandSpec::new(
@@ -2053,37 +2019,35 @@ fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
         commands: RefCell::new(Vec::new()),
     };
     let fixture = podman_install_fixture();
-    let owner =
-        crate::worker_lifecycle::WorkerPermit::try_acquire(session, "test binary replacement")
-            .unwrap()
-            .unwrap();
-    owner
-        .scope_blocking(|| {
-            replace_installed_worker_binary(
-                &executor,
-                &locator,
-                session,
-                &WorkerInstall::Host(fixture.worker_binary.clone()),
-            )
-        })
-        .unwrap();
+    super::upgrade::worker_binary_upload_plan(
+        &locator,
+        session,
+        &WorkerInstall::Host(fixture.worker_binary.clone()),
+        &format!("/var/lib/hel/workers/{session}/hel.private"),
+        None,
+    )
+    .unwrap()
+    .execute(&executor)
+    .unwrap();
 
     let mut lines = rendered(&executor.commands.borrow());
     let ownership = lines.remove(1);
     assert!(ownership.starts_with(&format!("podman exec --user 0:0 {container_id} sh -c")));
     assert!(ownership.contains("chown -R"));
-    assert!(ownership.ends_with(&format!("/var/lib/hel/workers/{session}/hel.next")));
+    assert!(ownership.ends_with(&format!("/var/lib/hel/workers/{session}/hel.private.next")));
     assert_eq!(
         lines,
         vec![
             format!(
-                "podman cp {} {container_id}:/var/lib/hel/workers/{session}/hel.next",
+                "podman cp {} {container_id}:/var/lib/hel/workers/{session}/hel.private.next",
                 fixture.worker_binary.display()
             ),
             format!(
-                "podman exec {container_id} mv -f /var/lib/hel/workers/{session}/hel.next /var/lib/hel/workers/{session}/hel"
+                "podman exec {container_id} mv -f /var/lib/hel/workers/{session}/hel.private.next /var/lib/hel/workers/{session}/hel.private"
             ),
-            format!("podman exec {container_id} chmod 700 /var/lib/hel/workers/{session}/hel"),
+            format!(
+                "podman exec {container_id} chmod 700 /var/lib/hel/workers/{session}/hel.private"
+            ),
         ]
     );
 }
@@ -2127,10 +2091,12 @@ fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
             "{kind} worker start must inherit the configured container user: {start_text}"
         );
 
-        let upgrade = installed_worker_binary_replacement_plan(
+        let upgrade = super::upgrade::worker_binary_upload_plan(
             &locator,
             session,
             &WorkerInstall::Host(source.path().to_path_buf()),
+            &format!("/var/lib/hel/workers/{session}/hel.private"),
+            None,
         )
         .unwrap();
         let commands = rendered(&upgrade.commands);
@@ -4533,6 +4499,9 @@ fn ssh_bare_locator(session_id: &str) -> targets::TargetLocator {
 
 #[test]
 fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("hel");
+    std::fs::write(&source, stamped_worker(b"managed harness worker")).unwrap();
     let session = "session-remote";
     let executor = DigestExecutor {
         installed_line: String::new(),
@@ -4571,7 +4540,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         &executor,
         &ssh_bare_locator(session),
         session,
-        &WorkerInstall::Host("/controller/hel".into()),
+        &WorkerInstall::Host(source),
         &launch,
     )
     .unwrap();
@@ -4586,9 +4555,18 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         vec![
             "clear managed harness preparation staging",
             "create managed harness preparation staging",
-            "stage current worker for managed harness preparation",
+            "remove stale private worker staging",
+            "collect unused Mjolnir worker binaries",
+            "verify shared Mjolnir worker",
+            "create private worker store upload",
+            "stage replacement Mjolnir worker",
+            "replace installed Mjolnir worker",
+            "make replaced Mjolnir worker executable",
+            "verify uploaded Mjolnir worker",
+            "publish shared Mjolnir worker",
+            "discard private worker store upload",
+            "link shared Mjolnir worker into session",
             "stage managed harness launch configuration",
-            "make managed harness preparation worker executable",
             "prepare exact managed harness",
             "remove managed harness preparation staging",
         ]

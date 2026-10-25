@@ -704,25 +704,11 @@ pub(super) fn install_worker_files(
     profile_stage: &Path,
     shared_login: Option<&SharedLogin>,
 ) -> Result<()> {
-    let installed = format!("{worker_root}/hel");
     if let Some(binary) = worker.host_binary() {
         verify_worker_build(binary)?;
-        crate::target_storage::ensure_room_for(
-            locator,
-            [worker_root],
-            || super::file_size(binary),
-            "install the Mjolnir worker",
-        )?;
     }
-    // Bare hosts have no image, so only a container can run its image's worker.
-    let host_binary = || {
-        worker
-            .host_binary()
-            .context("only a container target can run its image's worker")
-    };
     match locator {
         targets::TargetLocator::LocalBare { .. } => {
-            let worker_binary = host_binary()?;
             if profile_stage.is_dir() {
                 // A staged home that is a link to a profile home, left for a
                 // session an earlier release started there, is replaced by a
@@ -744,14 +730,6 @@ pub(super) fn install_worker_files(
                 CommandSpec::new(
                     "cp",
                     [
-                        worker_binary.to_string_lossy().into_owned(),
-                        installed.clone(),
-                    ],
-                )
-                .purpose("install local Mjolnir worker"),
-                CommandSpec::new(
-                    "cp",
-                    [
                         launch_config.to_string_lossy().into_owned(),
                         format!("{worker_root}/launch.json"),
                     ],
@@ -765,8 +743,6 @@ pub(super) fn install_worker_files(
                     ],
                 )
                 .purpose("install local worker ownership marker"),
-                CommandSpec::new("chmod", ["700", &installed])
-                    .purpose("make local Mjolnir worker executable"),
             ] {
                 execute_checked(executor, command)?;
             }
@@ -780,42 +756,13 @@ pub(super) fn install_worker_files(
                 targets::TargetLocator::AppleContainer { .. } => "container",
                 _ => unreachable!("matched local container target"),
             };
-            let install_worker = match worker {
-                WorkerInstall::Host(worker_binary) => CommandSpec::new(
-                    engine,
-                    [
-                        "cp".into(),
-                        worker_binary.to_string_lossy().into_owned(),
-                        format!("{container_id}:{installed}"),
-                    ],
-                )
-                .purpose("upload Mjolnir worker"),
-                WorkerInstall::Image => CommandSpec::new(
-                    engine,
-                    [
-                        "exec".into(),
-                        container_id.clone(),
-                        "ln".into(),
-                        "-sfn".into(),
-                        IMAGE_WORKER.into(),
-                        installed.clone(),
-                    ],
-                )
-                .purpose("link the image's Mjolnir worker"),
-            };
-            // The image's worker belongs to the image: its link is neither
-            // re-owned nor made private like a copied binary.
-            let copied = worker.host_binary().map(|_| installed.as_str());
             let launch_installed = format!("{worker_root}/launch.json");
             let ownership_installed = format!("{worker_root}/ownership.json");
-            let owned = copied
-                .into_iter()
-                .chain([
-                    launch_installed.as_str(),
-                    ownership_installed.as_str(),
-                    profile_home,
-                ])
-                .collect::<Vec<_>>();
+            let owned = [
+                launch_installed.as_str(),
+                ownership_installed.as_str(),
+                profile_home,
+            ];
             let mut commands = vec![
                 CommandSpec::new(
                     engine,
@@ -829,7 +776,6 @@ pub(super) fn install_worker_files(
                     ],
                 )
                 .purpose("create target worker directories"),
-                install_worker,
                 CommandSpec::new(
                     engine,
                     [
@@ -863,21 +809,6 @@ pub(super) fn install_worker_files(
                 )
                 .purpose("match uploaded files to the worker directory owner"),
             ];
-            if let Some(copied) = copied {
-                commands.push(
-                    CommandSpec::new(
-                        engine,
-                        [
-                            "exec".into(),
-                            container_id.clone(),
-                            "chmod".into(),
-                            "700".into(),
-                            copied.into(),
-                        ],
-                    )
-                    .purpose("make Mjolnir worker executable"),
-                );
-            }
             commands.push(
                 CommandSpec::new(
                     engine,
@@ -896,31 +827,23 @@ pub(super) fn install_worker_files(
                 execute_checked(executor, command)?;
             }
         }
-        // A disposable EC2 instance hosts one session and is terminated with
-        // it, so a cache there would only hold a second copy of the worker.
         targets::TargetLocator::AwsEc2 { ssh, .. } => {
             install_worker_over_ssh(
                 executor,
                 ssh,
-                None,
                 worker_root,
                 profile_home,
-                host_binary()?,
                 launch_config,
                 ownership,
                 profile_stage,
             )?;
         }
         targets::TargetLocator::SshBare { ssh, .. } => {
-            let worker_binary = host_binary()?;
-            let cached_worker = cache_worker_on_ssh_host(executor, ssh, session_id, worker_binary)?;
             install_worker_over_ssh(
                 executor,
                 ssh,
-                Some(&cached_worker),
                 worker_root,
                 profile_home,
-                worker_binary,
                 launch_config,
                 ownership,
                 profile_stage,
@@ -938,23 +861,6 @@ pub(super) fn install_worker_files(
             let engine = locator
                 .container_engine()
                 .expect("matched a remote container target");
-            let install_worker = match worker {
-                WorkerInstall::Host(worker_binary) => vec![
-                    engine.into(),
-                    "cp".into(),
-                    cache_worker_on_ssh_host(executor, ssh, session_id, worker_binary)?,
-                    format!("{container_id}:{installed}"),
-                ],
-                WorkerInstall::Image => vec![
-                    engine.into(),
-                    "exec".into(),
-                    container_id.clone(),
-                    "ln".into(),
-                    "-sfn".into(),
-                    IMAGE_WORKER.into(),
-                    installed.clone(),
-                ],
-            };
             let upload = format!("{}/{session_id}", targets::REMOTE_UPLOAD_STAGING);
             execute_checked(
                 executor,
@@ -976,17 +882,13 @@ pub(super) fn install_worker_files(
                 crate::targets::scp_upload(ssh, profile_stage, &format!("{upload}/profile"), true)
                     .purpose("upload remote container profile allowlist"),
             )?;
-            let copied = worker.host_binary().map(|_| installed.as_str());
             let launch_installed = format!("{worker_root}/launch.json");
             let ownership_installed = format!("{worker_root}/ownership.json");
-            let owned = copied
-                .into_iter()
-                .chain([
-                    launch_installed.as_str(),
-                    ownership_installed.as_str(),
-                    profile_home,
-                ])
-                .collect::<Vec<_>>();
+            let owned = [
+                launch_installed.as_str(),
+                ownership_installed.as_str(),
+                profile_home,
+            ];
             let mut remote = vec![
                 vec![
                     engine.into(),
@@ -997,7 +899,6 @@ pub(super) fn install_worker_files(
                     worker_root.into(),
                     profile_home.into(),
                 ],
-                install_worker,
                 vec![
                     engine.into(),
                     "cp".into(),
@@ -1025,16 +926,6 @@ pub(super) fn install_worker_files(
                     ))
                     .collect(),
             ];
-            if let Some(copied) = copied {
-                remote.push(vec![
-                    engine.into(),
-                    "exec".into(),
-                    container_id.clone(),
-                    "chmod".into(),
-                    "700".into(),
-                    copied.into(),
-                ]);
-            }
             remote.extend([
                 vec![
                     engine.into(),
@@ -1056,86 +947,17 @@ pub(super) fn install_worker_files(
             }
         }
     }
-    Ok(())
+    install_worker_binary(executor, locator, session_id, worker, "hel")
 }
 
-/// Put the worker binary in the SSH host's content-addressed cache and answer
-/// with its path there. The binary crosses the network only when the host
-/// does not hold this build yet.
-///
-/// A worker binary is well over 100 MB and identical across sessions. Uploading
-/// it once per session made each create on a slow link hold a daemon action
-/// slot for minutes (R3-4). Every session on the host, SSH-bare or in a remote
-/// container, copies its own worker from here instead.
-///
-/// Two sessions that find the cache empty at the same time each upload to
-/// their own partial name and rename it into place, so the cached path only
-/// ever names a complete file.
-fn cache_worker_on_ssh_host(
-    executor: &impl CommandExecutor,
-    ssh: &SshTarget,
-    session_id: &str,
-    worker_binary: &Path,
-) -> Result<String> {
-    let digest = mj_core::worker_launch::worker_executable_digest(worker_binary)?;
-    // Home-relative, not "~/": targets::ssh_command single-quotes every
-    // argument, so a tilde would stay literal in the remote shell while scp
-    // expands it, and the two sides would disagree. Both ssh commands (cwd is
-    // the login home) and scp resolve a relative path against the remote home.
-    let cache_dir = format!(".cache/mjolnir/workers/{digest}");
-    let cached_worker = format!("{cache_dir}/hel");
-    let cached = matches!(
-        executor.execute(
-            &crate::targets::ssh_command(ssh, ["test", "-f", &cached_worker])
-                .purpose("probe cached remote Mjolnir worker"),
-        ),
-        Ok(output) if output.status == 0
-    );
-    if cached {
-        return Ok(cached_worker);
-    }
-    execute_checked(
-        executor,
-        crate::targets::ssh_command(ssh, ["mkdir", "-p", &cache_dir])
-            .purpose("create remote worker cache"),
-    )?;
-    let partial = format!("{cache_dir}/hel.partial-{session_id}");
-    if let Err(error) = execute_checked(
-        executor,
-        crate::targets::scp_upload(ssh, worker_binary, &partial, false)
-            .purpose("upload Mjolnir worker to the remote cache"),
-    ) {
-        // The partial file is outside every session's worker root, so no
-        // session cleanup would ever remove it. Best effort: a connection
-        // that failed the upload may fail this too.
-        let _ = executor.execute(
-            &crate::targets::ssh_command(ssh, ["rm", "-f", "--", &partial])
-                .purpose("remove partial remote worker upload"),
-        );
-        return Err(error);
-    }
-    execute_checked(
-        executor,
-        crate::targets::ssh_command(ssh, ["mv", &partial, &cached_worker])
-            .purpose("publish cached remote Mjolnir worker"),
-    )?;
-    Ok(cached_worker)
-}
-
-/// Install a worker on a host reached over SSH with no container.
-///
-/// `cached_worker` is the host's cached copy of the worker binary, from
-/// [`cache_worker_on_ssh_host`]; the session gets its own copy of it, so its
-/// worker root and cleanup are the same as with an upload. Without one, the
-/// local binary is uploaded straight into the worker root.
+/// Install the session-private SSH metadata; binary installation is shared
+/// with creation, upgrades and recovery in `install_worker_binary`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn install_worker_over_ssh(
     executor: &impl CommandExecutor,
     ssh: &SshTarget,
-    cached_worker: Option<&str>,
     worker_root: &str,
     profile_home: &str,
-    worker_binary: &Path,
     launch_config: &Path,
     ownership: &Path,
     profile_stage: &Path,
@@ -1145,14 +967,6 @@ pub(super) fn install_worker_over_ssh(
         crate::targets::ssh_command(ssh, ["mkdir", "-p", worker_root, profile_home])
             .purpose("create SSH worker directories"),
     )?;
-    let worker = format!("{worker_root}/hel");
-    let install_worker = match cached_worker {
-        Some(cached_worker) => crate::targets::ssh_command(ssh, ["cp", cached_worker, &worker])
-            .purpose("copy cached Mjolnir worker into the session"),
-        None => crate::targets::scp_upload(ssh, worker_binary, &worker, false)
-            .purpose("upload SSH worker file"),
-    };
-    execute_checked(executor, install_worker)?;
     for (source, remote) in [
         (launch_config, format!("{worker_root}/launch.json")),
         (ownership, format!("{worker_root}/ownership.json")),
@@ -1181,11 +995,6 @@ pub(super) fn install_worker_over_ssh(
         executor,
         crate::targets::ssh_command(ssh, ["rm", "-rf", "--", &incoming_profile])
             .purpose("remove SSH profile staging"),
-    )?;
-    execute_checked(
-        executor,
-        crate::targets::ssh_command(ssh, ["chmod", "700", &format!("{worker_root}/hel")])
-            .purpose("make SSH worker executable"),
     )?;
     execute_checked(
         executor,
