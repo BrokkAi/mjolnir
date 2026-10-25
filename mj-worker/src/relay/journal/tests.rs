@@ -554,6 +554,7 @@ fn cover_with_checkpoint(relay: &mut DurableRelay, barrier: &str) {
     );
 }
 
+// Hard-won: 50a0277d2: retained terminal bodies exceeded the worker snapshot budget.
 #[test]
 fn only_the_newest_terminal_command_ids_survive_collection() {
     let temp = tempfile::tempdir().unwrap();
@@ -561,7 +562,19 @@ fn only_the_newest_terminal_command_ids_survive_collection() {
     let oldest = complete_prompt(&mut relay, "oldest-command");
     let second = complete_prompt(&mut relay, "second-command");
     for n in 0..crate::relay::journal::RETAINED_TERMINAL_COMMANDS - 1 {
-        complete_prompt(&mut relay, &format!("filler-command-{n}"));
+        let command_id = format!("filler-command-{n}");
+        submit_relay(&mut relay, &command_id, prompt(&"x".repeat(25 * 1024)));
+        relay.claim_pending_commands(true).unwrap();
+        relay
+            .record_command_completed(
+                &command_id,
+                RelayCommandOutcome::Prompt {
+                    diagnostic: None,
+                    stop_reason: "end_turn".into(),
+                    usage: None,
+                },
+            )
+            .unwrap();
     }
     cover_with_checkpoint(&mut relay, "ring-barrier");
     assert!(
@@ -575,6 +588,32 @@ fn only_the_newest_terminal_command_ids_survive_collection() {
         submit_relay(&mut relay, "second-command", prompt("second-command")),
         second,
         "the newest retained IDs still answer a retry with the original acceptance"
+    );
+    let state_path = temp.path().join(RELAY_STATE_FILE);
+    assert!(
+        fs::metadata(&state_path).unwrap().len() < 1024 * 1024,
+        "512 retained receipts must stay far below the snapshot budget"
+    );
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    let retained_id = format!("filler-command-{}", RETAINED_TERMINAL_COMMANDS - 2);
+    let accepted = relay.snapshot.handled_commands[&retained_id].accepted_ordinal;
+    let before = relay.latest_ordinal();
+    assert_eq!(
+        submit_relay(&mut relay, &retained_id, prompt(&"x".repeat(25 * 1024))),
+        accepted
+    );
+    assert_eq!(
+        relay.latest_ordinal(),
+        before,
+        "a retained retry must append no work"
+    );
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    assert!(
+        relay
+            .submit_command(&retained_id, prompt("different body"))
+            .unwrap()
+            .is_err()
     );
     assert!(
         submit_relay(&mut relay, "oldest-command", prompt("oldest-command")) > oldest,
@@ -1037,9 +1076,11 @@ fn retry_resumes_a_relay_local_command_after_snapshot_persistence_failure() {
             payload: RelayResponsePayload::Accepted { .. }
         }
     ));
-    assert_eq!(
-        relay.snapshot.dispatches["retry-local"].state,
-        RelayDispatchState::Completed
+    assert!(!relay.snapshot.dispatches.contains_key("retry-local"));
+    assert!(
+        relay.snapshot.handled_commands["retry-local"]
+            .terminal_ordinal
+            .is_some()
     );
 }
 
@@ -1650,4 +1691,76 @@ fn restored_relay_rejects_an_invalid_canonical_frontier() {
         );
         assert!(!temp.path().join(RELAY_STATE_FILE).exists());
     }
+}
+
+// Hard-won: 50a0277d2: terminal bodies made a worker's own snapshot impossible to reopen.
+#[test]
+fn oversized_legacy_terminal_ledger_opens_and_persists_compactly() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut snapshot = RelaySnapshot::new(SESSION.into());
+    let mut command = prompt(&"x".repeat(25 * 1024));
+    if let RelayCommand::Prompt { prompt } = &mut command
+        && let ContentBlock::Text(text) = &mut prompt[0]
+    {
+        text.meta = Some(serde_json::from_str(r#"{"z":{"b":2,"a":1},"a":0}"#).unwrap());
+    }
+    for index in 0..330 {
+        let id = format!("legacy-{index}");
+        snapshot.handled_commands.insert(
+            id.clone(),
+            mj_core::relay::HandledRelayCommand {
+                command: Some(command.clone()),
+                terminal_identity: None,
+                accepted_ordinal: index * 2 + 1,
+                terminal_ordinal: Some(index * 2 + 2),
+                outcome: Some(RelayCommandOutcome::Prompt {
+                    diagnostic: None,
+                    stop_reason: "end_turn".into(),
+                    usage: None,
+                }),
+                failure: None,
+            },
+        );
+        snapshot.dispatches.insert(
+            id,
+            mj_core::relay::RelayDispatchRecord {
+                command: command.clone(),
+                state: RelayDispatchState::Completed,
+            },
+        );
+    }
+    snapshot.format_version = 19;
+    snapshot.latest_ordinal = 660;
+    snapshot.latest_digest = "a".repeat(64);
+    snapshot.acknowledged_through = snapshot.latest_ordinal;
+    snapshot.acknowledged_digest = snapshot.latest_digest.clone();
+    snapshot.recovery_floor_ordinal = snapshot.latest_ordinal;
+    snapshot.recovery_floor_digest = snapshot.latest_digest.clone();
+    // Serializing without the optional identity produces the actual shipped shape.
+    let legacy = serde_json::to_vec_pretty(&snapshot).unwrap();
+    assert!(legacy.len() > RELAY_SNAPSHOT_BYTE_BUDGET);
+    let path = temp.path().join(RELAY_STATE_FILE);
+    fs::write(&path, &legacy).unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    let compact = fs::read(&path).unwrap();
+    assert!(compact.len() < 256 * 1024);
+    assert!(relay.snapshot.dispatches.is_empty());
+    assert!(
+        relay
+            .snapshot
+            .handled_commands
+            .values()
+            .all(|handled| handled.command.is_none())
+    );
+    let mut reordered = command.clone();
+    if let RelayCommand::Prompt { prompt } = &mut reordered
+        && let ContentBlock::Text(text) = &mut prompt[0]
+    {
+        text.meta = Some(serde_json::from_str(r#"{"a":0,"z":{"a":1,"b":2}}"#).unwrap());
+    }
+    assert_eq!(command, reordered);
+    assert_eq!(submit_relay(&mut relay, "legacy-329", reordered), 659);
+    assert_eq!(relay.latest_ordinal(), 660);
+    drop(relay);
+    DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
 }

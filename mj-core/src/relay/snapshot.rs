@@ -1349,13 +1349,59 @@ pub struct StoredHarnessTurn {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandledRelayCommand {
-    pub command: RelayCommand,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<RelayCommand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_identity: Option<TerminalRelayCommandIdentity>,
     pub accepted_ordinal: u64,
     pub terminal_ordinal: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<RelayCommandOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+}
+
+/// The information a terminal receipt needs after its execution payload is gone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TerminalRelayCommandIdentity {
+    pub digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mailbox_event_key: Option<String>,
+    pub prompt: bool,
+    pub cancels_capacity_retry: bool,
+    pub releases_history: bool,
+}
+
+impl HandledRelayCommand {
+    /// Mailbox keys preserve event identity across plain-text/structured retries.
+    pub fn matches_command(&self, command: &RelayCommand) -> anyhow::Result<bool> {
+        if let Some(original) = &self.command {
+            return Ok(original == command
+                || matches!((original, command),
+                (RelayCommand::DeliverMailboxEvent { event: original },
+                 RelayCommand::DeliverMailboxEvent { event: retry }) if original.key == retry.key));
+        }
+        let Some(identity) = &self.terminal_identity else {
+            return Ok(false);
+        };
+        if let RelayCommand::DeliverMailboxEvent { event } = command
+            && identity.mailbox_event_key.as_ref() == Some(&event.key)
+        {
+            return Ok(true);
+        }
+        Ok(identity.digest == relay_command_digest(command)?)
+    }
+}
+
+fn relay_command_digest(command: &RelayCommand) -> anyhow::Result<String> {
+    use sha2::{Digest, Sha256};
+    // Object insertion order is not part of command equality, including ACP
+    // extension metadata and builds that enable serde_json's preserve_order.
+    let mut value = serde_json::to_value(command)?;
+    value.sort_all_objects();
+    Ok(crate::hex::lower_hex(Sha256::digest(serde_json::to_vec(
+        &value,
+    )?)))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
