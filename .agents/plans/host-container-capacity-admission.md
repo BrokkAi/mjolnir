@@ -27,6 +27,7 @@ The admission calculation treats RAM as a hard, non-compressible commitment. It 
 - [x] (2026-10-25) Commit the validated change on the current branch.
 - [x] (2026-10-25) Commit the independently reviewed fixes on the current branch.
 - [x] (2026-10-25) Fix the second review's joined Move lease, same-host Move accounting, and terminal reservation projection regressions.
+- [x] (2026-10-25) Revalidate the in-place decision on the daemon and release the source commitment at the durable source-stop boundary.
 
 ## Surprises & Discoveries
 
@@ -74,6 +75,12 @@ The admission calculation treats RAM as a hard, non-compressible commitment. It 
 
 - Observation: The terminal had its own raw capacity poller and recomputed hard headroom from the records it happened to hold, so it could not see daemon-only resume and Move leases.
   Evidence: `DashboardState::host_container_capacity` used raw usage plus local records even when the daemon published a reservation-adjusted viewer projection.
+
+- Observation: `MovePreparation::in_place` crosses the request boundary but was not part of the preparation fingerprint or request validation. A forged `true` value skipped capacity admission even though the controller later recomputed the Move as a fresh destination.
+  Evidence: the daemon checked `request.preparation.in_place` before the lifecycle, while `move_session_managed_controlled` independently recomputed the durable Move operation's in-place decision.
+
+- Observation: Holding the same-host maximum through the entire Move lifecycle was safe during source teardown but overcharged after the source was durably stopped. An 8-to-2 CPU Move then blocked an otherwise valid 6-CPU launch until queue admission ended.
+  Evidence: the initial reservation replaced the stopped source record with the saved 8-CPU source commitment instead of using the durable record's post-stop state.
 
 ## Decision Log
 
@@ -157,6 +164,14 @@ The admission calculation treats RAM as a hard, non-compressible commitment. It 
   Rationale: The daemon is the only owner of in-memory leases and the shared reserve policy. The TUI may retain raw CPU and memory utilization for display, but it must not derive admission headroom from partial records.
   Date/Author: 2026-10-25 / Codex
 
+- Decision: Derive the in-place decision from daemon-owned source state and the committed Move record, then require the prepared flag to match.
+  Rationale: The request flag is client-controlled and is not covered by the confirmation fingerprint. A mismatch must force preparation again rather than becoming an admission bypass.
+  Date/Author: 2026-10-25 / Codex
+
+- Decision: Treat a Move's source commitment as live only while the durable moving record still owns that source target group and allocation.
+  Rationale: This keeps the source and destination maximum through checkpointing and source teardown, then releases the source as soon as `Stopped` or destination provisioning makes the source commitment impossible. The destination remains reserved throughout.
+  Date/Author: 2026-10-25 / Codex
+
 ## Outcomes & Retrospective
 
 The feature is implemented. New container sessions default to 4 CPUs and 8 GiB, require at least 2 CPUs and 4 GiB, and are admitted only when their allocation fits the host's aggregate CPU and hard RAM budget. The web viewer and TUI show RAM left from physical totals minus a 20 percent OS reserve and owning-container commitments; borrowed sub-agent containers are excluded. The refusal names the remaining resources, explains that the person may explicitly suspend or stop a session, and states that Mjolnir will not do so automatically.
@@ -167,7 +182,9 @@ After independent review, all five findings reproduced and were fixed. New-sessi
 
 A second independent review found three further real regressions. Joined web Move leases can no longer delete the owning reservation. Non-in-place Moves now retain their source accounting until source teardown: same-host transitions hold the larger source or destination allocation, cross-host transitions charge both hosts, and in-place transitions require no additional reservation. Destination admission excludes the old source record once, so growth is not double-counted. The runtime feed now carries the daemon's reservation-adjusted host capacity to the TUI, so both new-session validation and target cards use the same headroom as web and daemon admission.
 
-Validation completed: the controller suite passed 2105 tests with 17 ignored, the TUI suite passed 543 tests with 2 ignored, the client suite passed 42 unit tests plus its integration test, the CLI unit suite passed 225 tests, and its ACP integration binary passed 3 tests. The workspace clippy run passed with warnings denied, the deterministic web suite passed 108 tests with 3 environment skips, all 57 web unit tests passed, and the documentation Astro check reported zero diagnostics. The full core suite passed 536 tests and hit only the pre-existing container process-reaping failure described above. The CLI `daemon_startup` binary passed 6 tests and hit 10 of the same pre-existing fixture-daemon cleanup failures. Targeted capacity, database, API, protocol, runtime-feed, web, and TUI tests all pass.
+A third review found two further real capacity issues. The daemon now recomputes in-place eligibility from daemon-owned state and the committed Move record, and refuses a prepared flag that disagrees. The source half of a Move reservation is charged only while the durable session record still owns that source target and allocation, so same-host shrink Moves release the excess immediately after `Stopped` while retaining the destination reservation.
+
+Validation completed: the final controller suite passed 2107 tests with 17 ignored, the TUI suite passed 543 tests with 2 ignored, the client suite passed 42 unit tests plus its integration test, the CLI unit suite passed 225 tests, and its ACP integration binary passed 3 tests. The workspace clippy run passed with warnings denied, the deterministic web suite passed 108 tests with 3 environment skips, all 57 web unit tests passed, and the documentation Astro check reported zero diagnostics. The full core suite passed 536 tests and hit only the pre-existing container process-reaping failure described above. The CLI `daemon_startup` binary passed 6 tests and hit 10 of the same pre-existing fixture-daemon cleanup failures. Targeted capacity, database, API, protocol, runtime-feed, web, and TUI tests all pass.
 
 ## Context and Orientation
 
@@ -352,3 +369,4 @@ The web and TUI receive `HostContainerCapacity` rather than recomputing reserve 
 - 2026-10-25: Implementation completed. The plan now records the separate minimum-admission validator, additive wire projection, complete validation results, and the environment-only zombie failures. No schema migration was needed because capacity commitments are derived from durable sessions and borrowed-container ownership.
 - 2026-10-25: Independent review confirmed all five findings. Added resume/move leases, separated EC2 and container preferences, scoped the minimum to new sessions, corrected unknown-capacity rendering, and switched hard-limit formatting to floor instead of round.
 - 2026-10-25: A second independent review confirmed three additional findings. Added non-owning joined leases, source-aware Move capacity reservations with in-place bypass and same-host max accounting, and daemon-computed capacity in the terminal runtime feed.
+- 2026-10-25: A third independent review confirmed two additional findings. Revalidated the in-place decision against daemon-owned state and made source accounting follow the durable source lifetime.

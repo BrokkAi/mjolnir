@@ -32,18 +32,21 @@ pub(super) fn load_controller_for_resume(request: &ResumeSessionRequest) -> Resu
     Ok(controller)
 }
 
+fn validate_prepared_move_environment(prepared: bool, durable: bool) -> Result<()> {
+    ensure!(
+        prepared == durable,
+        "the Move's environment decision changed after preparation; prepare and confirm the Move again"
+    );
+    Ok(())
+}
+
 impl RuntimeState {
     async fn reserve_container_capacity_for_move(
         self: &Arc<Self>,
         request: &MoveSessionRequest,
     ) -> Result<Option<capacity::ContainerCapacityLease>> {
-        // An in-place Move replaces only the harness in the existing
-        // environment, so it creates no additional container commitment.
-        if request.preparation.in_place {
-            return Ok(None);
-        }
         let selection = &request.preparation.selection;
-        let (target_id, allocation, container_target, source) = {
+        let (target_id, allocation, container_target, source, in_place) = {
             let owner = self.owner();
             let controller = owner.controller();
             let source = controller
@@ -62,6 +65,16 @@ impl RuntimeState {
                 .get(&target_id)
                 .with_context(|| format!("unknown target {target_id:?}"))?;
             let container_target = mj_core::config::is_container_target(template);
+            let previous = owner
+                .committed()
+                .and_then(|committed| committed.moves.get(&source.id));
+            let in_place = crate::controller::move_session::move_in_place_for_record(
+                source,
+                selection,
+                &controller.config.targets,
+                controller.state.subagents.contains_key(&source.id),
+                previous,
+            );
             let allocation = if selection.clear_resource_allocation {
                 None
             } else {
@@ -83,8 +96,21 @@ impl RuntimeState {
             } else {
                 None
             };
-            (target_id, allocation, container_target, source_commitment)
+            (
+                target_id,
+                allocation,
+                container_target,
+                source_commitment,
+                in_place,
+            )
         };
+        validate_prepared_move_environment(request.preparation.in_place, in_place)
+            .map_err(|error| anyhow::Error::new(Refusal::precondition(error.to_string())))?;
+        // An in-place Move replaces only the harness in the existing
+        // environment, so it creates no additional container commitment.
+        if in_place {
+            return Ok(None);
+        }
         if !container_target || self.capacity_feed().is_none() {
             return Ok(None);
         }
@@ -553,6 +579,15 @@ mod admission_tests {
             error: None,
             recovery: None,
         }
+    }
+
+    // Hard-won: 03034132f: a client-controlled in-place flag could skip capacity admission.
+    #[test]
+    fn forged_move_environment_decision_is_refused() {
+        assert!(validate_prepared_move_environment(true, false).is_err());
+        assert!(validate_prepared_move_environment(false, true).is_err());
+        assert!(validate_prepared_move_environment(true, true).is_ok());
+        assert!(validate_prepared_move_environment(false, false).is_ok());
     }
 
     /// A command that records its process id and waits for `release`.

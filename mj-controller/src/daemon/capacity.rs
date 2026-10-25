@@ -351,6 +351,7 @@ pub(crate) fn capacity_with_reservations_after<'a>(
     reservations: &BTreeMap<String, ContainerCapacityReservation>,
     additionally_replaced: &BTreeSet<String>,
 ) -> mj_core::state::HostContainerCapacity {
+    let sessions = sessions.into_iter().collect::<Vec<_>>();
     let matching = reservations
         .iter()
         .filter(|(_, reservation)| reservation_affects_group(reservation, &input.target_ids))
@@ -364,25 +365,29 @@ pub(crate) fn capacity_with_reservations_after<'a>(
         input.total,
         &input.target_ids,
         sessions
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|session| !reserved_ids.contains(session.id.as_str())),
     );
     let mut complete = capacity.complete;
-    for (_, reservation) in matching {
+    for (session_id, reservation) in matching {
         let destination_matches = same_target_group(&reservation.target_ids, &input.target_ids);
         let destination =
             destination_matches.then_some(container_commitment(&reservation.allocation));
         let source = reservation
             .source
             .as_ref()
-            .filter(|source| same_target_group(&source.target_ids, &input.target_ids))
+            .filter(|source| {
+                same_target_group(&source.target_ids, &input.target_ids)
+                    && source_commitment_is_live(session_id, source, &sessions)
+            })
             .map(|source| source.allocation.as_ref().and_then(container_commitment));
         match (source, destination) {
             (Some(Some(source)), Some(Some(destination))) => {
                 // Until the source stop is durable both containers can own
-                // host resources. Hold the larger allocation, then keep it
-                // through the rest of the lifecycle rather than releasing
-                // headroom on a phase transition.
+                // host resources. Hold the larger allocation. Once the
+                // durable record no longer owns that source allocation, only
+                // the destination remains charged.
                 add_container_commitment(
                     &mut capacity,
                     source.cpus.max(destination.cpus),
@@ -396,9 +401,10 @@ pub(crate) fn capacity_with_reservations_after<'a>(
             (None, Some(Some(destination))) => {
                 add_container_commitment(&mut capacity, destination.cpus, destination.memory_bytes);
             }
-            (Some(Some(_)), Some(None)) | (None, Some(None)) | (None, None) => {
+            (Some(Some(_)), Some(None)) | (None, Some(None)) => {
                 complete = false;
             }
+            (None, None) => {}
         }
     }
     if !complete {
@@ -417,6 +423,21 @@ pub(crate) fn capacity_with_reservations_after<'a>(
         };
     }
     capacity
+}
+
+fn source_commitment_is_live(
+    session_id: &str,
+    source: &ContainerCapacityCommitment,
+    sessions: &[&SessionRecord],
+) -> bool {
+    sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .is_some_and(|session| {
+            source.target_ids.contains(&session.target_template_id)
+                && mj_core::state::session_owns_container(session)
+                && session.resource_allocation == source.allocation
+        })
 }
 
 fn container_commitment(
@@ -670,8 +691,9 @@ mod tests {
     }
 
     // Hard-won: d27eb9f56: a same-host Move released its running source too early.
+    // Hard-won: 03034132f: the reservation then kept charging it after it stopped.
     #[test]
-    fn same_host_move_holds_the_larger_source_allocation() {
+    fn same_host_move_tracks_the_source_until_its_durable_stop() {
         let mut source = crate::controller::test_support::checkpoint_test_session("moving-session");
         source.state = mj_core::state::SessionState::Running;
         source.target_template_id = "podman".into();
@@ -716,6 +738,24 @@ mod tests {
                 memory_bytes: 16 << 30,
             })
         );
+
+        let mut stopped = source.clone();
+        stopped.state = mj_core::state::SessionState::Stopped;
+        let capacity = capacity_with_reservations(&input, [&stopped], &reservations);
+        assert_eq!(capacity.committed.cpus, 2);
+        assert_eq!(capacity.remaining.cpus, 8);
+
+        let mut destination = source.clone();
+        destination.state = mj_core::state::SessionState::Provisioning;
+        destination.target = None;
+        destination.resource_allocation =
+            Some(mj_core::state::SessionResourceAllocation::Container {
+                cpus: 2,
+                memory_bytes: 4 << 30,
+            });
+        let capacity = capacity_with_reservations(&input, [&destination], &reservations);
+        assert_eq!(capacity.committed.cpus, 2);
+        assert_eq!(capacity.remaining.cpus, 8);
     }
 
     // Hard-won: d27eb9f56: a cross-host Move could release its source host early.
@@ -762,6 +802,12 @@ mod tests {
 
         assert_eq!(source_capacity.committed.cpus, 8);
         assert_eq!(destination_capacity.committed.cpus, 4);
+
+        let mut stopped = source;
+        stopped.state = mj_core::state::SessionState::Stopped;
+        let retired_source =
+            capacity_with_reservations(&input("podman"), [&stopped], &reservations);
+        assert_eq!(retired_source.committed.cpus, 0);
     }
 
     // Hard-won: d27eb9f56: destination admission counted a same-host source twice.
