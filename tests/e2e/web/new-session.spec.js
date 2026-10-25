@@ -364,6 +364,7 @@ test('golden_viewer_new_session', async ({ context }) => {
     state.upgradePreview = { session_id: 'mounted', source_container_id: 'old-container', current_image: 'agent-dev:2.51.0', current_image_id: 'sha256:previous', target_image: 'agent-dev:2.52.0', target_image_id: 'sha256:selected', available: true, retained_mounts: ['/workspace', '/cache', '/tmp'], warning: 'Writable-layer state, including manually installed packages, may be lost. A checkpoint does not preserve the whole environment.' };
     await refresh(page, state);
     await page.locator('.session-menu-trigger').click();
+    await expect(page.getByRole('menuitem', { name: 'Upgrade container and restart…', exact: true })).toBeVisible();
     await page.getByRole('menuitem', { name: 'Restart agent', exact: true }).click();
     const warning = page.getByRole('dialog', { name: 'Upgrade container and restart', exact: true });
     await expect(warning).toBeVisible();
