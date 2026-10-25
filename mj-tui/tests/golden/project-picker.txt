@@ -195,7 +195,7 @@ action: None
 │No se  │ Profile: claude-1                                                                │       │
 │Creat  │ Project: hel                                                                     │       │
 │       │ Target: podman (local Podman)                                                    │       │
-│       │ Compute: 8 CPU / 32.0G                                                           │       │
+│       │ Compute: 4 CPU / 8.0G                                                            │       │
 │       │                                                                                  │       │
 │       │ Attached directories: 0                                                          │       │
 │       │                                                                                  │       │

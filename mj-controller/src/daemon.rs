@@ -235,6 +235,9 @@ pub struct RuntimeState {
     /// The one capacity poller and what it shares; set once the daemon
     /// starts it.
     capacity: std::sync::OnceLock<capacity::CapacityFeed>,
+    /// Serializes a new container reservation with the durable creation of the
+    /// provisioning session that represents it.
+    container_admission: tokio::sync::Mutex<()>,
     /// What `[review]` last said, republished by the target refresher.
     review_config: Arc<Mutex<mj_core::config::ReviewConfig>>,
     /// Turn review runs here, in the process that owns every session, so a

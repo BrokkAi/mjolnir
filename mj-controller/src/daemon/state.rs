@@ -110,6 +110,7 @@ impl RuntimeState {
             next_notice_id: AtomicU64::new(1),
             quota: Mutex::new(QuotaBoard::default()),
             capacity: std::sync::OnceLock::new(),
+            container_admission: tokio::sync::Mutex::new(()),
             review_config,
             review_host,
             reviewer_runtime,
@@ -256,6 +257,7 @@ impl RuntimeState {
         let registered = self
             .start_create_session(CreateSessionRequest {
                 remember_launch_choices: false,
+                remember_container_size: false,
                 at: None,
                 branch: None,
                 base: None,

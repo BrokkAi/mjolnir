@@ -574,6 +574,8 @@ fn unique_id(base: &str, mut is_used: impl FnMut(&str) -> bool) -> String {
 pub struct SessionLaunchOptions {
     /// Allow this interactive launch to seed later new-session forms.
     pub remember_launch_choices: bool,
+    /// Save the selected container size for this physical host.
+    pub remember_container_size: bool,
     pub create_managed_worktree: Option<bool>,
     /// Full commit ID to start the bundle's primary repository at.
     pub at: Option<String>,
@@ -879,6 +881,7 @@ impl Controller {
     ) -> Result<String> {
         let SessionLaunchOptions {
             remember_launch_choices,
+            remember_container_size,
             create_managed_worktree,
             at,
             branch,
@@ -1029,7 +1032,7 @@ impl Controller {
         validate_resource_allocation(template, resource_allocation.as_ref())?;
         let selected_container_size =
             selected_host_container_size(template, resource_allocation.as_ref())
-                .filter(|_| remember_launch_choices);
+                .filter(|_| remember_container_size);
         if !additional_mounts.is_empty() && mount_history_host(template).is_none() {
             bail!("attached resources are unsupported for this target");
         }
@@ -1090,6 +1093,7 @@ impl Controller {
             &record,
             selected_container_size.clone(),
             remember_launch_choices,
+            remember_container_size,
         )?;
         let policy = record.subagents.clone().unwrap_or_default();
         if remember_launch_choices && policy.updates_remembered_choice(record.harness_kind) {

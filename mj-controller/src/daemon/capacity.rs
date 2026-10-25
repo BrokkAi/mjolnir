@@ -9,14 +9,61 @@
 
 use super::*;
 
+pub(crate) struct ContainerCapacityInput {
+    pub(crate) target_ids: Vec<String>,
+    pub(crate) total: mj_core::state::HostContainerSize,
+}
+
 /// What the capacity service shares with the surfaces that show capacity.
 pub(crate) struct CapacityFeed {
     pub(crate) targets: tokio::sync::watch::Receiver<Vec<crate::targets::DeploymentCapacityTarget>>,
     pub(crate) updates: tokio::sync::broadcast::Sender<crate::pollers::CapacityPollUpdate>,
+    latest: tokio::sync::watch::Receiver<BTreeMap<String, crate::targets::DeploymentCapacityUsage>>,
     refresh: tokio::sync::mpsc::Sender<()>,
 }
 
 impl CapacityFeed {
+    /// The latest successful reading for the deployment host that contains
+    /// `target_id`. A failed probe deliberately leaves the last good total and
+    /// observed usage in place; admission can still rely on the durable
+    /// committed-allocation count rather than an empty reading.
+    pub(crate) fn reading_for_target(
+        &self,
+        target_id: &str,
+    ) -> Option<(
+        crate::targets::DeploymentCapacityTarget,
+        crate::targets::DeploymentCapacityUsage,
+    )> {
+        let target = self
+            .targets
+            .borrow()
+            .iter()
+            .find(|target| target.target_ids.iter().any(|id| id == target_id))?
+            .clone();
+        let usage = self.latest.borrow().get(&target.id)?.clone();
+        Some((target, usage))
+    }
+
+    /// The deployment target containing `target_id`, even when no successful
+    /// reading has arrived yet.
+    pub(crate) fn target_for(
+        &self,
+        target_id: &str,
+    ) -> Option<crate::targets::DeploymentCapacityTarget> {
+        self.targets
+            .borrow()
+            .iter()
+            .find(|target| target.target_ids.iter().any(|id| id == target_id))
+            .cloned()
+    }
+
+    pub(crate) fn usage_for_target(
+        &self,
+        target_id: &str,
+    ) -> Option<crate::targets::DeploymentCapacityUsage> {
+        self.reading_for_target(target_id).map(|(_, usage)| usage)
+    }
+
     /// Ask for a new reading of every host. A request that arrives while one
     /// is queued is the same request.
     pub(crate) fn request_refresh(&self) -> bool {
@@ -36,6 +83,39 @@ impl RuntimeState {
     pub(crate) fn capacity_feed(&self) -> Option<&CapacityFeed> {
         self.capacity.get()
     }
+
+    /// The physical CPU and RAM totals for the host containing `target_id`.
+    /// A first launch may arrive before the periodic poll has produced a
+    /// reading, so this samples the existing deployment target on demand.
+    pub(crate) async fn container_capacity_input(
+        &self,
+        target_id: &str,
+    ) -> Result<Option<ContainerCapacityInput>> {
+        let Some(feed) = self.capacity_feed() else {
+            return Ok(None);
+        };
+        let Some(target) = feed.target_for(target_id) else {
+            return Ok(None);
+        };
+        if target.kind != crate::targets::DeploymentCapacityKind::Host {
+            return Ok(None);
+        }
+        let usage = match feed.usage_for_target(target_id) {
+            Some(usage) => usage,
+            None => crate::pollers::sample_capacity_target(target.clone())
+                .await?
+                .with_context(|| {
+                    format!("no CPU and memory reading is available for target {target_id:?}")
+                })?,
+        };
+        Ok(Some(ContainerCapacityInput {
+            target_ids: target.target_ids,
+            total: mj_core::state::HostContainerSize {
+                cpus: usage.logical_cores,
+                memory_bytes: usage.memory_total_bytes,
+            },
+        }))
+    }
 }
 
 pub(super) fn spawn_capacity_service(
@@ -49,10 +129,15 @@ pub(super) fn spawn_capacity_service(
         .active_controller_projection()
         .deployment_capacity_targets();
     targets_tx.send_replace(initial);
+    let (latest_tx, latest_rx) = tokio::sync::watch::channel(BTreeMap::<
+        String,
+        crate::targets::DeploymentCapacityUsage,
+    >::new());
     let (updates, _) = tokio::sync::broadcast::channel(64);
     let feed = CapacityFeed {
         targets: targets_tx.subscribe(),
         updates: updates.clone(),
+        latest: latest_rx,
         refresh,
     };
     if state.capacity.set(feed).is_err() {
@@ -77,6 +162,11 @@ pub(super) fn spawn_capacity_service(
                     let targets = state
                         .active_controller_projection()
                         .deployment_capacity_targets();
+                    latest_tx.send_if_modified(|latest| {
+                        let before = latest.len();
+                        latest.retain(|id, _| targets.iter().any(|target| target.id == *id));
+                        latest.len() != before
+                    });
                     targets_tx.send_if_modified(|current| {
                         if *current == targets {
                             false
@@ -104,6 +194,9 @@ pub(super) fn spawn_capacity_service(
                             &usage.storage,
                             reading.sampled_at_epoch_seconds,
                         );
+                        latest_tx.send_modify(|latest| {
+                            latest.insert(reading.target_id.clone(), usage.clone());
+                        });
                     }
                     // No subscriber is not an error: the web viewer may be off.
                     let _ = updates.send(reading);

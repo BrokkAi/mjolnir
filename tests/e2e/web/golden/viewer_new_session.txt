@@ -14,12 +14,14 @@ Container size
 CPU cores
 Memory (GiB)
 
-This host allows up to 24 CPU cores and 64 GiB of memory.
+Host: 24 CPUs and 64 GiB RAM · RAM left: 51.2 GiB · CPU left: 24. RAM left is a hard commitment; compressed or reclaimable memory does not increase it.
+
+Save as default sizing
 
 Back
 Next
 Cancel
-controls: [{"tag":"input","id":null,"label":"choice-1","value":"container","checked":true,"disabled":false,"pressed":null},{"tag":"input","id":null,"label":"choice-1","value":"local","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":null,"label":"choice-1","value":"remote","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-resource-cpus","label":null,"value":"8","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-resource-memory","label":null,"value":"32","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":null,"label":"choice-1","value":"container","checked":true,"disabled":false,"pressed":null},{"tag":"input","id":null,"label":"choice-1","value":"local","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":null,"label":"choice-1","value":"remote","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-resource-cpus","label":null,"value":"4","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-resource-memory","label":null,"value":"8","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-save-default-size","label":null,"value":"on","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 0
 project creation requests: 0
 === attachments edited on Review before launch (390x844) ===
@@ -135,7 +137,7 @@ Start
 Cancel
 controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"no_github_events":false,"additional_mounts":[{"source":"/srv/data","destination":"/repos","read_only":false,"access":"rw"},{"source":"/srv/cache","destination":"/mnt/cache","read_only":false},{"source":"/srv/reference","destination":"/mnt/reference","read_only":true}],"resource_allocation":{"kind":"container","cpus":6,"memory_bytes":13421772800}}]
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"no_github_events":false,"additional_mounts":[{"source":"/srv/data","destination":"/repos","read_only":false,"access":"rw"},{"source":"/srv/cache","destination":"/mnt/cache","read_only":false},{"source":"/srv/reference","destination":"/mnt/reference","read_only":true}],"resource_allocation":{"kind":"container","cpus":6,"memory_bytes":13421772800},"remember_container_size":true}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/mnt/data","read_only":true}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/mnt/data","read_only":true},{"source":"/opt/data","destination":"/mnt/data-2","read_only":false}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/repos","read_only":false,"access":"rw"},{"source":"/opt/data","destination":"/mnt/data-2","read_only":false}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/repos","read_only":false,"access":"rw"}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/repos","read_only":false,"access":"rw"},{"source":"/srv/cache","destination":"/mnt/cache","read_only":false}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/repos","read_only":false,"access":"rw"},{"source":"/srv/cache","destination":"/mnt/cache","read_only":false},{"source":"/srv/reference","destination":"/mnt/reference","read_only":true}]}]
 request: POST /api/paths/complete [{"target_id":"container","prefix":"/srv/data","kind":"directories"},{"target_id":"container","prefix":"/opt/data","kind":"directories"},{"target_id":"container","prefix":"/srv/cache","kind":"directories"},{"target_id":"container","prefix":"/srv/reference","kind":"directories"}]
 project creation requests: 0
@@ -149,7 +151,7 @@ alpha
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Project preflight
@@ -199,7 +201,7 @@ alpha
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Project preflight
@@ -555,7 +557,7 @@ alpha
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes
@@ -603,7 +605,7 @@ alpha
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes
@@ -639,7 +641,7 @@ Start
 Cancel
 controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":4,"memory_bytes":8589934592},"remember_container_size":false}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
 === review delegation configured selection (390x844) ===
@@ -652,7 +654,7 @@ alpha
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes
@@ -697,7 +699,7 @@ alpha
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes
@@ -730,7 +732,7 @@ Start
 Cancel
 controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"mjolnir"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"mjolnir"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":4,"memory_bytes":8589934592},"remember_container_size":false}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
 === review delegation remembered Mjolnir (390x844) ===
@@ -743,7 +745,7 @@ alpha
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes
@@ -788,7 +790,7 @@ alpha
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes
@@ -821,7 +823,7 @@ Start
 Cancel
 controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"mjolnir"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"mjolnir"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":4,"memory_bytes":8589934592},"remember_container_size":false}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
 === review delegation None without configured models (390x844) ===
@@ -834,7 +836,7 @@ alpha
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes
@@ -882,7 +884,7 @@ alpha
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes
@@ -918,7 +920,7 @@ Start
 Cancel
 controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"none","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"none"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"none"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":4,"memory_bytes":8589934592},"remember_container_size":false}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
 === review delegation remembered None (390x844) ===
@@ -931,7 +933,7 @@ alpha
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes
@@ -979,7 +981,7 @@ alpha
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes
@@ -1015,7 +1017,7 @@ Start
 Cancel
 controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"none","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"none"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"none"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":4,"memory_bytes":8589934592},"remember_container_size":false}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
 === review for harness without subagent support (390x844) ===
@@ -1028,7 +1030,7 @@ gamma
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes
@@ -1076,7 +1078,7 @@ gamma
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes
@@ -1112,7 +1114,7 @@ Start
 Cancel
 controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"gamma","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"gamma","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":4,"memory_bytes":8589934592},"remember_container_size":false}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"gamma","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
 === managed worktree unavailable on container (390x844) ===
@@ -1125,7 +1127,7 @@ alpha
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes
@@ -1259,7 +1261,7 @@ alpha
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes
@@ -1586,7 +1588,7 @@ alpha
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes
@@ -1631,7 +1633,7 @@ alpha
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes
@@ -1666,7 +1668,7 @@ Cancel
 Selected subagent model "removed" is unavailable. Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents.
 controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"mjolnir"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"mjolnir"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":4,"memory_bytes":8589934592},"remember_container_size":false}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
 === generic launch error (390x844) ===
@@ -1679,7 +1681,7 @@ alpha
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes
@@ -1717,6 +1719,6 @@ Cancel
 boom
 controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":4,"memory_bytes":8589934592},"remember_container_size":false}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0

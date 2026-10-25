@@ -339,6 +339,7 @@ impl DashboardState {
         let target_template_id = nth_key(&self.config.targets, wizard.target);
         let raw_project = is_bare_project_target(&self.config.targets[&target_template_id]);
         DashboardAction::CreateSession {
+            remember_container_size: wizard.remember_container_size,
             subagents: Some(wizard.subagents.selected()),
             review: None,
             create_managed_worktree: Some(

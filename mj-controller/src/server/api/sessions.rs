@@ -211,6 +211,7 @@ pub(super) async fn start_session(
     }
     let mut action = ControllerAction::New {
         remember_launch_choices: false,
+        remember_container_size: request.remember_container_size,
         create_managed_worktree: request.create_managed_worktree,
         at: request.at.clone(),
         branch: request.branch.clone(),

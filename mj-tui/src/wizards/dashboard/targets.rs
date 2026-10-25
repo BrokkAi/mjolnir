@@ -536,16 +536,48 @@ impl DashboardState {
             .map(|usage| (usage.logical_cores, usage.memory_total_bytes))
     }
 
+    pub(crate) fn host_container_capacity(
+        &self,
+        target_id: &str,
+    ) -> Option<mj_core::state::HostContainerCapacity> {
+        let detail = self
+            .capacity_details
+            .values()
+            .find(|detail| detail.target.target_ids.iter().any(|id| id == target_id))?;
+        let usage = detail.usage.as_ref()?;
+        Some(mj_core::state::host_container_capacity(
+            mj_core::state::HostContainerSize {
+                cpus: usage.logical_cores,
+                memory_bytes: usage.memory_total_bytes,
+            },
+            &detail.target.target_ids,
+            self.state.sessions.values(),
+        ))
+    }
+
     pub(super) fn validate_wizard_resources<W: WizardDraft>(&self, wizard: &mut W) {
         let target_id = nth_key(&self.config.targets, wizard.target());
-        let result = wizard
-            .resource_editor()
-            .allocation(self.host_limits(&target_id));
+        let uses_remaining = wizard.remember_container_size().is_some();
+        let capacity = self.host_container_capacity(&target_id);
+        let limits = if uses_remaining {
+            capacity.map(|capacity| (capacity.remaining.cpus, capacity.remaining.memory_bytes))
+        } else {
+            self.host_limits(&target_id)
+        };
+        let result = wizard.resource_editor().allocation(limits);
         let (_, allocation, error) = wizard.sizing_mut();
         match result {
             Ok(value) => {
-                *allocation = Some(value);
-                *error = None;
+                if uses_remaining && capacity.is_some_and(|capacity| !capacity.complete) {
+                    *allocation = None;
+                    *error = Some(
+                        "A live container has no recorded sizing, so RAM left cannot be calculated safely."
+                            .into(),
+                    );
+                } else {
+                    *allocation = Some(value);
+                    *error = None;
+                }
             }
             Err(reason) => {
                 *allocation = None;

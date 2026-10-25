@@ -1486,6 +1486,14 @@ function memoryGiBText(bytes) {
   return text;
 }
 
+function capacityGiBText(bytes) {
+  const value = Number(bytes) / 2 ** 30;
+  return value.toFixed(1).replace(/\.0$/, '');
+}
+
+const MIN_CONTAINER_CPUS = 2;
+const MIN_CONTAINER_MEMORY_BYTES = 4n * (1n << 30n);
+
 function parseMemoryGiB(text) {
   const value = text.trim();
   const match = /^(\d*)(?:\.(\d*))?$/.exec(value);
@@ -1507,14 +1515,24 @@ function containerAllocationFromDraft(draft, target) {
   if (cpusBig < 1n || cpusBig > BigInt(Number.MAX_SAFE_INTEGER)) {
     return { allocation: null, error: 'CPU must be a positive whole number.' };
   }
+  if (cpusBig < BigInt(MIN_CONTAINER_CPUS)) {
+    return { allocation: null, error: `CPU must be at least ${MIN_CONTAINER_CPUS}.` };
+  }
   const memoryBytes = parseMemoryGiB(draft.resourceMemoryText);
   if (memoryBytes === null) return { allocation: null, error: 'MEM must be a positive number of GiB (up to 30 decimal places).' };
-  const limits = target?.container_host_limits;
+  if (BigInt(memoryBytes) < MIN_CONTAINER_MEMORY_BYTES) {
+    return { allocation: null, error: 'RAM must be at least 4 GiB.' };
+  }
+  const capacity = target?.container_capacity;
+  if (capacity && !capacity.complete) {
+    return { allocation: null, error: 'A live container has no recorded sizing, so RAM left cannot be calculated safely.' };
+  }
+  const limits = capacity?.remaining ?? target?.container_host_limits;
   if (limits && cpusBig > BigInt(limits.cpus)) {
-    return { allocation: null, error: `CPU exceeds this host's ${limits.cpus} CPUs.` };
+    return { allocation: null, error: `CPU exceeds the ${limits.cpus} CPUs left on this host.` };
   }
   if (limits && BigInt(memoryBytes) > BigInt(limits.memory_bytes)) {
-    return { allocation: null, error: `MEM exceeds this host's ${memoryGiBText(limits.memory_bytes)} GiB.` };
+    return { allocation: null, error: `RAM exceeds the ${capacityGiBText(limits.memory_bytes)} GiB left on this host.` };
   }
   return {
     allocation: { kind: 'container', cpus: Number(cpusBig), memory_bytes: memoryBytes },
@@ -1622,7 +1640,7 @@ function renderNewTargetSizingControls(draft, host) {
     });
     const cpuInput = cpu.querySelector('input');
     cpuInput.type = 'number';
-    cpuInput.min = '1';
+    cpuInput.min = String(MIN_CONTAINER_CPUS);
     cpuInput.step = '1';
     cpuInput.inputMode = 'numeric';
     const memory = textField('Memory (GiB)', 'new-resource-memory', draft.resourceMemoryText, value => {
@@ -1635,13 +1653,30 @@ function renderNewTargetSizingControls(draft, host) {
     });
     const memoryInput = memory.querySelector('input');
     memoryInput.type = 'number';
-    memoryInput.min = '0.000000001';
+    memoryInput.min = '4';
     memoryInput.step = 'any';
     memoryInput.inputMode = 'decimal';
     host.append(el('h2', '', 'Container size'), cpu, memory);
-    if (target.container_host_limits) {
-      host.append(el('p', 'dim', `This host allows up to ${target.container_host_limits.cpus} CPU cores and ${memoryGiBText(target.container_host_limits.memory_bytes)} GiB of memory.`));
+    if (target.container_capacity) {
+      const capacity = target.container_capacity;
+      host.append(el(
+        'p',
+        'dim',
+        `Host: ${capacity.total.cpus} CPUs and ${capacityGiBText(capacity.total.memory_bytes)} GiB RAM · RAM left: ${capacityGiBText(capacity.remaining.memory_bytes)} GiB · CPU left: ${capacity.remaining.cpus}. RAM left is a hard commitment; compressed or reclaimable memory does not increase it.`,
+      ));
+    } else if (target.container_host_limits) {
+      host.append(el('p', 'dim', `Host: ${target.container_host_limits.cpus} CPUs and ${capacityGiBText(target.container_host_limits.memory_bytes)} GiB RAM. RAM left is unavailable until the capacity probe answers.`));
     }
+    const saveDefault = el('label', 'field');
+    const saveDefaultInput = el('input');
+    saveDefaultInput.type = 'checkbox';
+    saveDefaultInput.id = 'new-save-default-size';
+    saveDefaultInput.checked = draft.rememberContainerSize;
+    saveDefaultInput.onchange = () => {
+      draft.rememberContainerSize = saveDefaultInput.checked;
+    };
+    saveDefault.append(saveDefaultInput, document.createTextNode(' Save as default sizing'));
+    host.append(saveDefault);
     const error = el('p', 'error', newResourceAllocationError(draft));
     error.id = 'new-resource-error';
     host.append(error);
@@ -1721,6 +1756,7 @@ function freshDraft() {
     resourceAllocation: null,
     resourceCpuText: '',
     resourceMemoryText: '',
+    rememberContainerSize: false,
     resourceOptionsByTarget: {},
     resourceRequestController: null,
     resourceRequestTargetId: null,
@@ -1886,8 +1922,9 @@ function renderNewForm() {
     profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
     targets: step.key === 'target' ? [
       launchableTargets(snapshot.targets).map(t => [t.id, t.kind, targetStatus(t), t.resource_allocation_kind,
-        t.default_resource_allocation, t.container_host_limits]),
+        t.default_resource_allocation, t.container_host_limits, t.container_capacity]),
       newDraft.resourceCpuText, newDraft.resourceMemoryText, newDraft.resourceAllocation,
+      newDraft.rememberContainerSize,
       newDraft.resourceLoading, newDraft.resourceError,
     ] : null,
     project: step.key === 'project' ? [
@@ -2861,6 +2898,7 @@ async function commitNew() {
     ? containerAllocationFromDraft(draft, target).allocation
     : kind === 'aws-ec2' ? draft.resourceAllocation : null;
   if (resourceAllocation) body.resource_allocation = resourceAllocation;
+  if (kind === 'container') body.remember_container_size = draft.rememberContainerSize === true;
   if (newDraft.title.trim()) body.title = newDraft.title.trim();
   draft.committing = true;
   renderNewForm();
@@ -4285,6 +4323,21 @@ function renderTargets() {
           'Memory',
           `${percent}% of ${formatBytes(reading.memory_total_bytes)}`,
           band(100 - percent),
+        ]);
+      }
+      if (reading.container_capacity) {
+        const capacity = reading.container_capacity;
+        rows.push([
+          'RAM left',
+          capacity.complete
+            ? `${capacityGiBText(capacity.remaining.memory_bytes)} GiB of ${capacityGiBText(capacity.total.memory_bytes)} GiB`
+            : 'unavailable (live container sizing unknown)',
+          capacity.complete && capacity.remaining.memory_bytes > 0 ? '' : 'reading-low',
+        ]);
+        rows.push([
+          'CPU left',
+          `${capacity.remaining.cpus} of ${capacity.total.cpus}`,
+          capacity.remaining.cpus > 0 ? '' : 'reading-low',
         ]);
       }
       if (reading.logical_cores) rows.push(['Cores', String(reading.logical_cores), '']);

@@ -343,6 +343,7 @@ fn stale_worker_fails_before_any_container_is_created() {
             "stale worker",
             SessionLaunchOptions {
                 remember_launch_choices: true,
+                remember_container_size: true,
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
@@ -411,6 +412,7 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
             "failed image",
             SessionLaunchOptions {
                 remember_launch_choices: true,
+                remember_container_size: true,
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
@@ -499,6 +501,7 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
             "borrow the parent container",
             SessionLaunchOptions {
                 remember_launch_choices: true,
+                remember_container_size: true,
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
@@ -799,6 +802,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
             "missing Node",
             SessionLaunchOptions {
                 remember_launch_choices: true,
+                remember_container_size: true,
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
@@ -1009,6 +1013,7 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
             "cancelled launch",
             SessionLaunchOptions {
                 remember_launch_choices: true,
+                remember_container_size: true,
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,

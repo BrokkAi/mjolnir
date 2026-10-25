@@ -298,6 +298,7 @@ pub enum DashboardAction {
         text: String,
     },
     CreateSession {
+        remember_container_size: bool,
         create_managed_worktree: Option<bool>,
         subagents: Option<mj_core::subagent::SubagentPolicy>,
         /// The session's automatic turn-review choice. `None` follows the

@@ -257,12 +257,54 @@ impl RuntimeState {
             &policy,
         )
         .await?;
+        let container_target = config
+            .targets
+            .get(&request.target_template_id)
+            .is_some_and(mj_core::config::is_container_target);
+        if let Some(allocation) = request.resource_allocation.as_ref() {
+            validate_minimum_container_allocation(allocation)?;
+        }
+        let container_capacity = if container_target {
+            let input = self
+                .container_capacity_input(&request.target_template_id)
+                .await
+                .context(mj_core::refusal::Refusal::precondition(
+                    "Mjolnir could not read this host's CPU and RAM capacity; check the target and retry",
+                ))?;
+            if input.is_none() && self.capacity_feed().is_some() {
+                return Err(anyhow::Error::new(
+                    mj_core::refusal::Refusal::precondition(
+                        "this target's host capacity is not ready yet; refresh the target and retry",
+                    )
+                    .with_code("container-capacity-unavailable"),
+                ));
+            }
+            input
+        } else {
+            None
+        };
+        if container_capacity.is_some() && request.resource_allocation.is_none() {
+            return Err(anyhow::Error::new(
+                mj_core::refusal::Refusal::unusable(
+                    "container sessions require an explicit CPU and RAM allocation; retry from a current client or pass `cpus` and `memory_bytes`",
+                )
+                .with_code("container-size-required"),
+            ));
+        }
         if !request.bundle_id.is_empty() {
             crate::controller::config_only_controller(config.clone())
                 .validate_github_bundle_installations(&request.bundle_id)
                 .await
                 .map_err(crate::controller::GithubBundleSelectionError::into_anyhow)?;
         }
+        // The reservation and the durable session record must be one
+        // serialized decision. If the lock covered only the check, two
+        // concurrent creates could observe the same committed total.
+        let _container_admission = if container_capacity.is_some() {
+            Some(self.container_admission.lock().await)
+        } else {
+            None
+        };
         // Discovery is restartable preparation, not admitted lifecycle work.
         let _upgrade_work = crate::upgrade::activity("session admission")?;
         request.subagents = Some(policy);
@@ -271,6 +313,20 @@ impl RuntimeState {
         let preferences_owner = self.clone();
         let registered = blocking(move || {
             let mut controller = Controller::load()?;
+            if let (Some(input), Some(allocation)) =
+                (container_capacity, request.resource_allocation.as_ref())
+            {
+                validate_minimum_container_allocation(allocation)?;
+                let capacity = mj_core::state::host_container_capacity(
+                    input.total,
+                    &input.target_ids,
+                    controller.state.sessions.values(),
+                );
+                ensure!(
+                    capacity.fits(allocation),
+                    capacity_refusal(capacity, allocation)
+                );
+            }
             let path_executor = crate::targets::CancellableProcessExecutor::new(path_cancelled)
                 .with_deadline(Duration::from_secs(30));
             let project_directory = request
@@ -291,6 +347,7 @@ impl RuntimeState {
                 request.title,
                 SessionLaunchOptions {
                     remember_launch_choices: request.remember_launch_choices,
+                    remember_container_size: request.remember_container_size,
                     create_managed_worktree: request.create_managed_worktree,
                     at: request.at,
                     branch: request.branch,
@@ -366,6 +423,7 @@ impl RuntimeState {
             })
         })
         .await?;
+        drop(_container_admission);
         let session_id = registered.session.id.clone();
         self.start_or_join_lifecycle_controlled(
             session_id,
@@ -457,6 +515,113 @@ impl RuntimeState {
     }
 }
 
+fn validate_minimum_container_allocation(
+    allocation: &mj_core::state::SessionResourceAllocation,
+) -> Result<()> {
+    allocation
+        .validate_minimum_useful_container()
+        .map_err(|error| {
+            anyhow::Error::new(
+                mj_core::refusal::Refusal::unusable(error.to_string())
+                    .with_code("container-size-too-small"),
+            )
+        })
+}
+
+fn capacity_refusal(
+    capacity: mj_core::state::HostContainerCapacity,
+    allocation: &mj_core::state::SessionResourceAllocation,
+) -> anyhow::Error {
+    use anyhow::Error;
+    use mj_core::refusal::Refusal;
+    use mj_core::state::SessionResourceAllocation;
+
+    let SessionResourceAllocation::Container {
+        cpus: requested_cpus,
+        memory_bytes: requested_memory,
+    } = allocation
+    else {
+        return Error::new(Refusal::unusable(
+            "container capacity admission received a non-container allocation",
+        ));
+    };
+    if !capacity.complete {
+        return Error::new(
+            Refusal::unusable(
+                "a live container on this host has no recorded CPU and RAM sizing, so Mjolnir cannot safely calculate the RAM left; stop that session or restart it with an explicit size",
+            )
+            .with_code("container-capacity-unknown"),
+        );
+    }
+    let gib = |bytes: u64| format!("{:.1}", bytes as f64 / (1024.0 * 1024.0 * 1024.0));
+    Error::new(
+        Refusal::unusable(format!(
+            "this launch requests {requested_cpus} CPUs and {} GiB of RAM, but the host has {} CPUs and {} GiB of RAM left after its system reserve and live container commitments. Suspend or stop a session, or choose a smaller allocation. Mjolnir does not stop sessions automatically.",
+            gib(*requested_memory),
+            capacity.remaining.cpus,
+            gib(capacity.remaining.memory_bytes),
+        ))
+        .with_code("container-capacity-exceeded"),
+    )
+}
+
+#[cfg(test)]
+mod capacity_admission_tests {
+    use super::*;
+
+    #[test]
+    fn capacity_refusal_names_remaining_ram_and_never_promises_automatic_stop() {
+        let capacity = mj_core::state::HostContainerCapacity {
+            total: mj_core::state::HostContainerSize {
+                cpus: 24,
+                memory_bytes: 64 << 30,
+            },
+            reserved: mj_core::state::HostContainerSize {
+                cpus: 0,
+                memory_bytes: 12 << 30,
+            },
+            committed: mj_core::state::HostContainerSize {
+                cpus: 20,
+                memory_bytes: 44 << 30,
+            },
+            remaining: mj_core::state::HostContainerSize {
+                cpus: 4,
+                memory_bytes: 8 << 30,
+            },
+            complete: true,
+        };
+        let allocation = mj_core::state::SessionResourceAllocation::Container {
+            cpus: 4,
+            memory_bytes: 16 << 30,
+        };
+
+        let error = capacity_refusal(capacity, &allocation);
+        let refusal = mj_core::refusal::Refusal::of(&error).expect("user-facing refusal");
+
+        assert_eq!(refusal.code(), Some("container-capacity-exceeded"));
+        assert!(refusal.message().contains("4 CPUs and 8.0 GiB of RAM left"));
+        assert!(
+            refusal
+                .message()
+                .contains("does not stop sessions automatically")
+        );
+    }
+
+    #[test]
+    fn undersized_container_is_a_user_facing_refusal() {
+        let allocation = mj_core::state::SessionResourceAllocation::Container {
+            cpus: 1,
+            memory_bytes: 2 << 30,
+        };
+
+        let error = validate_minimum_container_allocation(&allocation).unwrap_err();
+        let refusal = mj_core::refusal::Refusal::of(&error).expect("user-facing refusal");
+
+        assert_eq!(refusal.code(), Some("container-size-too-small"));
+        assert!(refusal.message().contains("at least 2 CPUs"));
+    }
+}
+
 #[cfg(test)]
 mod delegation_replay_tests {
     use crate::controller::test_support::{IsolatedTest, test_name};
@@ -519,6 +684,7 @@ mod delegation_replay_tests {
             let policy_before = crate::database::load_state().unwrap().last_subagent_policy;
             let request = mj_client::daemon::CreateSessionRequest {
                 remember_launch_choices: remember,
+                remember_container_size: false,
                 create_managed_worktree: Some(false),
                 at: None,
                 branch: None,
@@ -646,6 +812,7 @@ mod delegation_replay_tests {
         let runtime = crate::daemon::tests::test_runtime_state();
         let request = mj_client::daemon::CreateSessionRequest {
             remember_launch_choices: false,
+            remember_container_size: false,
             create_managed_worktree: None,
             at: None,
             branch: None,

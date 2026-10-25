@@ -262,7 +262,10 @@ It walks you through picking a profile, a target, and a bundle.
 
 Before launch, you can size the container's CPU and memory allocation. The
 wizard starts with the allocation remembered for that physical host, or with
-8 CPUs and 32 GiB when no allocation has been remembered:
+4 CPUs and 8 GiB when no allocation has been remembered. The smallest accepted
+allocation is 2 CPUs and 4 GiB. Check **Save as default sizing** to remember the
+selected size for that physical host; leave it unchecked to keep the previous
+default:
 
 | Key | Effect |
 | --- | --- |
@@ -270,11 +273,17 @@ wizard starts with the allocation remembered for that physical host, or with
 | `-` | Halves the current allocation |
 | `c` | Adds 8 CPUs |
 | `m` | Adds 50% memory |
-| `r` | Resets to the 8-CPU/32-GiB baseline |
+| `r` | Resets to the 4-CPU/8-GiB baseline |
 
 The wizard ends on a review screen where you can add, edit, or remove
 attached directories before launch. Each attached directory has an access
 mode:
+
+Mjolnir also shows how much CPU and RAM remains after accounting for every
+live container on the physical host and a reserve for the host operating
+system. A new container is refused if either requested amount would overcommit
+that host. The refusal names the remaining capacity and offers the explicit
+Suspend or Destroy actions; Mjolnir does not stop sessions automatically.
 
 | Mode | Effect |
 | --- | --- |

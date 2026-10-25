@@ -1239,6 +1239,7 @@ fn snapshot_targets_carry_the_availability_the_options_report() {
         memory_used_bytes: None,
         memory_total_bytes: None,
         logical_cores: None,
+        container_capacity: None,
         disk_total_bytes: None,
         virtual_machines: None,
         sampled_at_epoch_seconds: Some(1),
@@ -1591,6 +1592,7 @@ fn prompt_action() -> ControllerAction {
 fn new_action() -> ControllerAction {
     ControllerAction::New {
         remember_launch_choices: true,
+        remember_container_size: true,
         review: None,
         no_project_memory: false,
         no_github_events: false,

@@ -249,6 +249,10 @@ pub struct CreateWorkspaceResponse {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartSessionRequest {
+    /// Save this session's container size as the default for its physical
+    /// host. False preserves the existing saved size or the baseline.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remember_container_size: bool,
     #[serde(default)]
     pub create_managed_worktree: Option<bool>,
     /// Full commit object ID to start the workspace at: an exact checkout of
@@ -305,11 +309,11 @@ pub struct StartSessionRequest {
     pub effort: Option<String>,
     #[serde(default)]
     pub prompt: Option<String>,
-    /// Container CPU limit. Omitted takes the target's default size, the
-    /// one the viewer's create form selects. Container targets only.
+    /// Container CPU limit, at least 2. Omitted takes the target's default
+    /// size, the one the viewer's create form selects. Container targets only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpus: Option<u64>,
-    /// Container memory limit in bytes, defaulted like `cpus`.
+    /// Container memory limit in bytes, at least 4 GiB, defaulted like `cpus`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_bytes: Option<u64>,
 }

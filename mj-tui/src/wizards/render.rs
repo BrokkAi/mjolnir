@@ -55,13 +55,32 @@ fn target_step_choices<W: WizardDraft>(
                 help.push(Line::styled(format!("{id}: {reason}"), warning));
             }
             if selected {
-                if mj_core::config::is_container_target(target)
-                    && dashboard.host_limits(id).is_none()
-                {
-                    help.push(Line::styled(
-                        "Host totals unavailable; resource limits cannot be checked.",
-                        warning,
-                    ));
+                if mj_core::config::is_container_target(target) {
+                    if let Some(capacity) = dashboard.host_container_capacity(id) {
+                        let remaining = if capacity.complete {
+                            format!(
+                                "{} CPUs · {} GiB RAM left",
+                                capacity.remaining.cpus,
+                                capacity_gib_text(capacity.remaining.memory_bytes)
+                            )
+                        } else {
+                            "RAM left unavailable (live container sizing unknown)".into()
+                        };
+                        help.push(Line::styled(
+                            format!(
+                                "Host: {} CPUs · {} GiB RAM · hard commitment; {}",
+                                capacity.total.cpus,
+                                capacity_gib_text(capacity.total.memory_bytes),
+                                remaining
+                            ),
+                            theme::muted(),
+                        ));
+                    } else if dashboard.host_limits(id).is_none() {
+                        help.push(Line::styled(
+                            "Host totals unavailable; resource limits cannot be checked.",
+                            warning,
+                        ));
+                    }
                 }
                 if let Some(error) = sizing_error.filter(|_| rejection.is_none()) {
                     help.push(Line::styled(format!("Sizing: {error}"), warning));

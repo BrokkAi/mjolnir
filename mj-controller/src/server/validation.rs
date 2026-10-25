@@ -416,6 +416,7 @@ fn validate_action_against(
     match action {
         ControllerAction::New {
             remember_launch_choices: _,
+            remember_container_size: _,
             workspace_id,
             profile_id,
             bundle_id,
@@ -484,6 +485,27 @@ fn validate_action_against(
                 resource_allocation.as_deref(),
             )
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
+            if let Some(allocation) = resource_allocation.as_deref() {
+                allocation
+                    .validate_minimum_useful_container()
+                    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+            }
+            if let (Some(allocation), Some(capacity)) =
+                (resource_allocation.as_deref(), target.container_capacity)
+            {
+                if !capacity.complete {
+                    return Err(ApiError::bad_request(
+                        "a live container has no recorded sizing, so Mjolnir cannot calculate the RAM left safely",
+                    ));
+                }
+                if !capacity.fits(allocation) {
+                    return Err(ApiError::bad_request(format!(
+                        "this launch exceeds the {} CPUs or {:.1} GiB of RAM left on this host after live container commitments; suspend or stop a session, or choose a smaller allocation. Mjolnir does not stop sessions automatically",
+                        capacity.remaining.cpus,
+                        capacity.remaining.memory_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                    )));
+                }
+            }
             if let (
                 Some(mj_core::state::SessionResourceAllocation::Container { cpus, memory_bytes }),
                 Some(limits),

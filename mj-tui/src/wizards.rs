@@ -9,7 +9,8 @@ mod subagents;
 pub(crate) use picker::*;
 pub(crate) use render::*;
 use resources::{
-    ResourceEditor, ResourcePicker, declare_resource_controls, memory_gib_text, target_resources,
+    ResourceEditor, ResourcePicker, capacity_gib_text, declare_resource_controls, memory_gib_text,
+    target_resources,
 };
 
 use mj_chat::path_input::PathInput;
@@ -83,6 +84,7 @@ pub(crate) enum WizardControl {
     TargetList,
     ResourceCpu,
     ResourceMemory,
+    RememberContainerSize,
     ResourceInstance,
     ProjectDirectory,
     RecentProject(usize),
@@ -217,6 +219,7 @@ pub(crate) struct NewWizard {
     project_history: Vec<std::path::PathBuf>,
     project_history_index: usize,
     pub(crate) resource_allocation: Option<SessionResourceAllocation>,
+    pub(crate) remember_container_size: bool,
     aws_options: BTreeMap<String, Vec<SessionResourceAllocation>>,
     pub(crate) sizing_error: Option<String>,
     pub(crate) resource_editor: ResourceEditor,
@@ -254,6 +257,7 @@ impl PartialEq for NewWizard {
             && self.project_history == other.project_history
             && self.project_history_index == other.project_history_index
             && self.resource_allocation == other.resource_allocation
+            && self.remember_container_size == other.remember_container_size
             && self.aws_options == other.aws_options
             && self.sizing_error == other.sizing_error
             && self.resource_editor == other.resource_editor

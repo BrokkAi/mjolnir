@@ -521,15 +521,19 @@ event production.
 
 On a container target, the session gets the same CPU and memory limit that
 the viewer's create form selects: the size last chosen for that host, else
-8 CPUs and 32 GiB, capped at the host's totals. `cpus` and `memory_bytes`
-override either one:
+4 CPUs and 8 GiB. New containers need at least 2 CPUs and 4 GiB. `cpus` and
+`memory_bytes` override either one:
 
 ```json
-{"cpus": 16, "memory_bytes": 68719476736}
+{"remember_container_size": true, "cpus": 16, "memory_bytes": 68719476736}
 ```
 
 A size above the host's reported totals answers `400`, and so does either
-field on a target that is not a container target.
+field on a target that is not a container target. The daemon also refuses a
+launch that would exceed the host's aggregate committed CPU or hard RAM
+budget. `remember_container_size` (boolean, default `false`) saves the selected
+size as the default for that physical host without changing the saved profile,
+target, recent-launch, or sub-agent defaults.
 
 Legacy `all_models` and `single_model` policy values are read as `mjolnir`;
 legacy model and effort selectors are ignored. This also applies to recorded

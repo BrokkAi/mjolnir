@@ -344,6 +344,7 @@ impl ViewerSnapshot {
                     .and_then(|host| state.container_sizes.get(host))
                     .copied(),
                 container_host_limits: None,
+                container_capacity: None,
                 default_resource_allocation: if mj_core::config::is_container_target(target) {
                     let size = mj_core::state::default_container_size(
                         mj_core::config::container_size_host(target)
@@ -1005,6 +1006,11 @@ pub struct ViewerTargetCapacity {
     pub memory_total_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_cores: Option<u64>,
+    /// Hard CPU and RAM commitments for the container targets on this host.
+    /// AWS fleets do not have one shared container budget and leave this
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_capacity: Option<mj_core::state::HostContainerCapacity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_total_bytes: Option<u64>,
     /// How many machines a fleet is running. Absent for a plain host.
@@ -1078,6 +1084,10 @@ pub struct ViewerTarget {
     /// The latest reported host CPU and memory totals, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_host_limits: Option<HostContainerSize>,
+    /// Prefer this hard-budget projection for new-session admission and for
+    /// showing the RAM left. `container_host_limits` remains for older clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_capacity: Option<mj_core::state::HostContainerCapacity>,
     /// Shared default selected for this container target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_resource_allocation: Option<SessionResourceAllocation>,
