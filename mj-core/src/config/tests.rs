@@ -2841,3 +2841,67 @@ fn review_trigger_loads_legacy_settings_and_saves_only_the_trigger() {
         );
     }
 }
+
+// Hard-won: 060306642: startup discovery duplicated a home containing `..`.
+#[test]
+fn setup_additions_recognizes_equivalent_profile_homes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(directory.path()).unwrap();
+    let home = root.join("home/.claude");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir(root.join("profiles")).unwrap();
+    let mut spellings = vec![root.join("profiles/../home/./.claude")];
+    #[cfg(unix)]
+    {
+        fs::create_dir(root.join("redirect")).unwrap();
+        let link = root.join("redirect/linked-home");
+        std::os::unix::fs::symlink(root.join("home"), &link).unwrap();
+        spellings.push(link.join(".claude"));
+        // Resolve symlinks before `..`: lexical collapse would choose the wrong folder.
+        spellings.push(link.join("../home/.claude"));
+    }
+    // Missing intermediate directories and homes exercise the lexical fallback.
+    spellings.push(root.join("missing/../home/.claude"));
+    let absent = root.join("absent/.claude");
+    let home_expansion = crate::path_input::user_home().map(|user_home| {
+        let relative =
+            PathBuf::from(directory.path().file_name().unwrap()).join("missing/../.claude");
+        (Path::new("~").join(&relative), user_home.join(relative))
+    });
+    for (configured_home, detected_home) in spellings
+        .into_iter()
+        .map(|configured| (configured, home.clone()))
+        .chain([(root.join("missing/../absent/./.claude"), absent)])
+        .chain(home_expansion)
+    {
+        let profile = |home: PathBuf| HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Claude,
+            home,
+            environment: Default::default(),
+            context_window_bytes: None,
+            legacy_subagents: Default::default(),
+            guardian_review_model: None,
+            codex_profile: None,
+        };
+        let mut configured = Config::default();
+        configured
+            .profiles
+            .insert("claude".into(), profile(configured_home.clone()));
+        let mut discovered = Config::default();
+        discovered
+            .profiles
+            .insert("claude".into(), profile(detected_home));
+        discovered
+            .profiles
+            .insert("different".into(), profile(root.join("different/.claude")));
+        let additions = configured.setup_additions(&discovered);
+        assert_eq!(
+            additions.profiles.keys().collect::<Vec<_>>(),
+            ["different"],
+            "{}",
+            configured_home.display()
+        );
+        assert_eq!(configured.profiles["claude"].home, configured_home);
+    }
+}

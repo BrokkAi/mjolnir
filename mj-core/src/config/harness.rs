@@ -1197,6 +1197,34 @@ pub const GUARDIAN_REVIEW_NEWEST_FLASH: &str = "newest-flash";
 /// The `guardian_review_model` value that leaves reviews to the session model.
 pub const GUARDIAN_REVIEW_SESSION: &str = "session";
 
+// Compare discovery identities without rewriting the user's configured path.
+fn installation_home(path: &Path) -> PathBuf {
+    let expanded = crate::path_input::expand_local(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Ok(canonical) = std::fs::canonicalize(&expanded) {
+        return canonical;
+    }
+
+    // Homes that are not present yet still have a stable lexical identity.
+    let mut normalized = PathBuf::new();
+    for component in expanded.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(std::path::Component::Normal(_))
+                ) {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
 impl HarnessProfile {
     pub fn discovery_inputs(&self) -> ProfileDiscoveryInputs {
         ProfileDiscoveryInputs {
@@ -1225,7 +1253,7 @@ impl HarnessProfile {
     /// Each Codex profile overlay in a home is an installation of its own.
     pub fn same_installation(&self, other: &Self) -> bool {
         self.kind == other.kind
-            && self.home == other.home
+            && installation_home(&self.home) == installation_home(&other.home)
             && self.codex_profile == other.codex_profile
     }
 
