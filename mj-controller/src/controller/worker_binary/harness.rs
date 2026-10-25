@@ -91,7 +91,8 @@ pub(in crate::controller) fn preflight_harness(
     // before provisioning creates target state.
     let script = if profile.kind == HarnessKind::Dsh {
         format!(
-            "if command -v dsh-acp >/dev/null 2>&1; then exit 0; fi; {}",
+            "if command -v dsh-acp >/dev/null 2>&1 && {}; then exit 0; fi; {}",
+            mj_core::harness_runtime::dsh_acp_version_supported_script(),
             node_or_downloader_preflight_script()
         )
     } else {

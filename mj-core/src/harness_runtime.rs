@@ -157,10 +157,12 @@ pub fn opencode_acp_script() -> String {
 pub const DSH_ACP_INSTRUCTIONS_LIMIT: usize = 1024 * 1024;
 
 /// Why dsh-acp cannot load an instruction file.
-/// The controller refuses a session for either before it launches anything
+/// The controller refuses a session for any of these before it launches anything
 /// ([`crate::config::HarnessProfile::ensure_ready`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UndeliverableDshInstructions {
+    /// The path exists but is not a regular file.
+    NotRegularFile,
     /// The file has more bytes than [`DSH_ACP_INSTRUCTIONS_LIMIT`].
     TooLong { bytes: u64 },
     /// The file is not UTF-8, and dsh-acp refuses instruction files that are
@@ -175,7 +177,7 @@ pub fn undeliverable_dsh_instructions(
 ) -> std::io::Result<Option<UndeliverableDshInstructions>> {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) if metadata.is_file() => metadata,
-        Ok(_) => return Ok(None),
+        Ok(_) => return Ok(Some(UndeliverableDshInstructions::NotRegularFile)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
@@ -216,16 +218,47 @@ pub fn dsh_acp_script() -> String {
     )
 }
 
+/// A POSIX shell command that succeeds when the `dsh-acp` on `PATH` can load
+/// staged instructions from its data directory. The caller checks that the
+/// command exists first.
+pub fn dsh_acp_version_supported_script() -> String {
+    let (required_major, required_minor) = DSH_ACP_VERSION
+        .split_once('.')
+        .and_then(|(major, minor)| {
+            Some((
+                major.parse::<u64>().ok()?,
+                minor.split('.').next()?.parse::<u64>().ok()?,
+            ))
+        })
+        .expect("DSH_ACP_VERSION starts with numeric major and minor versions");
+    format!(
+        "{{ reported=\"$(dsh-acp --version 2>/dev/null)\" || reported=; case \"$reported\" in 'dsh-acp '*) reported=\"${{reported#dsh-acp }}\" ;; *) reported= ;; esac; major=\"${{reported%%.*}}\"; rest=\"${{reported#*.}}\"; minor=\"${{rest%%.*}}\"; case \"$major\" in ''|*[!0-9]*) major= ;; esac; case \"$minor\" in ''|*[!0-9]*) minor= ;; esac; [ -n \"$major\" ] && [ -n \"$minor\" ] && {{ [ \"$major\" -gt {required_major} ] || {{ [ \"$major\" -eq {required_major} ] && [ \"$minor\" -ge {required_minor} ]; }}; }}; }}",
+        required_major = required_major,
+        required_minor = required_minor,
+    )
+}
+
 /// The shell commands that start dsh-acp on any target: the target's own
-/// `dsh-acp` when one is on `PATH`, otherwise the pinned npm package through
-/// `npx`, running [`dsh_acp_script`] with the resolved command as its
-/// positional arguments. DSH has no managed installation — the npm package
-/// bundles the same release binaries — so this one script is the whole
-/// launch path for bare and container targets alike, and for the model
-/// discovery probe.
+/// `dsh-acp` when its version supports native instruction loading, otherwise
+/// the pinned npm package through `npx`, running [`dsh_acp_script`] with the
+/// resolved command as its positional arguments. DSH has no managed
+/// installation — the npm package bundles the same release binaries — so this
+/// one script is the whole launch path for bare and container targets alike,
+/// and for the model discovery probe.
 pub fn dsh_acp_launch_script() -> String {
     format!(
-        "if command -v dsh-acp >/dev/null 2>&1; then set -- dsh-acp; elif command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then set -- npx -y {package}@{version}; else echo 'Mjolnir needs dsh-acp or Node.js, npm, and npx on PATH; install one in the target environment' >&2; exit 127; fi; {script}",
+        concat!(
+            "if command -v dsh-acp >/dev/null 2>&1; then if {version_supported}; then ",
+            "set -- dsh-acp; ",
+            "elif command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then ",
+            "set -- npx -y {package}@{version}; ",
+            "else echo 'Mjolnir requires dsh-acp {version} or newer to load AGENTS.md; upgrade it or install Node.js 22+, npm, and npx to use the pinned release' >&2; exit 127; fi; ",
+            "elif command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then ",
+            "set -- npx -y {package}@{version}; ",
+            "else echo 'Mjolnir needs dsh-acp or Node.js, npm, and npx on PATH; install one in the target environment' >&2; exit 127; fi; ",
+            "{script}"
+        ),
+        version_supported = dsh_acp_version_supported_script(),
         package = DSH_ACP_PACKAGE,
         version = DSH_ACP_VERSION,
         script = dsh_acp_script(),

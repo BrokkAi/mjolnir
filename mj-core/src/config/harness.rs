@@ -1644,6 +1644,9 @@ impl HarnessProfile {
         let own_text = own.display();
         match problem {
             None => Ok(()),
+            Some(UndeliverableDshInstructions::NotRegularFile) => bail!(
+                "{own_text} is not a regular file, but dsh-acp accepts instructions only from a regular AGENTS.md. Replace it with a regular file."
+            ),
             Some(UndeliverableDshInstructions::NotUtf8 { line }) => bail!(
                 "{own_text} is not UTF-8 text (line {line} has the first byte that is not), but dsh-acp accepts only UTF-8 instructions. Save the file as UTF-8."
             ),

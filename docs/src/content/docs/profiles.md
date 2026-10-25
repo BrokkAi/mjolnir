@@ -513,21 +513,22 @@ to load. The home is a `DSH_ACP_DATA_DIR` root. It holds an optional
 `AGENTS.md` and dsh-acp's native session records, `sessions/<id>.json`; there
 is no configuration file, no login file, and no skills support. dsh-acp reads
 `AGENTS.md` itself from the data directory, the session working directory, and
-each additional workspace root. Each file must be UTF-8 text of at most 1 MiB.
-Mjolnir checks the staged data-directory file, including the notes it adds to
-describe a container or EC2 session's environment, and refuses to start a
-session whose file breaks either rule. The refusal says which rule and by how
-much, and `mj doctor` reports the profile's own file the same way. Nothing
-creates the home automatically, and it is optional: a session stages its own
-home, which simply starts without an `AGENTS.md`. Create `~/.dsh` when you want
-to keep instructions there or move the profile; `mj doctor` reports it missing
-until you do. Mjolnir stages its instructions as the data directory's
-`AGENTS.md` and clears `DSH_ACP_SYSTEM_PROMPT` so a target login shell cannot
-add a duplicate prompt. The staged file is the profile's own `AGENTS.md` plus
-any guidance Mjolnir adds for the session: a disposable-environment note on
-container and EC2 targets, container storage notes, and sub-agent instructions
-when sub-agent delegation applies. On a bare local or SSH target with none of
-these, it is the profile's file unchanged.
+each additional workspace root. An existing `AGENTS.md` must be a regular
+UTF-8 file of at most 1 MiB. Mjolnir checks the staged data-directory file,
+including the notes it adds to describe a container or EC2 session's
+environment, and refuses to start a session whose file breaks any of those
+rules. The refusal says which rule and by how much, and `mj doctor` reports the
+profile's own file the same way. Nothing creates the home automatically, and
+it is optional: a session stages its own home, which simply starts without an
+`AGENTS.md`. Create `~/.dsh` when you want to keep instructions there or move
+the profile; `mj doctor` reports it missing until you do. Mjolnir stages its
+instructions as the data directory's `AGENTS.md` and clears
+`DSH_ACP_SYSTEM_PROMPT` so a target login shell cannot add a duplicate prompt.
+The staged file is the profile's own `AGENTS.md` plus any guidance Mjolnir adds
+for the session: a disposable-environment note on container and EC2 targets,
+container storage notes, and sub-agent instructions when sub-agent delegation
+applies. On a bare local or SSH target with none of these, it is the profile's
+file unchanged.
 
 DSH authenticates with an API key in `DEEPSEEK_API_KEY`. As with a
 [Codex custom provider](#codex-with-a-custom-provider), Mjolnir takes the key
@@ -908,13 +909,16 @@ never replaces its own binary.
 MiMo Code installs from the pinned `@mimo-ai/cli` npm package. Its managed
 launch disables automatic updates so a running session never replaces its own
 binary.
-DSH is never installed. A launch resolves the target's own `dsh-acp` on
-`PATH`, or fetches the pinned `@brokkai/dsh-acp@0.4.0` package through `npx`,
-using the compatible system runtime or the managed Node described above; the
-npm package bundles the release binaries. Linux and macOS, on x86-64 and ARM64,
-are supported. Linux needs glibc 2.34 or newer, so musl distributions such as
-Alpine cannot run it. Mjolnir reports a missing prerequisite and leaves the
-existing worker alone; it does not invoke sudo or a system package manager.
+DSH is never installed. A launch uses the target's own `dsh-acp` on `PATH` when
+it is 0.4.0 or newer, or fetches the pinned `@brokkai/dsh-acp@0.4.0` package
+through `npx`, using the compatible system runtime or the managed Node
+described above; the npm package bundles the release binaries. An older
+`dsh-acp` on `PATH` is not used: Mjolnir falls back to `npx` when Node.js, npm,
+and npx are available, and otherwise refuses the launch with an upgrade
+instruction. Linux and macOS, on x86-64 and ARM64, are supported. Linux needs
+glibc 2.34 or newer, so musl distributions such as Alpine cannot run it.
+Mjolnir reports a missing prerequisite and leaves the existing worker alone; it
+does not invoke sudo or a system package manager.
 
 Installs are content-addressed and shared across sessions for the same remote
 user. A cache hit performs only local manifest and executable checks. Upgrades

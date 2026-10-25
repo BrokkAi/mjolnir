@@ -611,10 +611,11 @@ that sets either fails to load. Other dsh-acp settings may go in
 
 Profiles do not select target-side executables. All bare workers, including
 localhost, SSH, and EC2, resolve an exact pinned runtime from their managed
-cache, except DSH, which has no managed runtime and runs the target's own
-`dsh-acp` or the pinned npm package. Containers use their image-provided
-runtime or the documented installer fallback. `mj login` invokes the harness's
-canonical controller-side command from `PATH`.
+cache, except DSH, which has no managed runtime and runs a target `dsh-acp`
+only when it is 0.4.0 or newer, otherwise the pinned npm package. Containers
+use their image-provided runtime or the documented installer fallback. The
+`mj login` command invokes the harness's canonical controller-side command from
+`PATH`.
 
 Profiles do not accept `model` or `reasoning_effort`. Use `/model` and `/effort`
 inside a session, or configure the harness's own defaults in its home. For

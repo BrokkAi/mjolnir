@@ -612,9 +612,13 @@ fn node_preflight_explains_when_the_target_has_no_managed_runtime() {
 
 #[cfg(unix)]
 #[test]
-fn dsh_preflight_accepts_its_native_binary_without_node_or_curl() {
+fn dsh_preflight_accepts_only_its_native_binary_without_node_or_curl() {
     let directory = tempfile::tempdir().unwrap();
-    mj_core::test_hooks::install_fake_command(directory.path(), "dsh-acp", "#!/bin/sh\nexit 0\n");
+    let current = format!(
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'dsh-acp {}'; fi\n",
+        mj_core::harness_runtime::DSH_ACP_VERSION
+    );
+    mj_core::test_hooks::install_fake_command(directory.path(), "dsh-acp", &current);
     let profile = HarnessProfile {
         enabled: true,
         kind: HarnessKind::Dsh,
@@ -636,6 +640,26 @@ fn dsh_preflight_accepts_its_native_binary_without_node_or_curl() {
         &ProcessExecutor,
     )
     .unwrap();
+
+    mj_core::test_hooks::install_fake_command(
+        directory.path(),
+        "dsh-acp",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'dsh-acp 0.3.0'; fi\n",
+    );
+    let error = format!(
+        "{:#}",
+        preflight_harness(
+            &mj_core::config::TargetTemplate::LocalBare,
+            &profile,
+            &ProcessExecutor,
+        )
+        .unwrap_err()
+    );
+    assert!(
+        error.contains("provide Node.js 22+ with npm and npx")
+            && error.contains("managed Node.js has no artifact"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -2297,16 +2321,17 @@ fn run_default_bridge(
 #[cfg(unix)]
 #[test]
 fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
+    use mj_core::harness_runtime::DSH_ACP_VERSION;
     use std::os::unix::fs::PermissionsExt;
+
     let root = tempfile::tempdir().unwrap();
     let bin = root.path().join("fake-bin");
     std::fs::create_dir_all(&bin).unwrap();
     let dsh = bin.join("dsh-acp");
-    std::fs::write(
-        &dsh,
-        "#!/bin/sh\nprintf '%s|%s|%s' \"$*\" \"$DSH_ACP_SYSTEM_PROMPT\" \"$DSH_ACP_DATA_DIR\"\n",
-    )
-    .unwrap();
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'dsh-acp {DSH_ACP_VERSION}\\n'; exit 0; fi\nprintf '%s|%s|%s' \"$*\" \"$DSH_ACP_SYSTEM_PROMPT\" \"$DSH_ACP_DATA_DIR\"\n"
+    );
+    std::fs::write(&dsh, script).unwrap();
     std::fs::set_permissions(&dsh, std::fs::Permissions::from_mode(0o755)).unwrap();
     let staged = root.path().join("staged");
     std::fs::create_dir_all(&staged).unwrap();
@@ -2445,6 +2470,17 @@ fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
         "{message}"
     );
 
+    // Hard-won: c330ea5f2: a directory AGENTS.md passed readiness but failed
+    // when dsh-acp opened the session.
+    std::fs::remove_file(&own).unwrap();
+    std::fs::create_dir(&own).unwrap();
+    let message = refusal(profile.ensure_ready("dsh").unwrap_err());
+    assert!(
+        message.contains("is not a regular file")
+            && message.contains("Replace it with a regular file."),
+        "{message}"
+    );
+
     std::fs::remove_file(staged.join("AGENTS.md")).unwrap();
     let output = launch(Some(&staged));
     assert!(output.status.success(), "{output:?}");
@@ -2459,6 +2495,75 @@ fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("DSH_ACP_DATA_DIR"),
         "{output:?}"
+    );
+}
+
+#[cfg(unix)]
+// Hard-won: c330ea5f2: a pre-0.4 dsh-acp on PATH silently received no staged instructions.
+#[test]
+fn dsh_launch_does_not_select_a_pre_native_loader() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let legacy_bin = root.path().join("legacy-bin");
+    let tools_bin = root.path().join("tools-bin");
+    std::fs::create_dir_all(&legacy_bin).unwrap();
+    std::fs::create_dir_all(&tools_bin).unwrap();
+    let legacy = legacy_bin.join("dsh-acp");
+    std::fs::write(
+        &legacy,
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'dsh-acp 0.3.0'; else echo legacy; fi\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for tool in ["node", "npm"] {
+        let path = tools_bin.join(tool);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let npx = tools_bin.join("npx");
+    std::fs::write(&npx, "#!/bin/sh\nprintf 'npx|%s' \"$*\"\n").unwrap();
+    std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let launch = |path: &Path| {
+        let staged = root.path().join("staged");
+        std::fs::create_dir_all(&staged).unwrap();
+        let (command, arguments) =
+            bridge_launch(HarnessKind::Dsh, ExecutionPolicy::ConfiguredApprovals);
+        assert_eq!(command, "sh");
+        let mut process = std::process::Command::new("/bin/sh");
+        process
+            .args(arguments)
+            .env_clear()
+            .env("HOME", root.path())
+            .env("PATH", path)
+            .env(HarnessKind::Dsh.home_env(), &staged);
+        mj_core::subprocess::run_with_input(&mut process, &[]).unwrap()
+    };
+
+    let fallback_path: PathBuf = std::env::join_paths([legacy_bin.as_path(), tools_bin.as_path()])
+        .unwrap()
+        .into();
+    let output = launch(&fallback_path);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "npx|-y {}@{}",
+            mj_core::harness_runtime::DSH_ACP_PACKAGE,
+            mj_core::harness_runtime::DSH_ACP_VERSION
+        )
+    );
+
+    let output = launch(&legacy_bin);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "requires dsh-acp {} or newer",
+            mj_core::harness_runtime::DSH_ACP_VERSION
+        )) && stderr.contains("upgrade it or install Node.js 22+, npm, and npx"),
+        "{stderr}"
     );
 }
 

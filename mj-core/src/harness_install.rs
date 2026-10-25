@@ -128,7 +128,7 @@ pub async fn resolve(
     }
     // DSH has no managed installation: the npm package bundles the same
     // release binaries, so the launch description the controller already
-    // provides resolves the target's own `dsh-acp` or fetches the pinned
+    // provides resolves a compatible target `dsh-acp` or fetches the pinned
     // package through npx.
     if harness == HarnessKind::Dsh {
         return Ok(None);
@@ -146,8 +146,8 @@ pub async fn resolve(
 /// Launch description for a harness [`resolve`] does not manage, for call
 /// sites the controller's bridge launch does not reach (the model discovery
 /// probe). Only DSH: [`crate::harness_runtime::dsh_acp_launch_script`]
-/// resolves the target's own `dsh-acp` or the pinned npm package, so there is
-/// no install to lease and nothing to cache.
+/// resolves a compatible target `dsh-acp` or the pinned npm package, so there
+/// is no install to lease and nothing to cache.
 pub fn unmanaged_launch(harness: HarnessKind) -> Option<(PathBuf, Vec<String>)> {
     match harness {
         HarnessKind::Dsh => Some((

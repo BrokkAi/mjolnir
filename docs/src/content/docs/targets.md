@@ -167,14 +167,15 @@ path, not the selected project or its linked-worktree location.
 
 The host does not need a preinstalled harness bridge, except DSH. Its worker
 installs and reuses the exact harness version pinned by Mjolnir in the remote
-user's cache; DSH instead runs the host's own `dsh-acp` or the pinned npm
-package. Node-based harnesses reuse Node.js 22 or newer with npm and npx when
-already on the host; otherwise the worker downloads a checksum-verified pinned
-Node.js into the user cache. Kimi, Grok, Muse, and OpenCode also install from
-checksum-verified artifacts downloaded by Mjolnir; they do not require `curl`,
-`tar`, or a shell-based vendor installer. DSH needs its own `dsh-acp` on `PATH`
-or the managed Node fallback. Mjolnir never uses sudo to add these prerequisites
-and does not fall back to another harness executable from the remote `PATH`.
+user's cache; DSH instead runs the host's own `dsh-acp` when it is 0.4.0 or
+newer, or the pinned npm package. Node-based harnesses reuse Node.js 22 or newer
+with npm and npx when already on the host; otherwise the worker downloads a
+checksum-verified pinned Node.js into the user cache. Kimi, Grok, Muse, and
+OpenCode also install from checksum-verified artifacts downloaded by Mjolnir;
+they do not require `curl`, `tar`, or a shell-based vendor installer. DSH needs
+a current `dsh-acp` on `PATH` or the managed Node fallback. Mjolnir never uses
+sudo to add these prerequisites and does not fall back to another harness
+executable from the remote `PATH`.
 
 `permissions` accepts `guardian` or `yolo` and defaults to `guardian`. The
 machine's SSH connection fields include `identity_file` and `extra_args`. See
