@@ -1283,6 +1283,7 @@ impl DashboardState {
                 | HelTargetTemplate::AppleContainer { .. }
                 | HelTargetTemplate::SshPodman { .. }
                 | HelTargetTemplate::SshDocker { .. }
+                | HelTargetTemplate::SshAppleContainer { .. }
         )
         .then_some(session)
     }

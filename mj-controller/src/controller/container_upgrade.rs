@@ -233,7 +233,8 @@ impl Controller {
         {
             let host = match &locator {
                 targets::TargetLocator::SshPodman { ssh, .. }
-                | targets::TargetLocator::SshDocker { ssh, .. } => {
+                | targets::TargetLocator::SshDocker { ssh, .. }
+                | targets::TargetLocator::SshAppleContainer { ssh, .. } => {
                     super::cache_host::CacheHost::Ssh(ssh.clone())
                 }
                 _ => super::cache_host::CacheHost::Local,

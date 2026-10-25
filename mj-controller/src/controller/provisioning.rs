@@ -67,7 +67,8 @@ pub(super) fn container_start_gate(
         | targets::TargetLocator::LocalDocker { container_id, .. }
         | targets::TargetLocator::AppleContainer { container_id, .. }
         | targets::TargetLocator::SshPodman { container_id, .. }
-        | targets::TargetLocator::SshDocker { container_id, .. } => container_id.clone(),
+        | targets::TargetLocator::SshDocker { container_id, .. }
+        | targets::TargetLocator::SshAppleContainer { container_id, .. } => container_id.clone(),
         targets::TargetLocator::LocalBare { .. }
         | targets::TargetLocator::SshBare { .. }
         | targets::TargetLocator::AwsEc2 { .. } => return None,
@@ -1457,6 +1458,13 @@ fn provisioned_locator_named(
             ssh: ssh.clone(),
             container_id: container_id()?,
         },
+        targets::TargetTemplate::SshAppleContainer { ssh, .. } => {
+            targets::TargetLocator::SshAppleContainer {
+                borrowed_from: None,
+                ssh: ssh.clone(),
+                container_id: container_id()?,
+            }
+        }
         targets::TargetTemplate::SshBare { ssh, .. } => targets::TargetLocator::SshBare {
             ssh: ssh.clone(),
             workspace: targets::workspace_for(target, session_id).ok()?,

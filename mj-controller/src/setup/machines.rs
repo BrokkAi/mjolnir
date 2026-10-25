@@ -16,12 +16,12 @@ use mj_core::config::{
 
 use super::{DEFAULT_IMAGE, RuntimeKind, RuntimeProbe};
 use crate::doctor::{
-    CheckStatus, SshConnectivity, ssh_connectivity, ssh_docker_failure_remediation,
-    ssh_podman_failure,
+    APPLE_CONTAINER_INSTALL_URL, CheckStatus, SshConnectivity, ssh_connectivity,
+    ssh_docker_failure_remediation, ssh_podman_failure,
 };
 use crate::targets::{
-    CommandExecutor, SshTarget, TargetOs, TargetPlatform, ssh_validation_command,
-    verify_ssh_docker, verify_ssh_podman,
+    APPLE_CONTAINER_MINIMUM_MACOS, CommandExecutor, SshTarget, TargetOs, TargetPlatform,
+    ssh_validation_command, verify_ssh_apple_container, verify_ssh_docker, verify_ssh_podman,
 };
 
 /// What probing one machine found.
@@ -134,7 +134,14 @@ fn probe_ssh_machine(ssh: &SshConnection, executor: &impl CommandExecutor) -> Ma
         };
     }
     let destination = &target.destination;
-    let bare = match probe_platform(&target, executor) {
+    let platform = probe_platform(&target, executor);
+    // Apple container runs only on Apple-silicon macOS, so a host that reported
+    // another platform is not asked for it: a Linux host has no `container`
+    // command and no reason to be told to install one.
+    let apple_host = platform.as_ref().ok().is_some_and(|platform| {
+        platform.os == TargetOs::Darwin && platform.architecture == "aarch64"
+    });
+    let bare = match &platform {
         Ok(platform) => RuntimeProbe {
             kind: RuntimeKind::Bare,
             status: CheckStatus::Ready,
@@ -188,7 +195,48 @@ fn probe_ssh_machine(ssh: &SshConnection, executor: &impl CommandExecutor) -> Ma
             remediation: Some(ssh_docker_failure_remediation(destination)),
         },
     };
-    MachineProbeOutcome::Answered(vec![bare, podman, docker])
+    let apple_container = if apple_host {
+        match verify_ssh_apple_container(&target, executor) {
+            Ok(preflight) => RuntimeProbe {
+                kind: RuntimeKind::AppleContainer,
+                status: CheckStatus::Ready,
+                detail: format!(
+                    "Apple container {} is available on macOS {}.",
+                    preflight.version, preflight.macos_version
+                ),
+                remediation: None,
+            },
+            Err(error) => RuntimeProbe {
+                kind: RuntimeKind::AppleContainer,
+                status: CheckStatus::Fixable,
+                detail: format!("{error:#}"),
+                remediation: Some(format!(
+                    "On {destination}: install the Apple container runtime from {APPLE_CONTAINER_INSTALL_URL}, start it with `container system start`, and use macOS {APPLE_CONTAINER_MINIMUM_MACOS} or newer. Run `mj doctor` to see which of these is missing."
+                )),
+            },
+        }
+    } else {
+        RuntimeProbe {
+            kind: RuntimeKind::AppleContainer,
+            status: CheckStatus::Unsupported,
+            detail: format!(
+                "Apple container runs only on Apple-silicon macOS {APPLE_CONTAINER_MINIMUM_MACOS} or newer, and {}.",
+                match &platform {
+                    Ok(platform) => format!(
+                        "{destination} runs {} on {}",
+                        match platform.os {
+                            TargetOs::Linux => "Linux",
+                            TargetOs::Darwin => "macOS",
+                        },
+                        platform.architecture
+                    ),
+                    Err(error) => format!("{error:#}"),
+                }
+            ),
+            remediation: None,
+        }
+    };
+    MachineProbeOutcome::Answered(vec![bare, podman, docker, apple_container])
 }
 
 /// The platform the host reports, which decides whether a worker can run on
@@ -252,6 +300,12 @@ fn machine_runtime(
             ssh: ssh.clone(),
             container: container(machine),
         },
+        (Machine::Ssh { ssh, .. }, RuntimeKind::AppleContainer) => {
+            TargetTemplate::SshAppleContainer {
+                ssh: ssh.clone(),
+                container: container(machine),
+            }
+        }
         (
             Machine::AwsEc2 {
                 aws_profile,
@@ -280,7 +334,7 @@ fn machine_runtime(
         RuntimeKind::Bare => machine_id.to_owned(),
         RuntimeKind::Podman => engine_runtime_id(machine_id, "podman"),
         RuntimeKind::Docker => engine_runtime_id(machine_id, "docker"),
-        RuntimeKind::AppleContainer => return None,
+        RuntimeKind::AppleContainer => engine_runtime_id(machine_id, "apple-container"),
     };
     Some((id, target))
 }

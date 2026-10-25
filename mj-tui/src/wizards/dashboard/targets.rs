@@ -486,7 +486,8 @@ impl DashboardState {
             | TargetTemplate::LocalDocker { .. }
             | TargetTemplate::AppleContainer { .. }
             | TargetTemplate::SshPodman { .. }
-            | TargetTemplate::SshDocker { .. } => {
+            | TargetTemplate::SshDocker { .. }
+            | TargetTemplate::SshAppleContainer { .. } => {
                 let limits = self.host_limits(&target_id);
                 let remembered = container_size_host(target)
                     .and_then(|host| self.state.container_sizes.get(host))

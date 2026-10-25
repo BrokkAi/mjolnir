@@ -121,7 +121,7 @@ A machine is a host: `local` (this computer), `ssh` (a named host), or
 | Local checkout or isolated clone | `bare` | `local`, on a Linux or macOS controller host | Configured approvals | Existing directory or independent clone under `.mj/clones/` |
 | Podman container | `podman` | `local`, on Linux, WSL2, or macOS with a rootless `podman machine` | Unconstrained | Disposable container |
 | Docker container | `docker` | `local`, with a reachable Linux Docker daemon, including a VM on macOS | Unconstrained | Disposable container |
-| Apple container | `apple-container` | `local`, on macOS 26+ with Apple silicon | Unconstrained | Disposable container |
+| Apple container | `apple-container` | `local` or an `ssh` machine, on macOS 26+ with Apple silicon | Unconstrained | Disposable container |
 | Remote checkout or isolated clone | `bare` | an `ssh` machine, a named Linux host | Guardian or unconstrained | Existing directory or independent clone on that host |
 | Podman over SSH | `podman` | an `ssh` machine | Unconstrained | Disposable remote container |
 | Docker over SSH | `docker` | an `ssh` machine | Unconstrained | Disposable remote container |
