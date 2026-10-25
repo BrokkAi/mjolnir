@@ -278,7 +278,12 @@ fn setup_without_an_agent_or_repository_still_completes_once() {
     )
     .unwrap()
     .unwrap();
-    assert!(report.summary().is_empty());
+    assert_eq!(
+        report.summary(),
+        vec![
+            "No installed coding agent was found. Mjolnir can install and sign in to one for you."
+        ]
+    );
     assert!(Config::load_from(&path).unwrap().profiles.is_empty());
     assert!(directory.path().join("setup-state").exists());
 }

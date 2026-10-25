@@ -677,6 +677,7 @@ pub(crate) fn spawn_setup_save(
     generation: u64,
     original: String,
     updated: String,
+    login_profile: Option<String>,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
@@ -688,7 +689,11 @@ pub(crate) fn spawn_setup_save(
             let state = mj_controller::database::load_state()?;
             save_setup_at(&mj_core::config::config_path(), &original, &updated, &state)
         },
-        move |result| DashboardIoUpdate::SetupSaved { generation, result },
+        move |result| DashboardIoUpdate::SetupSaved {
+            generation,
+            result,
+            login_profile,
+        },
     )
 }
 

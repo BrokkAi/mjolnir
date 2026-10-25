@@ -36,6 +36,11 @@ impl SetupReport {
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
+        } else {
+            lines.push(
+                "No installed coding agent was found. Mjolnir can install and sign in to one for you."
+                    .into(),
+            );
         }
         if let Some(repository) = &self.repository {
             lines.push(format!("Project: {repository}."));

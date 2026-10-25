@@ -23,9 +23,9 @@ After this work, the default local workflow should have one user-facing bootstra
 - [x] (2026-10-25 10:32Z) Replace Kimi and Grok vendor shell installers with direct pinned artifacts.
 - [x] (2026-10-25 10:12Z) Replace the external OpenCode `tar` call with the Rust archive reader already used for Node.
 - [x] (2026-10-25 10:51Z) Run managed-harness CLI fallback, Claude login, and Claude setup-token through the pinned CLI installation.
-- [ ] Add a managed-agent onboarding action that creates a non-own profile home, saves it, and hands off to sign-in.
-- [ ] Offer existing installed profiles first and keep manual/advanced profile creation available.
-- [ ] Make onboarding explain target choice and recommend an available container for harnesses the user does not want on the host.
+- [x] (2026-10-25 11:20Z) Add a managed-agent onboarding action that creates a non-own profile home, saves it, and hands off to sign-in.
+- [x] (2026-10-25 11:20Z) Offer existing installed profiles first and keep manual/advanced profile creation available.
+- [x] (2026-10-25 11:20Z) Make onboarding explain target choice and point to local containers when the user wants the harness isolated from the host account.
 - [ ] Add clean-machine integration coverage for managed profile creation and harness installation.
 - [ ] Update human documentation and diagnostics.
 - [ ] Run affected crate suites, workspace Clippy, and formatting; commit and push validated slices.
@@ -96,7 +96,7 @@ Third, make authentication independent of ambient CLIs. Extend the managed harne
 
 Fourth, add managed onboarding. Add a setup action available when no enabled profile exists or when the user explicitly chooses managed setup. The action opens a harness chooser listing the managed harnesses and a plain-language authentication summary. Choosing one computes a collision-free profile ID and an absolute Mjolnir-owned home under Mjolnir's configuration directory, creates an ordinary profile value, validates it, saves it through the existing supervised setup-save path, and then invokes the existing `SetupLogin` action. DSH is included because it needs only the documented environment key and needs no interactive login. Existing profiles suppress the automatic prompt but do not remove the manual managed-setup action.
 
-The chooser must explain target implications without selecting a target for the user. If a local container target is available, its row says that container sessions keep the harness off the host. If no container is available, local use remains selectable and the existing raw-target warning remains authoritative. The session wizard, not profile setup, records the eventual target.
+The chooser must explain target implications without selecting a target for the user. It points to local container sessions as the isolation option and leaves local use selectable. The existing target readiness checks and raw-target warning remain authoritative. The session wizard, not profile setup, records the eventual target.
 
 Fifth, update first-run messaging and documentation. Welcome output should say that managed setup is available in Settings instead of instructing a novice to install an agent CLI. The quickstart should present two ordered paths: use existing installations, or use managed setup. Profile and runtime docs should describe the actual cold-start downloads and no longer claim that users need `curl`, Bash, npx, or tar. Keep the explicit container Git behavior documented, including the root/passwordless-sudo condition.
 

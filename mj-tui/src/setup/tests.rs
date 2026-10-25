@@ -6,6 +6,43 @@ use crate::test_support::{
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{Terminal, backend::TestBackend};
 
+// Managed onboarding must not overwrite existing detected profiles or require
+// the user to choose a home path.
+#[test]
+fn managed_setup_creates_a_collision_free_profile_and_requests_login() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let mut existing = dashboard.config.profiles.values().next().unwrap().clone();
+    existing.kind = mj_core::config::HarnessKind::Claude;
+    dashboard.config.profiles.insert("claude".into(), existing);
+    dashboard.begin_settings_section("profiles", None);
+    setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .begin_managed_setup();
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    dialog.managed_setup.as_mut().unwrap().selected = 1;
+
+    let action = dialog.create_managed_profile_and_login(&Default::default());
+
+    let DashboardAction::SaveSetupAndLogin {
+        updated,
+        profile_id,
+        ..
+    } = action
+    else {
+        panic!("managed setup did not request save and login: {action:?}");
+    };
+    assert_eq!(profile_id, "claude-2");
+    let saved: Value = serde_json::from_str(&updated).unwrap();
+    let profile = &saved["profiles"][&profile_id];
+    assert_eq!(profile["kind"], "claude");
+    let home = profile["home"].as_str().unwrap();
+    assert!(std::path::Path::new(home).is_absolute(), "{home}");
+    assert!(
+        std::path::Path::new(home).ends_with("profiles/claude-2/claude"),
+        "{home}"
+    );
+}
+
 // Hard-won: 8d16bf96: unrelated settings saves failed when a configured API-key file disappeared.
 #[test]
 fn settings_save_api_key_profiles_without_resolving_credentials_on_the_ui_thread() {
