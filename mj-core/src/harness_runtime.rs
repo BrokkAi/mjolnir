@@ -257,6 +257,76 @@ pub fn dsh_acp_launch_script() -> String {
     )
 }
 
+/// The shell launcher used by container targets when Mjolnir's worker has not
+/// replaced it with a managed installation. Workers also use this value to
+/// distinguish the built-in fallback from a custom launch command.
+pub fn fallback_launch(
+    harness: HarnessKind,
+    policy: crate::config::ExecutionPolicy,
+) -> (String, Vec<String>) {
+    match harness {
+        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Muse => {
+            let bridge = npm_bridge(harness).expect("npm harness has a bridge");
+            (
+                "sh".into(),
+                vec!["-c".into(), bridge.bootstrap_script()],
+            )
+        }
+        HarnessKind::Kimi => (
+            "sh".into(),
+            vec![
+                "-c".into(),
+                "if command -v kimi >/dev/null 2>&1; then exec kimi acp; elif [ -x \"$HOME/.kimi-code/bin/kimi\" ]; then exec \"$HOME/.kimi-code/bin/kimi\" acp; else echo 'Mjolnir needs compatible Kimi Code on PATH or a Mjolnir-managed installation' >&2; exit 127; fi".into(),
+            ],
+        ),
+        HarnessKind::Grok => {
+            let acp = harness.bridge_args(policy).join(" ");
+            (
+                "sh".into(),
+                vec![
+                    "-c".into(),
+                    format!(
+                        "if command -v grok >/dev/null 2>&1; then exec grok {acp}; elif [ -x \"$GROK_HOME/bin/grok\" ]; then exec \"$GROK_HOME/bin/grok\" {acp}; elif [ -x \"$HOME/.grok/bin/grok\" ]; then exec \"$HOME/.grok/bin/grok\" {acp}; else echo 'Mjolnir needs compatible Grok Build on PATH or a Mjolnir-managed installation' >&2; exit 127; fi"
+                    ),
+                ],
+            )
+        }
+        HarnessKind::OpenCode => (
+            "sh".into(),
+            vec![
+                "-c".into(),
+                format!(
+                    "if command -v opencode >/dev/null 2>&1; then opencode=opencode; elif [ -x \"$HOME/.opencode/bin/opencode\" ]; then opencode=\"$HOME/.opencode/bin/opencode\"; else echo 'Mjolnir needs compatible OpenCode on PATH or a Mjolnir-managed installation' >&2; exit 127; fi; {}",
+                    opencode_acp_script()
+                ),
+            ],
+        ),
+        HarnessKind::Mimo => (
+            "sh".into(),
+            vec![
+                "-c".into(),
+                "if command -v mimo >/dev/null 2>&1; then exec mimo acp; else echo 'Mjolnir needs compatible MiMo Code on PATH or a Mjolnir-managed installation' >&2; exit 127; fi".into(),
+            ],
+        ),
+        HarnessKind::Dsh => (
+            "sh".into(),
+            vec!["-c".into(), dsh_acp_launch_script()],
+        ),
+    }
+}
+
+/// Whether a persisted launch description is the one Mjolnir generated for
+/// this harness, rather than a command supplied by a caller.
+pub fn is_fallback_launch(
+    harness: HarnessKind,
+    policy: crate::config::ExecutionPolicy,
+    command: &Path,
+    args: &[String],
+) -> bool {
+    let (expected_command, expected_args) = fallback_launch(harness, policy);
+    command == Path::new(&expected_command) && args == expected_args
+}
+
 /// The built-in npm launcher, selected on the worker before ACP startup.
 #[derive(Clone, Copy)]
 pub struct NpmBridge {

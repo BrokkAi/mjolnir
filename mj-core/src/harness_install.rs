@@ -1674,6 +1674,39 @@ mod tests {
     }
 
     #[test]
+    fn archive_extraction_selects_only_the_expected_regular_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("opencode.tgz");
+        let encoder = flate2::write::GzEncoder::new(
+            File::create(&archive).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(encoder);
+        for (path, body) in [
+            ("package/bin/opencode", "#!/bin/sh\necho ok\n"),
+            ("package/unrelated", "must not be extracted\n"),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, body.as_bytes())
+                .unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap();
+        let destination = temp.path().join("opencode");
+
+        extract_archive_file(&archive, Path::new("package/bin/opencode"), &destination).unwrap();
+
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"#!/bin/sh\necho ok\n"
+        );
+        assert!(!temp.path().join("package/unrelated").exists());
+    }
+
+    #[test]
     fn link_relocation_preserves_relative_and_external_links_without_following_them() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("staging");

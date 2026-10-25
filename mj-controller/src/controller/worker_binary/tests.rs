@@ -528,9 +528,29 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
 
 #[cfg(unix)]
 #[test]
-fn node_preflight_accepts_a_downloader_when_node_is_missing() {
+fn node_preflight_accepts_a_managed_runtime_when_node_is_missing() {
     let directory = tempfile::tempdir().unwrap();
-    mj_core::test_hooks::install_fake_command(directory.path(), "curl", "#!/bin/sh\nexit 0\n");
+    let system = if cfg!(target_os = "macos") {
+        "Darwin"
+    } else {
+        "Linux"
+    };
+    let machine = match std::env::consts::ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" => {
+            if cfg!(target_os = "macos") {
+                "arm64"
+            } else {
+                "aarch64"
+            }
+        }
+        architecture => panic!("test has no uname mapping for {architecture}"),
+    };
+    mj_core::test_hooks::install_fake_command(
+        directory.path(),
+        "uname",
+        &format!("#!/bin/sh\ncase \"$1\" in -s) echo {system} ;; -m) echo {machine} ;; esac\n"),
+    );
     let profile = HarnessProfile {
         enabled: true,
         kind: HarnessKind::Codex,
@@ -555,7 +575,7 @@ fn node_preflight_accepts_a_downloader_when_node_is_missing() {
 
 #[cfg(unix)]
 #[test]
-fn node_preflight_explains_when_it_cannot_install_node() {
+fn node_preflight_explains_when_the_target_has_no_managed_runtime() {
     let directory = tempfile::tempdir().unwrap();
     let profile = HarnessProfile {
         enabled: true,
@@ -582,15 +602,12 @@ fn node_preflight_explains_when_it_cannot_install_node() {
     );
     assert!(
         error.starts_with(
-            "Codex launch preflight failed on local host; install curl or provide Node.js 22+ \
-             with npm and npx on the target PATH"
+            "Codex launch preflight failed on local host; provide Node.js 22+ with npm and npx \
+             on the target PATH"
         ),
         "{error}"
     );
-    assert!(
-        error.contains("curl is unavailable to install Mjolnir pinned Node.js runtime"),
-        "{error}"
-    );
+    assert!(error.contains("managed Node.js has no artifact"), "{error}");
 }
 
 #[cfg(unix)]

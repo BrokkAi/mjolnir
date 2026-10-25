@@ -1,5 +1,4 @@
 use super::*;
-use mj_core::harness_runtime::{GROK_VERSION, KIMI_VERSION, MIMO_CLI_VERSION, OPENCODE_VERSION};
 
 /// The repository paths a worker opens. `session_id` and `container_workspace`
 /// identify the session whose workspace is used, which for a sub-agent child is
@@ -56,75 +55,13 @@ pub(in crate::controller) fn bridge_readiness_stage(profile: &HarnessProfile) ->
     ProvisionStage::Installing(profile.kind)
 }
 
-/// The Kimi and Grok fallbacks install the pinned release before starting
-/// the ACP server. The installer writes progress on stdout, which is the ACP
-/// stream, so its stdout goes to stderr, where the worker keeps the bridge's
-/// diagnostics (#1136).
+/// The target-provided launcher used before the worker decides whether to
+/// replace it with an exact managed installation.
 pub(in crate::controller) fn bridge_launch(
     harness: mj_core::config::HarnessKind,
     policy: mj_core::config::ExecutionPolicy,
 ) -> (String, Vec<String>) {
-    match harness {
-        mj_core::config::HarnessKind::Codex
-        | mj_core::config::HarnessKind::Claude
-        | mj_core::config::HarnessKind::Muse => {
-            let bridge =
-                mj_core::harness_runtime::npm_bridge(harness).expect("npm harness has a bridge");
-            ("sh".into(), vec!["-c".into(), bridge.bootstrap_script()])
-        }
-        mj_core::config::HarnessKind::Kimi => (
-            "sh".into(),
-            vec![
-                "-c".into(),
-                format!(
-                    "if command -v kimi >/dev/null 2>&1; then exec kimi acp; elif [ -x \"$HOME/.kimi-code/bin/kimi\" ]; then exec \"$HOME/.kimi-code/bin/kimi\" acp; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://code.kimi.com/kimi-code/install.sh | KIMI_VERSION={KIMI_VERSION} bash >&2 && exec \"$HOME/.kimi-code/bin/kimi\" acp; else echo 'Mjolnir needs compatible Kimi Code or curl for its official installer; add the tool to PATH' >&2; exit 127; fi"
-                ),
-            ],
-        ),
-        mj_core::config::HarnessKind::Grok => {
-            let acp = mj_core::config::HarnessKind::Grok
-                .bridge_args(policy)
-                .join(" ");
-            (
-                "sh".into(),
-                vec![
-                    "-c".into(),
-                    format!(
-                        "if command -v grok >/dev/null 2>&1; then exec grok {acp}; elif [ -x \"$GROK_HOME/bin/grok\" ]; then exec \"$GROK_HOME/bin/grok\" {acp}; elif [ -x \"$HOME/.grok/bin/grok\" ]; then exec \"$HOME/.grok/bin/grok\" {acp}; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://x.ai/cli/install.sh | bash -s {GROK_VERSION} >&2 && exec \"$HOME/.grok/bin/grok\" {acp}; else echo 'Mjolnir needs compatible Grok Build or curl for its official installer; add the tool to PATH' >&2; exit 127; fi"
-                    ),
-                ],
-            )
-        }
-        mj_core::config::HarnessKind::OpenCode => (
-            "sh".into(),
-            vec![
-                "-c".into(),
-                format!(
-                    "if command -v opencode >/dev/null 2>&1; then opencode=opencode; elif [ -x \"$HOME/.opencode/bin/opencode\" ]; then opencode=\"$HOME/.opencode/bin/opencode\"; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://opencode.ai/v2/install | bash -s -- --version {OPENCODE_VERSION} --no-modify-path >&2 || exit; opencode=\"$HOME/.opencode/bin/opencode\"; else echo 'Mjolnir needs compatible OpenCode or curl for its official installer; add the tool to PATH' >&2; exit 127; fi; {}",
-                    mj_core::harness_runtime::opencode_acp_script()
-                ),
-            ],
-        ),
-        mj_core::config::HarnessKind::Mimo => (
-            "sh".into(),
-            vec![
-                "-c".into(),
-                format!(
-                    "if command -v mimo >/dev/null 2>&1; then exec mimo acp; fi; if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v npx >/dev/null 2>&1; then echo 'Mjolnir needs MiMo Code or Node.js, npm, and npx on PATH; install Node in the target environment' >&2; exit 127; fi; exec npx -y @mimo-ai/cli@{MIMO_CLI_VERSION} acp"
-                ),
-            ],
-        ),
-        // The npm package bundles the same release binaries as the GitHub
-        // archives: the target's own `dsh-acp` when one is on PATH, otherwise
-        // npx fetches the pinned package. DSH has no managed installation.
-        mj_core::config::HarnessKind::Dsh => (
-            "sh".into(),
-            vec![
-                "-c".into(),
-                mj_core::harness_runtime::dsh_acp_launch_script(),
-            ],
-        ),
-    }
+    mj_core::harness_runtime::fallback_launch(harness, policy)
 }
 
 pub(in crate::controller) fn preflight_harness(
@@ -198,14 +135,14 @@ pub(in crate::controller) fn preflight_harness(
         anyhow::anyhow!(detail)
     };
     Err(failure.context(format!(
-        "{} launch preflight failed on {destination}; install curl or provide Node.js 22+ with npm and npx on the target PATH",
+        "{} launch preflight failed on {destination}; provide Node.js 22+ with npm and npx on the target PATH, or use a target where Mjolnir's managed runtime can run",
         profile.kind.display_name()
     )))
 }
 
 fn node_or_downloader_preflight_script() -> String {
     format!(
-        "if command -v node >/dev/null 2>&1 && node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)' && command -v npm >/dev/null 2>&1 && npm --version >/dev/null 2>&1 && command -v npx >/dev/null 2>&1 && npx --version >/dev/null 2>&1; then exit 0; fi; managed_target=''; loader=''; system=$(uname -s 2>/dev/null) || system=''; machine=$(uname -m 2>/dev/null) || machine=''; case \"$system:$machine\" in Linux:x86_64) managed_target=linux-x64; loader=/lib64/ld-linux-x86-64.so.2 ;; Linux:aarch64|Linux:arm64) managed_target=linux-arm64; loader=/lib/ld-linux-aarch64.so.1 ;; Darwin:x86_64) managed_target=darwin-x64 ;; Darwin:arm64) managed_target=darwin-arm64 ;; esac; managed=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/mjolnir/node/node-v{}-$managed_target\"; if [ -n \"$managed_target\" ] && [ -x \"$managed/bin/node\" ] && \"$managed/bin/node\" -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)' && [ -x \"$managed/bin/npm\" ] && \"$managed/bin/npm\" --version >/dev/null 2>&1 && [ -x \"$managed/bin/npx\" ] && \"$managed/bin/npx\" --version >/dev/null 2>&1; then exit 0; fi; if ! command -v curl >/dev/null 2>&1; then echo 'curl is unavailable to install Mjolnir pinned Node.js runtime' >&2; exit 127; fi; if [ -n \"$loader\" ] && [ ! -f \"$loader\" ]; then echo \"Mjolnir's pinned Node.js for this target is a glibc build, but the required program interpreter $loader is missing; install Node.js 22 or newer with npm and npx in the target environment\" >&2; exit 127; fi; exit 0",
+        "if command -v node >/dev/null 2>&1 && node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)' && command -v npm >/dev/null 2>&1 && npm --version >/dev/null 2>&1 && command -v npx >/dev/null 2>&1 && npx --version >/dev/null 2>&1; then exit 0; fi; managed_target=''; loader=''; system=$(uname -s 2>/dev/null) || system=''; machine=$(uname -m 2>/dev/null) || machine=''; case \"$system:$machine\" in Linux:x86_64) managed_target=linux-x64; loader=/lib64/ld-linux-x86-64.so.2 ;; Linux:aarch64|Linux:arm64) managed_target=linux-arm64; loader=/lib/ld-linux-aarch64.so.1 ;; Darwin:x86_64) managed_target=darwin-x64 ;; Darwin:arm64) managed_target=darwin-arm64 ;; *) echo \"Mjolnir's managed Node.js has no artifact for $system $machine; install Node.js 22 or newer with npm and npx on the target PATH\" >&2; exit 127 ;; esac; managed=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/mjolnir/node/node-v{}-$managed_target\"; if [ -x \"$managed/bin/node\" ] && \"$managed/bin/node\" -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)' && [ -x \"$managed/bin/npm\" ] && \"$managed/bin/npm\" --version >/dev/null 2>&1 && [ -x \"$managed/bin/npx\" ] && \"$managed/bin/npx\" --version >/dev/null 2>&1; then exit 0; fi; if [ -n \"$loader\" ] && [ ! -f \"$loader\" ]; then echo \"Mjolnir's pinned Node.js for this target is a glibc build, but the required program interpreter $loader is missing; install Node.js 22 or newer with npm and npx in the target environment\" >&2; exit 127; fi; exit 0",
         mj_core::harness_runtime::NODE_VERSION
     )
 }

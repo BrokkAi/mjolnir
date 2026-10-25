@@ -26,8 +26,9 @@ After this work, the default local workflow should have one user-facing bootstra
 - [x] (2026-10-25 11:20Z) Add a managed-agent onboarding action that creates a non-own profile home, saves it, and hands off to sign-in.
 - [x] (2026-10-25 11:20Z) Offer existing installed profiles first and keep manual/advanced profile creation available.
 - [x] (2026-10-25 11:20Z) Make onboarding explain target choice and point to local containers when the user wants the harness isolated from the host account.
-- [ ] Add clean-machine integration coverage for managed profile creation and harness installation.
-- [ ] Update human documentation and diagnostics.
+- [x] (2026-10-25 11:38Z) Add clean-machine coverage for managed profile creation, direct artifact installation, cache repair, and preflight without external download tools.
+- [x] (2026-10-25 11:38Z) Update human documentation and diagnostics.
+- [x] (2026-10-25 11:52Z) Reuse compatible image-provided native harnesses and install the exact managed pin when a custom container lacks them.
 - [ ] Run affected crate suites, workspace Clippy, and formatting; commit and push validated slices.
 
 ## Surprises & Discoveries
@@ -48,6 +49,10 @@ After this work, the default local workflow should have one user-facing bootstra
   Evidence: `mj-tui/src/setup/schema.rs:41`; `mj-tui/src/setup.rs:1334`; `mj-tui/src/setup.rs:2688`.
 - Observation: First-run discovery only creates profiles for installed agents. With none, it tells the person to add a profile manually.
   Evidence: `mj-tui/src/setup.rs:3250`.
+- Observation: Container fallback scripts also downloaded native harnesses with vendor `curl`/Bash installers. The worker now recognizes its own generated fallback, reuses an image-provided native executable when present, and otherwise switches to the exact managed cache installation. A caller-supplied custom command remains untouched.
+  Evidence: `mj-core/src/harness_runtime.rs::fallback_launch`; `mj-worker/src/worker_runtime/harness_launch.rs::is_managed_fallback_candidate`.
+- Observation: The supported release installer already requires curl and tar, but relying on that would couple harness startup to the installation channel. All harness runtime downloads now use Mjolnir's HTTPS client and Rust archive readers.
+  Evidence: `mj-core/src/harness_install.rs::download_verified_inner`; `extract_archive_file`; `extract_zstd_file`.
 
 ## Decision Log
 
@@ -69,10 +74,16 @@ After this work, the default local workflow should have one user-facing bootstra
 - Decision: Preserve plain local Git-free sessions as a separate prerequisite reduction, landed through PR #1351 or equivalent changes.
   Rationale: Git-free local directories solve a different user need from managed harness installation and should remain independently testable.
   Date/Author: 2026-10-25, Codex
+- Decision: Reuse a compatible image-provided native harness when it exists, but install the exact Mjolnir pin when the built-in fallback cannot find one.
+  Rationale: Default agent images start quickly, while minimal custom images no longer need to install curl, Bash, tar, or a harness CLI only to make Mjolnir work.
+  Date/Author: 2026-10-25, Codex
 
 ## Outcomes & Retrospective
 
-No implementation has landed yet. The work begins with correctness fixes in the managed Node layer because onboarding depends on that layer being repairable and honest about unsupported platforms.
+The managed Node repair path, internal artifact client, direct Kimi/Grok
+artifacts, pinned CLI login fallback, guided onboarding, container fallback
+reuse, and documentation are implemented. Remaining work is the final broad
+validation pass and any fixes it exposes.
 
 ## Context and Orientation
 
