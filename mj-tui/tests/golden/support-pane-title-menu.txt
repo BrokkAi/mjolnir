@@ -267,8 +267,8 @@ Profiles Settings… action: None
 │  │ No messages yet  │   claude-1                                               7 settings  ›     Add               │                     │
 │  │                  │   codex-1                                                7 settings  ›     Remove            │                     │
 │                     │   codex-2                                                7 settings  ›     Detect profiles   │                     │
+│                     │                                                                            Set up managed    │                     │
 │                     │                                                                            Sign in           │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -646,8 +646,8 @@ Profiles number 2 action: None
 │  │ No messages yet  │   claude-1                                               7 settings  ›     Add               │                     │
 │  │                  │   codex-1                                                7 settings  ›     Remove            │                     │
 │                     │   codex-2                                                7 settings  ›     Detect profiles   │                     │
+│                     │                                                                            Set up managed    │                     │
 │                     │                                                                            Sign in           │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -815,8 +815,8 @@ Profiles Enter setup action: None
 │  │ No messages yet  │   claude-1                                               7 settings  ›     Add               │                     │
 │  │                  │   codex-1                                                7 settings  ›     Remove            │                     │
 │                     │   codex-2                                                7 settings  ›     Detect profiles   │                     │
+│                     │                                                                            Set up managed    │                     │
 │                     │                                                                            Sign in           │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
