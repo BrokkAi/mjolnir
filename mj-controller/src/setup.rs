@@ -3,6 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "macos")]
+use anyhow::Context;
+
 use crate::doctor::{
     ApplePlatform, CheckStatus, apple_container_runtime_check, current_apple_platform,
     local_docker_runtime_check, local_podman_runtime_check,
@@ -399,6 +402,19 @@ fn claude_cli_reports_authenticated(home: &Path, executor: &impl CommandExecutor
 /// Keychain prompt; the shared executor still bounds a wedged lookup.
 #[cfg(target_os = "macos")]
 fn claude_keychain_reports_authenticated(executor: &impl CommandExecutor) -> bool {
+    claude_keychain_credentials(executor)
+        .ok()
+        .flatten()
+        .is_some_and(|credentials| claude_credentials_contain_login(&credentials))
+}
+
+/// Read Claude Code's shared macOS login for a target that cannot reach the
+/// controller's Keychain. The caller owns the returned copy and must not log
+/// it.
+#[cfg(target_os = "macos")]
+pub(crate) fn claude_keychain_credentials(
+    executor: &impl CommandExecutor,
+) -> anyhow::Result<Option<Vec<u8>>> {
     let command = CommandSpec::new(
         "security",
         [
@@ -408,11 +424,19 @@ fn claude_keychain_reports_authenticated(executor: &impl CommandExecutor) -> boo
             "-w",
         ],
     )
-    .purpose("check Claude Code authentication in the macOS Keychain");
-    let Ok(output) = executor.execute(&command) else {
-        return false;
-    };
-    output.status == 0 && claude_credentials_contain_login(&output.stdout)
+    .purpose("read Claude Code authentication from the macOS Keychain");
+    let output = executor
+        .execute(&command)
+        .context("read Claude Code's login from the macOS Keychain")?;
+    if output.status != 0 {
+        return Ok(None);
+    }
+    if !claude_credentials_contain_login(&output.stdout) {
+        anyhow::bail!(
+            "the macOS Keychain item \"Claude Code-credentials\" does not contain a usable Claude login"
+        );
+    }
+    Ok(Some(output.stdout))
 }
 
 #[cfg(not(target_os = "macos"))]

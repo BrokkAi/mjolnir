@@ -610,6 +610,12 @@ On macOS, Claude Code keeps its login in one Keychain item rather than in the
 home ([anthropics/claude-code#20553](https://github.com/anthropics/claude-code/issues/20553)),
 so `mj login` for a Claude profile leaves `CLAUDE_CONFIG_DIR` unset there and
 signs in to that one item. Every Claude profile on a Mac shares it.
+Mjolnir copies the current login into a session's staged home when the session
+runs in a container or on another machine, where the Keychain is unavailable.
+The Keychain remains authoritative at each launch. A stored setup token takes
+precedence. For a long-running container session, prefer the setup token because
+the copied OAuth grant can rotate while both copies still hold the same refresh
+token.
 
 After login, Mjolnir compares the authentication marker before and after the
 command and reports whether it changed. A successful update is reconciled into
