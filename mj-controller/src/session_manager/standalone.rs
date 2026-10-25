@@ -410,6 +410,14 @@ impl StandaloneSession {
     /// regularly releasing it lets other session actors keep their views
     /// current. The relay GC watermark advances only after the complete page.
     pub(super) async fn apply_event_page(&mut self, page: RelayEventPage) -> Result<RelayCursor> {
+        let now = std::time::SystemTime::now();
+        let now_ms = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        // Reconnect pages can replay events not yet projected before restart.
+        // Only failures completed in the last backoff window create marks.
+        let history_floor_ms = now_ms.saturating_sub(15 * 60 * 1000);
         for event in &page.events {
             if let mj_core::relay::RelayObservation::CommandQueued {
                 command: RelayCommand::Prompt { prompt },
@@ -441,7 +449,90 @@ impl StandaloneSession {
         let transaction_count = event_count.div_ceil(PROJECTION_TRANSACTION_EVENT_BUDGET);
         let started = Instant::now();
         for events in events.chunks(PROJECTION_TRANSACTION_EVENT_BUDGET) {
+            let prior_ordinal = self.materialized.applied_event_ordinal;
+            let mut health_observations = Vec::new();
+            for event in events {
+                if event.ordinal <= prior_ordinal || event.recorded_at_ms < history_floor_ms {
+                    continue;
+                }
+                let mj_core::relay::RelayObservation::CommandCompleted {
+                    command_id,
+                    outcome:
+                        mj_core::relay::RelayCommandOutcome::Prompt {
+                            stop_reason,
+                            diagnostic: Some(diagnostic),
+                            ..
+                        },
+                    ..
+                } = &event.observation
+                else {
+                    continue;
+                };
+                let result = mj_core::state::TurnOutcomeKind::Completed {
+                    stop_reason: stop_reason.clone(),
+                }
+                .result();
+                if result.kind == mj_core::event_outcome::TurnResultKind::Failed
+                    && let Some(fault) = crate::profile_health::ProfileFault::of(diagnostic)
+                {
+                    health_observations.push((command_id.clone(), fault, diagnostic.clone()));
+                }
+            }
             let session_id = self.materialized.session_id.clone();
+            let profile_health = crate::profile_health::shared();
+            for (command_id, fault, diagnostic) in health_observations {
+                let lookup_session = session_id.clone();
+                let lookup_command = command_id.clone();
+                let identity = tokio::task::spawn_blocking(move || {
+                    crate::database::load_session_turn_profile_model(
+                        &lookup_session,
+                        &lookup_command,
+                    )
+                })
+                .await
+                .context("profile health turn identity lookup task failed")
+                .and_then(|result| result);
+                let identity = match identity {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            command_id,
+                            %error,
+                            "could not load profile health turn identity before projection commit"
+                        );
+                        continue;
+                    }
+                };
+                let Some((profile_id, stored_model)) = identity else {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        command_id,
+                        "profile health has no stored turn selection"
+                    );
+                    continue;
+                };
+                let model = stored_model.or_else(|| {
+                    mj_core::acp::surface::AcpSessionSurface::from_configuration(
+                        &self.materialized.configuration.values,
+                    )
+                    .current_model()
+                    .map(str::to_owned)
+                });
+                let Some(model) = model else {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        command_id,
+                        "profile health has no model for the failed turn"
+                    );
+                    continue;
+                };
+                // The provider failure happened even if the following projection commit fails.
+                profile_health
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("profile health lock poisoned"))?
+                    .record(&profile_id, &model, fault, &diagnostic, now);
+            }
             let events = events.to_vec();
             let projection = self.materialized.clone();
             let mut window = self.window.clone();

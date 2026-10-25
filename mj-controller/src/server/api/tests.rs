@@ -1156,6 +1156,7 @@ impl SubagentBackend for FakeBackend {
                     harness: mj_core::config::HarnessKind::Codex,
                     choices,
                     remaining_percent: None,
+                    unhealthy: Default::default(),
                 }],
                 unavailable: Vec::new(),
             })
@@ -2046,6 +2047,7 @@ fn model_candidate_with_efforts(
             observed_at: 1,
         },
         remaining_percent: Some(remaining_percent),
+        unhealthy: Default::default(),
     }
 }
 

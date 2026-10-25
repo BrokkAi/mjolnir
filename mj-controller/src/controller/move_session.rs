@@ -2373,7 +2373,7 @@ impl Controller {
                 "cannot prove the same ready destination; refusing to replay potentially executed work"
             );
             let spec = self.reconnect_command(id)?;
-            let relay = StandaloneSession::connect_command(&spec, id).await?;
+            let relay = Box::pin(StandaloneSession::connect_command(&spec, id)).await?;
             let store_id = relay.snapshot().operational.store_id.context("destination worker does not expose its durable store identity; upgrade the worker before admitting queued work")?;
             if let Some(expected) = &operation.destination_store_id {
                 ensure!(

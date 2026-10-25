@@ -395,6 +395,9 @@ pub struct SubagentCandidate {
     /// for Codex and Claude), 100 for a pay-per-use profile, and `None` when
     /// no usable report exists.
     pub remaining_percent: Option<u8>,
+    /// The models this profile should not run now, by model id, from
+    /// provider failures its sessions just had (#1361).
+    pub unhealthy: std::collections::BTreeMap<String, crate::profile_health::Unhealthy>,
 }
 
 /// Candidate profiles split into those whose choices are known and those
