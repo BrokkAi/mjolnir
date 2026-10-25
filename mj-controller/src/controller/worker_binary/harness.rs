@@ -157,7 +157,7 @@ pub(in crate::controller) fn preflight_harness(
             node_or_downloader_preflight_script()
         )
     } else {
-        node_or_downloader_preflight_script().to_owned()
+        node_or_downloader_preflight_script()
     };
     let mut args = if profile.environment.contains_key("PATH") {
         vec![
@@ -202,8 +202,11 @@ pub(in crate::controller) fn preflight_harness(
     )))
 }
 
-fn node_or_downloader_preflight_script() -> &'static str {
-    "if command -v node >/dev/null 2>&1 && node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)' && command -v npm >/dev/null 2>&1 && npm --version >/dev/null 2>&1 && command -v npx >/dev/null 2>&1 && npx --version >/dev/null 2>&1; then exit 0; fi; if command -v curl >/dev/null 2>&1; then exit 0; fi; echo 'This target has no compatible Node.js 22+ runtime with npm and npx, and curl is unavailable to install Mjolnir pinned Node.js runtime' >&2; exit 127"
+fn node_or_downloader_preflight_script() -> String {
+    format!(
+        "if command -v node >/dev/null 2>&1 && node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)' && command -v npm >/dev/null 2>&1 && npm --version >/dev/null 2>&1 && command -v npx >/dev/null 2>&1 && npx --version >/dev/null 2>&1; then exit 0; fi; managed_target=''; loader=''; system=$(uname -s 2>/dev/null) || system=''; machine=$(uname -m 2>/dev/null) || machine=''; case \"$system:$machine\" in Linux:x86_64) managed_target=linux-x64; loader=/lib64/ld-linux-x86-64.so.2 ;; Linux:aarch64|Linux:arm64) managed_target=linux-arm64; loader=/lib/ld-linux-aarch64.so.1 ;; Darwin:x86_64) managed_target=darwin-x64 ;; Darwin:arm64) managed_target=darwin-arm64 ;; esac; managed=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/mjolnir/node/node-v{}-$managed_target\"; if [ -n \"$managed_target\" ] && [ -x \"$managed/bin/node\" ] && \"$managed/bin/node\" -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)' && [ -x \"$managed/bin/npm\" ] && \"$managed/bin/npm\" --version >/dev/null 2>&1 && [ -x \"$managed/bin/npx\" ] && \"$managed/bin/npx\" --version >/dev/null 2>&1; then exit 0; fi; if ! command -v curl >/dev/null 2>&1; then echo 'curl is unavailable to install Mjolnir pinned Node.js runtime' >&2; exit 127; fi; if [ -n \"$loader\" ] && [ ! -f \"$loader\" ]; then echo \"Mjolnir's pinned Node.js for this target is a glibc build, but the required program interpreter $loader is missing; install Node.js 22 or newer with npm and npx in the target environment\" >&2; exit 127; fi; exit 0",
+        mj_core::harness_runtime::NODE_VERSION
+    )
 }
 
 pub(super) const MJ_CONTAINER_ENVIRONMENT: &str = "## Mjolnir disposable environment\n\nThis session runs in a disposable Mjolnir container. When the session closes, Mjolnir checkpoints everything in project workspace directories under `/workspace`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then removes the container.\n\nEverything outside `/workspace`, including installed packages, `$HOME`, and `/tmp`, is ephemeral and will be lost. Keep durable results in the workspace or push them to a remote.\n\nNew workspaces start on their own session branch from the default network fetch remote’s default branch. Local unpublished commits and uncommitted files are not copied. Use normal git push to publish the current branch to the configured network push destination. Closing saves a checkpoint; it does not publish commits or update the original local checkout. Resumed sessions restore their saved work.\n";
