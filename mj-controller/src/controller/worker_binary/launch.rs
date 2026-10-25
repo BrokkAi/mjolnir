@@ -123,6 +123,13 @@ impl Controller {
             "profile staging completed"
         );
         result?;
+        stage_claude_keychain_login(
+            profile,
+            &profile_stage,
+            backend,
+            claude_environment_login_present(profile, &launch.environment),
+            executor,
+        )?;
         stage_managed_skills(
             profile.kind,
             &profile_stage,
@@ -963,7 +970,7 @@ pub(super) fn worker_launch_config_with_checkout(
         }
     }
     let project_memory = (!session.no_project_memory).then_some(project_memory);
-    apply_claude_setup_token(
+    let _ = apply_claude_setup_token(
         &mut environment,
         profile.kind,
         &mj_core::credentials::claude_oauth_token_path(&session.last_profile),

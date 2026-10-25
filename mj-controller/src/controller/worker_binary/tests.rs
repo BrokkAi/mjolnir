@@ -632,7 +632,11 @@ fn a_stored_setup_token_reaches_only_claude_workers_that_do_not_set_their_own() 
     write_claude_oauth_token(&token_path, b"sk-ant-oat01-stored").unwrap();
 
     let mut claude = BTreeMap::new();
-    apply_claude_setup_token(&mut claude, HarnessKind::Claude, &token_path);
+    assert!(apply_claude_setup_token(
+        &mut claude,
+        HarnessKind::Claude,
+        &token_path
+    ));
     assert_eq!(
         claude.get(CLAUDE_OAUTH_TOKEN_ENV).map(String::as_str),
         Some("sk-ant-oat01-stored")
@@ -644,7 +648,11 @@ fn a_stored_setup_token_reaches_only_claude_workers_that_do_not_set_their_own() 
         .filter(|kind| *kind != HarnessKind::Claude)
     {
         let mut environment = BTreeMap::new();
-        apply_claude_setup_token(&mut environment, kind, &token_path);
+        assert!(!apply_claude_setup_token(
+            &mut environment,
+            kind,
+            &token_path
+        ));
         assert!(environment.is_empty(), "{kind:?} must not read the token");
     }
 
@@ -653,7 +661,11 @@ fn a_stored_setup_token_reaches_only_claude_workers_that_do_not_set_their_own() 
         CLAUDE_OAUTH_TOKEN_ENV.to_owned(),
         "profile-token".to_owned(),
     )]);
-    apply_claude_setup_token(&mut overridden, HarnessKind::Claude, &token_path);
+    assert!(apply_claude_setup_token(
+        &mut overridden,
+        HarnessKind::Claude,
+        &token_path
+    ));
     assert_eq!(
         overridden.get(CLAUDE_OAUTH_TOKEN_ENV).map(String::as_str),
         Some("profile-token")
@@ -661,8 +673,146 @@ fn a_stored_setup_token_reaches_only_claude_workers_that_do_not_set_their_own() 
 
     // A profile with no stored token launches exactly as before.
     let mut without = BTreeMap::new();
-    apply_claude_setup_token(&mut without, HarnessKind::Claude, &missing);
+    assert!(!apply_claude_setup_token(
+        &mut without,
+        HarnessKind::Claude,
+        &missing
+    ));
     assert!(without.is_empty());
+
+    // A blank profile value is not a login and must not hide the stored token.
+    let mut blank = BTreeMap::from([(CLAUDE_OAUTH_TOKEN_ENV.to_owned(), "  ".to_owned())]);
+    assert!(apply_claude_setup_token(
+        &mut blank,
+        HarnessKind::Claude,
+        &token_path
+    ));
+    assert_eq!(
+        blank.get(CLAUDE_OAUTH_TOKEN_ENV).map(String::as_str),
+        Some("sk-ant-oat01-stored")
+    );
+}
+
+#[test]
+fn blank_claude_auth_environment_values_do_not_count_as_logins() {
+    use mj_core::credentials::CLAUDE_OAUTH_TOKEN_ENV;
+
+    let mut profile = mj_core::config::HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Claude,
+        home: std::path::PathBuf::from("claude"),
+        environment: Default::default(),
+        context_window_bytes: None,
+        legacy_subagents: Default::default(),
+        guardian_review_model: None,
+        codex_profile: None,
+    };
+    let mut environment = BTreeMap::from([
+        (CLAUDE_OAUTH_TOKEN_ENV.to_owned(), " \n ".to_owned()),
+        ("ANTHROPIC_API_KEY".to_owned(), " ".to_owned()),
+        ("ANTHROPIC_AUTH_TOKEN".to_owned(), "\t".to_owned()),
+    ]);
+    assert!(!claude_environment_login_present(&profile, &environment));
+
+    // Container target values are merged into the final launch environment
+    // after the profile, so each must be recognized there as well.
+    for name in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] {
+        let mut target_environment = environment.clone();
+        target_environment.insert(name.into(), "target-key".into());
+        assert!(claude_environment_login_present(
+            &profile,
+            &target_environment
+        ));
+    }
+
+    environment.insert("ANTHROPIC_API_KEY".into(), "key".into());
+    assert!(claude_environment_login_present(&profile, &environment));
+
+    environment.insert("ANTHROPIC_API_KEY".into(), " ".into());
+    environment.insert(CLAUDE_OAUTH_TOKEN_ENV.into(), "token".into());
+    assert!(claude_environment_login_present(&profile, &environment));
+
+    profile.kind = HarnessKind::Codex;
+    assert!(!claude_environment_login_present(&profile, &environment));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_apple_container_takes_macs_claude_keychain_login_unless_a_setup_token_does() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const KEYCHAIN_LOGIN: &[u8] =
+        br#"{"claudeAiOauth":{"accessToken":"keychain","refreshToken":"keychain-refresh","expiresAt":100}}"#;
+    const PREVIOUS_ACCOUNT_LOGIN: &[u8] =
+        br#"{"claudeAiOauth":{"accessToken":"previous","refreshToken":"previous","expiresAt":200}}"#;
+
+    struct KeychainExecutor {
+        calls: AtomicUsize,
+    }
+
+    impl CommandExecutor for KeychainExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert_eq!(command.program, "security");
+            assert_eq!(
+                command.args,
+                [
+                    "find-generic-password",
+                    "-s",
+                    "Claude Code-credentials",
+                    "-w"
+                ]
+            );
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(CommandOutput {
+                status: 0,
+                stdout: KEYCHAIN_LOGIN.to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let staged = directory.path().join("profile");
+    std::fs::create_dir(&staged).unwrap();
+    let profile = mj_core::config::HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Claude,
+        home: directory.path().join("claude"),
+        environment: Default::default(),
+        context_window_bytes: None,
+        legacy_subagents: Default::default(),
+        guardian_review_model: None,
+        codex_profile: None,
+    };
+    let backend = targets::TargetLocator::AppleContainer {
+        borrowed_from: None,
+        container_id: "hel-session".into(),
+    };
+    let executor = KeychainExecutor {
+        calls: AtomicUsize::new(0),
+    };
+
+    stage_claude_keychain_login(&profile, &staged, &backend, true, &executor).unwrap();
+    assert_eq!(executor.calls.load(Ordering::Relaxed), 0);
+    assert!(!staged.join(".credentials.json").exists());
+
+    stage_claude_keychain_login(&profile, &staged, &backend, false, &executor).unwrap();
+    assert_eq!(executor.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        std::fs::read(staged.join(".credentials.json")).unwrap(),
+        KEYCHAIN_LOGIN
+    );
+
+    // Freshness cannot distinguish a refreshed grant from another account.
+    // The current Keychain login stays authoritative even when an earlier
+    // staged copy has a later expiry.
+    std::fs::write(staged.join(".credentials.json"), PREVIOUS_ACCOUNT_LOGIN).unwrap();
+    stage_claude_keychain_login(&profile, &staged, &backend, false, &executor).unwrap();
+    assert_eq!(executor.calls.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        std::fs::read(staged.join(".credentials.json")).unwrap(),
+        KEYCHAIN_LOGIN
+    );
 }
 
 #[test]

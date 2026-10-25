@@ -426,7 +426,7 @@ fn discover_from_config(
         .enabled_profile(profile_id)
         .with_context(|| format!("unknown or disabled profile {profile_id:?}"))?;
     let mut environment = profile.environment.resolved().clone();
-    super::worker_binary::apply_claude_setup_token(
+    let _ = super::worker_binary::apply_claude_setup_token(
         &mut environment,
         profile.kind,
         &mj_core::credentials::claude_oauth_token_path(profile_id),
@@ -988,7 +988,7 @@ mod tests {
         };
         let resolve = |environment: BTreeMap<String, String>| {
             let mut environment = environment;
-            super::super::worker_binary::apply_claude_setup_token(
+            let _ = super::super::worker_binary::apply_claude_setup_token(
                 &mut environment,
                 profile.kind,
                 &token,
