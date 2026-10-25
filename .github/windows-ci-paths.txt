@@ -43,5 +43,8 @@ scripts/install-ps1.test.mjs
 # ConPTY dashboard smoke.
 mj-cli/tests/terminal_windows.rs
 
+# Repository paths distinguish native Windows directories from POSIX remote paths.
+mj-core/src/repository.rs
+
 # Container replacement preserves host paths and private CLI environment files.
 mj-controller/src/targets/container_upgrade.rs
