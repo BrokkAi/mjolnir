@@ -39,6 +39,7 @@ use crossterm::terminal::{
 };
 use mj_core::config::{Config, config_path};
 use mj_core::state::{MoveSelection, MoveSessionRequest, ResumeQueueDisposition};
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use mj_controller::controller::update::StartupUpdateNotice;
@@ -1889,6 +1890,7 @@ async fn login(args: LoginArgs) -> Result<()> {
     let stored = profile.auth_scheme() == mj_core::config::AuthScheme::NativeLoginStore;
     let before = profile_credential_fingerprint(profile)?;
 
+    #[cfg(unix)]
     let mut pinned_fallback = None;
     #[cfg(unix)]
     if !args.cli {
@@ -1931,27 +1933,26 @@ async fn login(args: LoginArgs) -> Result<()> {
 
     let (configured_program, arguments) = mj_core::credentials::login_command(profile)
         .with_context(|| format!("profile {profile_id:?}"))?;
+    #[cfg(unix)]
     let program = pinned_fallback
         .as_ref()
         .map(|pinned| pinned.command.clone())
         .unwrap_or_else(|| std::path::PathBuf::from(configured_program));
+    #[cfg(not(unix))]
+    let program = std::path::PathBuf::from(configured_program);
     println!(
         "Running `{} {}` against {}.",
         program.display(),
         arguments.join(" "),
         profile.home.display()
     );
-    let environment = if let Some(pinned) = &pinned_fallback {
-        pinned.environment.clone()
-    } else {
-        let mut environment = profile.environment.resolved().clone();
-        profile.kind.configure_profile_home_environment(
-            &profile.home,
-            mj_core::config::HarnessHost::current(),
-            &mut environment,
-        );
-        environment
-    };
+    #[cfg(unix)]
+    let environment = pinned_fallback
+        .as_ref()
+        .map(|pinned| pinned.environment.clone())
+        .unwrap_or_else(|| configured_login_environment(profile));
+    #[cfg(not(unix))]
+    let environment = configured_login_environment(profile);
     let status = tokio::process::Command::new(&program)
         .args(&arguments)
         .envs(&environment)
@@ -1971,6 +1972,18 @@ async fn login(args: LoginArgs) -> Result<()> {
         std::process::exit(status.code().unwrap_or(1));
     }
     Ok(())
+}
+
+fn configured_login_environment(
+    profile: &mj_core::config::HarnessProfile,
+) -> BTreeMap<String, String> {
+    let mut environment = profile.environment.resolved().clone();
+    profile.kind.configure_profile_home_environment(
+        &profile.home,
+        mj_core::config::HarnessHost::current(),
+        &mut environment,
+    );
+    environment
 }
 
 /// The credential fingerprint a login is expected to change.
@@ -2055,30 +2068,24 @@ async fn store_claude_setup_token(
         "Running `claude setup-token` against {}.",
         profile.home.display()
     );
-    let pinned = match crate::acp_login::pinned_cli(profile).await {
-        Ok(pinned) => Some(pinned),
+    #[cfg(unix)]
+    let (program, environment) = match crate::acp_login::pinned_cli(profile).await {
+        Ok(pinned) => (pinned.command.clone(), pinned.environment.clone()),
         Err(error) => {
             eprintln!(
                 "Could not prepare the pinned Claude CLI ({error:#}); using `claude` from PATH."
             );
-            None
+            (
+                std::path::PathBuf::from("claude"),
+                configured_login_environment(profile),
+            )
         }
     };
-    let program = pinned
-        .as_ref()
-        .map(|pinned| pinned.command.clone())
-        .unwrap_or_else(|| std::path::PathBuf::from("claude"));
-    let environment = if let Some(pinned) = &pinned {
-        pinned.environment.clone()
-    } else {
-        let mut environment = profile.environment.resolved().clone();
-        profile.kind.configure_profile_home_environment(
-            &profile.home,
-            mj_core::config::HarnessHost::current(),
-            &mut environment,
-        );
-        environment
-    };
+    #[cfg(not(unix))]
+    let (program, environment) = (
+        std::path::PathBuf::from("claude"),
+        configured_login_environment(profile),
+    );
     let output = tokio::task::spawn_blocking({
         let environment = environment.clone();
         let program = program.clone();
