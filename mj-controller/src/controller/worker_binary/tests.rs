@@ -526,19 +526,14 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
     assert!(subagent_tools_enabled(&codex, false));
 }
 
-/// On a host with neither Codex nor Node.js, the launch failed with "Codex
-/// launch preflight failed on local host; Node.js 22+ and npm must be
-/// available on the target PATH: Node.js is missing from PATH", which never
-/// says Codex is missing (launch finding R13-1). The failure now starts by
-/// saying so, with the install command `mj login` gives.
 #[cfg(unix)]
-// Hard-won: f8b8002: missing Codex was reported only as an incidental Node failure
 #[test]
-fn node_preflight_says_the_agent_is_not_installed_before_it_mentions_node() {
+fn node_preflight_accepts_a_downloader_when_node_is_missing() {
     let directory = tempfile::tempdir().unwrap();
-    let profile = |kind| HarnessProfile {
+    mj_core::test_hooks::install_fake_command(directory.path(), "curl", "#!/bin/sh\nexit 0\n");
+    let profile = HarnessProfile {
         enabled: true,
-        kind,
+        kind: HarnessKind::Codex,
         home: directory.path().into(),
         environment: std::collections::BTreeMap::from([(
             "PATH".into(),
@@ -550,48 +545,80 @@ fn node_preflight_says_the_agent_is_not_installed_before_it_mentions_node() {
         guardian_review_model: None,
         codex_profile: None,
     };
-    let failure = |kind| {
-        format!(
-            "{:#}",
-            preflight_harness(
-                &mj_core::config::TargetTemplate::LocalBare,
-                &profile(kind),
-                &ProcessExecutor,
-            )
-            .unwrap_err()
+    preflight_harness(
+        &mj_core::config::TargetTemplate::LocalBare,
+        &profile,
+        &ProcessExecutor,
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn node_preflight_explains_when_it_cannot_install_node() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Codex,
+        home: directory.path().into(),
+        environment: std::collections::BTreeMap::from([(
+            "PATH".into(),
+            directory.path().to_string_lossy().into_owned(),
+        )])
+        .into(),
+        context_window_bytes: None,
+        legacy_subagents: Default::default(),
+        guardian_review_model: None,
+        codex_profile: None,
+    };
+    let error = format!(
+        "{:#}",
+        preflight_harness(
+            &mj_core::config::TargetTemplate::LocalBare,
+            &profile,
+            &ProcessExecutor,
         )
+        .unwrap_err()
+    );
+    assert!(
+        error.starts_with(
+            "Codex launch preflight failed on local host; install curl or provide Node.js 22+ \
+             with npm and npx on the target PATH"
+        ),
+        "{error}"
+    );
+    assert!(
+        error.contains("curl is unavailable to install Mjolnir pinned Node.js runtime"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn dsh_preflight_accepts_its_native_binary_without_node_or_curl() {
+    let directory = tempfile::tempdir().unwrap();
+    mj_core::test_hooks::install_fake_command(directory.path(), "dsh-acp", "#!/bin/sh\nexit 0\n");
+    let profile = HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Dsh,
+        home: directory.path().into(),
+        environment: std::collections::BTreeMap::from([(
+            "PATH".into(),
+            directory.path().to_string_lossy().into_owned(),
+        )])
+        .into(),
+        context_window_bytes: None,
+        legacy_subagents: Default::default(),
+        guardian_review_model: None,
+        codex_profile: None,
     };
 
-    let codex = failure(HarnessKind::Codex);
-    assert!(
-        codex.starts_with(
-            "Codex is not installed on local host: `codex` is not on PATH. Install it with \
-             `npm install -g @openai/codex` (Node.js 22 or newer), sign in to it, then retry \
-             the launch: Node.js is missing from PATH"
-        ),
-        "{codex}"
-    );
-    let claude = failure(HarnessKind::Claude);
-    assert!(
-        claude.starts_with(
-            "Claude Code is not installed on local host: `claude` is not on PATH. Install it \
-             with `npm install -g @anthropic-ai/claude-code`, sign in to it, then retry the \
-             launch: Node.js is missing from PATH"
-        ),
-        "{claude}"
-    );
-
-    // With the agent's own command installed, only Node.js is missing, and
-    // the failure says that as before.
-    mj_core::test_hooks::install_fake_command(directory.path(), "codex", "#!/bin/sh\nexit 0\n");
-    let codex = failure(HarnessKind::Codex);
-    assert!(
-        codex.starts_with(
-            "Codex launch preflight failed on local host; Node.js 22+ and npm must be available \
-             on the target PATH: Node.js is missing from PATH"
-        ),
-        "{codex}"
-    );
+    preflight_harness(
+        &mj_core::config::TargetTemplate::LocalBare,
+        &profile,
+        &ProcessExecutor,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -5567,10 +5594,20 @@ mod container_runtime {
             .1;
         assert_eq!(launch.harness_runtime, HarnessRuntimePolicy::Ambient);
         launch.cwd = root.to_path_buf();
-        launch.environment.insert(
-            "PATH".into(),
-            root.join("node_modules/.bin").display().to_string(),
+        let bin = root.join("node_modules/.bin");
+        executable(
+            &bin.join("node"),
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.22.1; fi\n",
         );
+        for command in ["npm", "npx"] {
+            executable(
+                &bin.join(command),
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 11.6.2; fi\n",
+            );
+        }
+        launch
+            .environment
+            .insert("PATH".into(), bin.display().to_string());
         launch.environment.insert(
             "XDG_CACHE_HOME".into(),
             root.join("cache").display().to_string(),

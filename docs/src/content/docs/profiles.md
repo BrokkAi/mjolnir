@@ -872,13 +872,20 @@ Local-bare, raw SSH, and EC2 workers instead install the exact versions pinned b
 Mjolnir release into `$XDG_CACHE_HOME/mjolnir/harnesses`, or
 `$HOME/.cache/mjolnir/harnesses` when `XDG_CACHE_HOME` is unset. They launch
 only the resulting absolute path—never an arbitrary compatible executable from
-`PATH`. DSH is the exception and is never installed; see below. Codex, Claude, and MiMo Code require Node.js 22 or newer plus npm on
-the host.
+`PATH`. DSH is the exception and is never installed; see below.
+
+For Codex, Claude, Muse, MiMo, and DSH's npx fallback, Mjolnir uses Node.js 22
+or newer with npm and npx when the session `PATH` already provides that stack.
+Otherwise it downloads the pinned Node.js 24.22.1 distribution with curl,
+verifies its published SHA-256 checksum, and installs it under
+`$XDG_CACHE_HOME/mjolnir/node` (or `$HOME/.cache/mjolnir/node`). The managed
+`bin` directory is prepended for the harness and its child processes.
+
 Kimi and Grok require curl and Bash for their official installers.
-Muse requires Node.js 22 or newer, npm, and curl; Mjolnir launches the pinned
-`muse-acp` adapter through npx and downloads the pinned native Muse binary,
-verifying its SHA-256 checksum. Linux and macOS, on x86-64 and ARM64, are
-supported. The native Muse binary retains its own upstream terms.
+Muse also requires curl; Mjolnir launches the pinned `muse-acp` adapter through
+npx and downloads the pinned native Muse binary, verifying its SHA-256 checksum.
+Linux and macOS, on x86-64 and ARM64, are supported. The native Muse binary
+retains its own upstream terms.
 OpenCode requires curl and tar; Mjolnir downloads the pinned OpenCode 2 package
 for the platform from npm (`@opencode/cli-<platform>`), the same package
 OpenCode's own installer fetches, and verifies its SHA-256 checksum. Linux and macOS, on
@@ -889,12 +896,11 @@ launch disables automatic updates so a running session never replaces its own
 binary.
 DSH is never installed. A launch resolves the target's own `dsh-acp` on
 `PATH`, or fetches the pinned `@brokkai/dsh-acp@0.3.0` package through `npx`,
-so a bare target needs Node.js 22 or newer with npm and npx; the npm package
-bundles the release binaries. Linux and macOS, on x86-64 and ARM64, are
-supported. Linux needs glibc 2.34 or newer, so musl distributions such as
-Alpine cannot run it.
-Mjolnir reports a missing prerequisite and leaves the existing worker alone;
-it does not invoke sudo or a system package manager.
+using the compatible system runtime or the managed Node described above; the
+npm package bundles the release binaries. Linux and macOS, on x86-64 and ARM64,
+are supported. Linux needs glibc 2.34 or newer, so musl distributions such as
+Alpine cannot run it. Mjolnir reports a missing prerequisite and leaves the
+existing worker alone; it does not invoke sudo or a system package manager.
 
 Installs are content-addressed and shared across sessions for the same remote
 user. A cache hit performs only local manifest and executable checks. Upgrades

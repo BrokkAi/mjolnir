@@ -153,11 +153,12 @@ path, not the selected project or its linked-worktree location.
 The host does not need a preinstalled harness bridge, except DSH. Its worker
 installs and reuses the exact harness version pinned by Mjolnir in the remote
 user's cache; DSH instead runs the host's own `dsh-acp` or the pinned npm
-package. It does require Node.js 22 and npm for Codex, Claude, and MiMo Code,
-or curl and Bash for Kimi and Grok, or curl and tar for Muse and OpenCode.
-DSH needs `dsh-acp` on `PATH`, or Node.js 22 with npm and npx. Mjolnir never
-uses sudo to add these prerequisites and does not fall back to another harness
-executable from the remote `PATH`.
+package. Node-based harnesses reuse Node.js 22 or newer with npm and npx when
+already on the host; otherwise the worker installs a pinned Node.js into the
+user cache with curl. Kimi and Grok require curl and Bash, Muse requires curl,
+and OpenCode requires curl and tar. DSH needs its own `dsh-acp` on `PATH` or the
+managed Node fallback. Mjolnir never uses sudo to add these prerequisites and
+does not fall back to another harness executable from the remote `PATH`.
 
 `permissions` accepts `guardian` or `yolo` and defaults to `guardian`. The
 machine's SSH connection fields include `identity_file` and `extra_args`. See
@@ -176,8 +177,9 @@ release names the immutable image published for its own version, such as
 host has no copy.
 
 It carries the supported bridges and common development tools. A plain image
-can work, but every new session may need to install Git, GitHub CLI, Node, or a
-harness bridge. See [Container targets](/containers/) and
+can work, but every new session may need to install Git, GitHub CLI, or a
+harness bridge; a missing Node.js is installed into the session user's cache
+when a Node-based harness needs it. See [Container targets](/containers/) and
 [Custom images](/custom-images/).
 
 ### Podman

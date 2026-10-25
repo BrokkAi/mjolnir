@@ -1015,6 +1015,7 @@ for line in sys.stdin:
         excluded_environment: Vec::new(),
         cwd: root.path().to_owned(),
         harness_lease: None,
+        node_lease: None,
     }
     .write_spec(&spec_path)
     .unwrap();

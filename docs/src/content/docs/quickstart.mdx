@@ -74,13 +74,13 @@ Alternatively, install an agent and sign in with its own CLI, then choose
 pointed at your own agent home; `mj login --cli` always uses the command on
 `PATH`.
 
-Codex, Claude Code, Muse Code, and MiMo Code sessions on this machine also need
-Node.js 22 or newer and npm on `PATH`; Mjolnir launches its own pinned copy of
-each agent. OpenCode uses a verified download, and Kimi and Grok use their
-official installers. The managed OpenCode and Muse downloads need `curl` and
-`tar` (and Muse also needs Node/npm for its adapter); Kimi and Grok need `bash`
-and `curl`. DSH also needs Node.js 22 or newer with npm and npx, unless
-`dsh-acp` itself is on `PATH`; on Linux it needs glibc 2.34 or newer.
+Codex, Claude Code, Muse Code, MiMo Code, and DSH reuse Node.js 22 or newer
+with npm and npx when that stack is on `PATH`. Otherwise Mjolnir installs its
+own pinned Node.js into the user cache and needs `curl` for that first
+download. DSH also accepts its own `dsh-acp` binary; on Linux it needs glibc
+2.34 or newer. OpenCode uses a verified download, and Kimi and Grok use their
+official installers. The managed OpenCode download needs `curl` and `tar`;
+Kimi and Grok need `bash` and `curl`.
 
 The dashboard keeps its session list, Conversation and Prompt regions, target
 capacity, and profile quota visible together.

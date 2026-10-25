@@ -328,12 +328,10 @@ fn build_cache_release_check(
 
 /// Report the environment a session worker on this machine starts from.
 ///
-/// The profile checks cover harness homes and authentication, so doctor used to
-/// call a Node-based profile ready while every launch failed: the account's
-/// shell never put Node on the `PATH` the worker receives. Show the shell, how
-/// long its startup took, and the Node tools a session will find. This stays a
-/// warning rather than a fixable failure when they are missing, because Muse,
-/// OpenCode, Kimi and Grok sessions do not need Node.
+/// Show the shell, how long its startup took, and the Node tools a session will
+/// find. A missing Node runtime is not fatal: the worker installs its pinned
+/// Node distribution with curl before a Node-based harness starts. Doctor only
+/// warns when neither a complete system runtime nor the downloader is present.
 #[cfg(unix)]
 fn session_environment_check() -> Option<DoctorCheck> {
     let started = std::time::Instant::now();
@@ -382,6 +380,7 @@ fn session_environment_check_from(
     let node = resolve_on_path(path, "node");
     let npm = resolve_on_path(path, "npm");
     let npx = resolve_on_path(path, "npx");
+    let curl = resolve_on_path(path, "curl");
     let found = [("node", &node), ("npm", &npm), ("npx", &npx)];
     let missing = found
         .iter()
@@ -401,19 +400,31 @@ fn session_environment_check_from(
             ),
         );
     }
+    if curl.is_some() {
+        return DoctorCheck::ready(
+            "session.environment",
+            "Session environment",
+            format!(
+                "Sessions start {shell_name} as an interactive login shell ({milliseconds} ms); \
+                 their PATH ({entries} entries) has no {}. Mjolnir will install its pinned \
+                 Node.js, npm, and npx with curl before a Node-based harness starts.",
+                join_english(&missing),
+            ),
+        );
+    }
     DoctorCheck::warning(
         "session.environment",
         "Session environment",
         format!(
             "Sessions start {shell_name} as an interactive login shell ({milliseconds} ms), but \
-             their PATH ({entries} entries) has no {}. Codex, Claude and MiMo Code sessions \
-             install a managed harness with Node.js and will fail until it is there.",
+             their PATH ({entries} entries) has no {}, and it has no curl for Mjolnir to install \
+             its pinned Node.js.",
             join_english(&missing),
         ),
-        "Install Node.js 22 or newer where your shell startup files set PATH (~/.zprofile or \
-         ~/.zshrc for zsh; ~/.bash_profile or ~/.bashrc for bash; ~/.tcshrc or ~/.cshrc and \
-         ~/.login for tcsh/csh), or set an explicit [profiles.<id>.environment] PATH, then \
-         restart the worker or resume the session.",
+        "Install curl or Node.js 22 or newer with npm and npx where your shell startup files set \
+         PATH (~/.zprofile or ~/.zshrc for zsh; ~/.bash_profile or ~/.bashrc for bash; \
+         ~/.tcshrc or ~/.cshrc and ~/.login for tcsh/csh), or set an explicit \
+         [profiles.<id>.environment] PATH, then restart the worker or resume the session.",
     )
 }
 
@@ -557,9 +568,9 @@ the latest `mj doctor --json` output.\n\n\
 A local bare runtime runs the agent directly on this machine. It needs the\n\
 native `mj-worker` installed beside `mj`; the release installer and the npm\n\
 package include it. The worker installs the pinned harness version itself.\n\
-Codex and Claude need Node.js 22 or newer and npm on `PATH`. Kimi and Grok\n\
-need curl and Bash. Muse needs curl and tar. Mjolnir does not install these\n\
-prerequisites.\n\n\
+Node-based harnesses reuse Node.js 22 or newer with npm and npx when present;\n\
+otherwise Mjolnir installs its own pinned Node.js and needs curl. Kimi and Grok\n\
+need curl and Bash. Mjolnir does not install those shell prerequisites.\n\n\
 ## Linux container-runtime postconditions\n\n{}\n\n{}",
             crate::targets::PODMAN_DOCUMENTATION,
             crate::targets::DOCKER_DOCUMENTATION
@@ -590,9 +601,10 @@ the latest `mj doctor --json` output.\n\n\
 A local bare runtime runs the agent directly on this machine. It needs the\n\
 native `mj-worker` installed beside `mj`; the release installer, npm package,\n\
 and Homebrew formula include it (Homebrew keeps both binaries in libexec).\n\
-The worker installs the pinned harness version itself. Codex and Claude need\n\
-Node.js 22 or newer and npm on `PATH`. Kimi and Grok need curl and Bash.\n\
-Muse needs curl and tar. Mjolnir does not install these prerequisites.\n\n\
+The worker installs the pinned harness version itself. Node-based harnesses\n\
+reuse Node.js 22 or newer with npm and npx when present; otherwise Mjolnir\n\
+installs its own pinned Node.js and needs curl. Kimi and Grok need curl and\n\
+Bash. Mjolnir does not install those shell prerequisites.\n\n\
 ## Podman\n\n\
 A local Podman target on macOS uses a rootless `podman machine`. Install\n\
 Podman and create the machine:\n\n\

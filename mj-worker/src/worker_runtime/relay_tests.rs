@@ -996,10 +996,19 @@ fn launch_wires_require_the_new_baseline_shape() {
         excluded_environment: Vec::new(),
         cwd: ".".into(),
         harness_lease: None,
+        node_lease: None,
     };
     let mut incomplete = serde_json::to_value(&supervisor).unwrap();
     incomplete.as_object_mut().unwrap().remove("environment");
     assert!(serde_json::from_value::<AcpSupervisorSpec>(incomplete).is_err());
+    let mut legacy = serde_json::to_value(&supervisor).unwrap();
+    legacy.as_object_mut().unwrap().remove("node_lease");
+    assert_eq!(
+        serde_json::from_value::<AcpSupervisorSpec>(legacy)
+            .unwrap()
+            .node_lease,
+        None
+    );
 }
 
 fn prompt(text: &str) -> RelayCommand {
@@ -5564,6 +5573,7 @@ async fn the_acp_bridge_never_sees_an_excluded_variable() {
             .to_vec(),
         cwd: temp.path().to_owned(),
         harness_lease: None,
+        node_lease: None,
     };
     let (supervisor_stdin, _held_stdin) = tokio::io::duplex(64);
 
@@ -5587,6 +5597,7 @@ async fn acp_supervisor_notices_child_exit_while_a_descendant_holds_stdout_open(
         excluded_environment: Vec::new(),
         cwd: temp.path().to_owned(),
         harness_lease: None,
+        node_lease: None,
     };
     let (supervisor_stdin, _held_stdin) = tokio::io::duplex(64);
 
@@ -5601,6 +5612,66 @@ async fn acp_supervisor_notices_child_exit_while_a_descendant_holds_stdout_open(
         format!("{error:#}").contains("exit status: 17"),
         "unexpected supervisor error: {error:#}"
     );
+}
+
+#[tokio::test]
+async fn acp_supervisor_holds_the_managed_node_lease_for_the_process_tree() {
+    let temp = tempfile::tempdir().unwrap();
+    let lease_path = temp.path().join("node/.lease");
+    std::fs::create_dir_all(lease_path.parent().unwrap()).unwrap();
+    let ready = temp.path().join("ready");
+    let script = format!(
+        "touch {}; read line",
+        mj_core::targets::posix_quote(&ready.to_string_lossy())
+    );
+    let spec = AcpSupervisorSpec {
+        command: "/bin/sh".into(),
+        args: vec!["-c".into(), script],
+        environment: Default::default(),
+        excluded_environment: Vec::new(),
+        cwd: temp.path().to_owned(),
+        harness_lease: None,
+        node_lease: Some(lease_path.clone()),
+    };
+    let (supervisor_stdin, held_stdin) = tokio::io::duplex(64);
+    let task = tokio::spawn(unix::run_acp_supervisor_with_streams(
+        spec,
+        supervisor_stdin,
+        tokio::io::sink(),
+    ));
+
+    wait_for("the supervised child to start", async {
+        while !ready.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let contender = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lease_path)
+        .unwrap();
+    assert!(
+        matches!(contender.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+        "the supervisor must hold the managed Node.js lease while the child runs"
+    );
+    drop(contender);
+
+    drop(held_stdin);
+    tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .expect("supervisor did not stop after its input closed")
+        .unwrap()
+        .unwrap();
+
+    let released = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lease_path)
+        .unwrap();
+    released
+        .try_lock()
+        .expect("the supervisor released the Node.js lease");
 }
 
 #[tokio::test]
@@ -5626,6 +5697,7 @@ async fn acp_bridge_keeps_the_configured_github_wrapper_and_drops_inherited_toke
         excluded_environment: Vec::new(),
         cwd: temp.path().to_owned(),
         harness_lease: None,
+        node_lease: None,
     };
     let (supervisor_stdin, _held_stdin) = tokio::io::duplex(64);
 
@@ -7011,6 +7083,7 @@ while True: time.sleep(1)
             excluded_environment: Vec::new(),
             cwd: root.path().to_owned(),
             harness_lease: None,
+            node_lease: None,
         };
         let (input, held) = tokio::io::duplex(64);
         let output: Box<dyn tokio::io::AsyncWrite + Unpin + Send> = if broken_output {

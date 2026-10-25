@@ -44,11 +44,12 @@ deliver only part of an equivalent environment setting.
 For each harness, Mjolnir first looks for an image-baked bridge binary on
 `PATH`: `codex-acp`, `claude-agent-acp`, `kimi`, `grok`, `opencode`, `mimo`, or `dsh-acp`. If it doesn't find
 one, Codex and Claude Code install Mjolnir's pinned packages into a leased cache
-using `npm ci`. This requires Node.js 22+ and npm on the target PATH. Codex also
-uses this installation when the image's bridge version differs from Mjolnir's
-pin; Claude accepts the image's installed bridge. Selection and installation
-finish before the worker starts an ACP session. The worker executes the resolved
-bridge and provider.
+using `npm ci`. Mjolnir reuses Node.js 22+ with npm and npx from the image, or
+downloads and verifies its pinned Node.js into the user's cache with curl.
+Codex also uses this installation when the image's bridge version differs from
+Mjolnir's pin; Claude accepts the image's installed bridge. Selection and
+installation finish before the worker starts an ACP session. The worker
+executes the resolved bridge and provider.
 
 Kimi Code, Grok Build, and OpenCode have no npm bridge:
 Mjolnir runs their official installer with `curl` piped to Bash instead, which
@@ -56,14 +57,16 @@ needs both tools in the image. An image-baked `opencode` must be OpenCode 2,
 because each session imports its logins with `opencode auth import` before it
 starts.
 
-MiMo Code can fall back to `npx -y @mimo-ai/cli@0.1.15 acp`, so an unbaked
-image needs Node.js 22, npm, and npx. Bake `@mimo-ai/cli@0.1.15` and set
-`MIMOCODE_DISABLE_AUTOUPDATE=1` for a stable managed runtime.
+MiMo Code can fall back to `npx -y @mimo-ai/cli@0.1.15 acp`, using the same
+system-or-managed Node runtime. Bake `@mimo-ai/cli@0.1.15` and set
+`MIMOCODE_DISABLE_AUTOUPDATE=1` to avoid that installation.
 
 DSH speaks ACP itself, so `dsh-acp` is both its bridge and its agent. Without
 `dsh-acp` on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.3.0`,
-which needs Node.js 22 or newer, npm, and npx; the npm package bundles the
-release binaries. To bake it in, run `npm install -g @brokkai/dsh-acp@0.3.0`
+using Node.js 22 or newer with npm and npx; the npm package bundles the release
+binaries. Mjolnir supplies the pinned Node runtime when the image has no
+compatible one and curl is available. To bake it in, run
+`npm install -g @brokkai/dsh-acp@0.3.0`
 (Node.js 22 or newer), or put the `dsh-acp` binary from a release archive at
 <https://github.com/BrokkAi/dsh-acp/releases> on `PATH`. The Linux binaries
 need glibc 2.34 or newer, so musl images such as Alpine cannot run DSH.

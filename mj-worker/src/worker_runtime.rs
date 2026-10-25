@@ -138,6 +138,10 @@ pub struct AcpSupervisorSpec {
     /// a managed harness process tree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_lease: Option<PathBuf>,
+    /// Shared advisory lock the supervisor holds for the managed Node.js
+    /// runtime used by this ACP process tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_lease: Option<PathBuf>,
 }
 
 impl From<&WorkerLaunchConfig> for AcpSupervisorSpec {
@@ -149,6 +153,7 @@ impl From<&WorkerLaunchConfig> for AcpSupervisorSpec {
             excluded_environment: config.excluded_environment.clone(),
             cwd: config.cwd.clone(),
             harness_lease: None,
+            node_lease: None,
         }
     }
 }

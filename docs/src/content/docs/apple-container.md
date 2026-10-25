@@ -14,12 +14,20 @@ Install Apple's official signed package by following the
 [container project installation instructions](https://github.com/apple/container#initial-install).
 Mjolnir does not download or install it for you.
 
-Start the service before running setup:
+After installing the package, start the service once. This is also where Apple
+prompts for its recommended default kernel:
 
 ```console
 container system start
 container system status
 ```
+
+Once installed, Mjolnir starts the container service automatically when its
+daemon starts and at least one Apple container target is configured. It first
+runs `container system status`; if the service is stopped, it runs
+`container system start --disable-kernel-install` in the background. The flag
+keeps unattended startup from prompting for a kernel download. If the manual
+start above was skipped, run it once to install the recommended kernel.
 
 On an Intel Mac or an older macOS release, use a [remote SSH target](/ssh/) or
 an [EC2 target](/aws/) instead.

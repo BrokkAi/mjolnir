@@ -82,7 +82,7 @@ pub(crate) use backend::backend_locator;
 pub(crate) use backend::controller_github_token;
 pub use backend::image_refresh_plan;
 pub(crate) use backend::validate_resource_allocation;
-pub(crate) use backend::{LocalEngineReadiness, local_engine_readiness};
+pub(crate) use backend::{LocalEngineReadiness, is_missing_command, local_engine_readiness};
 pub use github_app::GithubBundleSelectionError;
 pub(crate) use github_app::{
     GithubAppTokenProvider, github_app_token_for_session, github_token_for_session,
