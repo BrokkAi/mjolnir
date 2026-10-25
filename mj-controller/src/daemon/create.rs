@@ -311,17 +311,15 @@ impl RuntimeState {
         let path_cancelled = control.cancelled.clone();
         let remember_launch_choices = request.remember_launch_choices;
         let preferences_owner = self.clone();
+        let admission_state = self.clone();
         let registered = blocking(move || {
             let mut controller = Controller::load()?;
             if let (Some(input), Some(allocation)) =
                 (container_capacity, request.resource_allocation.as_ref())
             {
                 validate_minimum_container_allocation(allocation)?;
-                let capacity = mj_core::state::host_container_capacity(
-                    input.total,
-                    &input.target_ids,
-                    controller.state.sessions.values(),
-                );
+                let capacity = admission_state
+                    .capacity_with_reservations(&input, controller.state.sessions.values());
                 ensure!(
                     capacity.fits(allocation),
                     capacity_refusal(capacity, allocation)
@@ -528,7 +526,7 @@ fn validate_minimum_container_allocation(
         })
 }
 
-fn capacity_refusal(
+pub(super) fn capacity_refusal(
     capacity: mj_core::state::HostContainerCapacity,
     allocation: &mj_core::state::SessionResourceAllocation,
 ) -> anyhow::Error {
@@ -553,7 +551,7 @@ fn capacity_refusal(
             .with_code("container-capacity-unknown"),
         );
     }
-    let gib = |bytes: u64| format!("{:.1}", bytes as f64 / (1024.0 * 1024.0 * 1024.0));
+    let gib = mj_core::state::floor_gib_tenths;
     Error::new(
         Refusal::unusable(format!(
             "this launch requests {requested_cpus} CPUs and {} GiB of RAM, but the host has {} CPUs and {} GiB of RAM left after its system reserve and live container commitments. Suspend or stop a session, or choose a smaller allocation. Mjolnir does not stop sessions automatically.",
@@ -586,7 +584,7 @@ mod capacity_admission_tests {
             },
             remaining: mj_core::state::HostContainerSize {
                 cpus: 4,
-                memory_bytes: 8 << 30,
+                memory_bytes: (8 << 30) - 1,
             },
             complete: true,
         };
@@ -599,7 +597,7 @@ mod capacity_admission_tests {
         let refusal = mj_core::refusal::Refusal::of(&error).expect("user-facing refusal");
 
         assert_eq!(refusal.code(), Some("container-capacity-exceeded"));
-        assert!(refusal.message().contains("4 CPUs and 8.0 GiB of RAM left"));
+        assert!(refusal.message().contains("4 CPUs and 7.9 GiB of RAM left"));
         assert!(
             refusal
                 .message()

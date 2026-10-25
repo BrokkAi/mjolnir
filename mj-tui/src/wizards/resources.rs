@@ -132,6 +132,7 @@ impl ResourceEditor {
     pub(crate) fn allocation(
         &self,
         limits: Option<(u64, u64)>,
+        require_new_minimum: bool,
     ) -> Result<SessionResourceAllocation, String> {
         let cpu = self.cpu.trim();
         let cpus = cpu
@@ -139,7 +140,7 @@ impl ResourceEditor {
             .ok()
             .filter(|cpus| *cpus > 0 && cpu.bytes().all(|byte| byte.is_ascii_digit()))
             .ok_or_else(|| "CPU must be a positive whole number.".to_owned())?;
-        if cpus < mj_core::state::MINIMUM_CONTAINER_CPUS {
+        if require_new_minimum && cpus < mj_core::state::MINIMUM_CONTAINER_CPUS {
             return Err(format!(
                 "CPU must be at least {}.",
                 mj_core::state::MINIMUM_CONTAINER_CPUS
@@ -150,7 +151,7 @@ impl ResourceEditor {
             .ok_or_else(|| {
                 "MEM must be a positive number of GiB (up to 30 decimal places).".to_owned()
             })?;
-        if memory_bytes < mj_core::state::MINIMUM_CONTAINER_MEMORY_BYTES {
+        if require_new_minimum && memory_bytes < mj_core::state::MINIMUM_CONTAINER_MEMORY_BYTES {
             return Err("RAM must be at least 4 GiB.".to_owned());
         }
         if let Some((max_cpus, max_memory)) = limits {
@@ -171,8 +172,7 @@ impl ResourceEditor {
 /// A host limit for a message: rounded down to one decimal, so the number
 /// shown is itself accepted when typed back.
 fn host_limit_gib_text(bytes: u64) -> String {
-    let tenths = (u128::from(bytes) * 10 / u128::from(GIB)) as u64;
-    format!("{}.{}", tenths / 10, tenths % 10)
+    mj_core::state::floor_gib_tenths(bytes)
 }
 
 /// Exact decimal GiB: even a host limit ending in a partial GiB round-trips.
@@ -193,13 +193,7 @@ pub(crate) fn memory_gib_text(bytes: u64) -> String {
 /// A capacity total is descriptive rather than an editable value, so show one
 /// decimal place and avoid the long repeating fraction of an exact byte count.
 pub(crate) fn capacity_gib_text(bytes: u64) -> String {
-    let tenths = ((u128::from(bytes) * 10 + u128::from(GIB) / 2) / u128::from(GIB)) as u64;
-    let fraction = tenths % 10;
-    if fraction == 0 {
-        (tenths / 10).to_string()
-    } else {
-        format!("{}.{}", tenths / 10, fraction)
-    }
+    mj_core::state::floor_gib_tenths(bytes)
 }
 
 fn parse_memory_gib(text: &str) -> Option<u64> {
@@ -251,7 +245,28 @@ mod tests {
             ..ResourceEditor::default()
         };
         let limit = 98 * GIB + GIB / 5 + 12345;
-        let message = editor.allocation(Some((8, limit))).unwrap_err();
+        let message = editor.allocation(Some((8, limit)), true).unwrap_err();
         assert_eq!(message, "RAM exceeds this host's 98.2 GiB.");
+    }
+
+    #[test]
+    fn existing_sessions_can_keep_a_size_below_the_new_session_minimum() {
+        let editor = ResourceEditor {
+            cpu: "1".into(),
+            memory: "2".into(),
+            ..ResourceEditor::default()
+        };
+
+        assert_eq!(
+            editor.allocation(None, false),
+            Ok(SessionResourceAllocation::Container {
+                cpus: 1,
+                memory_bytes: 2 * GIB,
+            })
+        );
+        assert_eq!(
+            editor.allocation(None, true),
+            Err("CPU must be at least 2.".into())
+        );
     }
 }

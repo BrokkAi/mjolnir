@@ -3174,6 +3174,45 @@ fn new_container_size_checkbox_is_explicit_and_reaches_the_create_action() {
 }
 
 #[test]
+fn unknown_live_container_capacity_is_not_reported_as_zero() {
+    let mut session = running_session();
+    session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        container_id: "unknown-size".into(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    });
+    session.resource_allocation = None;
+    let mut state = State::default();
+    state.sessions.insert(session.id.clone(), session);
+    let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
+    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    dashboard.apply_deployment_capacity(
+        "local",
+        Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            cpu_percent: None,
+            memory_used_bytes: 0,
+            memory_total_bytes: 64 << 30,
+            logical_cores: 24,
+            disk_total_bytes: None,
+            storage: Vec::new(),
+        })),
+        0,
+    );
+
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+
+    let wizard = new_wizard(&dashboard);
+    assert!(wizard.resource_allocation.is_none());
+    let error = wizard.sizing_error.as_deref().unwrap();
+    assert!(error.contains("no recorded sizing"), "{error}");
+    assert!(!error.contains("0 CPUs"), "{error}");
+    let screen = captured_drawn(&mut dashboard, 100, 30).join("\n");
+    assert!(screen.contains("RAM left unavailable"), "{screen}");
+    assert!(!screen.contains("RAM left: 0"), "{screen}");
+}
+
+#[test]
 fn resume_keeps_the_sessions_size_instead_of_the_hosts_latest_size() {
     let gib = 1024 * 1024 * 1024;
     let mut session = stopped_session();
@@ -3204,6 +3243,33 @@ fn resume_keeps_the_sessions_size_instead_of_the_hosts_latest_size() {
             memory_bytes: 16 * gib,
         })
     );
+}
+
+#[test]
+fn resume_keeps_a_legacy_allocation_below_the_new_session_minimum() {
+    let mut session = stopped_session();
+    session.resource_allocation = Some(SessionResourceAllocation::Container {
+        cpus: 1,
+        memory_bytes: 2 << 30,
+    });
+    let mut state = State::default();
+    state.sessions.insert(session.id.clone(), session);
+    let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
+
+    dashboard.begin_resume_for("session-1");
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("expected resume wizard on target step");
+    };
+    assert_eq!(
+        wizard.resource_allocation,
+        Some(SessionResourceAllocation::Container {
+            cpus: 1,
+            memory_bytes: 2 << 30,
+        })
+    );
+    assert_eq!(wizard.sizing_error, None);
 }
 
 #[test]

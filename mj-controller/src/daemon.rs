@@ -1,5 +1,6 @@
 //! Persistent per-user controller daemon and its authenticated local protocol.
 
+pub(crate) mod capacity;
 mod container_upgrade;
 mod feed;
 mod owner;
@@ -238,6 +239,8 @@ pub struct RuntimeState {
     /// Serializes a new container reservation with the durable creation of the
     /// provisioning session that represents it.
     container_admission: tokio::sync::Mutex<()>,
+    /// Resume reservations that precede their durable `Provisioning` state.
+    container_reservations: Mutex<BTreeMap<String, capacity::ContainerCapacityReservation>>,
     /// What `[review]` last said, republished by the target refresher.
     review_config: Arc<Mutex<mj_core::config::ReviewConfig>>,
     /// Turn review runs here, in the process that owns every session, so a
@@ -712,7 +715,6 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
     }
 }
 
-mod capacity;
 mod close;
 mod close_workspace;
 mod create;

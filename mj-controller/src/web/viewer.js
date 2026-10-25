@@ -1487,8 +1487,12 @@ function memoryGiBText(bytes) {
 }
 
 function capacityGiBText(bytes) {
-  const value = Number(bytes) / 2 ** 30;
-  return value.toFixed(1).replace(/\.0$/, '');
+  const gib = 1n << 30n;
+  const tenths = (BigInt(bytes) * 10n) / gib;
+  const fraction = tenths % 10n;
+  return fraction === 0n
+    ? String(tenths / 10n)
+    : `${tenths / 10n}.${fraction}`;
 }
 
 const MIN_CONTAINER_CPUS = 2;
@@ -1659,11 +1663,19 @@ function renderNewTargetSizingControls(draft, host) {
     host.append(el('h2', '', 'Container size'), cpu, memory);
     if (target.container_capacity) {
       const capacity = target.container_capacity;
-      host.append(el(
-        'p',
-        'dim',
-        `Host: ${capacity.total.cpus} CPUs and ${capacityGiBText(capacity.total.memory_bytes)} GiB RAM · RAM left: ${capacityGiBText(capacity.remaining.memory_bytes)} GiB · CPU left: ${capacity.remaining.cpus}. RAM left is a hard commitment; compressed or reclaimable memory does not increase it.`,
-      ));
+      if (capacity.complete) {
+        host.append(el(
+          'p',
+          'dim',
+          `Host: ${capacity.total.cpus} CPUs and ${capacityGiBText(capacity.total.memory_bytes)} GiB RAM · RAM left: ${capacityGiBText(capacity.remaining.memory_bytes)} GiB · CPU left: ${capacity.remaining.cpus}. RAM left is a hard commitment; compressed or reclaimable memory does not increase it.`,
+        ));
+      } else {
+        host.append(el(
+          'p',
+          'dim',
+          `Host: ${capacity.total.cpus} CPUs and ${capacityGiBText(capacity.total.memory_bytes)} GiB RAM. RAM left is unavailable because a live container has no recorded sizing.`,
+        ));
+      }
     } else if (target.container_host_limits) {
       host.append(el('p', 'dim', `Host: ${target.container_host_limits.cpus} CPUs and ${capacityGiBText(target.container_host_limits.memory_bytes)} GiB RAM. RAM left is unavailable until the capacity probe answers.`));
     }
@@ -4327,18 +4339,21 @@ function renderTargets() {
       }
       if (reading.container_capacity) {
         const capacity = reading.container_capacity;
-        rows.push([
-          'RAM left',
-          capacity.complete
-            ? `${capacityGiBText(capacity.remaining.memory_bytes)} GiB of ${capacityGiBText(capacity.total.memory_bytes)} GiB`
-            : 'unavailable (live container sizing unknown)',
-          capacity.complete && capacity.remaining.memory_bytes > 0 ? '' : 'reading-low',
-        ]);
-        rows.push([
-          'CPU left',
-          `${capacity.remaining.cpus} of ${capacity.total.cpus}`,
-          capacity.remaining.cpus > 0 ? '' : 'reading-low',
-        ]);
+        if (capacity.complete) {
+          rows.push([
+            'RAM left',
+            `${capacityGiBText(capacity.remaining.memory_bytes)} GiB of ${capacityGiBText(capacity.total.memory_bytes)} GiB`,
+            capacity.remaining.memory_bytes > 0 ? '' : 'reading-low',
+          ]);
+          rows.push([
+            'CPU left',
+            `${capacity.remaining.cpus} of ${capacity.total.cpus}`,
+            capacity.remaining.cpus > 0 ? '' : 'reading-low',
+          ]);
+        } else {
+          rows.push(['RAM left', 'unavailable (live container sizing unknown)', 'reading-low']);
+          rows.push(['CPU left', 'unavailable (live container sizing unknown)', 'reading-low']);
+        }
       }
       if (reading.logical_cores) rows.push(['Cores', String(reading.logical_cores), '']);
       if (reading.disk_total_bytes) {

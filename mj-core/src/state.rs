@@ -1601,7 +1601,23 @@ pub const BASELINE_CONTAINER_CPUS: u64 = 4;
 pub const BASELINE_CONTAINER_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const MINIMUM_CONTAINER_CPUS: u64 = 2;
 pub const MINIMUM_CONTAINER_MEMORY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const PREFERRED_AWS_CPUS: u64 = 8;
 const MINIMUM_HOST_MEMORY_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const GIB_BYTES: u128 = 1024 * 1024 * 1024;
+
+/// Format bytes as GiB rounded down to one decimal place.
+///
+/// Capacity messages use the same string as their hard limit so a value shown
+/// as available is always accepted when entered back.
+pub fn floor_gib_tenths(bytes: u64) -> String {
+    let tenths = u128::from(bytes) * 10 / GIB_BYTES;
+    let fraction = tenths % 10;
+    if fraction == 0 {
+        (tenths / 10).to_string()
+    } else {
+        format!("{}.{}", tenths / 10, fraction)
+    }
+}
 
 /// Reserve one fifth of RAM for the host operating system and other processes.
 /// CPU stay fully schedulable; this change sums CPU commitments against the
@@ -1732,7 +1748,7 @@ pub fn preferred_aws_allocation<'a>(
     }
     options
         .iter()
-        .find(|option| allocation_cpus(option) == BASELINE_CONTAINER_CPUS)
+        .find(|option| allocation_cpus(option) == PREFERRED_AWS_CPUS)
         .or_else(|| options.first())
 }
 

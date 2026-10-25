@@ -111,6 +111,7 @@ impl RuntimeState {
             quota: Mutex::new(QuotaBoard::default()),
             capacity: std::sync::OnceLock::new(),
             container_admission: tokio::sync::Mutex::new(()),
+            container_reservations: Mutex::new(BTreeMap::new()),
             review_config,
             review_host,
             reviewer_runtime,

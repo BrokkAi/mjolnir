@@ -500,9 +500,9 @@ fn validate_action_against(
                 }
                 if !capacity.fits(allocation) {
                     return Err(ApiError::bad_request(format!(
-                        "this launch exceeds the {} CPUs or {:.1} GiB of RAM left on this host after live container commitments; suspend or stop a session, or choose a smaller allocation. Mjolnir does not stop sessions automatically",
+                        "this launch exceeds the {} CPUs or {} GiB of RAM left on this host after live container commitments; suspend or stop a session, or choose a smaller allocation. Mjolnir does not stop sessions automatically",
                         capacity.remaining.cpus,
-                        capacity.remaining.memory_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                        mj_core::state::floor_gib_tenths(capacity.remaining.memory_bytes),
                     )));
                 }
             }

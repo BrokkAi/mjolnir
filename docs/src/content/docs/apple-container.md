@@ -67,7 +67,8 @@ against each VM independently. It reserves one fifth of physical RAM for macOS
 and sums every owning container's configured limits. The UI reports the hard
 RAM left: memory compression and reclaimable pages do not count as additional
 capacity. A launch that would exceed either the logical CPU count or that RAM
-budget is refused. Mjolnir never stops a session automatically to make room.
+budget is refused, including a resume or a move onto that Mac. Mjolnir never
+stops a session automatically to make room.
 
 Apple container takes part in the daemon's background image download like
 Podman and Docker: a configured image the host does not have is downloaded a

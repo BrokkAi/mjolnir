@@ -371,11 +371,13 @@ targets use the host directly and have no Mjolnir resource limit.
 
 These choices are capacity controls. Mjolnir sums the CPU and memory limits of
 live containers that share a physical host and refuses a new container when
-the committed total would exceed the host's logical CPUs or usable RAM. RAM is
-treated as a hard commitment, with one fifth of physical RAM reserved for the
-host operating system and other processes. Compression, swap, and reclaimable
-memory do not increase the RAM available to another session. Mjolnir reports
-the RAM left rather than stopping or suspending sessions automatically.
+the committed total would exceed the host's logical CPUs or usable RAM. The
+same check covers resuming a stopped container and moving a session onto a
+container target. RAM is treated as a hard commitment, with one fifth of
+physical RAM reserved for the host operating system and other processes.
+Compression, swap, and reclaimable memory do not increase the RAM available to
+another session. Mjolnir reports the RAM left rather than stopping or
+suspending sessions automatically.
 
 ## Image pull policy
 

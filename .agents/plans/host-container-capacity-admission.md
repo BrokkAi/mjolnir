@@ -23,7 +23,9 @@ The admission calculation treats RAM as a hard, non-compressible commitment. It 
 - [x] (2026-10-25) Update web and TUI tests, API documentation, and protocol compatibility coverage.
 - [x] (2026-10-25) Run focused tests during implementation, then full unit suites and clippy for every touched crate.
 - [x] (2026-10-25) Run the deterministic web suite, unit tests, and documentation check.
+- [x] (2026-10-25) Independent review fixes: cover resume and move admission, restore the separate 8-vCPU EC2 default, keep the new-session floor out of resume, avoid zero placeholders for unknown capacity, and floor displayed limits.
 - [x] (2026-10-25) Commit the validated change on the current branch.
+- [x] (2026-10-25) Commit the independently reviewed fixes on the current branch.
 
 ## Surprises & Discoveries
 
@@ -50,6 +52,18 @@ The admission calculation treats RAM as a hard, non-compressible commitment. It 
 
 - Observation: The CLI unit suite passes, but the full `daemon_startup` integration binary has environment failures where fixture daemons exit according to their logs but remain observable as zombies or retained stores after the test harness attempts SIGKILL. This is the same process-reaping condition and is not touched by the capacity change.
   Evidence: the failing fixtures log daemon shutdown completion before the cleanup assertion reports the process or store still retained.
+
+- Observation: The first implementation applied the new container default to the separate EC2 preference helper. An option list containing 2 and 8 vCPUs then selected 2 because the shared value had become 4.
+  Evidence: `preferred_aws_allocation` compared against `BASELINE_CONTAINER_CPUS`; the new regression test uses `[2, 8]` and requires the 8-vCPU option.
+
+- Observation: `ResourceEditor::allocation` is shared by new, resume, and move. Applying the new 2-CPU/4-GiB floor unconditionally made a previously valid smaller session impossible to resume.
+  Evidence: the shared editor is called from `validate_wizard_resources` for every wizard type.
+
+- Observation: `HostContainerCapacity::remaining` is deliberately zero when `complete` is false, but early UI formatting treated that sentinel as a real limit.
+  Evidence: web and TUI both rendered or validated the zero value before testing `complete`.
+
+- Observation: A nearest-tenth display could overstate a hard byte limit. The shared formatter now floors to a tenth, and both web and controller messages use that same conservative formatting.
+  Evidence: `(8 GiB - 1 byte)` displays as `7.9 GiB`.
 
 ## Decision Log
 
@@ -101,13 +115,35 @@ The admission calculation treats RAM as a hard, non-compressible commitment. It 
   Rationale: An unrecorded runtime fallback cannot be reserved safely without reinterpreting the backend's size strings. Current clients always send the explicit allocation, and the protocol bump makes that expectation unambiguous.
   Date/Author: 2026-10-25 / Codex
 
+- Decision: Keep a separate 8-vCPU preference for EC2.
+  Rationale: Container sizing and EC2 instance selection are independent policies. Lowering the default container to 4 CPUs must not alter the documented EC2 preference.
+  Date/Author: 2026-10-25 / Codex
+
+- Decision: Apply the 2-CPU/4-GiB floor only to new-session drafts and admission, not to the shared editor's resume/move mode.
+  Rationale: Existing valid sessions must retain and resume their recorded allocation, and the backend must remain loadable for legacy records.
+  Date/Author: 2026-10-25 / Codex
+
+- Decision: Use an in-memory capacity lease for resume and move while their durable session record is not yet `Provisioning`.
+  Rationale: Both operations can spend minutes in preflight. A lease reserves the destination budget without holding the new-session admission lock for that whole period. The capacity projection overlays the lease, and the lease disappears when the lifecycle ends.
+  Date/Author: 2026-10-25 / Codex
+
+- Decision: Test and display `complete: false` before formatting or validating `remaining`.
+  Rationale: Zero is a sentinel for unknown capacity in the core value, never a claim that the host has no capacity.
+  Date/Author: 2026-10-25 / Codex
+
+- Decision: Floor displayed GiB limits to one decimal.
+  Rationale: A displayed hard limit must not be larger than the bytes available. Entering the displayed value must remain admissible.
+  Date/Author: 2026-10-25 / Codex
+
 ## Outcomes & Retrospective
 
 The feature is implemented. New container sessions default to 4 CPUs and 8 GiB, require at least 2 CPUs and 4 GiB, and are admitted only when their allocation fits the host's aggregate CPU and hard RAM budget. The web viewer and TUI show RAM left from physical totals minus a 20 percent OS reserve and owning-container commitments; borrowed sub-agent containers are excluded. The refusal names the remaining resources, explains that the person may explicitly suspend or stop a session, and states that Mjolnir will not do so automatically.
 
 The explicit sizing checkbox is carried through both interactive surfaces, the HTTP API, the new daemon protocol, and the database write. Controller Action serialization and database tests prove that the broader interactive-default flag no longer implies that a container size is saved.
 
-Validation completed: the controller suite passed 2100 tests with 17 ignored, the TUI suite passed 539 tests with 2 ignored, the client suite passed 42 unit tests plus its integration test, the CLI unit suite passed 225 tests, all changed crates passed clippy with warnings denied, the deterministic web suite passed 107 tests with 3 environment skips, all 57 web unit tests passed, and the documentation Astro check passed with zero diagnostics. The full core and CLI integration suites each encountered the pre-existing container process-reaping failures described above; targeted capacity, database, API, protocol, web, and TUI tests all pass.
+After independent review, all five findings reproduced and were fixed. New-session admission, resume, and user-started moves to container targets now use the serialized host budget; resume and move leases cover their pre-provisioning work. EC2 again prefers 8 vCPUs independently of the 4-CPU container default. Resume keeps legacy allocations below the new-session floor. Unknown capacity is reported as unavailable rather than zero. Displayed GiB limits are conservatively floored.
+
+Validation completed: the controller suite passed 2101 tests with 17 ignored, the TUI suite passed 542 tests with 2 ignored, the client suite passed 42 unit tests plus its integration test, the CLI unit suite passed 225 tests, all changed crates passed clippy with warnings denied, the deterministic web suite passed 108 tests with 3 environment skips, all 57 web unit tests passed, and the documentation Astro check passed with zero diagnostics. The full core and CLI integration suites each encountered the pre-existing container process-reaping failures described above; targeted capacity, database, API, protocol, web, and TUI tests all pass.
 
 ## Context and Orientation
 
@@ -131,7 +167,7 @@ Add functions on `TargetLocator` and `SessionRecord` as needed to answer one que
 
 Add a pure helper that accepts the host's total CPU and memory, the ids of all target templates on that host, and the session records. It computes the OS reserve, sums owner allocations with saturating arithmetic, and returns `HostContainerCapacity`. If an active owner container has no recorded allocation, it saturates committed capacity to the usable budget and marks the capacity as unavailable for further admission; silently treating an unknown limit as zero would reintroduce oversubscription.
 
-Add minimum-size checks to `SessionResourceAllocation::validate`. Keep the existing non-zero checks for malformed persisted data and make the error actionable for new requests.
+Add the minimum-size check as a separate new-admission validator. Keep the existing non-zero checks for malformed persisted data, and keep the floor out of resume and move so older sessions remain usable.
 
 ### Milestone 2: Probe-to-surface plumbing and RAM-left projection
 
@@ -143,7 +179,7 @@ When building viewer capacity in `mj-controller/src/server_runtime/snapshot.rs`,
 
 The target capacity card in `mj-controller/src/web/viewer.js` must show a hard "RAM left" value derived from that committed budget. The new-session container controls must show total CPU/RAM, committed RAM, and RAM left. They must say that RAM left is a hard commitment and is not derived from compressed or reclaimable memory.
 
-In `mj-tui`, add an equivalent lookup on `DashboardState` in `mj-tui/src/wizards/dashboard/targets.rs`. The target step must render total and RAM-left values. New-session validation must use remaining capacity; resume and move retain their existing sizing semantics in this milestone because their source capacity and transition ordering need separate treatment.
+In `mj-tui`, add an equivalent lookup on `DashboardState` in `mj-tui/src/wizards/dashboard/targets.rs`. The target step must render total and RAM-left values. New-session validation uses remaining capacity and applies the new-session minimum; resume and move retain their recorded sizing semantics and do not apply that new floor.
 
 ### Milestone 3: Atomic admission at daemon create
 
@@ -282,9 +318,12 @@ In `mj-controller/src/daemon/capacity.rs`, add a crate-private lookup on `Capaci
 
 In `RuntimeState`, add a single serialized new-session capacity admission guard and a helper that formats a `Refusal` from a failed fit. No renderer or event loop may call a probe synchronously.
 
+Resume and move use the same guard to install an in-memory lease while their durable record is not yet `Provisioning`. The lease replaces any active commitment for the same session, is overlaid into viewer capacity, and is removed when the lifecycle ends. New sessions hold the guard until their durable session record exists; they do not need a separate lease.
+
 The web and TUI receive `HostContainerCapacity` rather than recomputing reserve policy or target-host grouping independently. This keeps one owner for the rule that determines how much RAM is left.
 
 ## Plan Revision Notes
 
 - 2026-10-25: Initial plan created after design discussion. It records the user's choices for 4 CPU / 8 GiB defaults, hard non-compressible RAM accounting, no automatic shutdown, and a per-launch checkbox for saving the host's default size.
 - 2026-10-25: Implementation completed. The plan now records the separate minimum-admission validator, additive wire projection, complete validation results, and the environment-only zombie failures. No schema migration was needed because capacity commitments are derived from durable sessions and borrowed-container ownership.
+- 2026-10-25: Independent review confirmed all five findings. Added resume/move leases, separated EC2 and container preferences, scoped the minimum to new sessions, corrected unknown-capacity rendering, and switched hard-limit formatting to floor instead of round.

@@ -111,7 +111,11 @@ pub(crate) async fn run_server(
             project_sources: &project_sources,
             operations: &operations,
             move_recoveries: &move_recoveries,
-            capacity: &viewer_capacity(&capacity_state, &controller.state),
+            capacity: &viewer_capacity(
+                &capacity_state,
+                &controller.state,
+                &daemon_runtime.container_capacity_reservations(),
+            ),
             launch_failures: &launch_failures,
             reviews: &review_views(&daemon_runtime),
         },
@@ -353,7 +357,11 @@ pub(crate) async fn run_server(
                         project_sources: &project_sources,
                         operations: &operations,
                         move_recoveries: &move_recoveries,
-                        capacity: &viewer_capacity(&capacity_state, &controller.state),
+                        capacity: &viewer_capacity(
+                            &capacity_state,
+                            &controller.state,
+                            &daemon_runtime.container_capacity_reservations(),
+                        ),
                         launch_failures: &launch_failures,
                         reviews: &review_views(&daemon_runtime),
                     },
@@ -1240,7 +1248,7 @@ pub(crate) async fn run_server(
                         }
                     };
                     if let ControllerAction::Move { request: move_request } = &request.action
-                        && let Err(error) = daemon_runtime.start_move_session((**move_request).clone()) {
+                        && let Err(error) = daemon_runtime.start_move_session((**move_request).clone()).await {
                         if let Some(id) = &session_id { active_actions.remove(id); }
                         let _ = request.reply.send(ActionOutcome::Refused(Refusal::unusable(error.to_string())));
                         continue;

@@ -33,6 +33,75 @@ pub(super) fn load_controller_for_resume(request: &ResumeSessionRequest) -> Resu
 }
 
 impl RuntimeState {
+    async fn reserve_move_container_capacity(
+        self: &Arc<Self>,
+        request: &MoveSessionRequest,
+    ) -> Result<Option<capacity::ContainerCapacityLease>> {
+        let selection = &request.preparation.selection;
+        let (target_id, allocation, container_target) = {
+            let owner = self.owner();
+            let controller = owner.controller();
+            let source = controller
+                .state
+                .sessions
+                .get(&selection.session_id)
+                .with_context(|| format!("unknown session {:?}", selection.session_id))?;
+            let target_id = selection
+                .target_template_id
+                .as_deref()
+                .unwrap_or(&source.target_template_id)
+                .to_owned();
+            let template = controller
+                .config
+                .targets
+                .get(&target_id)
+                .with_context(|| format!("unknown target {target_id:?}"))?;
+            let allocation = if selection.clear_resource_allocation {
+                None
+            } else {
+                selection
+                    .resource_allocation
+                    .clone()
+                    .or_else(|| source.resource_allocation.clone())
+            };
+            (
+                target_id,
+                allocation,
+                mj_core::config::is_container_target(template),
+            )
+        };
+        if !container_target || self.capacity_feed().is_none() {
+            return Ok(None);
+        }
+        let Some(input) = self.cached_container_capacity_input(&target_id) else {
+            return Err(anyhow::Error::new(
+                Refusal::precondition(
+                    "this target's host capacity is not ready yet; refresh the target and retry",
+                )
+                .with_code("container-capacity-unavailable"),
+            ));
+        };
+        let Some(allocation) = allocation else {
+            return Err(anyhow::Error::new(
+                Refusal::unusable(
+                    "this container session has no recorded CPU and RAM allocation; choose a size before moving",
+                )
+                .with_code("container-size-required"),
+            ));
+        };
+        let admission = self.container_admission.lock().await;
+        let capacity = {
+            let owner = self.owner();
+            self.capacity_with_reservations(&input, owner.controller().state.sessions.values())
+        };
+        if !capacity.fits(&allocation) {
+            return Err(super::create::capacity_refusal(capacity, &allocation));
+        }
+        let lease = self.reserve_container_capacity(&selection.session_id, &input, allocation);
+        drop(admission);
+        Ok(Some(lease))
+    }
+
     pub async fn prepare_move_session(
         self: &Arc<Self>,
         selection: MoveSelection,
@@ -98,11 +167,19 @@ impl RuntimeState {
     }
 
     /// Reserve lifecycle ownership before a web request is acknowledged.
-    pub(crate) fn start_move_session(self: &Arc<Self>, request: MoveSessionRequest) -> Result<()> {
-        self.admit_move_session(request).map(|_| ())
+    pub(crate) async fn start_move_session(
+        self: &Arc<Self>,
+        request: MoveSessionRequest,
+    ) -> Result<()> {
+        let capacity = self.reserve_move_container_capacity(&request).await?;
+        self.admit_move_session(request, capacity).map(|_| ())
     }
 
-    fn admit_move_session(self: &Arc<Self>, request: MoveSessionRequest) -> Result<LifecycleWatch> {
+    fn admit_move_session(
+        self: &Arc<Self>,
+        request: MoveSessionRequest,
+        capacity_lease: Option<capacity::ContainerCapacityLease>,
+    ) -> Result<LifecycleWatch> {
         let selection = request.preparation.selection.clone();
         let operation_id = request.preparation.operation_id.clone();
         // Preparation resolves inherited settings. Compare those settings,
@@ -122,6 +199,7 @@ impl RuntimeState {
                 deferrable_admission: None,
             },
             move |state, session_id, cancelled| async move {
+                let _capacity_lease = capacity_lease;
                 let result = state
                     .clone()
                     .run_move_controller_work(
@@ -158,7 +236,8 @@ impl RuntimeState {
         let selection = request.preparation.selection.clone();
         let operation_id = request.preparation.operation_id.clone();
         let session_id = selection.session_id.clone();
-        let result = self.admit_move_session(request)?;
+        let capacity = self.reserve_move_container_capacity(&request).await?;
+        let result = self.admit_move_session(request, capacity)?;
         let channel = result.clone();
         let result = Self::wait_lifecycle_result(result).await;
         self.remove_completed_lifecycle(&channel);

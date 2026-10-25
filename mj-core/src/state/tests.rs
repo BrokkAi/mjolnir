@@ -332,6 +332,36 @@ fn an_unrecorded_owner_allocation_makes_remaining_capacity_unknown() {
     assert_eq!(capacity.remaining.memory_bytes, 0);
 }
 
+#[test]
+fn aws_default_stays_at_eight_vcpus_when_container_default_is_smaller() {
+    let options = [
+        SessionResourceAllocation::AwsEc2 {
+            instance_type: "small".into(),
+            vcpus: 2,
+            memory_bytes: 4 << 30,
+        },
+        SessionResourceAllocation::AwsEc2 {
+            instance_type: "default".into(),
+            vcpus: 8,
+            memory_bytes: 32 << 30,
+        },
+    ];
+
+    let selected = preferred_aws_allocation(&options, None).expect("an AWS option");
+
+    assert!(matches!(
+        selected,
+        SessionResourceAllocation::AwsEc2 { instance_type, .. }
+            if instance_type == "default"
+    ));
+}
+
+#[test]
+fn capacity_gib_text_never_rounds_a_limit_up() {
+    assert_eq!(floor_gib_tenths((8 << 30) - 1), "7.9");
+    assert_eq!(floor_gib_tenths(64 << 30), "64");
+}
+
 fn sample_config() -> Config {
     Config {
         jev: Default::default(),

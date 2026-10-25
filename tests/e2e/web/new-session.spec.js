@@ -670,7 +670,7 @@ test('container sizing enforces the useful minimum and hard remaining RAM', asyn
       total: { cpus: 8, memory_bytes: 32 * 1024 ** 3 },
       reserved: { cpus: 0, memory_bytes: 6 * 1024 ** 3 },
       committed: { cpus: 4, memory_bytes: 18 * 1024 ** 3 },
-      remaining: { cpus: 4, memory_bytes: 8 * 1024 ** 3 },
+      remaining: { cpus: 4, memory_bytes: 8 * 1024 ** 3 - 1 },
       complete: true,
     },
   };
@@ -681,11 +681,50 @@ test('container sizing enforces the useful minimum and hard remaining RAM', asyn
   await expect(page.locator('#new-next')).toBeDisabled();
   await page.locator('#new-resource-cpus').fill('4');
   await page.locator('#new-resource-memory').fill('9');
-  await expect(page.locator('#new-resource-error')).toContainText('8 GiB left');
+  await expect(page.locator('#new-resource-error')).toContainText('7.9 GiB left');
   await expect(page.locator('#new-next')).toBeDisabled();
-  await page.locator('#new-resource-memory').fill('8');
+  await page.locator('#new-resource-memory').fill('7.9');
   await expect(page.locator('#new-resource-error')).toHaveText('');
   await expect(page.locator('#new-next')).toBeEnabled();
+});
+
+test('unknown live-container sizing is never rendered as zero capacity', async ({ page }) => {
+  const containerTarget = {
+    ...defaultContainerTarget,
+    container_capacity: {
+      total: { cpus: 8, memory_bytes: 32 * 1024 ** 3 },
+      reserved: { cpus: 0, memory_bytes: 6 * 1024 ** 3 },
+      committed: { cpus: 8, memory_bytes: 26 * 1024 ** 3 },
+      remaining: { cpus: 0, memory_bytes: 0 },
+      complete: false,
+    },
+  };
+  const state = await mount(page, { containerTarget });
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-step')).toContainText('no recorded sizing');
+  await expect(page.locator('#new-step')).not.toContainText('RAM left: 0');
+  await expect(page.locator('#new-step')).not.toContainText('CPU left: 0');
+  await expect(page.locator('#new-resource-error')).toContainText('no recorded sizing');
+  await expect(page.locator('#new-next')).toBeDisabled();
+  state.snapshot.capacity = [{
+    id: 'local',
+    label: 'local',
+    target_ids: ['container'],
+    cpu_percent: 40,
+    memory_used_bytes: 32 * 1024 ** 3,
+    memory_total_bytes: 64 * 1024 ** 3,
+    logical_cores: 24,
+    container_capacity: containerTarget.container_capacity,
+    refreshing: false,
+    stale: false,
+    has_error: false,
+    storage: [],
+  }];
+  await refresh(page, state);
+  await page.locator('#menu-button').click();
+  await page.getByRole('menuitem', { name: 'Targets', exact: true }).click();
+  await expect(page.locator('#targets')).toContainText('unavailable (live container sizing unknown)');
+  await expect(page.locator('#targets')).not.toContainText('0 of 8');
 });
 
 test('target capacity shows hard RAM left for a host with container sessions', async ({ page }) => {
@@ -700,9 +739,9 @@ test('target capacity shows hard RAM left for a host with container sessions', a
     logical_cores: 24,
     container_capacity: {
       total: { cpus: 24, memory_bytes: 64 * 1024 ** 3 },
-      reserved: { cpus: 0, memory_bytes: 12.8 * 1024 ** 3 },
+      reserved: { cpus: 0, memory_bytes: 13743895348 },
       committed: { cpus: 8, memory_bytes: 24 * 1024 ** 3 },
-      remaining: { cpus: 16, memory_bytes: 27.2 * 1024 ** 3 },
+      remaining: { cpus: 16, memory_bytes: 29205777612 },
       complete: true,
     },
     refreshing: false,
@@ -711,9 +750,10 @@ test('target capacity shows hard RAM left for a host with container sessions', a
     storage: [],
   }];
   await refresh(page, state);
-  await page.evaluate(() => { location.hash = '#targets'; });
+  await page.locator('#menu-button').click();
+  await page.getByRole('menuitem', { name: 'Targets', exact: true }).click();
   await expect(page.locator('#targets')).toContainText('RAM left');
-  await expect(page.locator('#targets')).toContainText('27.2 GiB of 64 GiB');
+  await expect(page.locator('#targets')).toContainText('27.1 GiB of 64 GiB');
   await expect(page.locator('#targets')).toContainText('16 of 24');
 });
 

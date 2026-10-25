@@ -282,8 +282,10 @@ mode:
 Mjolnir also shows how much CPU and RAM remains after accounting for every
 live container on the physical host and a reserve for the host operating
 system. A new container is refused if either requested amount would overcommit
-that host. The refusal names the remaining capacity and offers the explicit
-Suspend or Destroy actions; Mjolnir does not stop sessions automatically.
+that host. Resuming a stopped container and moving a session onto a container
+target use the same admission check. The refusal names the remaining capacity
+and offers the explicit Suspend or Destroy actions; Mjolnir does not stop
+sessions automatically.
 
 | Mode | Effect |
 | --- | --- |

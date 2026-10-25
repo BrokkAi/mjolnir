@@ -443,7 +443,11 @@ impl DashboardState {
             }
             DashboardAction::None
         } else {
-            self.prepare_wizard_target(wizard)
+            let action = self.prepare_wizard_target(wizard);
+            if mj_core::config::is_container_target(&self.config.targets[&target_id]) {
+                self.validate_wizard_resources(wizard);
+            }
+            action
         }
     }
 
@@ -559,25 +563,26 @@ impl DashboardState {
         let target_id = nth_key(&self.config.targets, wizard.target());
         let uses_remaining = wizard.remember_container_size().is_some();
         let capacity = self.host_container_capacity(&target_id);
+        if uses_remaining && capacity.is_some_and(|capacity| !capacity.complete) {
+            let (_, allocation, error) = wizard.sizing_mut();
+            *allocation = None;
+            *error = Some(
+                "A live container has no recorded sizing, so RAM left cannot be calculated safely."
+                    .into(),
+            );
+            return;
+        }
         let limits = if uses_remaining {
             capacity.map(|capacity| (capacity.remaining.cpus, capacity.remaining.memory_bytes))
         } else {
             self.host_limits(&target_id)
         };
-        let result = wizard.resource_editor().allocation(limits);
+        let result = wizard.resource_editor().allocation(limits, uses_remaining);
         let (_, allocation, error) = wizard.sizing_mut();
         match result {
             Ok(value) => {
-                if uses_remaining && capacity.is_some_and(|capacity| !capacity.complete) {
-                    *allocation = None;
-                    *error = Some(
-                        "A live container has no recorded sizing, so RAM left cannot be calculated safely."
-                            .into(),
-                    );
-                } else {
-                    *allocation = Some(value);
-                    *error = None;
-                }
+                *allocation = Some(value);
+                *error = None;
             }
             Err(reason) => {
                 *allocation = None;

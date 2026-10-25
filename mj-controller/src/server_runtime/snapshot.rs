@@ -84,6 +84,10 @@ pub(super) fn track_capacity_targets(
 pub(super) fn viewer_capacity(
     state: &std::collections::BTreeMap<String, PhoneCapacity>,
     controller_state: &mj_core::state::State,
+    reservations: &std::collections::BTreeMap<
+        String,
+        crate::daemon::capacity::ContainerCapacityReservation,
+    >,
 ) -> Vec<crate::server::ViewerTargetCapacity> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -98,13 +102,16 @@ pub(super) fn viewer_capacity(
             let container_capacity = usage
                 .filter(|_| entry.target.kind == crate::targets::DeploymentCapacityKind::Host)
                 .map(|usage| {
-                    mj_core::state::host_container_capacity(
-                        mj_core::state::HostContainerSize {
-                            cpus: usage.logical_cores,
-                            memory_bytes: usage.memory_total_bytes,
+                    crate::daemon::capacity::capacity_with_reservations(
+                        &crate::daemon::capacity::ContainerCapacityInput {
+                            target_ids: entry.target.target_ids.clone(),
+                            total: mj_core::state::HostContainerSize {
+                                cpus: usage.logical_cores,
+                                memory_bytes: usage.memory_total_bytes,
+                            },
                         },
-                        &entry.target.target_ids,
                         controller_state.sessions.values(),
+                        reservations,
                     )
                 });
             crate::server::ViewerTargetCapacity {
