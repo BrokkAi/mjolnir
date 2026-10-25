@@ -86,7 +86,7 @@ pub(crate) struct SubagentSelection {
     pub fast_mode: bool,
 }
 
-/// Resolve the session override or global task choice, preserving quota ranking.
+/// Resolve the session override or global task choice, drawing a profile by quota.
 pub(crate) async fn resolve_subagent_policy_selection(
     backend: &Arc<dyn SubagentBackend>,
     parent_profile: &str,
@@ -247,7 +247,7 @@ async fn resolve_model_profile_selection_matching(
             return Err(ApiFailure::bad_request(message));
         }
     } else {
-        rank_candidates(&mut offered, source.ranking_anchor());
+        draw_candidates(&mut offered, source.ranking_anchor())?;
     }
     let all_offered = offered.clone();
     let mut matching_model = false;
@@ -383,7 +383,7 @@ fn choose_model_profile(
                 validate_selectors(&chosen.choices, Some(model), None)?;
                 return Ok(chosen);
             }
-            rank_candidates(&mut offered, ranking_anchor);
+            draw_candidates(&mut offered, ranking_anchor)?;
             match offered
                 .iter()
                 .position(|candidate| offers_model(candidate, model))
@@ -447,7 +447,7 @@ fn child_effort(
 }
 
 /// The profile a child runs on. A pinned profile must be a candidate that
-/// offers the model; otherwise the best-ranked candidate that offers it wins.
+/// offers the model; otherwise the first drawn candidate that offers it wins.
 pub(crate) fn choose_subagent_profile(
     candidates: SubagentCandidates,
     requested_profile: Option<&str>,
@@ -475,7 +475,7 @@ pub(crate) fn choose_subagent_profile(
         validate_selectors(&chosen.choices, Some(model), None)?;
         return Ok(chosen);
     }
-    rank_candidates(&mut offered, Some(parent_profile));
+    draw_candidates(&mut offered, Some(parent_profile))?;
     match offered
         .iter()
         .position(|candidate| offers_model(candidate, model))
@@ -488,6 +488,56 @@ pub(crate) fn choose_subagent_profile(
             "eligible",
         ))),
     }
+}
+
+/// Order candidates for a new session so that simultaneous spawns spread out
+/// instead of all taking the profile with the most quota left. Profiles with
+/// quota left come first in a weighted random order: each comes first with
+/// probability remaining / sum(remaining), and the first one that offers a
+/// model is chosen with that probability among the profiles offering it.
+/// Profiles with no quota left, then unknown quota, follow in ranked order.
+fn draw_candidates(
+    candidates: &mut Vec<SubagentCandidate>,
+    ranking_anchor: Option<&str>,
+) -> Result<(), ApiFailure> {
+    let mut units = Vec::with_capacity(candidates.len());
+    for _ in 0..candidates.len() {
+        let bits = getrandom::u64().map_err(|error| {
+            ApiFailure::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("draw a profile: {error}"),
+            )
+        })?;
+        // 53 random bits as a float in (0, 1], so its logarithm is finite.
+        units.push(((bits >> 11) + 1) as f64 / (1u64 << 53) as f64);
+    }
+    order_by_draw(candidates, ranking_anchor, &units);
+    Ok(())
+}
+
+/// The ordering `draw_candidates` describes, with one uniform (0, 1] number
+/// per candidate in ranked order. Sorting by ln(u) / weight is the
+/// Efraimidis–Spirakis weighted sample without replacement.
+fn order_by_draw(
+    candidates: &mut Vec<SubagentCandidate>,
+    ranking_anchor: Option<&str>,
+    units: &[f64],
+) {
+    rank_candidates(candidates, ranking_anchor);
+    let mut keyed = candidates
+        .drain(..)
+        .zip(units)
+        .map(|(candidate, unit)| {
+            let key = match candidate.remaining_percent {
+                Some(remaining) if remaining > 0 => unit.ln() / f64::from(remaining),
+                _ => f64::NEG_INFINITY,
+            };
+            (key, candidate)
+        })
+        .collect::<Vec<_>>();
+    // A stable sort keeps the ranked order among the undrawn candidates.
+    keyed.sort_by(|left, right| right.0.total_cmp(&left.0));
+    candidates.extend(keyed.into_iter().map(|(_, candidate)| candidate));
 }
 
 /// Order candidates best first: the most quota left, with unknown quota last;
@@ -873,6 +923,40 @@ mod tests {
             ids(&candidates),
             vec!["high", "parent", "a-other", "b-other", "empty", "unknown"]
         );
+    }
+
+    #[test]
+    fn drawing_picks_in_proportion_to_quota_and_never_before_empty_or_unknown() {
+        let profiles = || {
+            vec![
+                candidate("unknown", None, &["luna"]),
+                candidate("empty", Some(0), &["luna"]),
+                candidate("sixty", Some(60), &["luna"]),
+                candidate("thirty-a", Some(30), &["luna"]),
+                candidate("thirty-b", Some(30), &["luna"]),
+            ]
+        };
+        // A fixed linear congruential stream keeps the test deterministic.
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut unit = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 11) + 1) as f64 / (1u64 << 53) as f64
+        };
+        let draws = 40_000;
+        let mut first = std::collections::BTreeMap::<String, u32>::new();
+        for _ in 0..draws {
+            let mut candidates = profiles();
+            let units = (0..candidates.len()).map(|_| unit()).collect::<Vec<_>>();
+            order_by_draw(&mut candidates, Some("thirty-b"), &units);
+            assert_eq!(ids(&candidates)[3..], ["empty", "unknown"]);
+            *first.entry(candidates[0].profile_id.clone()).or_default() += 1;
+        }
+        let share = |id: &str| f64::from(first[id]) / f64::from(draws);
+        assert!((share("sixty") - 0.5).abs() < 0.01, "{first:?}");
+        assert!((share("thirty-a") - 0.25).abs() < 0.01, "{first:?}");
+        assert!((share("thirty-b") - 0.25).abs() < 0.01, "{first:?}");
     }
 
     #[test]
