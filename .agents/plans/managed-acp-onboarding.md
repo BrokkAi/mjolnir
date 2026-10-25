@@ -125,14 +125,15 @@ it. The probe is intentionally testing reaping, so changing it to accept a
 permanent zombie would remove the regression guarantee.
 
 There are currently zero open pull requests, including feature pull requests.
-The only irreducible bootstrap is obtaining `mj` itself; a release installer may
-still use curl or tar before Mjolnir exists. The principal remaining runtime
-limitation is that the pinned Linux Node archive is glibc, so a musl target
-without a compatible system Node cannot run the Node-based harnesses. It now
-fails preflight with that exact explanation instead of downloading an unusable
-30 MB archive. Container and SSH targets continue to require their own
-engine/server infrastructure, and the full local-first progressive onboarding
-tracked by #1128 remains a separate open feature.
+On the supported macOS and glibc Linux hosts and container images, an installed
+`mj` can provide the managed harness runtime without a separate Node, npm, npx,
+curl, tar, or harness CLI. Container and SSH targets still require their own
+engine or server infrastructure, as those are target platforms rather than agent
+runtime dependencies. Arbitrary musl root filesystems are not a supported
+managed-Node target; Mjolnir reports that before downloading an incompatible
+archive. That unsupported platform is not a blocker for this work. The full
+local-first progressive onboarding tracked by #1128 remains a separate open
+feature.
 
 The main lesson is to test the executable launch and rendered user output after
 removing an installation phase. Installer-specific tests can become stale even
@@ -270,7 +271,8 @@ In `mj-tui/src/setup.rs`, add a managed-setup control and a small chooser state.
 
 In `mj-cli/src/dashboard/actions.rs`, route the chosen managed profile through the existing supervised save path and then the existing terminal login handoff. No TUI event handler may block on artifact download or authentication.
 
-Revision note (2026-10-25T10:23Z): Recorded final validation results, stale test
-updates, the zero-open-PR count, the PID-1 test limitation, and the remaining
-musl Node and broader-onboarding boundaries. No product design changed in this
-revision.
+Revision note (2026-10-25T13:02Z): Removed the `mj` bootstrap and arbitrary-musl
+portability from the completion boundaries. Both are outside the intended
+managed-harness requirement, so neither should be presented as missing work.
+The supported runtime guarantee applies after `mj` is installed on the supported
+platform shapes.
