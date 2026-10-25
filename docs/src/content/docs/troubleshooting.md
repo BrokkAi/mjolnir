@@ -49,7 +49,8 @@ matter, but only `fixable` means the doctor loop has not converged.
 If `config.toml` does not exist, run `mj` and open **prefix+s Settings** to add or detect
 an agent profile. Local target choices are supplied automatically.
 Managed container and EC2 sessions also need a bundle; a bare session selects
-an existing Git project directory instead.
+an existing directory instead. Only an SSH bare directory must be a committed
+Git project.
 
 For a TOML error, fix the exact path and type named by `mj doctor`. Mjolnir's
 schema rejects unknown fields rather than silently ignoring a misspelling. See

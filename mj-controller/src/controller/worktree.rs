@@ -81,28 +81,9 @@ impl Controller {
                     directory.is_dir(),
                     "project directory does not exist or is not a directory"
                 );
-                if local_project_repository(directory, executor)?.is_none() {
-                    return Ok(());
-                }
-                let output = executor.execute(
-                    &CommandSpec::new(
-                        "git",
-                        [
-                            "-C",
-                            &directory.to_string_lossy(),
-                            "rev-parse",
-                            "--verify",
-                            "HEAD",
-                        ],
-                    )
-                    .purpose("verify local bare Git project"),
-                )?;
-                ensure!(
-                    output.status == 0
-                        && !String::from_utf8_lossy(&output.stdout).trim().is_empty(),
-                    "project directory has no valid Git HEAD: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
+                // This also accepts a plain folder, a repository without its
+                // first commit, and a host where Git is not installed.
+                mj_core::repository::resolve_local_directory(directory, executor)?;
                 Ok(())
             }
             TargetTemplate::SshBare { ssh, .. } => {
@@ -856,7 +837,8 @@ pub fn local_project_repository(
     directory: &Path,
     executor: &impl CommandExecutor,
 ) -> Result<Option<PathBuf>> {
-    resolve_git_root(&ManagedWorktreeTarget::Local, directory, executor)
+    let resolved = mj_core::repository::resolve_local_directory(directory, executor)?;
+    Ok((!resolved.plain_directory).then_some(resolved.repository_root))
 }
 
 /// Which checkout each still-empty target repository is seeded from, or `None`
@@ -1037,6 +1019,14 @@ pub(super) fn plan_raw_to_workspace_with_checkout(
     let project_directory = checkout
         .project_directory()
         .context("a raw session has no project directory")?;
+    // A plain folder has no repository to clone from and no commits to carry,
+    // so it cannot become a bundle workspace. Say so instead of letting Git
+    // answer for a checkout that does not exist.
+    ensure!(
+        !project.primary_is_plain_directory(),
+        "{} is a directory project without a committed Git checkout, so it cannot move into a target",
+        project_directory.display()
+    );
     // The checkpoint describes the session's directory as if it were the
     // repository root, so only a whole checkout can move. Each branch checks
     // this against paths from one domain: the record's own paths for a managed

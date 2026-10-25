@@ -95,6 +95,70 @@ fn managed_worktree_export_capture(
     )
 }
 
+/// A bare local session may run in a plain folder. Its checkpoint records the
+/// directory but claims no Git state, so a restore can never rewrite or check
+/// out the user's own files there.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a bare project directory runs mkdir and requires POSIX paths"
+)]
+fn a_plain_project_directory_is_captured_without_git() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("todo.md"), "# todo\n").unwrap();
+    // Accepting the folder is what records it as plain; the layout reads that
+    // record rather than asking Git again.
+    let resolved =
+        mj_core::repository::resolve_local_directory(directory.path(), &targets::ProcessExecutor)
+            .unwrap();
+    assert!(resolved.plain_directory);
+    let project = crate::project_catalog::directory_snapshot(&resolved);
+    assert!(
+        project
+            .plain_directories
+            .contains(&project.bundle.primary_repo),
+        "accepting a plain folder records it as one"
+    );
+    let mut plain = crate::controller::test_support::checkpoint_test_session(
+        "3123456789abcdef0123456789abcdef",
+    );
+    let session_id = plain.id.clone();
+    plain.state = SessionState::Stopped;
+    plain.target_template_id = "local-bare".into();
+    plain.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: PathBuf::from("/home/dev/.local/share/hel/workers/session"),
+    });
+    plain.project_directory = Some(directory.path().to_path_buf());
+    let mut recorded = project.clone();
+    recorded
+        .plain_directories
+        .insert(recorded.bundle.primary_repo.clone());
+    plain.project = Some(recorded);
+    let mut state = State::default();
+    state.sessions.insert(session_id.clone(), plain);
+    let controller = Controller {
+        config: crate::controller::test_support::resume_compatibility_config(),
+        state,
+    };
+
+    let mut layout = controller
+        .session_export_layout(&session_id, &targets::ProcessExecutor)
+        .unwrap();
+    let repository = layout.repositories.remove(0);
+    assert!(matches!(
+        repository.capture,
+        CheckpointRepositoryCapture::PlainDirectory
+    ));
+    assert_eq!(
+        repository.relative_destination,
+        PathBuf::from(directory.path().file_name().unwrap())
+    );
+    assert!(
+        directory.path().join("todo.md").is_file(),
+        "reading the layout leaves the folder alone"
+    );
+}
+
 // Hard-won: 074faa0c0155: managed worktree checkpoints omitted every commit after using the live HEAD as base
 #[test]
 #[cfg_attr(

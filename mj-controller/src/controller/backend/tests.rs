@@ -168,6 +168,7 @@ fn provisioning_uses_accepted_fetch_and_push_settings_after_the_catalog_changes(
                 ],
             },
         )]),
+        plain_directories: Default::default(),
     });
     let spec = backend_session_bundle(&session, &Config::default(), &NoProbe).unwrap();
     assert_eq!(spec.primary, "original-layout");

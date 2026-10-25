@@ -653,6 +653,12 @@ fn a_launch_base_on_a_plain_directory_fails_instead_of_being_ignored() {
 fn local_bare_validation_accepts_projects_and_plain_directories_but_rejects_missing_paths() {
     let project = committed_repository();
     let plain = tempfile::tempdir().unwrap();
+    let unborn = tempfile::tempdir().unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .arg(unborn.path())
+        .status()
+        .unwrap();
     let mut config = Config::default();
     config
         .targets
@@ -666,6 +672,9 @@ fn local_bare_validation_accepts_projects_and_plain_directories_but_rejects_miss
         .unwrap();
     controller
         .validate_project_directory("localhost", plain.path(), &ProcessExecutor)
+        .unwrap();
+    controller
+        .validate_project_directory("localhost", unborn.path(), &ProcessExecutor)
         .unwrap();
     assert!(
         controller
@@ -703,6 +712,40 @@ fn a_plain_local_directory_starts_without_creating_a_git_worktree() {
     assert_eq!(session.project_directory.as_deref(), Some(plain.path()));
     assert!(session.managed_worktree.is_none());
     assert!(!plain.path().join(".git").exists());
+}
+
+#[test]
+fn a_plain_local_directory_cannot_convert_into_a_bundle_workspace() {
+    let plain = tempfile::tempdir().unwrap();
+    let resolved =
+        mj_core::repository::resolve_local_directory(plain.path(), &ProcessExecutor).unwrap();
+    let project = crate::project_catalog::directory_snapshot(&resolved);
+    assert!(!project.plain_directories.is_empty());
+    let mut session = raw_session_on("localhost", plain.path().to_str().unwrap());
+    session.target_template_id = "local-bare".into();
+    session.project = Some(project);
+    let config = resume_compatibility_config();
+
+    let detail = resume_compatibility(&session, &config, "podman").unwrap_err();
+    assert!(
+        detail.contains("without a committed Git checkout"),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("resume it on a local bare target"),
+        "{detail}"
+    );
+
+    let checkout = session.checkout();
+    let error = plan_raw_to_workspace_for_session(&session, &checkout, &config, &ProcessExecutor)
+        .unwrap_err();
+
+    let detail = format!("{error:#}");
+    assert!(
+        detail.contains("without a committed Git checkout"),
+        "{detail}"
+    );
+    assert!(detail.contains("cannot move into a target"), "{detail}");
 }
 
 #[test]
@@ -945,6 +988,7 @@ fn recorded_repository(head_commit: &str, branch: Option<&str>) -> RepositoryMet
         git_operation: None,
         push_urls: Vec::new(),
         remote_workspace: false,
+        plain_directory: false,
         id: "project".into(),
         relative_destination: PathBuf::from("project"),
         checkout_subdirectory: None,
@@ -2049,6 +2093,7 @@ fn a_failed_conversion_returns_the_session_to_its_checkout() {
                 .into_iter()
                 .collect(),
                 network_sources: Default::default(),
+                plain_directories: Default::default(),
             },
             source: fixture_network_source(),
             retire: previous.managed_worktree.clone(),

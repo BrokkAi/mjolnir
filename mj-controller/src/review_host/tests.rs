@@ -304,6 +304,7 @@ struct FakeEnvironment {
     save_gate: Mutex<Option<Arc<SaveGate>>>,
     subagent: std::sync::atomic::AtomicBool,
     classify_gate: Mutex<Option<Arc<SaveGate>>>,
+    review_refusal: Mutex<Option<String>>,
     /// Refusals the next reviewer resolutions answer with, in order.
     resolve_refusals: Mutex<std::collections::VecDeque<String>>,
     /// How many background holds the host took on the session.
@@ -372,6 +373,7 @@ impl FakeEnvironment {
             save_gate: Mutex::new(None),
             subagent: std::sync::atomic::AtomicBool::new(false),
             classify_gate: Mutex::new(None),
+            review_refusal: Mutex::new(None),
             resolve_refusals: Mutex::new(std::collections::VecDeque::new()),
             background_holds: std::sync::atomic::AtomicUsize::new(0),
             live_holds: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -384,6 +386,13 @@ impl FakeEnvironment {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push_back(reason.to_owned());
+    }
+
+    fn refuse_review(&self, reason: &str) {
+        *self
+            .review_refusal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason.to_owned());
     }
 
     fn background_holds(&self) -> usize {
@@ -420,6 +429,14 @@ impl FakeEnvironment {
 }
 
 impl ReviewEnvironment for FakeEnvironment {
+    fn review_refusal(&self, _session_id: &str) -> Result<(), String> {
+        self.review_refusal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .map_or(Ok(()), Err)
+    }
+
     fn enqueue_verdict(
         &self,
         _session: &str,
@@ -731,6 +748,46 @@ fn delivery_admission_bypasses_only_the_matching_held_prompt() {
     ));
     assert!(prompt_refusal(&session).is_some());
     release_prompts(&session);
+}
+
+#[tokio::test]
+async fn an_unreviewable_project_is_refused_before_the_worker_is_asked_to_capture() {
+    let session = session_id("plainreview");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    environment.refuse_review("this session works in a directory without a committed Git checkout");
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment,
+    );
+    host.observe(
+        session,
+        &view(session, mj_core::state::MaterializedExecutionState::Idle),
+    );
+
+    let refusal = host
+        .start(session, true)
+        .await
+        .expect_err("a plain directory cannot be reviewed");
+    assert!(
+        refusal.0.contains("without a committed Git checkout"),
+        "{refusal:?}"
+    );
+    let capture = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            if let RemoteSessionRequest::Reviewer { action, .. } = manager.next().await {
+                break action;
+            }
+        }
+    })
+    .await;
+    assert!(
+        capture.is_err(),
+        "the worker must not be asked to capture an unreviewable project"
+    );
+    host.shutdown().await.unwrap();
 }
 
 /// Drives a session from running to idle, which is the edge that arms an
