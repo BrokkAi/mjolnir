@@ -499,7 +499,7 @@ For DSH, configure `kind = "dsh"`, for example with
 `home = "/home/me/.dsh"`. Detection accepts DeepSeek's own `dsh` CLI, its
 `~/.dsh` home, or `DEEPSEEK_API_KEY` in the environment Mjolnir started with,
 so a key alone is enough to be offered a profile. DSH runs BrokkAi's
-[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.2.3, a DeepSeek coding agent
+[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.3.0, a DeepSeek coding agent
 that speaks ACP itself, so there is no separate bridge. It is not the DeepSeek
 harness earlier releases offered as `kind = "deepseek"`; that kind still fails
 to load. The home is a `DSH_ACP_DATA_DIR` root. It holds an optional
@@ -895,7 +895,7 @@ MiMo Code installs from the pinned `@mimo-ai/cli` npm package. Its managed
 launch disables automatic updates so a running session never replaces its own
 binary.
 DSH is never installed. A launch resolves the target's own `dsh-acp` on
-`PATH`, or fetches the pinned `@brokkai/dsh-acp@0.2.3` package through `npx`,
+`PATH`, or fetches the pinned `@brokkai/dsh-acp@0.3.0` package through `npx`,
 using the compatible system runtime or the managed Node described above; the
 npm package bundles the release binaries. Linux and macOS, on x86-64 and ARM64,
 are supported. Linux needs glibc 2.34 or newer, so musl distributions such as
