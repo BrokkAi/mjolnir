@@ -981,6 +981,7 @@ pub(crate) fn target_kind_label(target: &mj_core::config::TargetTemplate) -> &'s
         mj_core::config::TargetTemplate::SshBare { .. } => "SSH bare",
         mj_core::config::TargetTemplate::SshPodman { .. } => "SSH Podman",
         mj_core::config::TargetTemplate::SshDocker { .. } => "SSH Docker",
+        mj_core::config::TargetTemplate::SshAppleContainer { .. } => "SSH Apple container",
     }
 }
 

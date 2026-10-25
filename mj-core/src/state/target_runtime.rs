@@ -60,7 +60,12 @@ impl ContainerSettings {
     /// to replace the environment or infer what image it actually runs.
     pub fn upgrade_supported(session: &SessionRecord) -> bool {
         Self::owns_container(session)
-            && !matches!(session.target, Some(TargetLocator::AppleContainer { .. }))
+            && !matches!(
+                session.target,
+                Some(
+                    TargetLocator::AppleContainer { .. } | TargetLocator::SshAppleContainer { .. }
+                )
+            )
     }
 
     pub fn requested(session: &SessionRecord) -> Self {
@@ -115,6 +120,9 @@ impl ContainerSettings {
                     borrowed_from: None,
                     ..
                 } | TargetLocator::SshDocker {
+                    borrowed_from: None,
+                    ..
+                } | TargetLocator::SshAppleContainer {
                     borrowed_from: None,
                     ..
                 }
@@ -192,7 +200,10 @@ impl From<&TargetTemplate> for TargetRuntimeSettings {
         let connection = match template {
             TargetTemplate::SshBare { ssh, .. }
             | TargetTemplate::SshPodman { ssh, .. }
-            | TargetTemplate::SshDocker { ssh, .. } => TargetConnection::Ssh { ssh: ssh.clone() },
+            | TargetTemplate::SshDocker { ssh, .. }
+            | TargetTemplate::SshAppleContainer { ssh, .. } => {
+                TargetConnection::Ssh { ssh: ssh.clone() }
+            }
             TargetTemplate::AwsEc2 {
                 aws_profile,
                 region,
@@ -214,7 +225,8 @@ impl From<&TargetTemplate> for TargetRuntimeSettings {
             | TargetTemplate::LocalDocker { container }
             | TargetTemplate::AppleContainer { container }
             | TargetTemplate::SshPodman { container, .. }
-            | TargetTemplate::SshDocker { container, .. } => {
+            | TargetTemplate::SshDocker { container, .. }
+            | TargetTemplate::SshAppleContainer { container, .. } => {
                 container.environment.resolved().clone()
             }
             _ => BTreeMap::new(),

@@ -1341,7 +1341,7 @@ pub(crate) fn render_mount_wizard(
         .get(&target_id)
         .expect("selected target index is present in config");
     let protection = match target {
-        TargetTemplate::AppleContainer { .. } => {
+        TargetTemplate::AppleContainer { .. } | TargetTemplate::SshAppleContainer { .. } => {
             "Apple Container has no :O overlay mode; each extra bind is read-only."
         }
         TargetTemplate::LocalPodman { .. } | TargetTemplate::SshPodman { .. } => {

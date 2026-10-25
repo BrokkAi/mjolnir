@@ -69,6 +69,42 @@ hourly, with `container image inspect` and `container image pull`. It also
 evaluates `pull_policy` while provisioning each session, so an eligible image
 refresh still happens as part of launch.
 
+## Run it on another Mac
+
+The runtime can live on an SSH machine, which lets a Linux controller — or an
+Intel Mac — use the Apple-silicon Mac beside it:
+
+```toml
+[machines.mac]
+kind = "ssh"
+host = "mac.example.com"
+user = "dev"
+
+[targets.mac-apple]
+kind = "apple-container"
+machine = "mac"
+```
+
+Install the runtime on the remote Mac by following the [installation
+instructions](https://github.com/apple/container#initial-install), then start
+its service there. The remote Mac needs the same runtime and macOS release as a
+local one. The SSH account must find `container` on the noninteractive `PATH`
+used by `ssh <destination> <command>`. For zsh, add it in `.zshenv`; `.zprofile`
+is not read by these command sessions. Check the setup before adding the
+machine:
+
+```console
+ssh mac.example.com container --version
+ssh mac.example.com container system status
+```
+
+When you save that machine, Mjolnir probes it over SSH — `uname -sm`,
+`sw_vers -productVersion`, `container --version`, and `container system status`
+— and offers the runtime in **Settings → Runtimes** when all four answer.
+`mj doctor` checks it the same way. Every command for the session runs on that
+Mac; the controller needs `ssh` but no local container runtime. The Mac and its
+container service stay running when sessions stop.
+
 ## Verify it end to end
 
 Run the static checks, then opt into the disposable smoke test:

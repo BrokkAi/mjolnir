@@ -1,7 +1,7 @@
 # SSH machines: bare and container runtimes
 
 An SSH machine is a remote host under `[machines.<id>]` with `kind = "ssh"`.
-Three runtimes can run on it:
+Four runtimes can run on it:
 
 - `bare` — uses an existing Git project directory on the remote machine.
   **Create isolated checkout** chooses a session-specific clone under
@@ -11,8 +11,10 @@ Three runtimes can run on it:
   session inside it.
 - `docker` — uses the remote host's Linux Docker daemon; see
   [Docker for Mjolnir](DOCKER.md).
+- `apple-container` — runs Apple's Linux container runtime on an Apple-silicon
+  Mac; see [Apple container](apple-container.md).
 
-All three shell out to the local `ssh` CLI rather than using an SSH library.
+All four shell out to the local `ssh` CLI rather than using an SSH library.
 
 ## Sharing connections per host
 
@@ -142,6 +144,14 @@ to opening masters, and to every command when sharing is off.
   postconditions Mjolnir expects locally. See [Podman for Mjolnir](PODMAN.md) — the
   remote host needs Podman 4.3 or newer and the same rootless
   user-namespace setup as a local Podman host.
+- For an Apple container runtime: **Apple's signed `container` package, macOS 26
+  or newer, Apple silicon, and a running service**. Follow the [official
+  installation instructions](https://github.com/apple/container#initial-install)
+  on the Mac, run `container system start`, and check `container system status`.
+  The SSH account must also find `container` on its noninteractive `PATH`. For
+  zsh, put the directory containing it in `.zshenv`, which noninteractive
+  shells read. Verify the setup with `ssh <destination> container --version`.
+  Mjolnir checks these same commands before offering or launching the runtime.
 
 ## Machine and runtime configuration
 
@@ -152,14 +162,15 @@ as a session target.
 You do not have to write the runtimes yourself. When you save a machine under
 Settings › Machines, Mjolnir probes it over SSH and adds every runtime it can
 run: a `bare` runtime named after the machine when the host is Linux or macOS
-on x86_64 or arm64, and `<machine>-podman` and `<machine>-docker` for each
-engine that passes the same check a launch runs. A machine already in the file
-without a runtime gets the same treatment each time `mj` starts and when you
-run `mj setup`, and Settings › Runtimes › Detect runtimes probes every machine.
-A machine that answers with nothing usable, or does not answer, keeps no
-runtime; Settings › Machines, the new-session picker and `mj doctor` say why,
-with the fix. Removing one runtime of a machine is kept; to stop using a host
-altogether, remove the machine.
+on x86_64 or arm64, `<machine>-podman` and `<machine>-docker` for each engine
+that passes the same check a launch runs, and `<machine>-apple-container` when
+the machine is Apple-silicon macOS 26 or newer with a running Apple container
+service. A machine already in the file without a runtime gets the same
+treatment each time `mj` starts and when you run `mj setup`, and Settings ›
+Runtimes › Detect runtimes probes every machine. A machine that answers with
+nothing usable, or does not answer, keeps no runtime; Settings › Machines, the
+new-session picker and `mj doctor` say why, with the fix. Removing one runtime
+of a machine is kept; to stop using a host altogether, remove the machine.
 
 The machine's keys are:
 
@@ -209,7 +220,11 @@ otherwise the worker downloads and verifies its pinned Node.js with curl.
 Mjolnir checks the runtime through the account's login shell, so Homebrew's
 PATH setup belongs in that shell's login configuration, such as `.zprofile`
 for zsh. The worker uses the target account's login environment and then
-applies any configured profile environment overrides.
+applies any configured profile environment overrides. Apple container commands
+run through noninteractive SSH, so `container` must also be on the PATH OpenSSH
+uses for a command session. For zsh, `.zshenv` covers both login and
+noninteractive shells; `.zprofile` alone does not. Verify the setup with
+`ssh <destination> container --version` before selecting the runtime.
 
 ```toml
 [machines.mac]

@@ -662,6 +662,9 @@ impl Controller {
             mj_core::config::TargetTemplate::SshDocker { ssh, container } => {
                 (Some(ssh), Some("docker"), Some(container.image.as_str()))
             }
+            mj_core::config::TargetTemplate::SshAppleContainer { ssh, container } => {
+                (Some(ssh), Some("container"), Some(container.image.as_str()))
+            }
             mj_core::config::TargetTemplate::SshBare { ssh, .. } => (Some(ssh), None, None),
             _ => (None, None, None),
         };

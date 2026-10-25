@@ -755,6 +755,13 @@ fn borrowed_locator(
             container_id: container_id.clone(),
             borrowed_from: Some(parent_id.to_owned()),
         },
+        TargetLocator::SshAppleContainer {
+            host, container_id, ..
+        } => TargetLocator::SshAppleContainer {
+            host: host.clone(),
+            container_id: container_id.clone(),
+            borrowed_from: Some(parent_id.to_owned()),
+        },
         // EC2 children keep the parent's locator unchanged, as they did before
         // container borrowing was recorded.
         other @ TargetLocator::AwsEc2 { .. } => other.clone(),

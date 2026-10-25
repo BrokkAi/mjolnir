@@ -102,10 +102,10 @@ Workspaces are stored in `mj.sqlite3`, not `config.toml`. Do not add a
 
 ## Bundles define managed projects
 
-Container, SSH Podman, and EC2 targets start from a bundle. A bundle can contain
-one repository or assemble several repositories into a virtual monorepo. Its
-`primary_repo` becomes the ACP session working directory; every other member is
-provided to the harness as an additional workspace root.
+Container, SSH container, and EC2 targets start from a bundle. A bundle can
+contain one repository or assemble several repositories into a virtual
+monorepo. Its `primary_repo` becomes the ACP session working directory; every
+other member is provided to the harness as an additional workspace root.
 
 ```toml
 [bundles.product]
@@ -216,11 +216,11 @@ repositories, Mjolnir looks for a token in `GH_TOKEN`, then `GITHUB_TOKEN`, then
 the authenticated GitHub CLI. The active token is injected into managed
 non-local sessions and kept out of checkpoints and recovery archives.
 
-Local Podman, Docker, SSH Podman, SSH Docker, and Apple Container targets maintain a
-read-only Git object cache on the container host under
-`~/.cache/mjolnir/git`. Mjolnir refreshes a bare mirror, makes an isolated
-per-session snapshot with hardlinked immutable objects, and lets the target
-clone borrow from it. If cache setup is unavailable, the launch falls back to a
+Local Podman, Docker, SSH Podman, SSH Docker, Apple Container, and Apple
+Container on an SSH machine all maintain a read-only Git object cache on the
+container host under `~/.cache/mjolnir/git`. Mjolnir refreshes a bare mirror,
+makes an isolated per-session snapshot with hardlinked immutable objects, and
+lets the target clone borrow from it. If cache setup is unavailable, the launch falls back to a
 normal network clone.
 
 The cache can contain objects from private repositories and is created with

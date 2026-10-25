@@ -894,6 +894,15 @@ pub enum TargetLocator {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         borrowed_from: Option<String>,
     },
+    SshAppleContainer {
+        host: String,
+        container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
+    },
 }
 
 impl ManagedWorktreeTarget {
@@ -1154,6 +1163,7 @@ impl TargetLocator {
             | Self::AppleContainer { container_id, .. }
             | Self::SshPodman { container_id, .. }
             | Self::SshDocker { container_id, .. }
+            | Self::SshAppleContainer { container_id, .. }
                 if container_id.trim().is_empty() =>
             {
                 bail!("target locator has an empty container id")
@@ -1200,6 +1210,9 @@ impl TargetLocator {
             }
             Self::SshDocker { host, .. } if host.trim().is_empty() => {
                 bail!("SSH Docker target locator has an empty host")
+            }
+            Self::SshAppleContainer { host, .. } if host.trim().is_empty() => {
+                bail!("SSH Apple container target locator has an empty host")
             }
             _ => {}
         }

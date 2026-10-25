@@ -46,9 +46,29 @@ pub fn provision_plan_named(
                 | TargetTemplate::AppleContainer(_)
                 | TargetTemplate::SshPodman { .. }
                 | TargetTemplate::SshDocker { .. }
+                | TargetTemplate::SshAppleContainer { .. }
         )
     {
         bail!("additional mounts require a container-backed target");
+    }
+    // Apple's `container` CLI drives the host's own VM disk image, so the
+    // remote plan is the local one with every command run over SSH.
+    if let TargetTemplate::SshAppleContainer { ssh, container } = template {
+        validate_ssh(ssh)?;
+        let mut plan = provision_plan_named(
+            &TargetTemplate::AppleContainer(container.clone()),
+            session_id,
+            bundle,
+            additional_mounts,
+            container_workspace,
+            name,
+        )?;
+        plan.commands = plan
+            .commands
+            .into_iter()
+            .map(|command| command_over_ssh(command, ssh))
+            .collect();
+        return Ok(plan);
     }
     if let TargetTemplate::SshDocker { ssh, container } = template {
         validate_ssh(ssh)?;
@@ -160,7 +180,9 @@ pub fn provision_plan_named(
                 ssh_command_owned(ssh, args)
             }));
         }
-        TargetTemplate::SshDocker { .. } => unreachable!("handled above"),
+        TargetTemplate::SshDocker { .. } | TargetTemplate::SshAppleContainer { .. } => {
+            unreachable!("handled above")
+        }
         TargetTemplate::SshPodman { ssh, container } => {
             validate_ssh(ssh)?;
             validate_container_template(container)?;
@@ -238,6 +260,10 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
             validate_ssh(ssh)?;
             ("docker", container, ExecutionBoundary::Ssh(ssh))
         }
+        TargetTemplate::SshAppleContainer { ssh, container } => {
+            validate_ssh(ssh)?;
+            ("container", container, ExecutionBoundary::Ssh(ssh))
+        }
         _ => bail!("setup smoke tests require a local or SSH container target"),
     };
     validate_container_template(container)?;
@@ -260,9 +286,16 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
         ),
         _ => (
             container_run(engine, container, &name, smoke_id, &[], CONTAINER_WORKSPACE)?,
-            TargetLocator::AppleContainer {
-                borrowed_from: None,
-                container_id: name.clone(),
+            match boundary {
+                ExecutionBoundary::Ssh(ssh) => TargetLocator::SshAppleContainer {
+                    borrowed_from: None,
+                    ssh: ssh.clone(),
+                    container_id: name.clone(),
+                },
+                _ => TargetLocator::AppleContainer {
+                    borrowed_from: None,
+                    container_id: name.clone(),
+                },
             },
         ),
     };

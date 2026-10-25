@@ -766,7 +766,9 @@ impl Controller {
                     }
                 })
                 .with_context(|| format!("inspect resource source {}", source.display()))?,
-            TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
+            TargetTemplate::SshPodman { ssh, .. }
+            | TargetTemplate::SshDocker { ssh, .. }
+            | TargetTemplate::SshAppleContainer { ssh, .. } => {
                 targets::ssh_directory_exists(&SshTarget::from(ssh), source, executor)?
             }
             TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
@@ -1556,7 +1558,8 @@ pub(super) fn removable_profile_root(
         | targets::TargetLocator::LocalDocker { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshPodman { .. }
-        | targets::TargetLocator::SshDocker { .. } => {
+        | targets::TargetLocator::SshDocker { .. }
+        | targets::TargetLocator::SshAppleContainer { .. } => {
             format!("/var/lib/hel/profiles/{session_id}")
         }
         targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. } => {

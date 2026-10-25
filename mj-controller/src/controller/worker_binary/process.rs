@@ -244,6 +244,20 @@ pub(super) fn start_worker_command(
                 &exec_script,
             ],
         ),
+        targets::TargetLocator::SshAppleContainer {
+            ssh, container_id, ..
+        } => crate::targets::ssh_command(
+            ssh,
+            [
+                "container",
+                "exec",
+                "--detach",
+                container_id,
+                "sh",
+                "-c",
+                &exec_script,
+            ],
+        ),
     }
     .purpose("start detached Mjolnir worker")
     // Everything before this moves data into the target and reports as Sync.

@@ -1,5 +1,7 @@
 use super::*;
+use crate::targets::{CommandOutput, CommandSpec};
 use mj_core::config::DEFAULT_WORKSPACE_PREFIX;
+use mj_core::config::runtime_kind_name;
 
 fn ssh_machine(host: &str) -> Machine {
     Machine::Ssh {
@@ -112,4 +114,87 @@ fn probed_runtimes_are_added_once_and_only_to_the_machine_that_was_probed() {
             .is_empty()
     );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+}
+
+/// Answers each probe by the remote command it runs, so a machine probe's
+/// many unrelated checks do not depend on their order.
+struct RemoteHostExecutor {
+    platform: &'static str,
+    apple_container: Option<&'static str>,
+    commands: std::cell::RefCell<Vec<CommandSpec>>,
+}
+
+impl CommandExecutor for RemoteHostExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.commands.borrow_mut().push(command.clone());
+        let remote = command.args.last().cloned().unwrap_or_default();
+        let output = |status, stdout: &str| CommandOutput {
+            status,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: vec![],
+        };
+        Ok(if remote.contains("'uname' '-sm'") {
+            output(0, self.platform)
+        } else if remote.contains("sw_vers") {
+            output(0, "26.1")
+        } else if remote.contains("container' '--version") {
+            output(0, self.apple_container.unwrap_or_default())
+        } else if remote.contains("'container' 'system' 'status'") {
+            output(i32::from(self.apple_container.is_none()), "")
+        } else if remote == "'true'" {
+            output(0, "")
+        } else {
+            output(1, "")
+        })
+    }
+}
+
+/// An SSH machine is offered the Apple container runtime exactly when it
+/// reports Apple-silicon macOS; a Linux host is never asked for a `container`
+/// command it cannot have.
+#[test]
+fn a_machine_offers_apple_container_only_on_apple_silicon_macos() {
+    let machine = ssh_machine("mac.example.test");
+    let mac = RemoteHostExecutor {
+        platform: "Darwin arm64",
+        apple_container: Some("container 1.2.3"),
+        commands: Default::default(),
+    };
+    let probe = probe_machine("mac", &machine, &mac).unwrap();
+    let apple = probe
+        .usable()
+        .find(|runtime| runtime.kind == RuntimeKind::AppleContainer)
+        .expect("the Mac is offered Apple container");
+    assert!(apple.detail.contains("1.2.3"), "{}", apple.detail);
+    let (id, target) = probe
+        .runtimes()
+        .into_iter()
+        .find(|(_, target)| matches!(target, TargetTemplate::SshAppleContainer { .. }))
+        .expect("the runtime resolves to a target on that machine");
+    assert_eq!(id, "mac-apple-container");
+    assert_eq!(runtime_kind_name(&target), "apple-container");
+
+    let linux = RemoteHostExecutor {
+        platform: "Linux x86_64",
+        apple_container: Some("container 1.2.3"),
+        commands: Default::default(),
+    };
+    let probe = probe_machine("builder", &ssh_machine("builder.example.test"), &linux).unwrap();
+    let rejected = probe
+        .rejected()
+        .find(|runtime| runtime.kind == RuntimeKind::AppleContainer)
+        .expect("a Linux host is told why it cannot run Apple container");
+    assert_eq!(rejected.status, CheckStatus::Unsupported);
+    assert!(
+        rejected.detail.contains("Apple-silicon"),
+        "{}",
+        rejected.detail
+    );
+    assert!(
+        !linux.commands.borrow().iter().any(|command| command
+            .args
+            .last()
+            .is_some_and(|arg| arg.contains("container"))),
+        "a Linux host is never asked for a container command"
+    );
 }

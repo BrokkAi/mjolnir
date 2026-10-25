@@ -189,6 +189,11 @@ pub fn session_storage_paths(
             ContainerStorage::Docker.path().to_owned(),
             Vec::new(),
         ),
+        // Apple's container runtime keeps its storage in a VM disk image on
+        // the remote host, so there is no directory to board (as locally).
+        Recorded::SshAppleContainer { host, .. } => {
+            (ssh_host_name(host).to_owned(), String::new(), Vec::new())
+        }
     };
     SessionStoragePaths {
         host,
