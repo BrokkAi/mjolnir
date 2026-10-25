@@ -589,6 +589,10 @@ impl WizardDraft for NewWizard {
                     self.project_directory.control_kind(),
                     true,
                 );
+                form.set_field_uses_vertical_keys(
+                    WizardControl::ProjectDirectory,
+                    !self.project_history.is_empty(),
+                );
                 for index in 0..self.project_history.len().min(5) {
                     form.declare_with_enabled(
                         WizardControl::RecentProject(index),

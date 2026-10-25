@@ -660,3 +660,194 @@ fn open_popup_takes_clicks_over_a_later_control_it_covers() {
         Some(Interaction::ComboBoxCommit(1, 1))
     );
 }
+
+#[test]
+fn vertical_arrows_traverse_controls_in_order_skip_disabled_and_wrap() {
+    let mut form = Form::new();
+    for (id, kind, enabled) in [
+        (1, ControlKind::Checkbox, true),
+        (
+            2,
+            ControlKind::ComboBox {
+                len: 3,
+                selected: 0,
+                expanded: false,
+            },
+            true,
+        ),
+        (3, ControlKind::TextField, true),
+        (4, ControlKind::Checkbox, false),
+        (5, ControlKind::Button, true),
+        (
+            6,
+            ControlKind::PathField {
+                len: 0,
+                selected: 0,
+                expanded: false,
+            },
+            true,
+        ),
+    ] {
+        form.declare_with_enabled(id, kind, enabled);
+    }
+    form.end_frame(1);
+    for id in [2, 3, 5, 6, 1] {
+        let result = form.handle(&key(KeyCode::Down));
+        assert!(result.consumed);
+        assert_eq!(result.action, None);
+        assert_eq!(form.focused(), Some(id));
+    }
+    for id in [6, 5, 3, 2, 1] {
+        form.handle(&key(KeyCode::Up));
+        assert_eq!(form.focused(), Some(id));
+    }
+    form.focus(2);
+    form.declare(
+        2,
+        ControlKind::ComboBox {
+            len: 3,
+            selected: 1,
+            expanded: true,
+        },
+    );
+    assert_eq!(
+        form.handle(&key(KeyCode::Down)).action,
+        Some(Interaction::Select(2, 2))
+    );
+    assert_eq!(
+        form.handle(&key(KeyCode::Up)).action,
+        Some(Interaction::Select(2, 1))
+    );
+    assert_eq!(form.focused(), Some(2));
+}
+
+#[test]
+fn rendered_history_and_multiline_fields_keep_vertical_keys() {
+    use crate::components::TextField;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut terminal = Terminal::new(TestBackend::new(30, 8)).expect("terminal");
+    let mut form = Form::new();
+    let mut history = TextInput::from_value("draft");
+    history.set_history(vec!["previous".into()]);
+    let mut multiline = TextInput::multiline();
+    multiline.set_value("first\nsecond");
+    terminal
+        .draw(|frame| {
+            form.begin_frame();
+            TextField::render(frame, Rect::new(0, 0, 20, 1), &history, &mut form, 1);
+            TextField::render_multiline(
+                frame,
+                Rect::new(0, 2, 20, 3),
+                &multiline,
+                true,
+                true,
+                &mut form,
+                2,
+            );
+            form.declare(3, ControlKind::Button);
+            form.end_frame(1);
+        })
+        .expect("draw");
+    let edit = form.handle(&key(KeyCode::Up)).action;
+    let Some(Interaction::Edit(1, edit)) = edit else {
+        panic!("history must own Up")
+    };
+    TextField::apply(&mut history, edit);
+    assert_eq!(history.value(), "previous");
+    assert_eq!(form.focused(), Some(1));
+    form.focus(2);
+    let Some(Interaction::Edit(2, edit)) = form.handle(&key(KeyCode::Up)).action else {
+        panic!("multiline editor must own Up")
+    };
+    TextField::apply(&mut multiline, edit);
+    assert!(multiline.cursor() < "first\n".len());
+    assert_eq!(form.focused(), Some(2));
+}
+
+#[test]
+fn viewport_wheel_preserves_focus_and_redraw_then_focus_reveals_block() {
+    let mut form = form();
+    let area = Rect::new(0, 0, 20, 4);
+    assert_eq!(form.viewport(area, 20, Some(0..2)).offset(), 0);
+    for _ in 0..6 {
+        assert!(
+            form.handle(&mouse(MouseEventKind::ScrollDown, 12, 2))
+                .consumed
+        );
+    }
+    assert_eq!(form.focused(), Some(1));
+    // A complete redraw must not undo scrolling back to the focused field.
+    form.begin_frame();
+    form.declare(1, ControlKind::TextField);
+    form.declare(2, ControlKind::Button);
+    assert_eq!(form.viewport(area, 20, Some(0..2)).offset(), 6);
+    form.end_frame(1);
+    assert_eq!(form.viewport(area, 20, Some(0..2)).offset(), 6);
+    form.handle(&key(KeyCode::Down));
+    let viewport = form.viewport(area, 20, Some(12..15));
+    assert_eq!(form.focused(), Some(2));
+    assert_eq!(viewport.row(12, 3).height, 3);
+    assert_eq!(viewport.offset(), 11);
+    form.focus(1);
+    let viewport = form.viewport(area, 20, Some(2..9));
+    assert_eq!(viewport.offset(), 2);
+    assert_eq!(viewport.row(2, 7), area);
+    // Bounds shrink independently of focus and always clamp retained offsets.
+    assert_eq!(form.viewport(area, 3, Some(2..3)).offset(), 0);
+    assert!(
+        !form
+            .handle(&mouse(MouseEventKind::ScrollDown, 25, 2))
+            .consumed
+    );
+
+    // Programmatic focus can target a newly added, not-yet-drawn control.
+    form.declare(3, ControlKind::Checkbox);
+    form.focus(3);
+    form.begin_frame();
+    form.viewport(area, 20, Some(8..10));
+    form.declare(3, ControlKind::Checkbox);
+    form.end_frame(3);
+    form.handle(&mouse(MouseEventKind::ScrollDown, 12, 2));
+    assert_eq!(form.viewport(area, 20, Some(8..10)).offset(), 7);
+    // The first frame may establish focus after laying out the viewport.
+    let mut fresh = Form::new();
+    fresh.begin_frame();
+    fresh.viewport(area, 20, Some(0..1));
+    fresh.declare(1, ControlKind::Checkbox);
+    fresh.end_frame(1);
+    fresh.handle(&mouse(MouseEventKind::ScrollDown, 12, 2));
+    assert_eq!(fresh.viewport(area, 20, Some(0..1)).offset(), 1);
+}
+
+#[test]
+fn viewport_wheel_yields_to_inner_lists_and_expanded_popups() {
+    for kind in [
+        ControlKind::ChoiceList {
+            len: 3,
+            selected: 0,
+        },
+        ControlKind::ComboBox {
+            len: 3,
+            selected: 0,
+            expanded: true,
+        },
+        ControlKind::PathField {
+            len: 3,
+            selected: 0,
+            expanded: true,
+        },
+    ] {
+        let mut form = Form::new();
+        form.register(1, ControlKind::Button, Rect::new(0, 0, 4, 1), true);
+        form.register(2, kind, Rect::new(0, 1, 10, 3), true);
+        form.end_frame(1);
+        let area = Rect::new(0, 0, 20, 5);
+        form.viewport(area, 20, Some(0..1));
+        assert_eq!(
+            form.handle(&mouse(MouseEventKind::ScrollDown, 1, 2)).action,
+            Some(Interaction::Select(2, 1))
+        );
+        assert_eq!(form.viewport(area, 20, Some(1..4)).offset(), 0);
+    }
+}

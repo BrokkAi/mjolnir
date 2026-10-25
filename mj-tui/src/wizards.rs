@@ -41,7 +41,7 @@ use mj_core::state::{
 use mj_chat::components::PathField;
 use mj_chat::components::{
     Checkbox, ChoiceList, ComboBox, ComboBoxState, ControlKind, Dialog, DialogShell, EditOutcome,
-    FieldEdit, Form, FormViewport, Interaction, PopupSide, TextField, wrap_lines,
+    FieldEdit, Form, Interaction, PopupSide, TextField, wrap_lines,
 };
 use mj_chat::selection::FrameSurfaces;
 use mj_core::targets::{AdditionalMount, MountAccess, default_mount_destination};

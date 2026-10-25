@@ -168,6 +168,12 @@ impl TextInput {
         self
     }
 
+    /// Whether Up/Down belong to this editor rather than form navigation.
+    #[must_use]
+    pub fn uses_vertical_keys(&self) -> bool {
+        self.multiline || self.history.is_some()
+    }
+
     pub fn set_history(&mut self, history: Vec<String>) {
         self.history = (!history.is_empty()).then(|| {
             Box::new(InputHistory {

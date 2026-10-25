@@ -470,6 +470,7 @@ impl TextField {
             enabled,
             cursor_map,
         );
+        form.set_field_uses_vertical_keys(id, input.uses_vertical_keys());
         frame.render_widget(
             Paragraph::new(input.value())
                 .style(if enabled {
@@ -580,6 +581,7 @@ impl TextField {
         } else {
             form.register_with_cursor_map(id, kind, area, true, cursor_map);
         }
+        form.set_field_uses_vertical_keys(id, input.uses_vertical_keys());
         let style = theme::field(focused && form.is_focused(id));
         frame.render_widget(Paragraph::new(visible).style(style), area);
         if focused && form.is_focused(id) && content.width > 0 && content.height > 0 {

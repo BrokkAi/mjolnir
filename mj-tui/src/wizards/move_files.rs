@@ -151,11 +151,10 @@ pub(super) fn render(
         Some(WizardControl::MoveOtherFiles) => Some((summary.len() + rows.len() + 1) as u16),
         _ => None,
     };
-    let viewport = FormViewport::new(
+    let viewport = form.viewport(
         layout.body,
         (summary.len() + rows.len() + 3 + problems.len()) as u16,
-        0,
-        focus_row,
+        focus_row.map(|row| row..row + 1),
     );
     let summary_rows = summary.len();
     for (index, line) in summary.into_iter().enumerate() {

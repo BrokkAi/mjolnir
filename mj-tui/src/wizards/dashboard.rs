@@ -136,6 +136,10 @@ fn declare_mount_controls(form: &mut Dialog<WizardControl>, mounts: &MountWizard
         mounts.source.control_kind(),
         true,
     );
+    form.set_field_uses_vertical_keys(
+        WizardControl::MountSource,
+        mounts.source.is_empty() && !mounts.history.is_empty(),
+    );
     form.declare_with_enabled(
         WizardControl::MountDestination,
         ControlKind::TextField,

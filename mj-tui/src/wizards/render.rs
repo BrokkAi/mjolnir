@@ -377,10 +377,10 @@ pub(crate) fn render_new_wizard(
             Some(WizardControl::RecentProject(index)) => recent_rows
                 .iter()
                 .find(|(i, _, _)| *i == index)
-                .map(|(_, row, _)| *row),
-            _ => Some(field_row),
+                .map(|(_, row, height)| *row..row.saturating_add(*height)),
+            _ => Some(field_row..field_row + 1),
         };
-        let viewport = FormViewport::new(layout.body, height, 0, focused_row);
+        let viewport = form.viewport(layout.body, height, focused_row);
         let title = dismissible_modal_title(
             &mut form,
             popup,
@@ -417,6 +417,10 @@ pub(crate) fn render_new_wizard(
             &wizard.project_directory,
             &mut form,
             WizardControl::ProjectDirectory,
+        );
+        form.set_field_uses_vertical_keys(
+            WizardControl::ProjectDirectory,
+            !wizard.project_history.is_empty(),
         );
         let mut buttons = vec![(WizardControl::Cancel, "Cancel", true)];
         if wizard.has_back() {
@@ -1010,7 +1014,7 @@ pub(crate) fn render_review_wizard(
         Some(WizardControl::DiscardQueue) => Some(summary_height.saturating_add(list_height)),
         _ => None,
     };
-    let viewport = FormViewport::new(body, total_height, 0, focused_row);
+    let viewport = form.viewport(body, total_height, focused_row.map(|row| row..row + 1));
     for (index, line) in lines.iter().enumerate() {
         frame.render_widget(
             Paragraph::new(line.clone()),
@@ -1422,7 +1426,7 @@ pub(crate) fn render_mount_wizard(
         Some(WizardControl::MountAccess) => Some(info_height.saturating_add(4)),
         _ => None,
     };
-    let viewport = FormViewport::new(body, total_height, 0, focused_row);
+    let viewport = form.viewport(body, total_height, focused_row.map(|row| row..row + 1));
     for (index, line) in lines.iter().enumerate() {
         let row = viewport.row(u16::try_from(index).unwrap_or(u16::MAX), 1);
         frame.render_widget(Paragraph::new(line.clone()), row);
@@ -1454,6 +1458,10 @@ pub(crate) fn render_mount_wizard(
         &mounts.source,
         form,
         WizardControl::MountSource,
+    );
+    form.set_field_uses_vertical_keys(
+        WizardControl::MountSource,
+        mounts.source.is_empty() && !mounts.history.is_empty(),
     );
     let destination_row = viewport.row(info_height.saturating_add(2), 1);
     frame.render_widget(

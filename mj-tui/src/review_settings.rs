@@ -4,14 +4,12 @@
 //! controller performs discovery and persistence off the event loop; replies
 //! carry a generation so a slow discovery can never replace a newer choice.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::time::Instant;
 
 use crossterm::event::Event;
-use mj_chat::components::{
-    ComboBox, ComboBoxState, ControlKind, Dialog, FormViewport, Interaction, PopupSide,
-};
+use mj_chat::components::{ComboBox, ComboBoxState, ControlKind, Dialog, Interaction, PopupSide};
 use mj_chat::theme;
 use mj_core::acp::SessionConfigChoice;
 use mj_core::config::{Config, ReviewConfig, ReviewTrigger, SpinnerStyle};
@@ -98,7 +96,6 @@ pub(crate) struct ReviewSettingsDialog {
     pub(crate) profiles: Vec<Option<String>>,
     pub(crate) form: RefCell<Dialog<ReviewSettingsFocus>>,
     combo: ComboBoxState<ReviewSettingsFocus>,
-    scroll: Cell<u16>,
     pub(crate) model_choices: Vec<SessionConfigChoice>,
     pub(crate) effort_choices: Vec<SessionConfigChoice>,
     /// Whether the model list came from a successful discovery. This remains
@@ -160,7 +157,6 @@ impl ReviewSettingsDialog {
             profiles,
             form: RefCell::new(Dialog::default()),
             combo: ComboBoxState::default(),
-            scroll: Cell::new(0),
             model_choices: Vec::new(),
             effort_choices: Vec::new(),
             model_choices_discovered: false,
@@ -890,13 +886,11 @@ pub(crate) fn render_review_settings(
         inner.width,
         inner.height.saturating_sub(2),
     );
-    let viewport = FormViewport::new(
+    let viewport = form.viewport(
         body,
         (notes.len() as u16).saturating_add(6),
-        dialog.scroll.get(),
-        Some(focus_row),
+        Some(focus_row..focus_row + 1),
     );
-    dialog.scroll.set(viewport.offset());
     let row = |index: u16| viewport.row(index, 1);
     let mut expanded_combo = None;
     for (index, (id, label, values, selected)) in dialog.selectors().iter().enumerate() {

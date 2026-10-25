@@ -1,13 +1,12 @@
 //! Container settings composed from reusable terminal controls.
 use mj_chat::path_input::PathInput;
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 
 use crate::widgets::dismissible_modal_title;
 use crossterm::event::{Event, KeyEventKind};
 use mj_chat::components::{
-    ChoiceList, ComboBoxState, ControlKind, Dialog, EditOutcome, FormViewport, Interaction,
-    TextField,
+    ChoiceList, ComboBoxState, ControlKind, Dialog, EditOutcome, Interaction, TextField,
 };
 use ratatui::layout::Margin;
 
@@ -38,7 +37,6 @@ pub(crate) struct ContainerEditor {
     /// only: it is fixed when the container's mounts are, so changing it here
     /// could not affect the running session.
     pub(crate) build_cache: Option<PathBuf>,
-    scroll: Cell<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,10 +388,9 @@ pub(crate) fn render_container_editor(
         }
         row_y = row_y.saturating_add(row.height());
     }
-    let viewport = FormViewport::new(body, total, editor.scroll.get(), focus_row);
-    editor.scroll.set(viewport.offset());
     let mut form = editor.form.borrow_mut();
     form.begin_frame();
+    let viewport = form.viewport(body, total, focus_row.map(|row| row..row + 1));
     let title = dismissible_modal_title(
         &mut form,
         popup,
@@ -579,7 +576,6 @@ impl DashboardState {
                 .build_cache
                 .as_ref()
                 .map(|cache| cache.directory.clone()),
-            scroll: Cell::new(0),
         };
         editor.prepare();
         self.mode = Mode::EditContainer(editor);

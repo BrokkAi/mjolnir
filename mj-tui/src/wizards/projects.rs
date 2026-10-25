@@ -592,7 +592,7 @@ pub(super) fn render_project_picker(
         ) => Some(repo_actions_row),
         _ => None,
     };
-    let viewport = FormViewport::new(layout.body, height, 0, focused_row);
+    let viewport = form.viewport(layout.body, height, focused_row.map(|row| row..row + 1));
     let row = |start| viewport.row(start, 1);
     let tabs = [
         (WizardControl::ProjectRecent, "Recent", ProjectTab::Recent),

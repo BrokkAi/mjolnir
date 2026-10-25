@@ -116,8 +116,8 @@ pub fn form_columns(area: Rect, count: usize) -> Vec<Rect> {
         .to_vec()
 }
 
-/// A vertically clipped form body which reveals the focused row.
-/// Keep its offset in the screen draft between frames; fixed footer buttons stay outside it.
+/// A vertically clipped form body, managed by [`super::Form::viewport`].
+/// Fixed footer buttons stay outside it.
 #[derive(Debug, Clone, Copy)]
 pub struct FormViewport {
     area: Rect,
@@ -125,19 +125,31 @@ pub struct FormViewport {
 }
 
 impl FormViewport {
-    /// Computes the scroll position for the current body height and focused content row.
+    /// Computes clipped layout, optionally revealing a half-open content row block.
     #[must_use]
-    pub fn new(area: Rect, content_height: u16, previous: u16, focused_row: Option<u16>) -> Self {
-        let mut offset = previous.min(content_height.saturating_sub(area.height));
-        if let Some(row) = focused_row {
-            if row < offset {
-                offset = row;
-            }
-            if area.height > 0 && row >= offset.saturating_add(area.height) {
-                offset = row.saturating_add(1).saturating_sub(area.height);
+    pub fn new(
+        area: Rect,
+        content_height: u16,
+        previous: u16,
+        focused_block: Option<std::ops::Range<u16>>,
+    ) -> Self {
+        let max_offset = content_height.saturating_sub(area.height);
+        let mut offset = previous.min(max_offset);
+        if let Some(block) = focused_block.filter(|block| !block.is_empty()) {
+            if block.start < offset || block.end - block.start > area.height {
+                offset = block.start;
+            } else if block.end > offset.saturating_add(area.height) {
+                offset = block.end.saturating_sub(area.height);
             }
         }
-        Self { area, offset }
+        Self {
+            area,
+            offset: offset.min(max_offset),
+        }
+    }
+
+    pub(crate) fn area(self) -> Rect {
+        self.area
     }
 
     /// The offset to retain for the next frame.

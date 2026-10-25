@@ -207,6 +207,7 @@ struct Control<K> {
     enabled: bool,
     active: bool,
     kind: ControlKind,
+    uses_vertical_keys: bool,
     cursor_map: Vec<(u16, usize)>,
     multiline_cursor_map: Vec<(u16, u16, usize)>,
     editor_area: Rect,
@@ -243,6 +244,7 @@ impl<K> Control<K> {
             enabled: true,
             active: true,
             kind,
+            uses_vertical_keys: false,
             cursor_map: Vec::new(),
             multiline_cursor_map: Vec::new(),
             editor_area: Rect::default(),
@@ -302,6 +304,10 @@ pub struct Form<K: Copy + Eq> {
     event_time: Instant,
     default_action: Option<K>,
     blocked_activation: Option<K>,
+    viewport: Option<(super::FormViewport, u16)>,
+    viewport_focus: Option<K>,
+    viewport_reveal: bool,
+    viewport_active: bool,
 }
 
 impl<K: Copy + Eq> Default for Form<K> {
@@ -329,6 +335,10 @@ impl<K: Copy + Eq> Form<K> {
             event_time: Instant::now(),
             default_action: None,
             blocked_activation: None,
+            viewport: None,
+            viewport_focus: None,
+            viewport_reveal: true,
+            viewport_active: false,
         }
     }
 
@@ -348,10 +358,45 @@ impl<K: Copy + Eq> Form<K> {
     /// Marks the start of a render pass. Registrations from the previous pass are hidden.
     pub fn begin_frame(&mut self) {
         self.begin_update();
+        self.viewport_active = false;
         for control in &mut self.controls {
             control.cursor_map.clear();
             control.multiline_cursor_map.clear();
             control.editor_area = Rect::default();
+        }
+    }
+
+    /// Lays out this form's scrolling body. Focus changes reveal the entire
+    /// half-open content row block; ordinary redraws preserve wheel scrolling.
+    pub fn viewport(
+        &mut self,
+        area: Rect,
+        content_height: u16,
+        focused_block: Option<std::ops::Range<u16>>,
+    ) -> super::FormViewport {
+        // A newly focused control may not have registered in this render yet.
+        let focused = self.pending_focus.or_else(|| self.focused());
+        let reveal = self.viewport_reveal || self.viewport_focus != focused;
+        let previous = self.viewport.map_or(0, |(viewport, _)| viewport.offset());
+        let viewport = super::FormViewport::new(
+            area,
+            content_height,
+            previous,
+            if reveal { focused_block } else { None },
+        );
+        self.viewport = Some((viewport, content_height));
+        self.viewport_active = true;
+        self.viewport_focus = focused;
+        self.viewport_reveal = false;
+        viewport
+    }
+
+    /// Reserves vertical arrows for a field's editor or screen-owned history.
+    /// TextField and PathField register TextInput's capability automatically;
+    /// custom history owners set this after rendering and during declaration.
+    pub fn set_field_uses_vertical_keys(&mut self, id: K, uses_vertical_keys: bool) {
+        if let Some(control) = self.control_mut(id) {
+            control.uses_vertical_keys = uses_vertical_keys;
         }
     }
 
@@ -635,6 +680,10 @@ impl<K: Copy + Eq> Form<K> {
 
     /// Removes all active controls while retaining their stable identities for future frames.
     pub fn clear(&mut self) {
+        self.viewport = None;
+        self.viewport_active = false;
+        self.viewport_focus = None;
+        self.viewport_reveal = true;
         self.cancel_pointer();
         self.order.clear();
         self.last_order.clear();
@@ -662,6 +711,7 @@ impl<K: Copy + Eq> Form<K> {
 
     /// Clears hitboxes and cursor maps while retaining declarations and focus identities.
     pub fn reset_geometry(&mut self) {
+        self.viewport_active = false;
         for control in &mut self.controls {
             control.area = Rect::default();
             control.cursor_map.clear();
@@ -733,6 +783,9 @@ impl<K: Copy + Eq> Form<K> {
 
     /// Requests focus for a stable control id.
     pub fn focus(&mut self, id: K) {
+        if self.focused() != Some(id) {
+            self.viewport_reveal = true;
+        }
         if let Some(control) = self.active_control(id).filter(|control| control.enabled) {
             if self.focus_tree.is_valid_widget(control) {
                 self.focus_tree.focus(control);
@@ -1027,6 +1080,24 @@ impl<K: Copy + Eq> Form<K> {
         {
             return Some(EventResult::handled());
         }
+        if ordinary
+            && matches!(key.code, KeyCode::Up | KeyCode::Down)
+            && (kind.is_button()
+                || kind.is_checkbox()
+                || matches!(
+                    kind,
+                    ControlKind::ComboBox {
+                        expanded: false,
+                        ..
+                    }
+                )
+                || (kind.is_field()
+                    && !matches!(kind, ControlKind::PathField { expanded: true, .. })
+                    && !self.control(id)?.uses_vertical_keys))
+        {
+            self.focus_sibling(id, key.code == KeyCode::Down, false);
+            return Some(EventResult::handled());
+        }
         if kind.is_button() {
             if is_press
                 && ordinary
@@ -1036,10 +1107,6 @@ impl<K: Copy + Eq> Form<K> {
             }
             if ordinary && (key.code == KeyCode::Left || key.code == KeyCode::Right) {
                 self.focus_sibling(id, key.code == KeyCode::Right, true);
-                return Some(EventResult::handled());
-            }
-            if ordinary && matches!(key.code, KeyCode::Up | KeyCode::Down) {
-                self.focus_sibling(id, key.code == KeyCode::Down, false);
                 return Some(EventResult::handled());
             }
             return None;
@@ -1187,11 +1254,14 @@ impl<K: Copy + Eq> Form<K> {
 
     fn focus_pending_sibling(&mut self, forward: bool) -> bool {
         if self.focus_tree.focused().is_some() {
-            return if forward {
+            let previous = self.focused();
+            let changed = if forward {
                 self.focus_tree.next()
             } else {
                 self.focus_tree.prev()
             };
+            self.viewport_reveal |= self.focused() != previous;
+            return changed;
         }
         let current = self.pending_focus;
         let current_index =
@@ -1218,7 +1288,7 @@ impl<K: Copy + Eq> Form<K> {
             .into_iter()
             .find(|index| self.is_eligible(self.order[*index]))
         {
-            self.pending_focus = Some(self.order[index]);
+            self.focus(self.order[index]);
             return true;
         }
         false
@@ -1308,7 +1378,7 @@ impl<K: Copy + Eq> Form<K> {
                     mouse.kind,
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                 ) {
-                    let (id, len, selected) = self.hit(x, y).and_then(|hit| match hit {
+                    let target = self.hit(x, y).and_then(|hit| match hit {
                         PointerHit::Control(id) => {
                             self.control(id).and_then(|control| match control.kind {
                                 ControlKind::ChoiceList { len, selected } if control.enabled => {
@@ -1328,7 +1398,28 @@ impl<K: Copy + Eq> Form<K> {
                             })
                         }
                         PointerHit::Dismiss => None,
-                    })?;
+                    });
+                    let Some((id, len, selected)) = target else {
+                        let (viewport, height) = self.viewport?;
+                        if !self.viewport_active || !viewport.area().contains((x, y).into()) {
+                            return None;
+                        }
+                        // ChoiceList wheel events move by one row too.
+                        let offset = if mouse.kind == MouseEventKind::ScrollUp {
+                            viewport.offset().saturating_sub(1)
+                        } else {
+                            viewport.offset().saturating_add(1)
+                        };
+                        self.viewport = Some((
+                            super::FormViewport::new(viewport.area(), height, offset, None),
+                            height,
+                        ));
+                        // Scrolling follows any focus repair in the last frame.
+                        // Only a subsequent focus change should reveal again.
+                        self.viewport_focus = self.pending_focus.or_else(|| self.focused());
+                        self.viewport_reveal = false;
+                        return Some(EventResult::handled());
+                    };
                     let code = if mouse.kind == MouseEventKind::ScrollUp {
                         KeyCode::Up
                     } else {
@@ -1588,6 +1679,10 @@ impl<K: Copy + Eq> Clone for Form<K> {
         clone.dismiss_active = self.dismiss_active;
         clone.default_action = self.default_action;
         clone.blocked_activation = self.blocked_activation;
+        clone.viewport = self.viewport;
+        clone.viewport_focus = self.viewport_focus;
+        clone.viewport_reveal = self.viewport_reveal;
+        clone.viewport_active = self.viewport_active;
         // A physical pointer gesture belongs to the original view, never a draft copy.
         clone.pointer_owner = None;
         clone.controls = self
@@ -1596,6 +1691,7 @@ impl<K: Copy + Eq> Clone for Form<K> {
             .map(|control| {
                 let mut cloned = Control::new(control.id, control.kind);
                 cloned.area = control.area;
+                cloned.uses_vertical_keys = control.uses_vertical_keys;
                 cloned.enabled = control.enabled;
                 cloned.active = control.active;
                 cloned.cursor_map.clone_from(&control.cursor_map);
