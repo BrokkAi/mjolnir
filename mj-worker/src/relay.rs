@@ -41,6 +41,7 @@ mod capacity_tests;
 mod snapshot_tests;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
+use std::io::Read;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
@@ -289,9 +290,18 @@ impl DurableRelay {
 
         let state_path = root.join(RELAY_STATE_FILE);
         let mut snapshot = if state_path.exists() {
-            let bytes =
-                fs::read(&state_path).with_context(|| format!("read {}", state_path.display()))?;
-            ensure_byte_budget(bytes.len(), RELAY_SNAPSHOT_BYTE_BUDGET, "relay snapshot")?;
+            // Legacy snapshots stored pretty JSON and duplicated terminal bodies.
+            // Bound the read independently of the compact write budget.
+            let mut bytes = Vec::new();
+            fs::File::open(&state_path)?
+                .take((RELAY_SNAPSHOT_BYTE_BUDGET * 4 + 1) as u64)
+                .read_to_end(&mut bytes)
+                .with_context(|| format!("read {}", state_path.display()))?;
+            ensure_byte_budget(
+                bytes.len(),
+                RELAY_SNAPSHOT_BYTE_BUDGET * 4,
+                "legacy relay snapshot",
+            )?;
             let mut snapshot: RelaySnapshot = serde_json::from_slice(&bytes)
                 .with_context(|| format!("parse {}", state_path.display()))?;
             if snapshot.format_version > RELAY_STATE_VERSION {
@@ -390,7 +400,8 @@ impl DurableRelay {
                     snapshot.handled_commands.insert(
                         queued.command_id.clone(),
                         HandledRelayCommand {
-                            command: command.clone(),
+                            command: Some(command.clone()),
+                            terminal_identity: None,
                             accepted_ordinal: restored.event_frontier,
                             terminal_ordinal: None,
                             outcome: None,
@@ -414,6 +425,7 @@ impl DurableRelay {
             snapshot
         };
 
+        let compacted_terminal_commands = snapshot.compact_terminal_commands()?;
         let assigned_store_id = snapshot.store_id.is_none();
         if assigned_store_id {
             let mut random = [0u8; 16];
@@ -586,6 +598,7 @@ impl DurableRelay {
             || assigned_store_id
             || recovered_native_history
             || migrated_assessment
+            || compacted_terminal_commands
         {
             relay.persist_snapshot()?;
         }

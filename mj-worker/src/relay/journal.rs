@@ -61,7 +61,7 @@ pub(crate) fn span_previous_digest(first: &RelayEvent) -> Option<String> {
 /// recreated root holding only a snapshot cannot be reopened: its frontier
 /// would run ahead of a journal that no longer exists.
 pub(crate) fn persist_relay_snapshot(root: &Path, snapshot: &RelaySnapshot) -> Result<()> {
-    let body = serde_json::to_vec_pretty(snapshot)?;
+    let body = serde_json::to_vec(snapshot)?;
     ensure_byte_budget(body.len(), RELAY_SNAPSHOT_BYTE_BUDGET, "relay snapshot")?;
     mj_core::config::atomic_write_existing(&root.join(RELAY_STATE_FILE), &body)
 }
@@ -733,18 +733,8 @@ impl DurableRelay {
         }
         mj_core::test_hooks::reach_test_hook("journal_append_before_snapshot_publication")?;
 
-        let previous_assessment = self.snapshot.assessment.clone();
-        match staged {
-            Some(next_snapshot) => self.snapshot = next_snapshot,
-            // Applying is still what moves the frontier, so a misclassified
-            // observation cannot silently lose its state change. It cannot
-            // fail here either: this event was digested from this exact
-            // frontier, which `relay_event_digest` already validated.
-            None => apply_relay_event(&mut self.snapshot, &event)?,
-        }
-        if self.snapshot.assessment != previous_assessment {
-            self.publish_assessment_diagnostic();
-        }
+        // A delivered steer terminalizes its queued prompt. Capture the summary
+        // before publishing the snapshot that drops terminal execution bodies.
         let mut summary_prompt = None;
         if let Some(command_id) =
             mj_transcript::turn_context::delivered_prompt_command_id(&event.observation)
@@ -762,6 +752,18 @@ impl DurableRelay {
                 .collect::<Vec<_>>()
                 .join("\n");
             summary_prompt = Some(prompt_text);
+        }
+        let previous_assessment = self.snapshot.assessment.clone();
+        match staged {
+            Some(next_snapshot) => self.snapshot = next_snapshot,
+            // Applying is still what moves the frontier, so a misclassified
+            // observation cannot silently lose its state change. It cannot
+            // fail here either: this event was digested from this exact
+            // frontier, which `relay_event_digest` already validated.
+            None => apply_relay_event(&mut self.snapshot, &event)?,
+        }
+        if self.snapshot.assessment != previous_assessment {
+            self.publish_assessment_diagnostic();
         }
         self.turn_context
             .observe_relay(&event.observation, summary_prompt.as_deref());

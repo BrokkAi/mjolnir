@@ -514,9 +514,11 @@ fn claude_automatic_steer_is_delivered_and_completed_by_post_tool_batch() {
         SteeringStatus::Applied
     );
     assert!(relay.snapshot.queued_prompts.is_empty());
-    assert_eq!(
-        relay.snapshot.dispatches["prompt-second"].state,
-        RelayDispatchState::Completed
+    assert!(!relay.snapshot.dispatches.contains_key("prompt-second"));
+    assert!(
+        relay.snapshot.handled_commands["prompt-second"]
+            .terminal_ordinal
+            .is_some()
     );
     let delivered = retained_events(&relay)
         .into_iter()
@@ -4711,10 +4713,7 @@ fn removing_a_queued_config_stops_it_from_dispatching() {
     );
 
     assert!(queued_command_ids(&relay).is_empty());
-    assert_eq!(
-        relay.snapshot.dispatches["config-queued"].state,
-        RelayDispatchState::Rejected
-    );
+    assert!(!relay.snapshot.dispatches.contains_key("config-queued"));
     assert!(
         relay.snapshot.handled_commands["config-queued"]
             .terminal_ordinal
@@ -4957,10 +4956,12 @@ fn goal_controls_bypass_work_and_checkpoints_without_consuming_prompts() {
         assert_eq!(queued_command_ids(&relay), vec!["queued-work"]);
         let replay = relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap();
         assert!(replay.starts_with(&events));
-        assert!(matches!(
-            relay.snapshot.dispatches["goal-resume"].state,
-            RelayDispatchState::Interrupted
-        ));
+        assert!(!relay.snapshot.dispatches.contains_key("goal-resume"));
+        assert!(
+            relay.snapshot.handled_commands["goal-resume"]
+                .failure
+                .is_some()
+        );
     }
 }
 
@@ -5538,7 +5539,7 @@ fn jev_user_boundary_moves_only_after_confirmed_steering_and_survives_reopen() {
     assert_eq!(after.transcript_summary, before.transcript_summary);
 }
 
-/// I1-11: a finished turn leaves its completed dispatch in the ledger until the
+/// I1-11: a finished turn leaves its compact receipt in the ledger until the
 /// daemon acknowledges its events. That record is history, not work, so it
 /// must not make `/clear` think the session is busy.
 // Hard-won: 433c0a29: completed but unacknowledged dispatch records made every idle /clear refuse.
@@ -5558,7 +5559,12 @@ fn clear_is_accepted_after_a_finished_turn_whose_events_are_unacknowledged() {
             },
         )
         .unwrap();
-    assert!(relay.snapshot.dispatches.contains_key("finished-turn"));
+    assert!(
+        relay
+            .snapshot
+            .handled_commands
+            .contains_key("finished-turn")
+    );
     assert_eq!(
         relay.operational_state().execution,
         RelayExecutionState::Idle
@@ -5591,7 +5597,12 @@ fn a_rejected_clear_does_not_block_later_prompts() {
             "restore model after clear failed",
         )
         .unwrap();
-    assert!(relay.snapshot.dispatches.contains_key("clear-request"));
+    assert!(
+        relay
+            .snapshot
+            .handled_commands
+            .contains_key("clear-request")
+    );
     assert_eq!(relay.operational_state().clear_context_started_at_ms, None);
     let accepted = relay
         .submit_command("after-clear", prompt("still usable"))
@@ -5638,7 +5649,12 @@ fn a_finished_clear_is_not_published_as_in_progress_during_a_later_turn() {
         .unwrap();
     submit_relay(&mut relay, "later-turn", prompt("Write a story"));
     relay.claim_pending_commands(true).unwrap();
-    assert!(relay.snapshot.dispatches.contains_key("clear-request"));
+    assert!(
+        relay
+            .snapshot
+            .handled_commands
+            .contains_key("clear-request")
+    );
     assert!(relay.snapshot.activity_turn_started_at_ms.is_some());
     assert_eq!(relay.operational_state().clear_context_started_at_ms, None);
 }
@@ -6890,9 +6906,11 @@ fn published_apply_queued_preserves_settings_order_and_survives_reconnect() {
     let reopened = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
     assert_eq!(reopened.snapshot.config.get("model").unwrap(), "fable");
     assert_eq!(reopened.snapshot.config.get("effort").unwrap(), "high");
-    assert_eq!(
-        reopened.snapshot.dispatches["user-question"].state,
-        RelayDispatchState::Completed
+    assert!(!reopened.snapshot.dispatches.contains_key("user-question"));
+    assert!(
+        reopened.snapshot.handled_commands["user-question"]
+            .terminal_ordinal
+            .is_some()
     );
     assert!(reopened.snapshot.queued_prompts.is_empty());
 }
@@ -6976,9 +6994,11 @@ fn apply_queued_rechecks_its_head_before_dispatch() {
     );
     submit_relay(&mut relay, "other-setting", set_config("effort", "high"));
     assert!(relay.claim_pending_commands(true).unwrap().is_empty());
-    assert_eq!(
-        relay.snapshot.dispatches["apply-queued"].state,
-        RelayDispatchState::Rejected
+    assert!(!relay.snapshot.dispatches.contains_key("apply-queued"));
+    assert!(
+        relay.snapshot.handled_commands["apply-queued"]
+            .terminal_ordinal
+            .is_some()
     );
     assert!(relay.snapshot.cancelling_prompt_id.is_none());
     assert_eq!(

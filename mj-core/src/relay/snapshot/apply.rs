@@ -527,7 +527,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             snapshot.handled_commands.insert(
                 command_id.clone(),
                 HandledRelayCommand {
-                    command: command.clone(),
+                    command: Some(command.clone()),
+                    terminal_identity: None,
                     accepted_ordinal: event.ordinal,
                     terminal_ordinal: None,
                     outcome: None,
@@ -1049,19 +1050,24 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .handled_commands
                 .get(command_id)
                 .ok_or_else(|| anyhow!("retry assessment for unknown command {command_id}"))?;
-            if !matches!(
-                handled.command,
-                RelayCommand::Prompt { .. }
-                    | RelayCommand::HandbackReminder { .. }
-                    | RelayCommand::MailboxWake { .. }
-                    | RelayCommand::ContinueAuthorizedWork { .. }
-                    | RelayCommand::ResumeAfterQuota { .. }
-            ) {
+            if !handled
+                .command
+                .as_ref()
+                .is_some_and(|command| command.kind() == RelayCommandKind::Prompt)
+                && !handled
+                    .terminal_identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.prompt)
+            {
                 bail!("retry assessment requires a prompt command");
             }
             let superseded = snapshot.handled_commands.values().any(|other| {
                 other.accepted_ordinal > handled.accepted_ordinal
-                    && cancels_capacity_retry(&other.command)
+                    && (other.command.as_ref().is_some_and(cancels_capacity_retry)
+                        || other
+                            .terminal_identity
+                            .as_ref()
+                            .is_some_and(|identity| identity.cancels_capacity_retry))
             });
             if !superseded {
                 snapshot.retry_assessment = Some(RetryAssessment {
@@ -1666,9 +1672,39 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         snapshot.cancelling_prompt_id = None;
     }
     apply_assessment_context(snapshot, event);
+    snapshot.compact_terminal_commands()?;
     snapshot.latest_ordinal = event.ordinal;
     snapshot.latest_digest = event.digest.clone();
     Ok(())
+}
+
+impl RelaySnapshot {
+    /// Drop execution payloads only after every side effect of a terminal event.
+    /// Also upgrades legacy receipts when a stored snapshot is opened.
+    pub fn compact_terminal_commands(&mut self) -> Result<bool> {
+        let mut changed = false;
+        for (id, handled) in &mut self.handled_commands {
+            if handled.terminal_ordinal.is_none() {
+                continue;
+            }
+            if let Some(command) = &handled.command {
+                handled.terminal_identity = Some(TerminalRelayCommandIdentity {
+                    digest: relay_command_digest(command)?,
+                    mailbox_event_key: match command {
+                        RelayCommand::DeliverMailboxEvent { event } => Some(event.key.clone()),
+                        _ => None,
+                    },
+                    prompt: command.kind() == RelayCommandKind::Prompt,
+                    cancels_capacity_retry: cancels_capacity_retry(command),
+                    releases_history: releases_history(command),
+                });
+                handled.command = None;
+                changed = true;
+            }
+            changed |= self.dispatches.remove(id).is_some();
+        }
+        Ok(changed)
+    }
 }
 
 /// Whether finishing this relay-local command can let journal GC drop history.

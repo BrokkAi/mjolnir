@@ -314,17 +314,7 @@ impl DurableRelay {
         };
         if let Some(handled) = self.snapshot.handled_commands.get(command_id) {
             let accepted_ordinal = {
-                // Mailbox keys own event identity across protocol translation.
-                // An older worker may have admitted the PlainText rendering
-                // before an upgrade retries the structured event with this ID.
-                let same_mailbox_event = matches!(
-                    (&handled.command, &command),
-                    (
-                        RelayCommand::DeliverMailboxEvent { event: original },
-                        RelayCommand::DeliverMailboxEvent { event: retry }
-                    ) if original.key == retry.key
-                );
-                if handled.command != command && !same_mailbox_event {
+                if !handled.matches_command(&command)? {
                     return Ok(Err(relay_protocol_error(
                         RelayErrorCode::InvalidRequest,
                         "command ID was already used for a different command",
@@ -929,6 +919,19 @@ impl DurableRelay {
     /// reopening the relay can resume after any append without duplicating or
     /// skipping the remaining queue transition.
     pub(super) fn finish_relay_local_command(&mut self, command_id: &str) -> Result<()> {
+        if let Some(handled) = self.snapshot.handled_commands.get(command_id)
+            && handled.terminal_ordinal.is_some()
+        {
+            if handled.outcome.is_some()
+                && handled
+                    .terminal_identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.releases_history)
+            {
+                self.garbage_collect_relay_history()?;
+            }
+            return Ok(());
+        }
         let dispatch = self
             .snapshot
             .dispatches
@@ -939,19 +942,6 @@ impl DurableRelay {
         }
         let command = dispatch.command.clone();
         let state = dispatch.state;
-        if matches!(
-            state,
-            RelayDispatchState::Completed
-                | RelayDispatchState::Rejected
-                | RelayDispatchState::Interrupted
-        ) {
-            if state == RelayDispatchState::Completed && releases_history(&command) {
-                // The completion event may be durable even if its following
-                // journal GC reported a transient persistence error.
-                self.garbage_collect_relay_history()?;
-            }
-            return Ok(());
-        }
         // Recorded before the command starts, and unguarded by dispatch state:
         // a retry that repeats this append is harmless because the projection
         // keys the transcript line on this command, not on the event ordinal.

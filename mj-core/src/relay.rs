@@ -117,7 +117,8 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // Revision 17 is breaking: revision-16 readers require mailbox text fields and cannot preserve structured bodies.
 // Revision 18 is breaking: revision-17 readers cannot preserve session-message sender bodies.
 // Revision 19 is breaking: revision-18 readers cannot replay a hook lease carrying a Claude steer.
-pub const RELAY_STATE_VERSION: u32 = 19;
+// Revision 20 is breaking: terminal receipts no longer carry execution payloads.
+pub const RELAY_STATE_VERSION: u32 = 20;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";
