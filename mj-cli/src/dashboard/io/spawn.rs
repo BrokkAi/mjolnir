@@ -629,6 +629,7 @@ pub(crate) fn spawn_setup_discovery(
             match scope {
                 DetectScope::Profiles => {
                     config = setup::profiles_config(&setup::discover_profiles(&executor));
+                    setup::reference_secret_api_keys(&mut config, &mj_core::config::config_path());
                 }
                 DetectScope::Runtimes => {
                     // The machines are other hosts, probed while this one is.
@@ -676,6 +677,7 @@ pub(crate) fn spawn_setup_save(
     generation: u64,
     original: String,
     updated: String,
+    login_profile: Option<String>,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
@@ -687,7 +689,11 @@ pub(crate) fn spawn_setup_save(
             let state = mj_controller::database::load_state()?;
             save_setup_at(&mj_core::config::config_path(), &original, &updated, &state)
         },
-        move |result| DashboardIoUpdate::SetupSaved { generation, result },
+        move |result| DashboardIoUpdate::SetupSaved {
+            generation,
+            result,
+            login_profile,
+        },
     )
 }
 
@@ -1504,6 +1510,7 @@ pub(crate) fn spawn_dashboard_create_session(
     tokio::task::spawn_blocking(move || {
         let retry_launch = action.clone();
         let DashboardAction::CreateSession {
+            remember_container_size,
             create_managed_worktree,
             subagents,
             review,
@@ -1564,6 +1571,7 @@ pub(crate) fn spawn_dashboard_create_session(
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
                         remember_launch_choices: true,
+                        remember_container_size,
                         review,
                         no_project_memory: false,
                         no_github_events: false,

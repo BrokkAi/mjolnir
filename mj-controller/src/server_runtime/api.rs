@@ -2595,10 +2595,10 @@ impl SubagentBackend for ApiBackend {
 
     fn subagent_candidates(
         &self,
-        parent_profile: String,
+        _parent_profile: String,
     ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
         Box::pin(async move {
-            let ids = self.profile_catalog.candidates(&parent_profile)?;
+            let ids = self.profile_catalog.candidates()?;
             self.discover_profile_candidates(ids, "sub-agent").await
         })
     }

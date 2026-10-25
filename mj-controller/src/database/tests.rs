@@ -6310,7 +6310,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         subtle: None,
     };
     parent.subagents = Some(fixed.clone());
-    save_new_session_to(&path, &parent, None, true).unwrap();
+    save_new_session_to(&path, &parent, None, true, true).unwrap();
     let state = load_state_from(&path).unwrap();
     assert_eq!(state.last_subagent_policy, fixed);
     assert_eq!(state.sessions[&parent.id].subagents, Some(fixed.clone()));
@@ -6335,6 +6335,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
             },
         )),
         false,
+        false,
     )
     .unwrap();
     let state = load_state_from(&path).unwrap();
@@ -6344,12 +6345,61 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         Some(SubagentPolicy::Native)
     );
     assert!(!state.container_sizes.contains_key("builder"));
+    // Interactive defaults and the container-size default are independent.
+    // Checking the broader launch-choice flag does not opt into saving size.
+    let mut interactive_without_size = session("interactive-without-size", "project");
+    interactive_without_size.harness_kind = HarnessKind::Dsh;
+    interactive_without_size.subagents = Some(SubagentPolicy::Native);
+    save_new_session_to(
+        &path,
+        &interactive_without_size,
+        Some((
+            "builder".into(),
+            HostContainerSize {
+                cpus: 16,
+                memory_bytes: 64,
+            },
+        )),
+        true,
+        false,
+    )
+    .unwrap();
+    assert!(
+        !load_state_from(&path)
+            .unwrap()
+            .container_sizes
+            .contains_key("builder")
+    );
+    let mut interactive_with_size = session("interactive-with-size", "project");
+    interactive_with_size.harness_kind = HarnessKind::Dsh;
+    interactive_with_size.subagents = Some(SubagentPolicy::Native);
+    save_new_session_to(
+        &path,
+        &interactive_with_size,
+        Some((
+            "builder".into(),
+            HostContainerSize {
+                cpus: 16,
+                memory_bytes: 64,
+            },
+        )),
+        true,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        load_state_from(&path).unwrap().container_sizes["builder"],
+        HostContainerSize {
+            cpus: 16,
+            memory_bytes: 64,
+        }
+    );
     // DSH has no sub-agents of its own: its None must not become what the
     // next Claude or Codex session starts with, but its Mjolnir does.
     let mut dsh = session("dsh-none", "project");
     dsh.harness_kind = HarnessKind::Dsh;
     dsh.subagents = Some(SubagentPolicy::None);
-    save_new_session_to(&path, &dsh, None, true).unwrap();
+    save_new_session_to(&path, &dsh, None, true, true).unwrap();
     assert_eq!(load_state_from(&path).unwrap().last_subagent_policy, fixed);
     let plain = SubagentPolicy::Mjolnir {
         straightforward: None,
@@ -6358,11 +6408,11 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     let mut dsh = session("dsh-mjolnir", "project");
     dsh.harness_kind = HarnessKind::Dsh;
     dsh.subagents = Some(plain.clone());
-    save_new_session_to(&path, &dsh, None, true).unwrap();
+    save_new_session_to(&path, &dsh, None, true, true).unwrap();
     assert_eq!(load_state_from(&path).unwrap().last_subagent_policy, plain);
     let mut next = session("next", "project");
     next.subagents = Some(SubagentPolicy::None);
-    save_new_session_to(&path, &next, None, true).unwrap();
+    save_new_session_to(&path, &next, None, true, true).unwrap();
     assert_eq!(
         load_state_from(&path).unwrap().last_subagent_policy,
         SubagentPolicy::None

@@ -291,6 +291,7 @@ impl RuntimeState {
                         default_targets: controller.config.default_targets.clone(),
                         last_subagent_policy: controller.state.last_subagent_policy.clone(),
                         lifecycles,
+                        container_capacities: self.container_capacity_projection(&controller.state),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -541,7 +542,7 @@ mod tests {
             }
         }));
         assert!(state.profile_catalog.set(catalog.clone()).is_ok());
-        let config = test_config(&[("draft", HarnessKind::Codex)], &[]);
+        let config = test_config(&[("draft", HarnessKind::Codex)]);
         let key = config.profiles["draft"].capabilities_key("draft");
         let mut replica = RuntimeReplica::default();
         replica

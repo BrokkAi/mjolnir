@@ -377,7 +377,7 @@ mj new --workspace eval --bundle product --target builder \
   `subtle`. With only straightforward, the spawn tool has no task type,
   every child uses the straightforward choice, and the parent is told to
   delegate straightforward work.
-  Mjolnir chooses an eligible profile offering its model and effort by quota.
+  Mjolnir chooses an enabled profile offering its model and effort by quota.
 - `mj new --review off|turn|push` sets the session's trigger, overriding
   `[review]`. `mj import <harness>` takes the same option for the session it
   adopts. `--review-model <name>` and `--review-effort <name>` set reviewer
@@ -397,7 +397,9 @@ mj new --workspace eval --bundle product --target builder \
   effect. `[github.watch] enabled` and `[jev] enabled` control GitHub event production.
 - On a container target, `mj new` gives the session the same CPU and memory
   limit that the dashboard and the web viewer select: the size last chosen for
-  that host, else 8 CPUs and 32 GiB, capped at the host's totals.
+  that host, else 4 CPUs and 8 GiB. New containers need at least 2 CPUs and
+  4 GiB, and the host's live container commitments must leave enough CPU and
+  RAM for the chosen size.
   `--cpus <count>` and `--memory-gib <GiB>` override either one. Other targets
   refuse both options.
 - `--return-on-input` makes `mj prompt` and `mj wait` return as soon as

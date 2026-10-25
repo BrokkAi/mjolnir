@@ -67,6 +67,7 @@ pub fn is_container(locator: &TargetLocator) -> bool {
             | TargetLocator::AppleContainer { .. }
             | TargetLocator::SshPodman { .. }
             | TargetLocator::SshDocker { .. }
+            | TargetLocator::SshAppleContainer { .. }
     )
 }
 

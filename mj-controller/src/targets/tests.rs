@@ -132,6 +132,66 @@ fn podman_output(stdout: impl AsRef<[u8]>) -> CommandOutput {
     }
 }
 
+#[test]
+fn a_waiter_for_the_apple_container_gate_stops_when_cancelled() {
+    use std::sync::mpsc;
+
+    struct WaitingExecutor {
+        cancelled: Arc<AtomicBool>,
+        first_check: Mutex<Option<mpsc::Sender<()>>>,
+    }
+    impl CommandExecutor for WaitingExecutor {
+        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+            panic!("a cancelled waiter must not run the Apple container CLI")
+        }
+
+        fn cancellation_requested(&self) -> bool {
+            if let Some(first_check) = self
+                .first_check
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                first_check.send(()).unwrap();
+            }
+            self.cancelled.load(Ordering::Acquire)
+        }
+    }
+
+    let gate_guard = super::preflight::apple_container_runtime_gate()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let (checked_tx, checked_rx) = mpsc::channel();
+    let executor = WaitingExecutor {
+        cancelled: cancelled.clone(),
+        first_check: Mutex::new(Some(checked_tx)),
+    };
+    let (result_tx, result_rx) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let result = ensure_apple_container_runtime(&executor);
+        result_tx.send(result).unwrap();
+    });
+
+    checked_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("the waiter did not begin checking cancellation");
+    std::thread::sleep(Duration::from_millis(25));
+    cancelled.store(true, Ordering::Release);
+    let result = result_rx
+        .recv_timeout(Duration::from_millis(500))
+        .expect("cancellation did not release the gate waiter");
+    drop(gate_guard);
+    waiter.join().unwrap();
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled while waiting")
+    );
+}
+
 /// A `podman info --format json` result with the fields the preflight reads.
 fn podman_info_json(
     rootless: bool,
@@ -4680,6 +4740,110 @@ fn ssh_docker_provisions_overlay_mounts_and_streams_secret_without_local_docker(
             .last()
             .unwrap()
             .contains("read -r MJ_TEST_SECRET")
+    );
+}
+
+fn ssh_apple_container_template() -> TargetTemplate {
+    TargetTemplate::SshAppleContainer {
+        ssh: ssh(),
+        container: ContainerTemplate {
+            build_cache: None,
+            image: "example.invalid/agent:latest".into(),
+            pull_policy: ImagePullPolicy::Auto,
+            extra_run_args: vec![],
+            workspace_storage: Default::default(),
+        },
+    }
+}
+
+/// Apple's runtime keeps its VM disk image on the host that runs it, so a
+/// remote session is the local one with every command sent over SSH, and
+/// nothing is run here.
+#[test]
+fn ssh_apple_container_provisions_with_container_run_over_ssh_only() {
+    let template = ssh_apple_container_template();
+    let plan = provision_plan(&template, SESSION, &bundle(), &[], None).unwrap();
+    assert!(!plan.commands.is_empty());
+    assert!(plan.commands.iter().all(|command| command.program == "ssh"));
+    let create = plan
+        .commands
+        .iter()
+        .find(|command| command.creates_target)
+        .expect("a command creates the container");
+    let remote = create.args.last().unwrap();
+    assert!(remote.contains("'container' 'run'"), "{remote}");
+    assert!(!remote.contains("podman"), "{remote}");
+    assert!(!remote.contains("docker"), "{remote}");
+    assert_eq!(plan.commands[0].program, "ssh");
+}
+
+#[test]
+fn ssh_apple_container_closes_the_container_and_snapshot_over_ssh() {
+    let locator = TargetLocator::SshAppleContainer {
+        borrowed_from: None,
+        ssh: ssh(),
+        container_id: resource_name(SESSION).unwrap(),
+    };
+    let plan = close_plan(&locator, SESSION).unwrap();
+    let command = &plan.commands[0];
+    assert_eq!(command.program, "ssh");
+    let remote = command.args.last().unwrap();
+    assert!(remote.contains("container rm --force"), "{remote}");
+    assert!(
+        remote.contains("git/sessions/$2"),
+        "removing the shared cache names the session snapshot: {remote}"
+    );
+    assert!(
+        remote.contains(&format!(" '{SESSION}' ")),
+        "the session id the snapshot is named after is passed to the script: {remote}"
+    );
+}
+
+#[test]
+fn ssh_apple_container_absence_is_confirmed_on_the_remote_host() {
+    let locator = TargetLocator::SshAppleContainer {
+        borrowed_from: None,
+        ssh: ssh(),
+        container_id: resource_name(SESSION).unwrap(),
+    };
+    let executor = PodmanPreflightExecutor::with_outputs([podman_output("")]);
+    assert!(
+        cleanup_target_is_confirmed_absent(&locator, SESSION, &executor).unwrap(),
+        "no listed container means the target is absent"
+    );
+    assert_eq!(executor.seen.borrow()[0].program, "ssh");
+    assert_eq!(
+        executor.seen.borrow()[0].args.last().unwrap(),
+        "'container' 'list' '--all' '--quiet'"
+    );
+
+    let executor = PodmanPreflightExecutor::with_outputs([podman_output(format!(
+        "{}\n",
+        resource_name(SESSION).unwrap()
+    ))]);
+    assert!(
+        !cleanup_target_is_confirmed_absent(&locator, SESSION, &executor).unwrap(),
+        "a listed container means the target is still present"
+    );
+}
+
+#[test]
+fn ssh_apple_container_smoke_runs_and_removes_a_disposable_container_remotely() {
+    let plan = setup_smoke_plan(&ssh_apple_container_template(), SESSION).unwrap();
+    assert!(plan.commands.iter().all(|command| command.program == "ssh"));
+    assert!(
+        plan.commands.iter().any(|command| command
+            .args
+            .last()
+            .unwrap()
+            .contains("'container' 'run'"))
+    );
+    assert!(
+        plan.commands.iter().any(|command| command
+            .args
+            .last()
+            .unwrap()
+            .contains("'container' 'rm'"))
     );
 }
 

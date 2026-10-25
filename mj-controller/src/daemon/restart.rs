@@ -939,12 +939,37 @@ pub(super) fn restart_target_availability(
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
         }
-    } else if let mj_core::targets::TargetLocator::AppleContainer { container_id, .. } = &locator {
-        let list = CommandSpec::new("container", ["list", "--all", "--quiet"])
-            .purpose("check retained Apple container before Restart");
+    } else if let mj_core::targets::TargetLocator::AppleContainer { container_id, .. }
+    | mj_core::targets::TargetLocator::SshAppleContainer { container_id, .. } = &locator
+    {
+        // Listing runs on the host that owns the runtime, which for a remote
+        // target is the other side of ssh.
+        let engine = locator.container_engine().expect("Apple container locator");
+        let arguments = vec![
+            engine.to_owned(),
+            "list".to_owned(),
+            "--all".to_owned(),
+            "--quiet".to_owned(),
+        ];
+        let list = match &locator {
+            mj_core::targets::TargetLocator::SshAppleContainer { ssh, .. } => {
+                crate::targets::ssh_command_owned(ssh, arguments)
+            }
+            _ => {
+                let mut arguments = arguments.into_iter();
+                CommandSpec::new(
+                    arguments.next().expect("engine"),
+                    arguments.collect::<Vec<_>>(),
+                )
+            }
+        }
+        .purpose("check retained Apple container before Restart");
         let output = executor
             .execute(&list)
             .context("list retained Apple target before Restart")?;
+        if output.status == 255 && locator_is_remote(&locator) {
+            return Ok(RestartTargetAvailability::Unreachable);
+        }
         ensure!(
             output.status == 0,
             "could not confirm Apple target availability before Restart (status {}): {}",
@@ -986,6 +1011,7 @@ fn locator_is_remote(locator: &mj_core::targets::TargetLocator) -> bool {
             | mj_core::targets::TargetLocator::SshBare { .. }
             | mj_core::targets::TargetLocator::SshPodman { .. }
             | mj_core::targets::TargetLocator::SshDocker { .. }
+            | mj_core::targets::TargetLocator::SshAppleContainer { .. }
     )
 }
 

@@ -1,6 +1,6 @@
 ---
 title: Custom container images
-description: What a container image must provide to work as a Mjolnir Podman, Docker, Apple container, or SSH Podman target.
+description: What a container image must provide to work with any local or SSH container runtime.
 ---
 
 mj can run a session in any container image that meets a small contract.
@@ -43,27 +43,32 @@ deliver only part of an equivalent environment setting.
 
 For each harness, Mjolnir first looks for an image-baked bridge binary on
 `PATH`: `codex-acp`, `claude-agent-acp`, `kimi`, `grok`, `opencode`, `mimo`, or `dsh-acp`. If it doesn't find
-one, Codex and Claude Code install Mjolnir's pinned packages into a leased cache
-using `npm ci`. This requires Node.js 22+ and npm on the target PATH. Codex also
-uses this installation when the image's bridge version differs from Mjolnir's
-pin; Claude accepts the image's installed bridge. Selection and installation
-finish before the worker starts an ACP session. The worker executes the resolved
-bridge and provider.
+one, the worker installs Mjolnir's exact pinned artifact into a leased cache.
+Codex and Claude Code use `npm ci`; the other harnesses use their direct
+artifacts or pinned packages. Mjolnir reuses Node.js 22+ with npm and npx from
+the image, or downloads and verifies its pinned Node.js into the user's cache
+with its own HTTPS client. Harness installation does not require `curl`, `tar`,
+or a shell-based vendor installer. Codex also uses the pinned installation when
+the image's bridge version differs from Mjolnir's pin. Selection and
+installation finish before the worker starts an ACP session.
 
-Kimi Code, Grok Build, and OpenCode have no npm bridge:
-Mjolnir runs their official installer with `curl` piped to Bash instead, which
-needs both tools in the image. An image-baked `opencode` must be OpenCode 2,
-because each session imports its logins with `opencode auth import` before it
-starts.
+Pinned Node.js releases for Linux are glibc builds. A musl image must provide
+its own compatible Node.js 22+ runtime or an image-baked bridge; Mjolnir
+reports the missing glibc loader before downloading an unusable archive.
 
-MiMo Code can fall back to `npx -y @mimo-ai/cli@0.1.15 acp`, so an unbaked
-image needs Node.js 22, npm, and npx. Bake `@mimo-ai/cli@0.1.15` and set
-`MIMOCODE_DISABLE_AUTOUPDATE=1` for a stable managed runtime.
+An image-baked `opencode` must be OpenCode 2, because each session imports its
+logins with `opencode auth import` before it starts.
+
+MiMo Code falls back to Mjolnir's managed package installation, using the same
+system-or-managed Node runtime. Bake `@mimo-ai/cli@0.1.15` and set
+`MIMOCODE_DISABLE_AUTOUPDATE=1` to avoid installing it.
 
 DSH speaks ACP itself, so `dsh-acp` is both its bridge and its agent. Without
-`dsh-acp` on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.2.3`,
-which needs Node.js 22 or newer, npm, and npx; the npm package bundles the
-release binaries. To bake it in, run `npm install -g @brokkai/dsh-acp@0.2.3`
+`dsh-acp` on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.3.0`,
+using Node.js 22 or newer with npm and npx; the npm package bundles the release
+binaries. Mjolnir supplies the pinned Node runtime when the image has no
+compatible one. To bake it in, run
+`npm install -g @brokkai/dsh-acp@0.3.0`
 (Node.js 22 or newer), or put the `dsh-acp` binary from a release archive at
 <https://github.com/BrokkAi/dsh-acp/releases> on `PATH`. The Linux binaries
 need glibc 2.34 or newer, so musl images such as Alpine cannot run DSH.

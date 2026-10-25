@@ -52,6 +52,25 @@ MANAGED_CODEX_INSTALL_ID = re.search(
 CODEX_ACP_VERSION = MANAGED_CODEX_INSTALL_ID.split("-acp-")[1].split("_")[0]
 
 
+def process_is_running(pid: int) -> bool:
+    """Whether a process is still running, not merely present in the process table."""
+    try:
+        stat = pathlib.Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        if pathlib.Path("/proc").is_dir():
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    except OSError:
+        return True
+    return stat.rsplit(")", 1)[1].split()[0] not in ("Z", "X")
+
+
 def render_terminal(raw: bytes, rows: int = 32, columns: int = 140) -> str:
     """Apply the small ANSI subset emitted by crossterm to a fixed screen."""
     text = raw.decode("utf-8", "replace")
@@ -515,7 +534,7 @@ class Lab:
         (fixture_bin / "sh").symlink_to("/bin/sh")
         # The Python harness needs no Node installation, but launch preflight
         # still checks the configured profile's toolchain.
-        for name in ["node", "npm"]:
+        for name in ["node", "npm", "npx"]:
             tool = fixture_bin / name
             tool.write_text("#!/bin/sh\nexit 0\n")
             tool.chmod(0o700)
@@ -1093,7 +1112,7 @@ pull_policy = "never"
         self.command("daemon", "stop", check=False)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            if not pathlib.Path(f"/proc/{self.daemon_pid}").exists():
+            if not process_is_running(self.daemon_pid):
                 self.record_process("stopped", "daemon", self.daemon_pid)
                 return
             time.sleep(0.05)
@@ -1116,7 +1135,7 @@ pull_policy = "never"
                     os.kill(pid, signal.SIGTERM)
             grace = time.monotonic() + 2
             while pids and time.monotonic() < grace:
-                pids = [pid for pid in pids if pathlib.Path(f"/proc/{pid}").exists()]
+                pids = [pid for pid in pids if process_is_running(pid)]
                 time.sleep(0.05)
             for pid in pids:
                 with contextlib.suppress(ProcessLookupError, PermissionError):

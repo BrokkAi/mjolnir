@@ -894,6 +894,15 @@ pub enum TargetLocator {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         borrowed_from: Option<String>,
     },
+    SshAppleContainer {
+        host: String,
+        container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
+    },
 }
 
 impl ManagedWorktreeTarget {
@@ -1108,6 +1117,28 @@ impl SessionResourceAllocation {
             _ => Ok(()),
         }
     }
+
+    /// Refuse a new container allocation that is too small to be useful.
+    ///
+    /// This is deliberately separate from [`Self::validate`], which also runs
+    /// while loading durable records. A store written by an older Mjolnir may
+    /// contain a smaller live allocation, and loading it must remain
+    /// compatible. Only a new admission applies this floor.
+    pub fn validate_minimum_useful_container(&self) -> Result<()> {
+        let Self::Container { cpus, memory_bytes } = self else {
+            return Ok(());
+        };
+        if *cpus < MINIMUM_CONTAINER_CPUS {
+            bail!("container sessions need at least {MINIMUM_CONTAINER_CPUS} CPUs");
+        }
+        if *memory_bytes < MINIMUM_CONTAINER_MEMORY_BYTES {
+            bail!(
+                "container sessions need at least {} GiB of RAM",
+                MINIMUM_CONTAINER_MEMORY_BYTES / (1024 * 1024 * 1024)
+            );
+        }
+        Ok(())
+    }
 }
 
 /// The CPU count an allocation grants, regardless of target kind.
@@ -1127,6 +1158,19 @@ pub fn allocation_memory(allocation: &SessionResourceAllocation) -> u64 {
 }
 
 impl TargetLocator {
+    /// Whether this locator owns a container rather than borrowing one.
+    pub const fn owns_container(&self) -> bool {
+        match self {
+            Self::LocalPodman { borrowed_from, .. }
+            | Self::LocalDocker { borrowed_from, .. }
+            | Self::AppleContainer { borrowed_from, .. }
+            | Self::SshPodman { borrowed_from, .. }
+            | Self::SshDocker { borrowed_from, .. }
+            | Self::SshAppleContainer { borrowed_from, .. } => borrowed_from.is_none(),
+            Self::LocalBare { .. } | Self::SshBare { .. } | Self::AwsEc2 { .. } => false,
+        }
+    }
+
     /// Only raw localhost sessions can use the daemon host's CLI and config.
     pub const fn skills_scope(&self) -> crate::skills::SkillsScope {
         match self {
@@ -1154,6 +1198,7 @@ impl TargetLocator {
             | Self::AppleContainer { container_id, .. }
             | Self::SshPodman { container_id, .. }
             | Self::SshDocker { container_id, .. }
+            | Self::SshAppleContainer { container_id, .. }
                 if container_id.trim().is_empty() =>
             {
                 bail!("target locator has an empty container id")
@@ -1200,6 +1245,9 @@ impl TargetLocator {
             }
             Self::SshDocker { host, .. } if host.trim().is_empty() => {
                 bail!("SSH Docker target locator has an empty host")
+            }
+            Self::SshAppleContainer { host, .. } if host.trim().is_empty() => {
+                bail!("SSH Apple container target locator has an empty host")
             }
             _ => {}
         }
@@ -1532,8 +1580,130 @@ pub struct HostContainerSize {
     pub memory_bytes: u64,
 }
 
-pub const BASELINE_CONTAINER_CPUS: u64 = 8;
-pub const BASELINE_CONTAINER_MEMORY_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+/// The capacity committed to containers on one physical host.
+///
+/// `committed` sums owning container limits, never borrowed sub-agent
+/// containers. `remaining` is the admission budget left after the host reserve
+/// and those commitments. `complete` is false when an active owner container
+/// has no recorded allocation; admission must not mistake that unknown usage
+/// for zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostContainerCapacity {
+    pub total: HostContainerSize,
+    pub reserved: HostContainerSize,
+    pub committed: HostContainerSize,
+    pub remaining: HostContainerSize,
+    pub complete: bool,
+}
+
+pub const BASELINE_CONTAINER_CPUS: u64 = 4;
+pub const BASELINE_CONTAINER_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+pub const MINIMUM_CONTAINER_CPUS: u64 = 2;
+pub const MINIMUM_CONTAINER_MEMORY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const PREFERRED_AWS_CPUS: u64 = 8;
+const MINIMUM_HOST_MEMORY_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const GIB_BYTES: u128 = 1024 * 1024 * 1024;
+
+/// Format bytes as GiB rounded down to one decimal place.
+///
+/// Capacity messages use the same string as their hard limit so a value shown
+/// as available is always accepted when entered back.
+pub fn floor_gib_tenths(bytes: u64) -> String {
+    let tenths = u128::from(bytes) * 10 / GIB_BYTES;
+    let fraction = tenths % 10;
+    if fraction == 0 {
+        (tenths / 10).to_string()
+    } else {
+        format!("{}.{}", tenths / 10, fraction)
+    }
+}
+
+/// Reserve one fifth of RAM for the host operating system and other processes.
+/// CPU stay fully schedulable; this change sums CPU commitments against the
+/// logical core count rather than reserving idle cores.
+pub fn reserved_container_capacity(total: HostContainerSize) -> HostContainerSize {
+    HostContainerSize {
+        cpus: 0,
+        memory_bytes: (total.memory_bytes / 5).max(MINIMUM_HOST_MEMORY_RESERVE_BYTES),
+    }
+}
+
+/// Whether an active session owns a container whose CPU and RAM are charged
+/// to its deployment host. A borrowed child runs inside its parent's limit.
+pub fn session_owns_container(session: &SessionRecord) -> bool {
+    if !session.state.is_active() {
+        return false;
+    }
+    match &session.target {
+        Some(target) => target.owns_container(),
+        None => matches!(
+            session.state,
+            SessionState::Provisioning | SessionState::StartupCleanup
+        ),
+    }
+}
+
+/// Sum the owning container allocations for one physical host.
+///
+/// A new or resuming owner has no target locator while provisioning, so those
+/// states reserve their requested size. Once a target exists, a container
+/// child whose locator names a parent is skipped because it already consumes
+/// the parent's allocation.
+pub fn host_container_capacity<'a>(
+    total: HostContainerSize,
+    target_ids: &[String],
+    sessions: impl IntoIterator<Item = &'a SessionRecord>,
+) -> HostContainerCapacity {
+    let reserved = reserved_container_capacity(total);
+    let usable = HostContainerSize {
+        cpus: total.cpus.saturating_sub(reserved.cpus),
+        memory_bytes: total.memory_bytes.saturating_sub(reserved.memory_bytes),
+    };
+    let mut committed = HostContainerSize {
+        cpus: 0,
+        memory_bytes: 0,
+    };
+    let mut complete = true;
+    for session in sessions {
+        if !target_ids.contains(&session.target_template_id) || !session_owns_container(session) {
+            continue;
+        }
+        let Some(SessionResourceAllocation::Container { cpus, memory_bytes }) =
+            session.resource_allocation.as_ref()
+        else {
+            complete = false;
+            continue;
+        };
+        committed.cpus = committed.cpus.saturating_add(*cpus);
+        committed.memory_bytes = committed.memory_bytes.saturating_add(*memory_bytes);
+    }
+    if !complete {
+        committed = usable;
+    }
+    HostContainerCapacity {
+        total,
+        reserved,
+        committed,
+        remaining: HostContainerSize {
+            cpus: usable.cpus.saturating_sub(committed.cpus),
+            memory_bytes: usable.memory_bytes.saturating_sub(committed.memory_bytes),
+        },
+        complete,
+    }
+}
+
+impl HostContainerCapacity {
+    /// Whether a new owning container can commit this allocation.
+    pub fn fits(&self, allocation: &SessionResourceAllocation) -> bool {
+        let SessionResourceAllocation::Container { cpus, memory_bytes } = allocation else {
+            return false;
+        };
+        self.complete
+            && self.remaining.cpus >= *cpus
+            && self.remaining.memory_bytes >= *memory_bytes
+    }
+}
 
 /// Clamp a container size to a host reading, preserving the TUI's minimum of
 /// one CPU and one byte when a host reports zero totals.
@@ -1554,7 +1724,7 @@ pub fn clamp_container_size(
 }
 
 /// The default selected for a new container target: its remembered host size,
-/// or 8 CPUs / 32 GiB, clamped to the latest host totals when available.
+/// or 4 CPUs / 8 GiB, clamped to the latest host totals when available.
 pub fn default_container_size(
     remembered: Option<HostContainerSize>,
     limits: Option<HostContainerSize>,
@@ -1583,7 +1753,7 @@ pub fn preferred_aws_allocation<'a>(
     }
     options
         .iter()
-        .find(|option| allocation_cpus(option) == BASELINE_CONTAINER_CPUS)
+        .find(|option| allocation_cpus(option) == PREFERRED_AWS_CPUS)
         .or_else(|| options.first())
 }
 

@@ -69,8 +69,8 @@ action: CreateSession with managed worktree enabled
 ╭ Sessions ─────  ╭ × New session · 1/3 target ──────────────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
 │No sessions yet  │   TARGET  KIND          CPU     MEM (GiB)     STATUS                             │                 │
-│Create new work  │   podman  local Podman  8       32                                               │                 │
-│                 │                                                                                  │                 │
+│Create new work  │   podman  local Podman  4       8                                                │                 │
+│                 │ ☐ Save as default sizing                                                         │                 │
 │                 │ Host totals unavailable; resource limits cannot be checked.                      │                 │
 │                 │ ctrl+b shift+r recheck availability                                              │                 │
 │                 │                                                                                  │                 │
@@ -134,7 +134,7 @@ action: None
 │No sessions yet  │ Profile: claude-1                                                                │                 │
 │Create new work  │ Project: hel                                                                     │                 │
 │                 │ Target: podman (local Podman)                                                    │                 │
-│                 │ Compute: 8 CPU / 32.0G                                                           │                 │
+│                 │ Compute: 4 CPU / 8.0G                                                            │                 │
 │                 │                                                                                  │                 │
 │                 │ Attached directories: 0                                                          │                 │
 │                 │                                                                                  │                 │

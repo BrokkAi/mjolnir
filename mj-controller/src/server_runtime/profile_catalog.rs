@@ -9,9 +9,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use futures::future::{FutureExt, Shared, TryFutureExt, join_all};
 use mj_client::session::BoxFuture;
-use mj_core::config::{Config, HarnessKind};
 #[cfg(test)]
-use mj_core::config::{HarnessProfile, SubagentConfig};
+use mj_core::config::HarnessProfile;
+use mj_core::config::{Config, HarnessKind};
 use mj_core::profile_capabilities::{
     CapabilityState, ProfileCapabilities, ProfileCapabilitiesSnapshot,
 };
@@ -163,7 +163,7 @@ impl ProfileCatalog {
         }
     }
 
-    /// Adoption updates eligibility without invalidating capability entries.
+    /// Adoption updates which profiles are enabled without invalidating capability entries.
     pub(crate) fn sync(self: &Arc<Self>, config: &Config) {
         let (changed, first) = {
             let mut inner = self.lock();
@@ -698,11 +698,10 @@ impl ProfileCatalog {
             .context("the profile catalogue has not adopted a configuration")
     }
 
-    pub(crate) fn candidates(&self, parent: &str) -> Result<Vec<(String, HarnessKind)>> {
+    pub(crate) fn candidates(&self) -> Result<Vec<(String, HarnessKind)>> {
         let config = self.live()?;
         Ok(config
             .enabled_profiles()
-            .filter(|(id, _)| config.subagents.profile_is_eligible(parent, id))
             .map(|(id, profile)| (id.into(), profile.kind))
             .collect())
     }
@@ -818,11 +817,9 @@ impl ProfileCatalog {
     }
 }
 
-/// A configuration with the named profiles enabled and, when `eligible` names
-/// them, admitted for every parent. Shared with the API's `list_profiles`
-/// test so both drive the same candidate filter.
+/// A configuration with the named profiles enabled.
 #[cfg(test)]
-pub(crate) fn test_config(profiles: &[(&str, HarnessKind)], eligible: &[&str]) -> Config {
+pub(crate) fn test_config(profiles: &[(&str, HarnessKind)]) -> Config {
     Config {
         profiles: profiles
             .iter()
@@ -842,10 +839,6 @@ pub(crate) fn test_config(profiles: &[(&str, HarnessKind)], eligible: &[&str]) -
                 )
             })
             .collect(),
-        subagents: SubagentConfig {
-            eligible_profiles: eligible.iter().map(|id| ((*id).to_owned(), true)).collect(),
-            ..SubagentConfig::default()
-        },
         ..Config::default()
     }
 }
@@ -969,21 +962,11 @@ mod tests {
                 })
             }),
         );
-        let mut config = test_config(&[("parent", HarnessKind::Codex)], &[]);
+        let mut config = test_config(&[("parent", HarnessKind::Codex)]);
         catalog.sync(&config);
         assert_eq!(started.recv().await.as_deref(), Some("parent"));
-        assert!(
-            catalog
-                .snapshot()
-                .options(&config, "parent", None)
-                .is_some()
-        );
-        assert!(
-            catalog
-                .snapshot()
-                .options(&config, "parent", Some("other"))
-                .is_none()
-        );
+        assert!(catalog.snapshot().options(&config, None).is_some());
+        assert!(catalog.snapshot().options(&config, Some("other")).is_none());
         let reader = {
             let catalog = catalog.clone();
             let config = config.clone();
@@ -996,7 +979,7 @@ mod tests {
         // Adding a different profile must leave this model's pending owner intact.
         config.profiles.insert(
             "sibling".into(),
-            test_config(&[("sibling", HarnessKind::Claude)], &[])
+            test_config(&[("sibling", HarnessKind::Claude)])
                 .profiles
                 .remove("sibling")
                 .unwrap(),
@@ -1050,10 +1033,7 @@ mod tests {
             })
         };
         let catalog = ProfileCatalog::with_probe(probe);
-        let config = test_config(
-            &[("muse", HarnessKind::Muse), ("codex", HarnessKind::Codex)],
-            &[],
-        );
+        let config = test_config(&[("muse", HarnessKind::Muse), ("codex", HarnessKind::Codex)]);
         catalog.sync_now(&config).await;
 
         let first = catalog.capabilities(&["muse".into()]).await.unwrap();
@@ -1098,18 +1078,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_readers_and_eligibility_edits_join_startup_hydration() {
+    async fn concurrent_readers_join_startup_hydration() {
         let calls = calls();
         let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
         let (release, gate) = tokio::sync::watch::channel(false);
         let catalog = ProfileCatalog::with_probe(gated_probe(calls.clone(), started_tx, gate));
-        let mut config = test_config(
-            &[
-                ("parent", HarnessKind::Codex),
-                ("helper", HarnessKind::Claude),
-            ],
-            &[],
-        );
+        let config = test_config(&[
+            ("parent", HarnessKind::Codex),
+            ("helper", HarnessKind::Claude),
+        ]);
         catalog.sync(&config);
         started.recv().await.unwrap();
         started.recv().await.unwrap();
@@ -1121,20 +1098,10 @@ mod tests {
                     .await
             })
         };
-        config
-            .subagents
-            .eligible_profiles
-            .insert("helper".into(), true);
-
         catalog.sync(&config);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
-        assert_eq!(catalog.candidates("parent").unwrap().len(), 2);
-        assert!(
-            catalog
-                .snapshot()
-                .options(&config, "parent", None)
-                .is_none()
-        );
+        assert_eq!(catalog.candidates().unwrap().len(), 2);
+        assert!(catalog.snapshot().options(&config, None).is_none());
         release.send(true).unwrap();
         assert_eq!(reader.await.unwrap().unwrap().len(), 2);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -1161,7 +1128,7 @@ mod tests {
             })
         });
         let catalog = ProfileCatalog::with_probe(probe);
-        let mut config = test_config(&[("parent", HarnessKind::Codex)], &[]);
+        let mut config = test_config(&[("parent", HarnessKind::Codex)]);
         catalog.sync(&config);
         started.recv().await.unwrap();
         let old_key = config.profiles["parent"].capabilities_key("parent");
@@ -1173,7 +1140,7 @@ mod tests {
         config.profiles.get_mut("parent").unwrap().home = "/changed".into();
         config.profiles.insert(
             "sibling".into(),
-            test_config(&[("sibling", HarnessKind::Claude)], &[])
+            test_config(&[("sibling", HarnessKind::Claude)])
                 .profiles
                 .remove("sibling")
                 .unwrap(),
@@ -1199,7 +1166,7 @@ mod tests {
     async fn drafts_share_global_entries_without_adopting_their_profile_list() {
         let calls = calls();
         let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
-        let live = test_config(&[("parent", HarnessKind::Codex)], &[]);
+        let live = test_config(&[("parent", HarnessKind::Codex)]);
         catalog.sync_now(&live).await;
         let mut draft = live.clone();
         draft.profiles.get_mut("parent").unwrap().home = "/draft".into();
@@ -1225,7 +1192,7 @@ mod tests {
         let calls = calls();
         let failing = Arc::new(AtomicBool::new(false));
         let catalog = ProfileCatalog::with_probe(flag_probe(failing.clone(), calls.clone()));
-        let config = test_config(&[("parent", HarnessKind::Codex)], &[]);
+        let config = test_config(&[("parent", HarnessKind::Codex)]);
         catalog.sync_now(&config).await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         catalog.refresh(|_| false);
@@ -1260,7 +1227,7 @@ mod tests {
         let calls = calls();
         let failing = Arc::new(AtomicBool::new(true));
         let catalog = ProfileCatalog::with_probe(flag_probe(failing.clone(), calls.clone()));
-        let config = test_config(&[("parent", HarnessKind::Codex)], &[]);
+        let config = test_config(&[("parent", HarnessKind::Codex)]);
         catalog.sync_now(&config).await;
         for _ in 0..3 {
             assert!(catalog.capabilities(&["parent".into()]).await.is_err());
@@ -1270,7 +1237,7 @@ mod tests {
             1,
             "failed UI queries cannot launch retries"
         );
-        let options = catalog.snapshot().options(&config, "parent", None).unwrap();
+        let options = catalog.snapshot().options(&config, None).unwrap();
         assert!(options.unavailable[0].contains("harness is not installed"));
         failing.store(false, Ordering::SeqCst);
         tokio::time::advance(Duration::from_secs(1)).await;
@@ -1301,14 +1268,14 @@ mod tests {
                 }
             })
         }));
-        let config = test_config(&[("parent", HarnessKind::Codex)], &[]);
+        let config = test_config(&[("parent", HarnessKind::Codex)]);
         catalog.sync_now(&config).await;
         tokio::time::advance(Duration::from_secs(600)).await;
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        let options = catalog.snapshot().options(&config, "parent", None).unwrap();
+        let options = catalog.snapshot().options(&config, None).unwrap();
         assert!(
             options.unavailable[0].contains("runs no local Mjolnir worker"),
             "{options:?}"
@@ -1320,7 +1287,7 @@ mod tests {
             catalog.fetch(&config, "parent", None).await.unwrap(),
             test_choices("parent")
         );
-        let options = catalog.snapshot().options(&config, "parent", None).unwrap();
+        let options = catalog.snapshot().options(&config, None).unwrap();
         assert!(options.unavailable.is_empty(), "{options:?}");
         assert_eq!(options.models, test_choices("parent").models);
     }
@@ -1338,7 +1305,7 @@ mod tests {
             probe,
             Arc::new(move |id, _| model_probe(id)),
         );
-        catalog.sync(&test_config(&[("parent", HarnessKind::Codex)], &[]));
+        catalog.sync(&test_config(&[("parent", HarnessKind::Codex)]));
         started.recv().await.unwrap();
         cancellation.cancel();
         assert!(
@@ -1357,7 +1324,7 @@ mod tests {
         let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
         assert!(
             catalog
-                .candidates("parent")
+                .candidates()
                 .unwrap_err()
                 .to_string()
                 .contains("not adopted")
@@ -1367,22 +1334,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_candidates_include_enabled_profiles_outside_subagent_eligibility() {
+    async fn subagent_candidates_include_every_enabled_profile() {
         let catalog = ProfileCatalog::new(CancellationToken::new());
-        let mut config = test_config(
-            &[
-                ("codex", HarnessKind::Codex),
-                ("helper", HarnessKind::Codex),
-                ("claude4", HarnessKind::Claude),
-                ("disabled", HarnessKind::Kimi),
-            ],
-            &["helper"],
-        );
-        config.profiles.get_mut("disabled").unwrap().enabled = false;
+        let mut config = test_config(&[
+            ("codex", HarnessKind::Codex),
+            ("helper", HarnessKind::Codex),
+            ("claude4", HarnessKind::Claude),
+            ("disabled-parent", HarnessKind::Kimi),
+        ]);
+        config.profiles.get_mut("disabled-parent").unwrap().enabled = false;
         catalog.sync(&config);
 
         let subagent_ids = catalog
-            .candidates("codex")
+            .candidates()
             .unwrap()
             .into_iter()
             .map(|(id, _)| id)
@@ -1394,7 +1358,15 @@ mod tests {
             .map(|(id, _)| id)
             .collect::<Vec<_>>();
 
-        assert_eq!(subagent_ids, vec!["codex".to_owned(), "helper".to_owned()]);
+        assert_eq!(
+            subagent_ids,
+            vec![
+                "claude4".to_owned(),
+                "codex".to_owned(),
+                "helper".to_owned()
+            ]
+        );
+        assert!(!subagent_ids.iter().any(|id| id == "disabled-parent"));
         assert_eq!(
             configured_ids,
             vec![

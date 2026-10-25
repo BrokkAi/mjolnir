@@ -56,31 +56,36 @@ the folder.
 
 ### If no coding agent is installed
 
-Mjolnir can install the exact pinned harness for a profile when you sign in, but
-it needs a profile first. If no agent is found:
+Choose **Set up a managed agent** on the first-run welcome, or open
+Settings (`prefix+s`) → **Agent Profiles** → **Set up managed**. Pick the agent
+you want to use. Mjolnir creates a profile in its own configuration directory,
+saves it, installs the exact pinned harness, and opens that harness's sign-in
+flow. You do not need to choose a home directory or install the agent's CLI.
 
-1. Open Settings (`prefix+s`), choose **Agent Profiles**, choose **Add**, pick
-   the agent kind, point `home` at a directory for that profile, and save.
-2. Select the profile and choose **Sign in**. The first sign-in installs the
-   pinned harness under Mjolnir's cache; `mj login --profile <id>` does the same
-   from a shell. Claude's ACP bridge advertises no login, so a Claude profile
-   still needs the `claude` CLI (or `mj login --setup-token`, which also runs
-   that CLI). DSH has no sign-in: export `DEEPSEEK_API_KEY` before starting
-   Mjolnir and detection offers it without a DeepSeek CLI installation; see
-   [Profiles](/profiles/).
+The welcome offers this path only when first-run discovery finds no installed
+agent. When a configured agent is already present, Mjolnir continues to use its
+existing profile. The ordinary **Add** action remains available for an advanced
+profile with a home you manage yourself. DSH has no interactive sign-in: export
+`DEEPSEEK_API_KEY` before starting Mjolnir and add its profile through the
+advanced path; see [Profiles](/profiles/).
+
+Managed setup configures the account, not where a session runs. When you create
+the session, choose a local Podman, Docker, or Apple container if you want the
+agent isolated from your normal host account. A harness such as Muse can
+therefore run in a container even when you do not want it running directly on
+the host.
 
 Alternatively, install an agent and sign in with its own CLI, then choose
 **Detect profiles** (or run `mj setup`). That is also the path for a profile
 pointed at your own agent home; `mj login --cli` always uses the command on
 `PATH`.
 
-Codex, Claude Code, Muse Code, and MiMo Code sessions on this machine also need
-Node.js 22 or newer and npm on `PATH`; Mjolnir launches its own pinned copy of
-each agent. OpenCode uses a verified download, and Kimi and Grok use their
-official installers. The managed OpenCode and Muse downloads need `curl` and
-`tar` (and Muse also needs Node/npm for its adapter); Kimi and Grok need `bash`
-and `curl`. DSH also needs Node.js 22 or newer with npm and npx, unless
-`dsh-acp` itself is on `PATH`; on Linux it needs glibc 2.34 or newer.
+Codex, Claude Code, Muse Code, MiMo Code, and DSH reuse Node.js 22 or newer
+with npm and npx when that stack is on `PATH`. Otherwise Mjolnir downloads its
+own pinned Node.js into the user cache over HTTPS. Harness artifacts are fetched
+by Mjolnir itself and verified by SHA-256; setup does not require `curl`, Bash,
+or `tar` on the target. DSH also accepts its own `dsh-acp` binary; on Linux it
+needs glibc 2.34 or newer.
 
 The dashboard keeps its session list, Conversation and Prompt regions, target
 capacity, and profile quota visible together.

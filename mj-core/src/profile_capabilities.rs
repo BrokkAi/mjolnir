@@ -34,17 +34,9 @@ pub struct ProfileCapabilitiesSnapshot {
 impl ProfileCapabilitiesSnapshot {
     /// None means required hydration is still in flight, including effort
     /// discovery. Successful empty choices and failures are terminal states.
-    pub fn options(
-        &self,
-        config: &Config,
-        parent: &str,
-        model: Option<&str>,
-    ) -> Option<SubagentOptions> {
+    pub fn options(&self, config: &Config, model: Option<&str>) -> Option<SubagentOptions> {
         let mut options = SubagentOptions::default();
-        for (id, profile) in config
-            .enabled_profiles()
-            .filter(|(id, _)| config.subagents.profile_is_eligible(parent, id))
-        {
+        for (id, profile) in config.enabled_profiles() {
             let entry = self.profiles.get(&profile.capabilities_key(id))?;
             match &entry.choices {
                 CapabilityState::Pending => return None,
@@ -153,9 +145,9 @@ mod tests {
             .unwrap()
             .context_window_bytes = Some(42);
         assert_eq!(config.profiles_discovery_key(), original);
-        assert!(snapshot.options(&config, "parent", Some("a")).is_some());
+        assert!(snapshot.options(&config, Some("a")).is_some());
         config.profiles.get_mut("parent").unwrap().home = "/another/home".into();
         assert_ne!(config.profiles_discovery_key(), original);
-        assert!(snapshot.options(&config, "parent", None).is_none());
+        assert!(snapshot.options(&config, None).is_none());
     }
 }

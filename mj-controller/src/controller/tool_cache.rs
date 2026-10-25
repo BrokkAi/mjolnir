@@ -44,9 +44,14 @@ fn prepare_checked(
         .targets
         .get(template_id)
         .context("cache target disappeared")?;
+    // Apple's runtime mounts supplemental directories read-only from its own
+    // VM, so there is no host directory to share, locally or over SSH; EC2
+    // copies the directory instead of mounting it.
     if matches!(
         template,
-        TargetTemplate::AwsEc2 { .. } | TargetTemplate::AppleContainer { .. }
+        TargetTemplate::AwsEc2 { .. }
+            | TargetTemplate::AppleContainer { .. }
+            | TargetTemplate::SshAppleContainer { .. }
     ) {
         return Ok(None);
     }

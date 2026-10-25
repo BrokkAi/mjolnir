@@ -3210,6 +3210,31 @@ fn golden_dashboard_resource_panels() {
         })),
         now_epoch_seconds(),
     );
+    dashboard.set_container_capacities(BTreeMap::from([(
+        "local".into(),
+        mj_client::runtime_feed::RuntimeContainerCapacity {
+            target_ids: vec!["podman".into(), "mac-container".into()],
+            capacity: mj_core::state::HostContainerCapacity {
+                total: mj_core::state::HostContainerSize {
+                    cpus: 8,
+                    memory_bytes: 4,
+                },
+                reserved: mj_core::state::HostContainerSize {
+                    cpus: 0,
+                    memory_bytes: 2 << 30,
+                },
+                committed: mj_core::state::HostContainerSize {
+                    cpus: 0,
+                    memory_bytes: 0,
+                },
+                remaining: mj_core::state::HostContainerSize {
+                    cpus: 8,
+                    memory_bytes: 0,
+                },
+                complete: true,
+            },
+        },
+    )]));
     append_dashboard_golden(
         &mut output,
         "grouped host load without sample clock",

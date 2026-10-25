@@ -29,7 +29,10 @@ include = [
     "assets/opencode-provider-environment.txt",
     # Pinned managed harness packages and verified runtime manifests.
     "assets/harnesses/**",
+    "assets/grok/runtime.json",
+    "assets/kimi/runtime.json",
     "assets/muse/runtime.json",
+    "assets/node/runtime.json",
     "assets/opencode/runtime.json",
     "Cargo.toml",
     "Cargo.lock",
@@ -62,10 +65,14 @@ jsonc-parser = { version = "0.34", features = ["serde"] }
 libc.workspace = true
 memchr.workspace = true
 regex = "1"
+reqwest.workspace = true
+ruzstd.workspace = true
+rustls.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 sha2.workspace = true
 similar = "2.7"
+tar.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["full"] }
 toml.workspace = true
@@ -87,4 +94,5 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tiny_http = "0.12"
 tokio = { workspace = true, features = ["test-util"] }

@@ -642,12 +642,13 @@ fn worker_binary_replacement_plan(
         }
         | targets::TargetLocator::SshDocker {
             ssh, container_id, ..
+        }
+        | targets::TargetLocator::SshAppleContainer {
+            ssh, container_id, ..
         } => {
-            let engine = match locator {
-                targets::TargetLocator::SshPodman { .. } => "podman",
-                targets::TargetLocator::SshDocker { .. } => "docker",
-                _ => unreachable!("matched remote container target"),
-            };
+            let engine = locator
+                .container_engine()
+                .expect("matched a remote container target");
             let upload = format!(
                 "{}/{}",
                 targets::REMOTE_UPLOAD_STAGING,

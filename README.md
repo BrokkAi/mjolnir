@@ -83,24 +83,25 @@ builds, and desktop dependencies.
 
 ## Quick start
 
-Mjolnir can install a pinned coding harness when you sign in. Add a profile in
-Settings → Agent Profiles and choose **Sign in**, or install and sign in to an
-agent you already have and choose **Detect profiles**. Then, from a project
-directory:
+Mjolnir can install a pinned coding harness when you sign in. On first launch,
+choose **Set up a managed agent** if no agent is found, or install and sign in
+to an agent you already have and choose **Detect profiles**. Managed setup
+creates the profile and opens sign-in without asking you to choose a home
+directory. Then, from a project directory:
 
 ```sh
 mj
 ```
 
-On first launch, Mjolnir automatically adds profiles for your installed agents
-and a bundle for the current GitHub repository; every later plain `mj`
-launch adds profiles for agents installed since (`mj go`, `mj workspaces`,
-and the relaunch after an upgrade do not). To stop using an agent, disable its
-profile in Settings rather than removing it. A brief welcome shows what it
-found and any prerequisite errors. Press Continue, then `ctrl+b c` to create
-a session: pick an agent profile and where the session runs. Container images
-download in the background while you use the dashboard. Configure SSH and AWS
-targets in Settings (`ctrl+b s`).
+On first launch, Mjolnir automatically adds profiles for your installed agents,
+and a bundle for the current GitHub repository; every later plain `mj` launch
+adds profiles for agents installed since (`mj go`, `mj workspaces`, and the
+relaunch after an upgrade do not). To stop using an agent, disable its profile
+in Settings rather than removing it. A brief welcome shows what it found and any
+prerequisite errors. Press Continue, then `ctrl+b c` to create a session: pick
+an agent profile and where the session runs. Container images download in the
+background while you use the dashboard. Configure SSH and AWS targets in
+Settings (`ctrl+b s`).
 
 - `mj setup` reruns agent and repository discovery from the shell, preserving
   your existing configuration.

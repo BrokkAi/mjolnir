@@ -14,13 +14,20 @@ use ratatui::widgets::{Paragraph, Wrap};
 use crate::widgets::{centered_modal, dismissible_modal_title};
 use crate::{CommandId, DashboardAction, DashboardState, Mode};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WelcomeAction {
+    ManagedSetup,
+    Continue,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WelcomeDialog {
     lines: Vec<String>,
     status: Option<&'static str>,
+    managed_setup_available: bool,
     scroll: usize,
     max_scroll: Cell<usize>,
-    pub(crate) form: RefCell<Dialog<()>>,
+    pub(crate) form: RefCell<Dialog<WelcomeAction>>,
 }
 
 fn open_welcome(mode: &mut Mode) -> Option<&mut WelcomeDialog> {
@@ -36,6 +43,7 @@ impl DashboardState {
         self.pending_welcome = Some(WelcomeDialog {
             lines: Vec::new(),
             status: Some("Finding your agents…"),
+            managed_setup_available: false,
             scroll: 0,
             max_scroll: Cell::new(0),
             form: RefCell::new(Dialog::default()),
@@ -60,6 +68,12 @@ impl DashboardState {
         if let Some(dialog) = self.welcome_mut() {
             dialog.lines = lines;
             dialog.status = Some("Checking prerequisites…");
+        }
+    }
+
+    pub fn welcome_managed_setup_available(&mut self, available: bool) {
+        if let Some(dialog) = self.welcome_mut() {
+            dialog.managed_setup_available = available;
         }
     }
 
@@ -104,7 +118,13 @@ impl DashboardState {
         let result = dialog.form.get_mut().handle(&event);
         self.last_event_consumed.set(result.consumed);
         match result.action {
-            Some(Interaction::Cancel | Interaction::Activate(())) => self.cancel_modal(),
+            Some(Interaction::Activate(WelcomeAction::ManagedSetup)) => {
+                self.cancel_modal();
+                return DashboardAction::OpenManagedSetup;
+            }
+            Some(Interaction::Cancel | Interaction::Activate(WelcomeAction::Continue)) => {
+                self.cancel_modal()
+            }
             _ => self.mode = Mode::Welcome(dialog),
         }
         DashboardAction::None
@@ -175,8 +195,13 @@ pub(crate) fn render_welcome(
         inner.width,
         inner.height.min(1),
     );
-    Dialog::render_actions(frame, footer, &[((), "Continue", true)], &mut form);
-    form.end_frame(());
+    let mut actions = Vec::new();
+    if dialog.managed_setup_available {
+        actions.push((WelcomeAction::ManagedSetup, "Set up a managed agent", true));
+    }
+    actions.push((WelcomeAction::Continue, "Continue", true));
+    Dialog::render_actions(frame, footer, &actions, &mut form);
+    form.end_frame(WelcomeAction::Continue);
 }
 
 #[cfg(test)]

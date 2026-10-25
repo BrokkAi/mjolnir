@@ -437,6 +437,12 @@ impl WorkerLaunchConfig {
             || crate::harness_runtime::npm_bridge(self.harness).is_some_and(|bridge| {
                 bridge.matches_launcher(&self.bridge_command, &self.bridge_args)
             })
+            || crate::harness_runtime::is_fallback_launch(
+                self.harness,
+                self.execution_policy,
+                &self.bridge_command,
+                &self.bridge_args,
+            )
     }
 
     pub fn read(path: &Path) -> Result<Self> {
@@ -677,6 +683,30 @@ mod tests {
         disabled["agent_mailboxes_enabled"] = serde_json::json!(false);
         let launch: WorkerLaunchConfig = serde_json::from_value(disabled).unwrap();
         assert!(!launch.agent_mailboxes_enabled);
+    }
+
+    #[test]
+    fn built_in_container_launchers_are_prepared_before_start() {
+        for harness in HarnessKind::ALL {
+            let (command, args) =
+                crate::harness_runtime::fallback_launch(harness, ExecutionPolicy::Unconstrained);
+            let mut value = launch_json();
+            value["harness"] = serde_json::to_value(harness).unwrap();
+            value["bridge_command"] = serde_json::to_value(command).unwrap();
+            value["bridge_args"] = serde_json::to_value(args).unwrap();
+            value["execution_policy"] = serde_json::json!("unconstrained");
+            let launch: WorkerLaunchConfig = serde_json::from_value(value).unwrap();
+            assert!(
+                launch.requires_harness_preparation(),
+                "{} must decide between its target launcher and managed installation",
+                harness.display_name()
+            );
+        }
+
+        let mut custom = launch_json();
+        custom["bridge_command"] = serde_json::json!("/opt/custom-agent");
+        let custom: WorkerLaunchConfig = serde_json::from_value(custom).unwrap();
+        assert!(!custom.requires_harness_preparation());
     }
 
     /// Older controllers required both task types, so a launch without the

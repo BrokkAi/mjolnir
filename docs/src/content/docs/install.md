@@ -184,10 +184,11 @@ mj doctor
 ## First run
 
 Mjolnir runs a coding agent and can install its own pinned copy when you sign
-in. Add a profile in Settings → Agent Profiles and choose **Sign in**; if you
-already have an agent installed and signed in, **Detect profiles** finds it.
-DSH has no sign-in; export `DEEPSEEK_API_KEY` before starting `mj` instead, and
-discovery offers it. Then go to a project directory and run `mj`:
+in. Choose **Set up a managed agent** on the welcome screen or in Settings →
+Agent Profiles; Mjolnir creates the profile and opens sign-in. If you already
+have an agent installed and signed in, **Detect profiles** finds it. DSH has no
+sign-in; export `DEEPSEEK_API_KEY` before starting `mj` instead, and discovery
+offers it. Then go to a project directory and run `mj`:
 
 ```sh
 cd path/to/your/repository

@@ -1,5 +1,4 @@
 use super::*;
-use mj_core::harness_runtime::{GROK_VERSION, KIMI_VERSION, MIMO_CLI_VERSION, OPENCODE_VERSION};
 
 /// The repository paths a worker opens. `session_id` and `container_workspace`
 /// identify the session whose workspace is used, which for a sub-agent child is
@@ -18,7 +17,8 @@ pub(super) fn workspace_paths(
         | targets::TargetLocator::LocalDocker { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshPodman { .. }
-        | targets::TargetLocator::SshDocker { .. } => {
+        | targets::TargetLocator::SshDocker { .. }
+        | targets::TargetLocator::SshAppleContainer { .. } => {
             targets::container_workspace_root(container_workspace)
         }
         targets::TargetLocator::AwsEc2 { workspace, .. }
@@ -55,75 +55,13 @@ pub(in crate::controller) fn bridge_readiness_stage(profile: &HarnessProfile) ->
     ProvisionStage::Installing(profile.kind)
 }
 
-/// The Kimi and Grok fallbacks install the pinned release before starting
-/// the ACP server. The installer writes progress on stdout, which is the ACP
-/// stream, so its stdout goes to stderr, where the worker keeps the bridge's
-/// diagnostics (#1136).
+/// The target-provided launcher used before the worker decides whether to
+/// replace it with an exact managed installation.
 pub(in crate::controller) fn bridge_launch(
     harness: mj_core::config::HarnessKind,
     policy: mj_core::config::ExecutionPolicy,
 ) -> (String, Vec<String>) {
-    match harness {
-        mj_core::config::HarnessKind::Codex
-        | mj_core::config::HarnessKind::Claude
-        | mj_core::config::HarnessKind::Muse => {
-            let bridge =
-                mj_core::harness_runtime::npm_bridge(harness).expect("npm harness has a bridge");
-            ("sh".into(), vec!["-c".into(), bridge.bootstrap_script()])
-        }
-        mj_core::config::HarnessKind::Kimi => (
-            "sh".into(),
-            vec![
-                "-c".into(),
-                format!(
-                    "if command -v kimi >/dev/null 2>&1; then exec kimi acp; elif [ -x \"$HOME/.kimi-code/bin/kimi\" ]; then exec \"$HOME/.kimi-code/bin/kimi\" acp; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://code.kimi.com/kimi-code/install.sh | KIMI_VERSION={KIMI_VERSION} bash >&2 && exec \"$HOME/.kimi-code/bin/kimi\" acp; else echo 'Mjolnir needs compatible Kimi Code or curl for its official installer; add the tool to PATH' >&2; exit 127; fi"
-                ),
-            ],
-        ),
-        mj_core::config::HarnessKind::Grok => {
-            let acp = mj_core::config::HarnessKind::Grok
-                .bridge_args(policy)
-                .join(" ");
-            (
-                "sh".into(),
-                vec![
-                    "-c".into(),
-                    format!(
-                        "if command -v grok >/dev/null 2>&1; then exec grok {acp}; elif [ -x \"$GROK_HOME/bin/grok\" ]; then exec \"$GROK_HOME/bin/grok\" {acp}; elif [ -x \"$HOME/.grok/bin/grok\" ]; then exec \"$HOME/.grok/bin/grok\" {acp}; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://x.ai/cli/install.sh | bash -s {GROK_VERSION} >&2 && exec \"$HOME/.grok/bin/grok\" {acp}; else echo 'Mjolnir needs compatible Grok Build or curl for its official installer; add the tool to PATH' >&2; exit 127; fi"
-                    ),
-                ],
-            )
-        }
-        mj_core::config::HarnessKind::OpenCode => (
-            "sh".into(),
-            vec![
-                "-c".into(),
-                format!(
-                    "if command -v opencode >/dev/null 2>&1; then opencode=opencode; elif [ -x \"$HOME/.opencode/bin/opencode\" ]; then opencode=\"$HOME/.opencode/bin/opencode\"; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://opencode.ai/v2/install | bash -s -- --version {OPENCODE_VERSION} --no-modify-path >&2 || exit; opencode=\"$HOME/.opencode/bin/opencode\"; else echo 'Mjolnir needs compatible OpenCode or curl for its official installer; add the tool to PATH' >&2; exit 127; fi; {}",
-                    mj_core::harness_runtime::opencode_acp_script()
-                ),
-            ],
-        ),
-        mj_core::config::HarnessKind::Mimo => (
-            "sh".into(),
-            vec![
-                "-c".into(),
-                format!(
-                    "if command -v mimo >/dev/null 2>&1; then exec mimo acp; fi; if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v npx >/dev/null 2>&1; then echo 'Mjolnir needs MiMo Code or Node.js, npm, and npx on PATH; install Node in the target environment' >&2; exit 127; fi; exec npx -y @mimo-ai/cli@{MIMO_CLI_VERSION} acp"
-                ),
-            ],
-        ),
-        // The npm package bundles the same release binaries as the GitHub
-        // archives: the target's own `dsh-acp` when one is on PATH, otherwise
-        // npx fetches the pinned package. DSH has no managed installation.
-        mj_core::config::HarnessKind::Dsh => (
-            "sh".into(),
-            vec![
-                "-c".into(),
-                mj_core::harness_runtime::dsh_acp_launch_script(),
-            ],
-        ),
-    }
+    mj_core::harness_runtime::fallback_launch(harness, policy)
 }
 
 pub(in crate::controller) fn preflight_harness(
@@ -138,7 +76,7 @@ pub(in crate::controller) fn preflight_harness(
             "git --version >/dev/null || { echo 'Git is missing or unusable; install Git and, on macOS, the Xcode Command Line Tools on the target' >&2; exit 1; }",
         ).purpose("preflight remote Git"))?;
     }
-    if !matches!(profile.kind, HarnessKind::Codex | HarnessKind::Claude) {
+    if !mj_core::harness_runtime::harness_uses_node_runtime(profile.kind) {
         return Ok(());
     }
     if !matches!(
@@ -147,15 +85,18 @@ pub(in crate::controller) fn preflight_harness(
     ) {
         return Ok(());
     }
-    // Mjolnir installs its own pinned copy of the agent with Node.js and npm,
-    // so the agent's own command is not a prerequisite. When Node.js or npm
-    // is missing, though, the failure first says whether the agent itself is
-    // missing too, because that is what a person on a fresh machine needs to
-    // hear (launch finding R13-1).
-    let cli = profile.kind.cli_binary_name();
-    let script = format!(
-        "status=0; if ! command -v node >/dev/null 2>&1; then echo 'Node.js is missing from PATH; install Node.js 22 or newer in the target environment' >&2; status=127; elif ! node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)'; then echo 'Node.js 22 or newer is required in the target environment' >&2; status=1; elif ! command -v npm >/dev/null 2>&1 || ! npm --version >/dev/null; then echo 'npm is missing or unusable; install npm in the target environment' >&2; status=127; fi; if [ \"$status\" -ne 0 ] && ! command -v {cli} >/dev/null 2>&1; then exit {HARNESS_CLI_MISSING_STATUS}; fi; exit \"$status\""
-    );
+    // Mjolnir installs its own pinned Node.js when the target has no
+    // compatible runtime. The worker performs that download, so the
+    // controller only needs to establish that one of the two paths exists
+    // before provisioning creates target state.
+    let script = if profile.kind == HarnessKind::Dsh {
+        format!(
+            "if command -v dsh-acp >/dev/null 2>&1; then exit 0; fi; {}",
+            node_or_downloader_preflight_script()
+        )
+    } else {
+        node_or_downloader_preflight_script()
+    };
     let mut args = if profile.environment.contains_key("PATH") {
         vec![
             "-c".to_owned(),
@@ -182,7 +123,7 @@ pub(in crate::controller) fn preflight_harness(
         }
         _ => unreachable!(),
     };
-    let command = command.purpose("preflight managed harness Node.js and npm");
+    let command = command.purpose("preflight managed harness Node.js");
     let output = executor.execute(&command)?;
     if output.status == 0 {
         return Ok(());
@@ -193,22 +134,18 @@ pub(in crate::controller) fn preflight_harness(
     } else {
         anyhow::anyhow!(detail)
     };
-    let name = profile.kind.display_name();
-    Err(if output.status == HARNESS_CLI_MISSING_STATUS {
-        failure.context(format!(
-            "{name} is not installed on {destination}: `{cli}` is not on PATH. {}, sign in to it, then retry the launch",
-            profile.kind.install_advice()
-        ))
-    } else {
-        failure.context(format!(
-            "{name} launch preflight failed on {destination}; Node.js 22+ and npm must be available on the target PATH"
-        ))
-    })
+    Err(failure.context(format!(
+        "{} launch preflight failed on {destination}; provide Node.js 22+ with npm and npx on the target PATH, or use a target where Mjolnir's managed runtime can run",
+        profile.kind.display_name()
+    )))
 }
 
-/// The exit status the harness preflight script uses when Node.js or npm is
-/// unusable and the agent's own command is missing as well.
-const HARNESS_CLI_MISSING_STATUS: i32 = 3;
+fn node_or_downloader_preflight_script() -> String {
+    format!(
+        "if command -v node >/dev/null 2>&1 && node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)' && command -v npm >/dev/null 2>&1 && npm --version >/dev/null 2>&1 && command -v npx >/dev/null 2>&1 && npx --version >/dev/null 2>&1; then exit 0; fi; managed_target=''; loader=''; system=$(uname -s 2>/dev/null) || system=''; machine=$(uname -m 2>/dev/null) || machine=''; case \"$system:$machine\" in Linux:x86_64) managed_target=linux-x64; loader=/lib64/ld-linux-x86-64.so.2 ;; Linux:aarch64|Linux:arm64) managed_target=linux-arm64; loader=/lib/ld-linux-aarch64.so.1 ;; Darwin:x86_64) managed_target=darwin-x64 ;; Darwin:arm64) managed_target=darwin-arm64 ;; *) echo \"Mjolnir's managed Node.js has no artifact for $system $machine; install Node.js 22 or newer with npm and npx on the target PATH\" >&2; exit 127 ;; esac; managed=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/mjolnir/node/node-v{}-$managed_target\"; if [ -x \"$managed/bin/node\" ] && \"$managed/bin/node\" -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)' && [ -x \"$managed/bin/npm\" ] && \"$managed/bin/npm\" --version >/dev/null 2>&1 && [ -x \"$managed/bin/npx\" ] && \"$managed/bin/npx\" --version >/dev/null 2>&1; then exit 0; fi; if [ -n \"$loader\" ] && [ ! -f \"$loader\" ]; then echo \"Mjolnir's pinned Node.js for this target is a glibc build, but the required program interpreter $loader is missing; install Node.js 22 or newer with npm and npx in the target environment\" >&2; exit 127; fi; exit 0",
+        mj_core::harness_runtime::NODE_VERSION
+    )
+}
 
 pub(super) const MJ_CONTAINER_ENVIRONMENT: &str = "## Mjolnir disposable environment\n\nThis session runs in a disposable Mjolnir container. When the session closes, Mjolnir checkpoints everything in project workspace directories under `/workspace`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then removes the container.\n\nEverything outside `/workspace`, including installed packages, `$HOME`, and `/tmp`, is ephemeral and will be lost. Keep durable results in the workspace or push them to a remote.\n\nNew workspaces start on their own session branch from the default network fetch remote’s default branch. Local unpublished commits and uncommitted files are not copied. Use normal git push to publish the current branch to the configured network push destination. Closing saves a checkpoint; it does not publish commits or update the original local checkout. Resumed sessions restore their saved work.\n";
 

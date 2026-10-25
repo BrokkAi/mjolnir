@@ -312,7 +312,7 @@ pub(super) fn local_engine_installed(host: &ImageHost, path: Option<&std::ffi::O
         ImageHost::LocalPodman | ImageHost::LocalDocker | ImageHost::AppleContainer => {
             crate::targets::program_on_path(host.engine(), path)
         }
-        ImageHost::SshPodman(_) | ImageHost::SshDocker(_) => true,
+        ImageHost::SshPodman(_) | ImageHost::SshDocker(_) | ImageHost::SshAppleContainer(_) => true,
     }
 }
 
@@ -350,15 +350,25 @@ pub(super) async fn refresh_images(
         let report = report.clone();
         hosts.spawn_blocking(move || {
             let host = refresh.host.label();
-            // A launch that needs this image waits on the same lock, so it
-            // never starts a second download of what this tick is fetching.
-            let lock = crate::image_pull_gate::image_pull_mutex(&refresh.host, &refresh.image);
-            let held =
-                crate::image_pull_gate::hold_image_pull(&lock, || executor.is_cancelled(), || {});
-            let outcome = held.and_then(|guard| {
-                let outcome = refresh_host_image(&refresh, &executor, &*report);
-                drop(guard);
-                outcome
+            let ensure = if refresh.host == ImageHost::AppleContainer {
+                crate::targets::ensure_apple_container_runtime(&executor).map(|_| ())
+            } else {
+                Ok(())
+            };
+            let outcome = ensure.and_then(|()| {
+                // A launch that needs this image waits on the same lock, so it
+                // never starts a second download of what this tick is fetching.
+                let lock = crate::image_pull_gate::image_pull_mutex(&refresh.host, &refresh.image);
+                let held = crate::image_pull_gate::hold_image_pull(
+                    &lock,
+                    || executor.is_cancelled(),
+                    || {},
+                );
+                held.and_then(|guard| {
+                    let outcome = refresh_host_image(&refresh, &executor, &*report);
+                    drop(guard);
+                    outcome
+                })
             });
             let error = match outcome {
                 Ok(_) => None,

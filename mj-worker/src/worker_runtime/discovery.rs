@@ -13,7 +13,23 @@ use super::AcpSupervisorSpec;
 
 pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileConfig> {
     let policy = ExecutionPolicy::ConfiguredApprovals;
-    let mut environment = spec.environment;
+    // Discovery probes a fresh target before any session launch exists. Resolve
+    // the account's login environment first so nvm/Homebrew Node installations
+    // and the cache root (`HOME` or `XDG_CACHE_HOME`) are visible to the
+    // system-or-managed Node decision.
+    let mut environment = mj_core::login_environment::with_overrides(&spec.environment).await?;
+    let managed_node = if super::harness_launch::needs_node_runtime(spec.harness, &environment)? {
+        super::harness::ensure_node_runtime(&mut environment)
+            .await
+            .with_context(|| {
+                format!(
+                    "prepare Node.js for {} discovery",
+                    spec.harness.display_name()
+                )
+            })?
+    } else {
+        None
+    };
     // The probe runs from a staged copy of the profile, like a session.
     spec.harness
         .configure_home_environment(&spec.profile_home, &mut environment);
@@ -40,7 +56,7 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
         }
     };
     environment.extend(managed_environment);
-    let mut session_environment = mj_core::login_environment::with_overrides(&environment).await?;
+    let mut session_environment = environment.clone();
     super::exclude_from_harness_environment(
         spec.harness,
         &spec.excluded_environment,
@@ -58,6 +74,9 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
         excluded_environment: spec.excluded_environment.clone(),
         cwd: spec.cwd.clone(),
         harness_lease: lease_path,
+        node_lease: managed_node
+            .as_ref()
+            .map(|node| node.lease_path().to_path_buf()),
     }
     .write_spec(&supervisor)?;
     let launch = LaunchSpec {
@@ -97,7 +116,9 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
         verdict: None,
         stall_policy: None,
     };
-    probe(launch, spec.model).await
+    let result = probe(launch, spec.model).await;
+    drop(managed_node);
+    result
 }
 
 async fn probe(launch: LaunchSpec, model: Option<String>) -> Result<ProfileConfig> {

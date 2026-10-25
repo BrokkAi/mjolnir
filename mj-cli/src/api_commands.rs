@@ -190,11 +190,11 @@ pub(crate) struct NewArgs {
     #[arg(long)]
     no_github_events: bool,
     /// Container CPU limit. Omitted takes the target's default size: the
-    /// size last chosen for that host, else 8 CPUs, capped at the host's.
+    /// size last chosen for that host, else 4 CPUs, capped at the host's.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     cpus: Option<u64>,
     /// Container memory limit in GiB. Omitted takes the target's default
-    /// size: the size last chosen for that host, else 32 GiB, capped at the
+    /// size: the size last chosen for that host, else 8 GiB, capped at the
     /// host's.
     #[arg(long, value_name = "GIB", value_parser = clap::value_parser!(u64).range(1..))]
     memory_gib: Option<u64>,
@@ -1170,6 +1170,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         (None, None) => return Err(crate::workspace_required("mj new").await),
     };
     let request = StartSessionRequest {
+        remember_container_size: false,
         subagents: new_subagent_policy(&args)?,
         review: new_session_review(&args),
         no_project_memory: args.no_project_memory,

@@ -2204,13 +2204,14 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
     assert!(actions.try_recv().is_err());
 
     let response = tokio::spawn(app.oneshot(start_request(start_body(
-        r#","prompt":"add a README line","no_github_events":true"#,
+        r#","prompt":"add a README line","no_github_events":true,"remember_container_size":true"#,
     ))));
     let request = actions.recv().await.unwrap();
     assert_eq!(
         request.action,
         ControllerAction::New {
             remember_launch_choices: false,
+            remember_container_size: true,
             review: None,
             no_project_memory: false,
             no_github_events: true,
@@ -2330,7 +2331,7 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
 }
 
 #[tokio::test]
-async fn subagent_model_selection_stays_within_eligible_profiles() {
+async fn subagent_model_selection_uses_any_enabled_profile() {
     let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend {
         subagent_configuration: Some(mj_core::config::SubagentConfig {
             straightforward: Some(mj_core::config::SubagentChoice {
@@ -2356,7 +2357,15 @@ async fn subagent_model_selection_stays_within_eligible_profiles() {
             unavailable: Vec::new(),
         }),
         subagent_model_candidates: Some(SubagentCandidates {
-            offered: vec![model_candidate("codex-1", 5, "luna")],
+            offered: vec![
+                model_candidate("codex-1", 5, "luna"),
+                model_candidate_for_harness(
+                    "claude4",
+                    98,
+                    "luna",
+                    mj_core::config::HarnessKind::Claude,
+                ),
+            ],
             unavailable: Vec::new(),
         }),
         ..FakeBackend::default()
@@ -2374,7 +2383,7 @@ async fn subagent_model_selection_stays_within_eligible_profiles() {
     .await
     .unwrap();
 
-    assert_eq!(selection.profile_id, "codex-1");
+    assert_eq!(selection.profile_id, "claude4");
 }
 
 #[tokio::test]
@@ -5295,6 +5304,7 @@ async fn options_mark_a_local_target_without_its_engine_unavailable() {
                 requires_project_directory: false,
                 remembered_container_size: None,
                 container_host_limits: None,
+                container_capacity: None,
                 default_resource_allocation: None,
                 runtime_missing: false,
                 default_candidate: false,
@@ -5310,6 +5320,7 @@ async fn options_mark_a_local_target_without_its_engine_unavailable() {
                 memory_used_bytes: None,
                 memory_total_bytes: None,
                 logical_cores: None,
+                container_capacity: None,
                 disk_total_bytes: None,
                 virtual_machines: None,
                 sampled_at_epoch_seconds: Some(1),
@@ -5361,6 +5372,7 @@ async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
             requires_project_directory: false,
             remembered_container_size: None,
             container_host_limits: None,
+            container_capacity: None,
             default_resource_allocation: None,
             runtime_missing: true,
             default_candidate: false,
@@ -5376,6 +5388,7 @@ async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
             memory_used_bytes: None,
             memory_total_bytes: None,
             logical_cores: None,
+            container_capacity: None,
             disk_total_bytes: None,
             virtual_machines: None,
             sampled_at_epoch_seconds: None,

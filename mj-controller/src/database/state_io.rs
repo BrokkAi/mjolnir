@@ -812,6 +812,20 @@ pub(super) fn insert_target(
                 None,
                 borrowed_from.as_deref(),
             ),
+            TargetLocator::SshAppleContainer {
+                host,
+                container_id,
+                borrowed_from,
+            } => (
+                "ssh-apple-container",
+                Some(host.as_str()),
+                Some(container_id.as_str()),
+                None,
+                None,
+                None,
+                None,
+                borrowed_from.as_deref(),
+            ),
             TargetLocator::SshDocker {
                 host,
                 container_id,
@@ -965,6 +979,11 @@ fn load_targets_selected(
                 worker_id,
             },
             "ssh-docker" => TargetLocator::SshDocker {
+                borrowed_from,
+                host: host.unwrap(),
+                container_id: resource.unwrap(),
+            },
+            "ssh-apple-container" => TargetLocator::SshAppleContainer {
                 borrowed_from,
                 host: host.unwrap(),
                 container_id: resource.unwrap(),

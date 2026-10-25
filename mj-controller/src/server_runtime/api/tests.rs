@@ -198,14 +198,11 @@ async fn selection_backend_refusing(
 ) -> (Arc<ApiBackend>, Arc<RecordingExports>) {
     let catalog = ProfileCatalog::with_probe(models_probe(offers));
     catalog
-        .sync_now(&test_config(
-            &[
-                ("parent", HarnessKind::Codex),
-                ("codex-high", HarnessKind::Codex),
-                ("deepseek", HarnessKind::Codex),
-            ],
-            &["codex-high", "deepseek"],
-        ))
+        .sync_now(&test_config(&[
+            ("parent", HarnessKind::Codex),
+            ("codex-high", HarnessKind::Codex),
+            ("deepseek", HarnessKind::Codex),
+        ]))
         .await;
     let quotas = BTreeMap::from([
         (
@@ -263,7 +260,7 @@ fn spawn_with() -> mj_core::subagent::SubagentToolRequest {
     }
 }
 
-// Hard-won: 435b4ed9: model selection sent a child to a nearly exhausted profile despite an eligible profile with quota.
+// Hard-won: 435b4ed9: model selection sent a child to a nearly exhausted profile despite an enabled profile with quota.
 #[tokio::test]
 async fn spawn_runs_the_child_on_the_profile_with_the_most_quota_that_offers_the_model() {
     let (backend, exports) = selection_backend(SAME_MODELS, None).await;
@@ -792,11 +789,11 @@ fn spawn_backend(catalog: Arc<ProfileCatalog>) -> Arc<ApiBackend> {
 }
 
 #[tokio::test]
-async fn spawn_refuses_a_model_no_eligible_profile_offers() {
+async fn spawn_refuses_a_model_no_enabled_profile_offers() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
     catalog
-        .sync_now(&test_config(&[("parent", HarnessKind::Codex)], &[]))
+        .sync_now(&test_config(&[("parent", HarnessKind::Codex)]))
         .await;
     let warmed = calls.load(std::sync::atomic::Ordering::SeqCst);
 
@@ -808,7 +805,7 @@ async fn spawn_refuses_a_model_no_eligible_profile_offers() {
     assert!(
         result
             .message
-            .contains("no eligible profile offers model \"luna\""),
+            .contains("no enabled profile offers model \"luna\""),
         "{}",
         result.message
     );
@@ -831,14 +828,14 @@ async fn spawn_refuses_a_model_no_eligible_profile_offers() {
 async fn spawn_over_a_cold_catalogue_waits_for_the_background_discovery() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
-    catalog.sync(&test_config(&[("parent", HarnessKind::Codex)], &[]));
+    catalog.sync(&test_config(&[("parent", HarnessKind::Codex)]));
 
     let result = spawn_backend(catalog)
         .execute_subagent_tool("parent-1".into(), spawn_with())
         .await;
 
     assert!(
-        result.message.contains("no eligible profile offers"),
+        result.message.contains("no enabled profile offers"),
         "the spawn should have checked the model once discovered: {}",
         result.message
     );

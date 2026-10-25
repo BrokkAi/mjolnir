@@ -182,7 +182,7 @@ impl<'a> ModelProfileCandidateSource<'a> {
     fn profile_description(self) -> &'static str {
         match self {
             Self::Session { .. } => "configured",
-            Self::Subagents { .. } => "eligible",
+            Self::Subagents { .. } => "enabled",
         }
     }
 }
@@ -234,7 +234,7 @@ async fn resolve_model_profile_selection_matching(
                     format!("profile {requested:?} is not available for a new session")
                 }
                 ModelProfileCandidateSource::Subagents { .. } => format!(
-                    "profile {requested:?} is not eligible for sub-agent use from this session"
+                    "profile {requested:?} is unavailable for sub-agent use from this session"
                 ),
             };
             return Err(ApiFailure::bad_request(message));
@@ -473,14 +473,14 @@ pub(crate) fn choose_subagent_profile(
             .find(|candidate| candidate.profile_id == requested)
             .ok_or_else(|| {
                 ApiFailure::bad_request(format!(
-                    "profile {requested:?} is not eligible for sub-agent use from this session"
+                    "profile {requested:?} is unavailable for sub-agent use from this session"
                 ))
             })?;
         validate_selectors(&chosen.choices, Some(model), None)?;
         return Ok(chosen);
     }
     draw_candidates(&mut offered, Some(parent_profile))?;
-    take_healthy_offer(offered, &unavailable, model, "eligible")
+    take_healthy_offer(offered, &unavailable, model, "enabled")
 }
 
 /// The first candidate that offers `model` and is not marked unhealthy for
@@ -1021,12 +1021,12 @@ mod tests {
             "{}",
             not_offered.message
         );
-        let ineligible =
+        let unavailable =
             choose_subagent_profile(candidates(), Some("kimi"), "codex", "luna").unwrap_err();
         assert!(
-            ineligible.message.contains("not eligible"),
+            unavailable.message.contains("unavailable"),
             "{}",
-            ineligible.message
+            unavailable.message
         );
         let broken =
             choose_subagent_profile(candidates(), Some("glm"), "codex", "luna").unwrap_err();
@@ -1280,7 +1280,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_type_spawn_uses_global_choices_and_quota_ranked_eligible_profiles() {
+    async fn task_type_spawn_uses_global_choices_and_quota_ranked_enabled_profiles() {
         use mj_core::config::{SubagentChoice, SubagentConfig};
         use mj_core::subagent::{SubagentPolicy, SubagentTaskType};
         let candidates = SubagentCandidates {

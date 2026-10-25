@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn bare_preflight_accepts_non_git_directories_but_rejects_missing_or_unborn_projects() {
+    fn bare_preflight_accepts_non_git_and_unborn_directories_but_rejects_missing_projects() {
         let directory = tempfile::tempdir().unwrap();
         let controller = config_only_controller(resume_compatibility_config());
         let result = controller
@@ -302,11 +302,10 @@ mod tests {
                 .is_err()
         );
         test_git(directory.path(), &["init", "--initial-branch=master"]);
-        assert!(
-            controller
-                .preflight_new_session("", "local-bare", Some(directory.path()), &ProcessExecutor)
-                .is_err()
-        );
+        let result = controller
+            .preflight_new_session("", "local-bare", Some(directory.path()), &ProcessExecutor)
+            .unwrap();
+        assert!(!result.managed_worktree.available);
     }
 
     #[test]

@@ -41,6 +41,9 @@ pub struct RuntimeStateUpdate {
     pub container_upgrade_sessions: std::collections::BTreeSet<String>,
     /// The daemon storage owner's verdict per target host.
     pub storage: Vec<mj_core::targets::storage::TargetStorageView>,
+    /// The daemon's reservation-adjusted container headroom per deployment
+    /// host. Terminal surfaces consume this instead of recalculating it.
+    pub container_capacities: BTreeMap<String, mj_client::runtime_feed::RuntimeContainerCapacity>,
 }
 
 /// What a session looked like the last time a view was published for it.

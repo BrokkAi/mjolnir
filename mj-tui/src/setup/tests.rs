@@ -6,6 +6,43 @@ use crate::test_support::{
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{Terminal, backend::TestBackend};
 
+// Managed onboarding must not overwrite existing detected profiles or require
+// the user to choose a home path.
+#[test]
+fn managed_setup_creates_a_collision_free_profile_and_requests_login() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let mut existing = dashboard.config.profiles.values().next().unwrap().clone();
+    existing.kind = mj_core::config::HarnessKind::Claude;
+    dashboard.config.profiles.insert("claude".into(), existing);
+    dashboard.begin_settings_section("profiles", None);
+    setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .begin_managed_setup();
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    dialog.managed_setup.as_mut().unwrap().selected = 1;
+
+    let action = dialog.create_managed_profile_and_login(&Default::default());
+
+    let DashboardAction::SaveSetupAndLogin {
+        updated,
+        profile_id,
+        ..
+    } = action
+    else {
+        panic!("managed setup did not request save and login: {action:?}");
+    };
+    assert_eq!(profile_id, "claude-2");
+    let saved: Value = serde_json::from_str(&updated).unwrap();
+    let profile = &saved["profiles"][&profile_id];
+    assert_eq!(profile["kind"], "claude");
+    let home = profile["home"].as_str().unwrap();
+    assert!(std::path::Path::new(home).is_absolute(), "{home}");
+    assert!(
+        std::path::Path::new(home).ends_with("profiles/claude-2/claude"),
+        "{home}"
+    );
+}
+
 // Hard-won: 8d16bf96: unrelated settings saves failed when a configured API-key file disappeared.
 #[test]
 fn settings_save_api_key_profiles_without_resolving_credentials_on_the_ui_thread() {
@@ -196,23 +233,6 @@ fn turning_jev_off_says_running_sessions_follow_after_a_resume_or_restart() {
     let saved = saved_config(dialog);
     dashboard.setup_saved(generation, Ok(saved));
     assert!(!dashboard.notice().unwrap().contains("Jev"));
-}
-
-/// The additional eligible profiles are a set of checkboxes, so their row
-/// says how many are chosen rather than reading like an off switch.
-/// Launch campaign finding C-3.
-// Hard-won: e03accb6: the eligible-profiles summary hid that it was a multi-select.
-#[test]
-fn the_eligible_profiles_row_reads_as_a_multi_select() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_settings_section("subagents", None);
-    let lines = drawn(&mut dashboard, 140, 40);
-    let row = lines
-        .iter()
-        .find(|line| line.contains("Additional eligible profiles"))
-        .unwrap_or_else(|| panic!("missing row: {lines:#?}"));
-    assert!(!row.contains("Off"), "{row:?}");
-    assert!(row.contains("selected"), "{row:?}");
 }
 
 #[test]
@@ -3267,7 +3287,6 @@ fn every_setting_description_fits_its_two_rows() {
         &["sessionwiki"],
         &["sessionwiki", "archive_after_days"],
         &["subagents"],
-        &["subagents", "eligible_profiles"],
         &["machines", "m", "build_cache"],
         &["machines", "m", "build_cache", "directory"],
         &["machines", "m", "build_cache", "tools_directory"],

@@ -205,7 +205,8 @@ pub const CHOICE_UNAVAILABLE_CODE: &str = "subagent_choice_unavailable";
 
 /// How a choice is matched to a profile. Surface-neutral, so it can follow
 /// any message from [`SubagentOptions::validate`].
-const ELIGIBILITY_NOTE: &str = "Mjolnir chooses an eligible profile offering that selection by remaining quota. This session's own profile is always eligible.";
+const ELIGIBILITY_NOTE: &str =
+    "Mjolnir chooses an enabled profile offering that selection by remaining quota.";
 
 /// Choices before a parent session exists, using the same eligibility as spawn.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

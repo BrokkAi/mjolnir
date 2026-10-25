@@ -1,6 +1,33 @@
 use super::*;
 
 impl RuntimeState {
+    /// Reserve the host resources a resume would create before its potentially
+    /// long preflight begins. The lease lives until the daemon has published
+    /// the resumed session as `Provisioning` or the lifecycle ends.
+    async fn reserve_resume_container_capacity(
+        self: &Arc<Self>,
+        request: &ResumeSessionRequest,
+    ) -> Result<Option<capacity::ContainerCapacityLease>> {
+        let session_id = request.session_id.clone();
+        let requested_allocation = request.resource_allocation.clone();
+        let allocation = blocking(move || {
+            let controller = Controller::load()?;
+            let session = controller
+                .state
+                .sessions
+                .get(&session_id)
+                .with_context(|| format!("unknown session {session_id:?}"))?;
+            Ok(requested_allocation.or_else(|| session.resource_allocation.clone()))
+        })
+        .await?;
+        self.reserve_container_capacity_for_launch(
+            &request.session_id,
+            &request.target_template_id,
+            allocation,
+        )
+        .await
+    }
+
     /// Resume a session, and return nothing.
     ///
     /// This used to answer with the whole `MaterializedSession`. That reply
@@ -32,6 +59,7 @@ impl RuntimeState {
         if already_running {
             return Ok(());
         }
+        let _capacity_reservation = self.reserve_resume_container_capacity(&request).await?;
         let profile_id = request.profile_id.clone();
         let target_template_id = request.target_template_id.clone();
         let workspace_id = request.workspace_id.clone();

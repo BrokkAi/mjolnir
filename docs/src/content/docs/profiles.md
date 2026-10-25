@@ -427,7 +427,8 @@ its `config.toml` names a custom model provider or its `auth.json` records
 On every bare runtime, whether on this machine, an SSH machine, or an EC2
 machine, each worker performs one bounded probe of the account's shell and
 starts it the way a terminal does: as an interactive login shell (`zsh -l -i`
-for zsh, `bash -l -i` for bash). The probe begins from a cleared environment, so
+for zsh, `bash -l -i` for bash, and login `argv[0]` with `-i` for tcsh or csh).
+The probe begins from a cleared environment, so
 nothing the process that launched Mjolnir exported leaks into the session, but
 it reads the same startup files a terminal reads. Tools that a version manager
 adds to `PATH` — nvm, pyenv, asdf, mise, volta, sdkman, or Homebrew on Linux —
@@ -443,6 +444,13 @@ session resumes. Credential and skill reconciliation has its own live sync path
 described below.
 
 ## Log in
+
+The guided **Set up managed** flow creates a profile home under
+`<config dir>/profiles/<profile-id>/<harness>`, where `<config dir>` is
+`~/.config/mjolnir` on Linux or the path in `MJ_CONFIG_DIR`. These homes are
+owned by Mjolnir, so its pinned harness can safely create or migrate the login
+without touching an existing agent installation. The same flow is available
+from first-run onboarding when no installed agent was found.
 
 For Muse, configure `kind = "muse"` and a home ending in `muse`, for example
 `home = "/home/me/.config/muse"` or `/home/me/accounts/work/muse`. Discovery
@@ -498,7 +506,7 @@ For DSH, configure `kind = "dsh"`, for example with
 `home = "/home/me/.dsh"`. Detection accepts DeepSeek's own `dsh` CLI, its
 `~/.dsh` home, or `DEEPSEEK_API_KEY` in the environment Mjolnir started with,
 so a key alone is enough to be offered a profile. DSH runs BrokkAi's
-[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.2.3, a DeepSeek coding agent
+[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.3.0, a DeepSeek coding agent
 that speaks ACP itself, so there is no separate bridge. It is not the DeepSeek
 harness earlier releases offered as `kind = "deepseek"`; that kind still fails
 to load. The home is a `DSH_ACP_DATA_DIR` root. It holds an optional
@@ -534,6 +542,9 @@ home = "/home/me/.dsh"
 [profiles.dsh.environment]
 DEEPSEEK_API_KEY = { from_secret = "DEEPSEEK_API_KEY" }
 ```
+
+When detection adds a DSH profile and `secrets.toml` beside `config.toml`
+defines `DEEPSEEK_API_KEY`, it writes that `environment` entry for you.
 
 There is no interactive login, and `mj login` refuses the profile. A profile
 without the key cannot start; the refused session and `mj doctor` say how to
@@ -575,7 +586,7 @@ that harness as an ACP agent. It reads the methods the bridge advertises:
 | Harness | What `mj login` does |
 | --- | --- |
 | Codex | ACP `authenticate` for `chat-gpt` (browser) or `api-key` (environment key) |
-| Claude Code | No ACP methods; falls back to `claude auth login` when the Claude CLI is installed |
+| Claude Code | No ACP methods; runs `auth login` through the Claude CLI installed in Mjolnir's pinned harness |
 | Kimi Code | Runs its advertised ACP method; falls back to `kimi login` only when the bridge cannot run |
 | Grok Build | Runs `grok login` for its `grok.com` method; falls back to the CLI when the bridge cannot run |
 | Muse Code | Runs the ACP `terminal` method `muse-acp login` |
@@ -585,27 +596,30 @@ that harness as an ACP agent. It reads the methods the bridge advertises:
 
 Use `--method <id>` when a bridge advertises several methods. Use `--cli` to
 skip ACP and run the harness command found on `PATH`, which is the behavior of
-earlier releases. A bridge that advertises no usable method, or a pinned
-installation that cannot be prepared, also falls back to that command-line
-login. A failure inside a chosen ACP method is reported instead of silently
-trying a different flow.
+earlier releases. A bridge that advertises no usable method falls back to the
+CLI in the same pinned installation. A failure inside a chosen ACP method is
+reported instead of silently trying a different flow.
 
 For harnesses with an ACP login, signing in installs or reuses the pinned
 harness, so the controller does not need a separate installation of that
-harness. Claude agent-acp advertises no login method, so Claude still uses an
-installed `claude` CLI (or the Mjolnir setup token). When a harness is installed
-on `PATH` it is also available through `--cli`, and it is used automatically as
-the fallback when ACP cannot run. A profile pointed at your own OpenCode, Muse, or MiMo
-home signs in through that installed harness's CLI instead: Mjolnir never runs
-the pinned binary against a login database it does not own. A profile with its
-own managed home gets the pinned ACP flow. API-key profiles, and profiles whose
-harness is configured for an API key rather than a native login, have no
-interactive login.
+harness. Claude agent-acp advertises no login method, so Mjolnir runs
+`auth login` through the Claude CLI in the pinned installation. A profile
+pointed at your own OpenCode, Muse, or MiMo home signs in through that installed
+harness's CLI instead: Mjolnir never runs the pinned binary against a login
+database it does not own. A profile with its own Mjolnir-managed home gets the
+pinned flow. API-key profiles, and profiles whose harness is configured for an
+API key rather than a native login, have no interactive login.
 
 On macOS, Claude Code keeps its login in one Keychain item rather than in the
 home ([anthropics/claude-code#20553](https://github.com/anthropics/claude-code/issues/20553)),
 so `mj login` for a Claude profile leaves `CLAUDE_CONFIG_DIR` unset there and
 signs in to that one item. Every Claude profile on a Mac shares it.
+Mjolnir copies the current login into a session's staged home when the session
+runs in a container or on another machine, where the Keychain is unavailable.
+The Keychain remains authoritative at each launch. A stored setup token takes
+precedence. For a long-running container session, prefer the setup token because
+the copied OAuth grant can rotate while both copies still hold the same refresh
+token.
 
 After login, Mjolnir compares the authentication marker before and after the
 command and reports whether it changed. A successful update is reconciled into
@@ -621,8 +635,9 @@ sessions, create a non-rotating setup token:
 mj login --profile claude-work --setup-token
 ```
 
-This runs `claude setup-token`, verifies it with `claude auth status`, and stores
-it under Mjolnir's configuration directory at:
+This runs `setup-token` through the Claude CLI in Mjolnir's pinned installation,
+verifies it with `auth status`, and stores it under Mjolnir's configuration
+directory at:
 
 ```text
 profiles/<profile-id>/claude-oauth-token
@@ -631,8 +646,7 @@ profiles/<profile-id>/claude-oauth-token
 New and resumed sessions receive it as `CLAUDE_CODE_OAUTH_TOKEN`. It covers
 model requests, not Claude Remote Control or claude.ai connectors. Remove that
 file to return the profile to its normal synced credentials. `--setup-token` is
-valid only for Claude profiles and runs `claude` from `PATH`; it conflicts with
-`--method` and `--cli`.
+valid only for Claude profiles; it conflicts with `--method` and `--cli`.
 
 ## What a session's staged home holds
 
@@ -868,29 +882,38 @@ Local-bare, raw SSH, and EC2 workers instead install the exact versions pinned b
 Mjolnir release into `$XDG_CACHE_HOME/mjolnir/harnesses`, or
 `$HOME/.cache/mjolnir/harnesses` when `XDG_CACHE_HOME` is unset. They launch
 only the resulting absolute path—never an arbitrary compatible executable from
-`PATH`. DSH is the exception and is never installed; see below. Codex, Claude, and MiMo Code require Node.js 22 or newer plus npm on
-the host.
-Kimi and Grok require curl and Bash for their official installers.
-Muse requires Node.js 22 or newer, npm, and curl; Mjolnir launches the pinned
+`PATH`. DSH is the exception and is never installed; see below.
+
+For Codex, Claude, Muse, MiMo, and DSH's npx fallback, Mjolnir uses Node.js 22
+or newer with npm and npx when the session `PATH` already provides that stack.
+Otherwise it downloads the pinned Node.js 24.22.1 distribution with its internal
+HTTPS client, verifies its published SHA-256 checksum, and installs it under
+`$XDG_CACHE_HOME/mjolnir/node` (or `$HOME/.cache/mjolnir/node`). The managed
+`bin` directory is prepended for the harness and its child processes. A target
+that mirrors the Node.js distribution can set `NODEJS_ORG_MIRROR` (or the
+compatible `NVM_NODEJS_ORG_MIRROR`) to an HTTPS base URL; Mjolnir still checks
+the pinned digest.
+
+Kimi Code and Grok Build install from their direct per-platform release
+artifacts, with pinned SHA-256 checksums. Mjolnir launches the pinned
 `muse-acp` adapter through npx and downloads the pinned native Muse binary,
 verifying its SHA-256 checksum. Linux and macOS, on x86-64 and ARM64, are
 supported. The native Muse binary retains its own upstream terms.
-OpenCode requires curl and tar; Mjolnir downloads the pinned OpenCode 2 package
-for the platform from npm (`@opencode/cli-<platform>`), the same package
-OpenCode's own installer fetches, and verifies its SHA-256 checksum. Linux and macOS, on
-x86-64 and ARM64, are supported. The pinned installation disables OpenCode's
-self-update so a running session never replaces its own binary.
+OpenCode downloads the pinned OpenCode 2 package for the platform from npm
+(`@opencode/cli-<platform>`), the same package OpenCode's own installer fetches,
+and verifies it in-process. Linux and macOS, on x86-64 and ARM64, are supported.
+The pinned installation disables OpenCode's self-update so a running session
+never replaces its own binary.
 MiMo Code installs from the pinned `@mimo-ai/cli` npm package. Its managed
 launch disables automatic updates so a running session never replaces its own
 binary.
 DSH is never installed. A launch resolves the target's own `dsh-acp` on
-`PATH`, or fetches the pinned `@brokkai/dsh-acp@0.2.3` package through `npx`,
-so a bare target needs Node.js 22 or newer with npm and npx; the npm package
-bundles the release binaries. Linux and macOS, on x86-64 and ARM64, are
-supported. Linux needs glibc 2.34 or newer, so musl distributions such as
-Alpine cannot run it.
-Mjolnir reports a missing prerequisite and leaves the existing worker alone;
-it does not invoke sudo or a system package manager.
+`PATH`, or fetches the pinned `@brokkai/dsh-acp@0.3.0` package through `npx`,
+using the compatible system runtime or the managed Node described above; the
+npm package bundles the release binaries. Linux and macOS, on x86-64 and ARM64,
+are supported. Linux needs glibc 2.34 or newer, so musl distributions such as
+Alpine cannot run it. Mjolnir reports a missing prerequisite and leaves the
+existing worker alone; it does not invoke sudo or a system package manager.
 
 Installs are content-addressed and shared across sessions for the same remote
 user. A cache hit performs only local manifest and executable checks. Upgrades

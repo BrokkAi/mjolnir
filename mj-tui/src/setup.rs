@@ -82,6 +82,8 @@ pub(crate) enum SetupControl {
     Apply,
     DetectProfiles,
     DetectRuntimes,
+    ManagedSetup,
+    ManagedContinue,
     SignIn,
     InstallMbx,
     Save,
@@ -176,6 +178,21 @@ struct SetupSize {
     height: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManagedSetupState {
+    selected: usize,
+}
+
+const MANAGED_SETUP_HARNESSES: [mj_core::config::HarnessKind; 7] = [
+    mj_core::config::HarnessKind::Codex,
+    mj_core::config::HarnessKind::Claude,
+    mj_core::config::HarnessKind::Kimi,
+    mj_core::config::HarnessKind::Grok,
+    mj_core::config::HarnessKind::Muse,
+    mj_core::config::HarnessKind::OpenCode,
+    mj_core::config::HarnessKind::Mimo,
+];
+
 /// A profile whose authentication obviously needs no interactive login,
 /// using only configuration already in memory. Codex custom providers are
 /// decided by the background status read because their provider file is I/O.
@@ -197,6 +214,7 @@ pub(crate) struct SetupDialog {
     selected: usize,
     editor: Option<Editor>,
     search: Option<SearchState>,
+    managed_setup: Option<ManagedSetupState>,
     pub(crate) review_editor: Option<Box<ReviewSettingsDialog>>,
     review_validation: Option<ReviewSettingsValidation>,
     pub(crate) form: RefCell<Dialog<SetupControl>>,
@@ -299,26 +317,6 @@ fn pointer(path: &[String]) -> String {
         .collect()
 }
 
-fn populate_subagent_profile_choices(draft: &mut Value) {
-    let selected = draft["subagents"]["eligible_profiles"]
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-    let profiles = draft["profiles"]
-        .as_object()
-        .map(|profiles| profiles.keys().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-    let choices = draft["subagents"]["eligible_profiles"]
-        .as_object_mut()
-        .expect("expanded sub-agent profile choices are an object");
-    for profile_id in profiles {
-        choices.entry(profile_id).or_insert(Value::Bool(false));
-    }
-    for (profile_id, value) in selected {
-        choices.insert(profile_id, value);
-    }
-}
-
 fn machine_host_label(machine_id: &str, machine: &mj_core::config::Machine) -> String {
     match machine {
         mj_core::config::Machine::Local { .. } => "the local machine".to_owned(),
@@ -366,9 +364,6 @@ fn config_from_draft(mut draft: Value) -> Result<Config, serde_json::Error> {
         {
             draft["subagents"].as_object_mut().unwrap().remove(task);
         }
-    }
-    if let Some(choices) = draft["subagents"]["eligible_profiles"].as_object_mut() {
-        choices.retain(|_, eligible| eligible.as_bool().unwrap_or(false));
     }
     // The Machines page always shows this machine. Until it carries a setting
     // of its own it is the implied machine, not an entry, so it does not turn
@@ -731,12 +726,6 @@ fn value_summary(
     let mut child_path = path.to_vec();
     child_path.push(key.to_owned());
     let summary = match value {
-        // The eligible profiles are a page of checkboxes, one per profile, so
-        // the row counts the checked ones instead of counting settings.
-        Value::Object(entries) if child_path == ["subagents", "eligible_profiles"] => {
-            let selected = entries.values().filter(|value| **value == true).count();
-            format!("{selected} of {} selected  ›", entries.len())
-        }
         Value::Object(entries) => {
             format!("{}  ›", counted(entries.len(), "setting", "settings"))
         }
@@ -892,7 +881,6 @@ impl SetupDialog {
         let original = draft.to_string();
         ensure_local_machine(&mut draft);
         schema::expand(&mut draft, &mut Vec::new());
-        populate_subagent_profile_choices(&mut draft);
         let saved_profile_values = draft
             .get("profiles")
             .and_then(Value::as_object)
@@ -926,6 +914,7 @@ impl SetupDialog {
             selected: 0,
             editor: None,
             search: None,
+            managed_setup: None,
             review_editor: None,
             review_validation: None,
             form: RefCell::new(Dialog::default()),
@@ -974,7 +963,6 @@ impl SetupDialog {
         let mut saved = serde_json::to_value(config).expect("configuration serializes");
         ensure_local_machine(&mut saved);
         schema::expand(&mut saved, &mut Vec::new());
-        populate_subagent_profile_choices(&mut saved);
         self.saved_profile_values = saved
             .get("profiles")
             .and_then(Value::as_object)
@@ -1008,6 +996,20 @@ impl SetupDialog {
             return vec![
                 (Back, "Back", true),
                 (Save, self.save_label(), !self.saving),
+            ];
+        }
+        if self.managed_setup.is_some() {
+            return vec![
+                (Back, "Back", true),
+                (
+                    ManagedContinue,
+                    if self.saving {
+                        "Saving…"
+                    } else {
+                        "Set up and sign in"
+                    },
+                    !self.saving,
+                ),
             ];
         }
         if let Some(editor) = &self.editor
@@ -1051,6 +1053,13 @@ impl SetupDialog {
             actions.push((
                 control,
                 label,
+                interactive && !self.discovering && !self.saving,
+            ));
+        }
+        if self.path == ["profiles"] {
+            actions.push((
+                ManagedSetup,
+                "Set up managed",
                 interactive && !self.discovering && !self.saving,
             ));
         }
@@ -1158,6 +1167,23 @@ impl SetupDialog {
         }
         self.expire_notice();
         use SetupControl::*;
+        if let Some(managed) = &self.managed_setup {
+            let actions = self.actions();
+            let form = self.form.get_mut();
+            form.begin_frame();
+            form.declare(
+                List,
+                ControlKind::ChoiceList {
+                    len: MANAGED_SETUP_HARNESSES.len(),
+                    selected: managed.selected,
+                },
+            );
+            for (id, _, enabled) in actions {
+                form.declare_with_enabled(id, ControlKind::Button, enabled);
+            }
+            form.end_frame(List);
+            return;
+        }
         if let Some(search) = &self.search {
             let len = search.matches.len();
             let selected = search.selected;
@@ -1984,7 +2010,15 @@ impl SetupDialog {
 
     fn save(
         &mut self,
+        capabilities: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    ) -> DashboardAction {
+        self.save_with_login(capabilities, None)
+    }
+
+    fn save_with_login(
+        &mut self,
         _capabilities: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+        login_profile: Option<String>,
     ) -> DashboardAction {
         if self.saving {
             return DashboardAction::None;
@@ -2006,10 +2040,19 @@ impl SetupDialog {
             Ok(config) => {
                 self.saving = true;
                 self.notice = Some("Saving settings…".into());
-                DashboardAction::SaveSetup {
-                    generation: self.generation,
-                    original: self.original.clone(),
-                    updated: serde_json::to_string(&config).expect("config serializes"),
+                let updated = serde_json::to_string(&config).expect("config serializes");
+                match login_profile {
+                    Some(profile_id) => DashboardAction::SaveSetupAndLogin {
+                        generation: self.generation,
+                        original: self.original.clone(),
+                        updated,
+                        profile_id,
+                    },
+                    None => DashboardAction::SaveSetup {
+                        generation: self.generation,
+                        original: self.original.clone(),
+                        updated,
+                    },
                 }
             }
             Err(error) => {
@@ -2017,6 +2060,70 @@ impl SetupDialog {
                 DashboardAction::None
             }
         }
+    }
+
+    fn begin_managed_setup(&mut self) {
+        self.editor = None;
+        self.search = None;
+        self.path = vec!["profiles".to_owned()];
+        self.selected = 0;
+        self.managed_setup = Some(ManagedSetupState { selected: 0 });
+        self.notice = None;
+        self.form = RefCell::new(Dialog::default());
+        self.prepare();
+    }
+
+    fn leave_managed_setup(&mut self) {
+        self.managed_setup = None;
+        self.form = RefCell::new(Dialog::default());
+        self.prepare();
+    }
+
+    fn create_managed_profile_and_login(
+        &mut self,
+        capabilities: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    ) -> DashboardAction {
+        let Some(state) = &self.managed_setup else {
+            return DashboardAction::None;
+        };
+        let Some(kind) = MANAGED_SETUP_HARNESSES.get(state.selected).copied() else {
+            self.notice = Some("Choose an agent to set up.".into());
+            return DashboardAction::None;
+        };
+        let profile_id = self.available_profile_id(kind.id());
+        let home = kind.managed_profile_home(&profile_id);
+        let profile = json!({
+            "enabled": true,
+            "kind": kind,
+            "home": home,
+            "environment": {},
+            "context_window_bytes": null,
+            "guardian_review_model": null,
+            "codex_profile": null,
+        });
+        self.draft["profiles"]
+            .as_object_mut()
+            .expect("profiles is an object")
+            .insert(profile_id.clone(), profile);
+        self.managed_setup = None;
+        self.notice = Some(format!(
+            "Created {}. Next, Mjolnir will install it and open sign-in.",
+            kind.display_name()
+        ));
+        self.save_with_login(capabilities, Some(profile_id))
+    }
+
+    fn available_profile_id(&self, base: &str) -> String {
+        let profiles = self.draft["profiles"]
+            .as_object()
+            .expect("profiles is an object");
+        if !profiles.contains_key(base) {
+            return base.to_owned();
+        }
+        (2..)
+            .map(|suffix| format!("{base}-{suffix}"))
+            .find(|candidate| !profiles.contains_key(candidate))
+            .expect("an unused profile id always exists")
     }
 
     /// Compares only values that can be persisted to the config file. The
@@ -2200,6 +2307,13 @@ impl ModalSurface for SetupDialog {
 }
 
 impl DashboardState {
+    pub fn begin_managed_setup(&mut self) {
+        self.begin_settings_section("profiles", None);
+        if let Some(dialog) = setup_dialog_mut(&mut self.mode) {
+            dialog.begin_managed_setup();
+        }
+    }
+
     pub(crate) fn begin_settings_section(&mut self, section: &str, entry: Option<&str>) {
         self.profile_login_refresh = true;
         let mut dialog = SetupDialog::new(&self.config);
@@ -2370,22 +2484,12 @@ impl DashboardState {
         let Mode::Setup(dialog) = &mut self.mode else {
             return None;
         };
-        let mut config = config_from_draft(dialog.draft.clone()).ok()?;
-        // A global picker sees every enabled installation, rather than one parent's eligibility.
-        config.subagents.eligible_profiles = config
-            .enabled_profiles()
-            .map(|(id, _)| (id.to_owned(), true))
-            .collect();
-        let parent = config
-            .enabled_profiles()
-            .next()
-            .map(|(id, _)| id.to_owned())
-            .unwrap_or_default();
+        let config = config_from_draft(dialog.draft.clone()).ok()?;
         for task in ["straightforward", "subtle"] {
             let model = dialog.draft["subagents"][task]["model"].as_str();
-            let mut options = self.profile_capabilities.options(&config, &parent, None);
+            let mut options = self.profile_capabilities.options(&config, None);
             if let Some(options) = &mut options
-                && let Some(efforts) = self.profile_capabilities.options(&config, &parent, model)
+                && let Some(efforts) = self.profile_capabilities.options(&config, model)
             {
                 options.efforts = efforts.efforts;
                 options.unavailable = efforts.unavailable;
@@ -2631,13 +2735,24 @@ impl DashboardState {
             Some(Interaction::Cancel) if dialog.editor.is_some() => {
                 dialog.back();
             }
+            Some(Interaction::Cancel) if dialog.managed_setup.is_some() => {
+                dialog.leave_managed_setup();
+            }
             Some(Interaction::Cancel) | Some(Interaction::Activate(Cancel)) => {
                 return self.dismiss_setup(dialog);
+            }
+            Some(Interaction::Activate(Back)) if dialog.managed_setup.is_some() => {
+                dialog.leave_managed_setup();
             }
             Some(Interaction::Activate(Back)) => {
                 if dialog.back() {
                     // Leaving from the root is a dismissal; keep the dirty guard.
                     return self.dismiss_setup(dialog);
+                }
+            }
+            Some(Interaction::Select(List, index)) if dialog.managed_setup.is_some() => {
+                if let Some(managed) = &mut dialog.managed_setup {
+                    managed.selected = index.min(MANAGED_SETUP_HARNESSES.len().saturating_sub(1));
                 }
             }
             Some(Interaction::Select(List, index)) => {
@@ -2660,6 +2775,9 @@ impl DashboardState {
             }
             Some(Interaction::Toggle(List)) => {
                 dialog.open_selected();
+            }
+            Some(Interaction::Activate(List)) if dialog.managed_setup.is_some() => {
+                action = dialog.create_managed_profile_and_login(&self.profile_capabilities);
             }
             Some(Interaction::Activate(List)) => {
                 if dialog.selected_is_review() {
@@ -2702,6 +2820,12 @@ impl DashboardState {
             }
             Some(Interaction::Activate(Add)) => {
                 dialog.add();
+            }
+            Some(Interaction::Activate(ManagedSetup)) => {
+                dialog.begin_managed_setup();
+            }
+            Some(Interaction::Activate(ManagedContinue)) if dialog.managed_setup.is_some() => {
+                action = dialog.create_managed_profile_and_login(&self.profile_capabilities);
             }
             Some(Interaction::Activate(Remove)) if dialog.collection() => {
                 if let Some(key) = dialog.keys().get(dialog.selected).cloned() {
@@ -3116,6 +3240,14 @@ impl DashboardState {
         }
     }
 
+    pub fn queue_setup_login(&mut self, generation: u64, profile_id: String) {
+        self.pending_setup_login = Some((generation, profile_id));
+    }
+
+    pub fn take_setup_login(&mut self) -> Option<(u64, String)> {
+        self.pending_setup_login.take()
+    }
+
     pub fn setup_discovered(&mut self, generation: u64, result: Result<SetupDetection, String>) {
         let Some(dialog) = setup_dialog_mut(&mut self.mode) else {
             return;
@@ -3221,7 +3353,6 @@ impl DashboardState {
                     }
                 }
                 schema::expand(&mut dialog.draft, &mut Vec::new());
-                populate_subagent_profile_choices(&mut dialog.draft);
                 let found_any = match scope {
                     DetectScope::Profiles => !config.profiles.is_empty(),
                     DetectScope::Runtimes => !config.targets.is_empty() || found_on_machines,
@@ -3406,6 +3537,10 @@ pub(crate) fn render_setup(
     }
     if dialog.search.is_some() {
         render_search(frame, popup, inner, dialog);
+        return;
+    }
+    if dialog.managed_setup.is_some() {
+        render_managed_setup(frame, popup, inner, dialog);
         return;
     }
     let text_editor = dialog
@@ -3805,6 +3940,86 @@ pub(crate) fn render_setup(
     }
 
     form.end_frame(initial);
+}
+
+fn managed_harness_description(kind: mj_core::config::HarnessKind) -> &'static str {
+    use mj_core::config::HarnessKind;
+
+    match kind {
+        HarnessKind::Codex => "ChatGPT subscription or an OpenAI-compatible provider",
+        HarnessKind::Claude => "Claude Pro, Max, Team, or an Anthropic API key",
+        HarnessKind::Kimi => "Kimi Code subscription",
+        HarnessKind::Grok => "Grok Build subscription",
+        HarnessKind::Muse => "Muse account; container use is supported",
+        HarnessKind::OpenCode => "OpenCode provider login or an API key",
+        HarnessKind::Mimo => "MiMo Code account",
+        HarnessKind::Dsh => "DeepSeek API key",
+    }
+}
+
+fn render_managed_setup(frame: &mut Frame, popup: Rect, inner: Rect, dialog: &SetupDialog) {
+    use SetupControl::*;
+
+    let managed = dialog.managed_setup.as_ref().expect("managed setup");
+    let actions = dialog.actions();
+    let mut form = dialog.form.borrow_mut();
+    form.begin_frame();
+    let title = dismissible_modal_title(
+        &mut form,
+        popup,
+        " Set up a managed agent ",
+        theme::title(true),
+        !dialog.saving,
+    );
+    frame.render_widget(theme::modal().title(title), popup);
+
+    let intro = Rect::new(inner.x, inner.y, inner.width, 2);
+    frame.render_widget(
+        Paragraph::new(
+            "Choose an agent. Mjolnir will install its exact pinned version and open its sign-in flow.",
+        )
+        .wrap(Wrap { trim: false })
+        .style(theme::muted()),
+        intro,
+    );
+
+    let footer_row = mj_chat::components::DialogShell::layout(inner, 0).actions;
+    let guidance = Rect::new(inner.x, footer_row.y.saturating_sub(3), inner.width, 2);
+    frame.render_widget(
+        Paragraph::new(
+            "Where it runs is chosen when you create a session. Use a local Podman, Docker, or Apple container when you want the agent isolated from your normal host account.",
+        )
+        .wrap(Wrap { trim: false })
+        .style(theme::muted()),
+        guidance,
+    );
+    let body = Rect::new(
+        inner.x,
+        inner.y + 2,
+        inner.width,
+        guidance.y.saturating_sub(inner.y + 2).max(1),
+    );
+    let rows = MANAGED_SETUP_HARNESSES
+        .iter()
+        .map(|kind| {
+            Line::raw(format!(
+                "{} — {}",
+                kind.display_name(),
+                managed_harness_description(*kind)
+            ))
+        })
+        .collect::<Vec<_>>();
+    ChoiceList::render(frame, body, &rows, managed.selected, &mut form, List);
+    Dialog::render_actions(frame, footer_row, &actions, &mut form);
+    if let Some(notice) = &dialog.notice {
+        frame.render_widget(
+            Paragraph::new(notice.as_str())
+                .wrap(Wrap { trim: false })
+                .style(theme::palette().error),
+            Rect::new(inner.x, footer_row.y.saturating_sub(1), inner.width, 1),
+        );
+    }
+    form.end_frame(List);
 }
 
 /// Draws the search in place of the page: the query, then every setting that
