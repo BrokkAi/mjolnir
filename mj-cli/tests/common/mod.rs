@@ -278,17 +278,9 @@ impl DaemonStorage {
     }
 }
 
-/// Whether a process still exists. Signal 0 runs the existence and permission
-/// checks without delivering anything.
-#[cfg(unix)]
-pub fn process_exists(pid: u32) -> bool {
-    let Ok(pid) = i32::try_from(pid) else {
-        return false;
-    };
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
-#[cfg(not(unix))]
+/// Whether a process is still running. A zombie has exited and cannot hold or
+/// write the fixture store, even when the process table retains it because
+/// PID 1 does not reap.
 pub fn process_exists(pid: u32) -> bool {
     let process_id = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();

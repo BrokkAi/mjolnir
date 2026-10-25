@@ -445,6 +445,13 @@ described below.
 
 ## Log in
 
+The guided **Set up managed** flow creates a profile home under
+`<config dir>/profiles/<profile-id>/<harness>`, where `<config dir>` is
+`~/.config/mjolnir` on Linux or the path in `MJ_CONFIG_DIR`. These homes are
+owned by Mjolnir, so its pinned harness can safely create or migrate the login
+without touching an existing agent installation. The same flow is available
+from first-run onboarding when no installed agent was found.
+
 For Muse, configure `kind = "muse"` and a home ending in `muse`, for example
 `home = "/home/me/.config/muse"` or `/home/me/accounts/work/muse`. Discovery
 uses `$XDG_CONFIG_HOME/muse` when set. Mjolnir gives each session a private
@@ -579,7 +586,7 @@ that harness as an ACP agent. It reads the methods the bridge advertises:
 | Harness | What `mj login` does |
 | --- | --- |
 | Codex | ACP `authenticate` for `chat-gpt` (browser) or `api-key` (environment key) |
-| Claude Code | No ACP methods; falls back to `claude auth login` when the Claude CLI is installed |
+| Claude Code | No ACP methods; runs `auth login` through the Claude CLI installed in Mjolnir's pinned harness |
 | Kimi Code | Runs its advertised ACP method; falls back to `kimi login` only when the bridge cannot run |
 | Grok Build | Runs `grok login` for its `grok.com` method; falls back to the CLI when the bridge cannot run |
 | Muse Code | Runs the ACP `terminal` method `muse-acp login` |
@@ -589,22 +596,19 @@ that harness as an ACP agent. It reads the methods the bridge advertises:
 
 Use `--method <id>` when a bridge advertises several methods. Use `--cli` to
 skip ACP and run the harness command found on `PATH`, which is the behavior of
-earlier releases. A bridge that advertises no usable method, or a pinned
-installation that cannot be prepared, also falls back to that command-line
-login. A failure inside a chosen ACP method is reported instead of silently
-trying a different flow.
+earlier releases. A bridge that advertises no usable method falls back to the
+CLI in the same pinned installation. A failure inside a chosen ACP method is
+reported instead of silently trying a different flow.
 
 For harnesses with an ACP login, signing in installs or reuses the pinned
 harness, so the controller does not need a separate installation of that
-harness. Claude agent-acp advertises no login method, so Claude still uses an
-installed `claude` CLI (or the Mjolnir setup token). When a harness is installed
-on `PATH` it is also available through `--cli`, and it is used automatically as
-the fallback when ACP cannot run. A profile pointed at your own OpenCode, Muse, or MiMo
-home signs in through that installed harness's CLI instead: Mjolnir never runs
-the pinned binary against a login database it does not own. A profile with its
-own managed home gets the pinned ACP flow. API-key profiles, and profiles whose
-harness is configured for an API key rather than a native login, have no
-interactive login.
+harness. Claude agent-acp advertises no login method, so Mjolnir runs
+`auth login` through the Claude CLI in the pinned installation. A profile
+pointed at your own OpenCode, Muse, or MiMo home signs in through that installed
+harness's CLI instead: Mjolnir never runs the pinned binary against a login
+database it does not own. A profile with its own Mjolnir-managed home gets the
+pinned flow. API-key profiles, and profiles whose harness is configured for an
+API key rather than a native login, have no interactive login.
 
 On macOS, Claude Code keeps its login in one Keychain item rather than in the
 home ([anthropics/claude-code#20553](https://github.com/anthropics/claude-code/issues/20553)),
@@ -631,8 +635,9 @@ sessions, create a non-rotating setup token:
 mj login --profile claude-work --setup-token
 ```
 
-This runs `claude setup-token`, verifies it with `claude auth status`, and stores
-it under Mjolnir's configuration directory at:
+This runs `setup-token` through the Claude CLI in Mjolnir's pinned installation,
+verifies it with `auth status`, and stores it under Mjolnir's configuration
+directory at:
 
 ```text
 profiles/<profile-id>/claude-oauth-token
@@ -641,8 +646,7 @@ profiles/<profile-id>/claude-oauth-token
 New and resumed sessions receive it as `CLAUDE_CODE_OAUTH_TOKEN`. It covers
 model requests, not Claude Remote Control or claude.ai connectors. Remove that
 file to return the profile to its normal synced credentials. `--setup-token` is
-valid only for Claude profiles and runs `claude` from `PATH`; it conflicts with
-`--method` and `--cli`.
+valid only for Claude profiles; it conflicts with `--method` and `--cli`.
 
 ## What a session's staged home holds
 
@@ -882,21 +886,24 @@ only the resulting absolute path—never an arbitrary compatible executable from
 
 For Codex, Claude, Muse, MiMo, and DSH's npx fallback, Mjolnir uses Node.js 22
 or newer with npm and npx when the session `PATH` already provides that stack.
-Otherwise it downloads the pinned Node.js 24.22.1 distribution with curl,
-verifies its published SHA-256 checksum, and installs it under
+Otherwise it downloads the pinned Node.js 24.22.1 distribution with its internal
+HTTPS client, verifies its published SHA-256 checksum, and installs it under
 `$XDG_CACHE_HOME/mjolnir/node` (or `$HOME/.cache/mjolnir/node`). The managed
-`bin` directory is prepended for the harness and its child processes.
+`bin` directory is prepended for the harness and its child processes. A target
+that mirrors the Node.js distribution can set `NODEJS_ORG_MIRROR` (or the
+compatible `NVM_NODEJS_ORG_MIRROR`) to an HTTPS base URL; Mjolnir still checks
+the pinned digest.
 
-Kimi and Grok require curl and Bash for their official installers.
-Muse also requires curl; Mjolnir launches the pinned `muse-acp` adapter through
-npx and downloads the pinned native Muse binary, verifying its SHA-256 checksum.
-Linux and macOS, on x86-64 and ARM64, are supported. The native Muse binary
-retains its own upstream terms.
-OpenCode requires curl and tar; Mjolnir downloads the pinned OpenCode 2 package
-for the platform from npm (`@opencode/cli-<platform>`), the same package
-OpenCode's own installer fetches, and verifies its SHA-256 checksum. Linux and macOS, on
-x86-64 and ARM64, are supported. The pinned installation disables OpenCode's
-self-update so a running session never replaces its own binary.
+Kimi Code and Grok Build install from their direct per-platform release
+artifacts, with pinned SHA-256 checksums. Mjolnir launches the pinned
+`muse-acp` adapter through npx and downloads the pinned native Muse binary,
+verifying its SHA-256 checksum. Linux and macOS, on x86-64 and ARM64, are
+supported. The native Muse binary retains its own upstream terms.
+OpenCode downloads the pinned OpenCode 2 package for the platform from npm
+(`@opencode/cli-<platform>`), the same package OpenCode's own installer fetches,
+and verifies it in-process. Linux and macOS, on x86-64 and ARM64, are supported.
+The pinned installation disables OpenCode's self-update so a running session
+never replaces its own binary.
 MiMo Code installs from the pinned `@mimo-ai/cli` npm package. Its managed
 launch disables automatic updates so a running session never replaces its own
 binary.

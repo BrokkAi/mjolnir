@@ -839,7 +839,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
     .unwrap_err();
     let reported = format!("{error:#}");
     assert!(
-        reported.contains("install curl or provide Node.js 22+ with npm and npx"),
+        reported.contains("use a target where Mjolnir's managed runtime can run"),
         "{reported}"
     );
     assert!(

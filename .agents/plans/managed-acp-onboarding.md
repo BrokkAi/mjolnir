@@ -14,21 +14,23 @@ After this work, the default local workflow should have one user-facing bootstra
 
 ## Progress
 
-- [x] (2026-10-25 09:30Z) Audited existing managed harness, Node, login, target, and Git bootstrap paths.
-- [x] (2026-10-25 09:30Z) Confirmed that DSH and Muse npx calls use the leased managed Node installation and are not external software prerequisites.
-- [x] (2026-10-25 09:30Z) Confirmed that Podman, Docker, Apple container, SSH Podman, and SSH Docker provisioning already install `git` and `gh` through the image package manager when missing, subject to root or passwordless sudo.
-- [x] (2026-10-25 09:48Z) Make managed Node cache probing recoverable, detect incompatible glibc artifacts before download, and report failed system probes.
-- [x] (2026-10-25 09:48Z) Add managed Node mirror support with checksum verification and tests.
-- [x] (2026-10-25 10:12Z) Use Mjolnir's bounded HTTPS client for verified Node, Muse, and OpenCode artifact downloads.
-- [ ] Replace Kimi and Grok vendor shell installers with direct pinned artifacts.
-- [x] (2026-10-25 10:12Z) Replace the external OpenCode `tar` call with the Rust archive reader already used for Node.
-- [ ] Run Claude login and setup-token through the pinned Claude CLI.
-- [ ] Add a managed-agent onboarding action that creates a non-own profile home, saves it, and hands off to sign-in.
-- [ ] Offer existing installed profiles first and keep manual/advanced profile creation available.
-- [ ] Make onboarding explain target choice and recommend an available container for harnesses the user does not want on the host.
-- [ ] Add clean-machine integration coverage for managed profile creation and harness installation.
-- [ ] Update human documentation and diagnostics.
-- [ ] Run affected crate suites, workspace Clippy, and formatting; commit and push validated slices.
+- [x] (2026-10-25 09:10Z) Audited existing managed harness, Node, login, target, and Git bootstrap paths.
+- [x] (2026-10-25 09:10Z) Confirmed that DSH and Muse npx calls use the leased managed Node installation and are not external software prerequisites.
+- [x] (2026-10-25 09:10Z) Confirmed that Podman, Docker, Apple container, SSH Podman, and SSH Docker provisioning already install `git` and `gh` through the image package manager when missing, subject to root or passwordless sudo.
+- [x] (2026-10-25 09:19Z) Make managed Node cache probing recoverable, detect incompatible glibc artifacts before download, and report failed system probes.
+- [x] (2026-10-25 09:19Z) Add managed Node mirror support with checksum verification and tests.
+- [x] (2026-10-25 09:27Z) Use Mjolnir's bounded HTTPS client for verified Node, Muse, and OpenCode artifact downloads.
+- [x] (2026-10-25 09:32Z) Replace Kimi and Grok vendor shell installers with direct pinned artifacts.
+- [x] (2026-10-25 09:27Z) Replace the external OpenCode `tar` call with the Rust archive reader already used for Node.
+- [x] (2026-10-25 09:38Z) Run managed-harness CLI fallback, Claude login, and Claude setup-token through the pinned CLI installation.
+- [x] (2026-10-25 09:51Z) Add a managed-agent onboarding action that creates a Mjolnir-owned profile home, saves it, and hands off to sign-in.
+- [x] (2026-10-25 09:51Z) Offer existing installed profiles first and keep manual/advanced profile creation available.
+- [x] (2026-10-25 09:51Z) Make onboarding explain target choice and point to local containers when the user wants the harness isolated from the host account.
+- [x] (2026-10-25 09:51Z) Add clean-machine coverage for managed profile creation, direct artifact installation, cache repair, and preflight without external download tools.
+- [x] (2026-10-25 10:03Z) Update human documentation and diagnostics.
+- [x] (2026-10-25 10:03Z) Reuse compatible image-provided native harnesses and install the exact managed pin when a custom container lacks them.
+- [x] (2026-10-25 10:23Z) Run the affected crate suites and workspace Clippy, verify documentation links, and commit and push each validated slice.
+- [ ] The full core suite still contains one environment-specific detached-child assertion that cannot pass under this container's PID 1, which does not reap exiting orphans; the product subprocess tests and all other core tests pass.
 
 ## Surprises & Discoveries
 
@@ -48,6 +50,18 @@ After this work, the default local workflow should have one user-facing bootstra
   Evidence: `mj-tui/src/setup/schema.rs:41`; `mj-tui/src/setup.rs:1334`; `mj-tui/src/setup.rs:2688`.
 - Observation: First-run discovery only creates profiles for installed agents. With none, it tells the person to add a profile manually.
   Evidence: `mj-tui/src/setup.rs:3250`.
+- Observation: Container fallback scripts also downloaded native harnesses with vendor `curl`/Bash installers. The worker now recognizes its own generated fallback, reuses an image-provided native executable when present, and otherwise switches to the exact managed cache installation. A caller-supplied custom command remains untouched.
+  Evidence: `mj-core/src/harness_runtime.rs::fallback_launch`; `mj-worker/src/worker_runtime/harness_launch.rs::is_managed_fallback_candidate`.
+- Observation: The supported release installer already requires curl and tar, but relying on that would couple harness startup to the installation channel. All harness runtime downloads now use Mjolnir's HTTPS client and Rust archive readers.
+  Evidence: `mj-core/src/harness_install.rs::download_verified_inner`; `extract_archive_file`; `extract_zstd_file`.
+- Observation: The old Kimi and Grok bridge tests exercised vendor installer stdout, which no longer exists after direct pinned artifacts replaced those installers. The replacement tests use the installed launcher and prove that ACP stdout remains clean.
+  Evidence: `mj-controller/src/controller/worker_binary/tests.rs::kimi_default_bridge_starts_installed_acp_with_clean_stdout` and `grok_default_bridge_starts_installed_acp_with_clean_stdout`.
+- Observation: Adding managed setup changed two user-facing golden renders: the setup summary now always tells a newcomer that Mjolnir can install an agent, and the profile action menu now contains `Set up managed`.
+  Evidence: `mj-controller/tests/golden/setup-origin-discovery.txt`; `mj-tui/tests/golden/support-pane-title-menu.txt`.
+- Observation: PTY fixtures can inherit `NO_COLOR` from the host. The terminal received and parsed a white-background reply correctly, but the requested Auto theme correctly resolved to Mono, so no Light surface was painted.
+  Evidence: an isolated run with `NO_COLOR=1` parsed `Ok(Some((255, 255, 255)))` and painted no palette background; removing `NO_COLOR` made the real-PTY acceptance test pass.
+- Observation: This container's PID 1 does not reap orphaned processes. Fixture cleanup and the detached-process core assertion therefore observe persistent zombie entries even after the processes have exited.
+  Evidence: `ps` showed the retained fixture PIDs with state `Z` and parent `1`; the daemon integration suite passed 16/16 after cleanup treated zombies as exited.
 
 ## Decision Log
 
@@ -69,10 +83,62 @@ After this work, the default local workflow should have one user-facing bootstra
 - Decision: Preserve plain local Git-free sessions as a separate prerequisite reduction, landed through PR #1351 or equivalent changes.
   Rationale: Git-free local directories solve a different user need from managed harness installation and should remain independently testable.
   Date/Author: 2026-10-25, Codex
+- Decision: Reuse a compatible image-provided native harness when it exists, but install the exact Mjolnir pin when the built-in fallback cannot find one.
+  Rationale: Default agent images start quickly, while minimal custom images no longer need to install curl, Bash, tar, or a harness CLI only to make Mjolnir work.
+  Date/Author: 2026-10-25, Codex
+- Decision: Kimi and Grok use checksum-pinned native artifacts rather than vendor shell installers or ambient CLIs.
+  Rationale: Direct artifacts remove Bash and curl from the harness runtime path and make the installed version deterministic; retaining the launcher itself preserves compatibility with image-provided harnesses.
+  Date/Author: 2026-10-25, Codex
+- Decision: Keep the broader local-first progressive onboarding proposal in open issue #1128 separate from this managed setup.
+  Rationale: Managed setup removes the first-run software-installation burden and offers a task-oriented entry point, but a full basic/advanced wizard split and local onboarding checklist are a larger product change with different acceptance criteria.
+  Date/Author: 2026-10-25, Codex
 
 ## Outcomes & Retrospective
 
-No implementation has landed yet. The work begins with correctness fixes in the managed Node layer because onboarding depends on that layer being repairable and honest about unsupported platforms.
+After installing `mj`, a user can choose `Set up managed` from the first-run
+welcome or Agent Profiles, create a Mjolnir-owned profile without knowing a
+harness home, save it through the normal supervised settings path, and hand off
+to the existing sign-in flow. Existing detected profiles remain preferred.
+Managed harness installations now acquire every artifact with Mjolnir's bounded
+HTTPS client, verify pinned checksums, extract archives in Rust, and put the
+managed Node `bin` directory on the ACP launch path. Consequently, users do not
+need Node, npm, npx, curl, tar, or a harness CLI installed in advance. Claude
+login and setup-token also use the pinned CLI from the same leased installation.
+
+Kimi and Grok install from exact native artifacts. OpenCode no longer invokes
+`tar`. Minimal container fallbacks reuse compatible image-provided native
+harnesses or install the managed pin. Podman, Docker, Apple container, SSH
+Podman, and SSH Docker provisioners install Git and GitHub CLI when absent,
+given root or passwordless sudo in the container. Plain local directories
+remain usable without Git.
+
+Validation is complete for the ordinary workspace paths: worker 698 library
+tests plus every binary and integration suite passed; controller passed 2,098
+tests with 17 ignored after the stale fixture fixes; CLI passed every unit,
+ACP, daemon-upgrade, store, instance, and real-PTY test; TUI passed 540 tests
+with 2 ignored; docs built 27 pages and checked 2,295 internal links; and
+workspace Clippy and formatting passed. The full core suite passed 537 tests
+with 3 ignored and one environment-only failure in
+`spawn_detached_leaves_no_zombie_under_a_spawner_that_keeps_running`, because
+this container's PID 1 leaves the detached child as a zombie instead of reaping
+it. The probe is intentionally testing reaping, so changing it to accept a
+permanent zombie would remove the regression guarantee.
+
+There are currently zero open pull requests, including feature pull requests.
+The only irreducible bootstrap is obtaining `mj` itself; a release installer may
+still use curl or tar before Mjolnir exists. The principal remaining runtime
+limitation is that the pinned Linux Node archive is glibc, so a musl target
+without a compatible system Node cannot run the Node-based harnesses. It now
+fails preflight with that exact explanation instead of downloading an unusable
+30 MB archive. Container and SSH targets continue to require their own
+engine/server infrastructure, and the full local-first progressive onboarding
+tracked by #1128 remains a separate open feature.
+
+The main lesson is to test the executable launch and rendered user output after
+removing an installation phase. Installer-specific tests can become stale even
+when the replacement behavior is stronger, and fixture environment such as
+`NO_COLOR` or a non-reaping PID 1 must be made explicit rather than mistaken for
+a product regression.
 
 ## Context and Orientation
 
@@ -96,7 +162,7 @@ Third, make authentication independent of ambient CLIs. Extend the managed harne
 
 Fourth, add managed onboarding. Add a setup action available when no enabled profile exists or when the user explicitly chooses managed setup. The action opens a harness chooser listing the managed harnesses and a plain-language authentication summary. Choosing one computes a collision-free profile ID and an absolute Mjolnir-owned home under Mjolnir's configuration directory, creates an ordinary profile value, validates it, saves it through the existing supervised setup-save path, and then invokes the existing `SetupLogin` action. DSH is included because it needs only the documented environment key and needs no interactive login. Existing profiles suppress the automatic prompt but do not remove the manual managed-setup action.
 
-The chooser must explain target implications without selecting a target for the user. If a local container target is available, its row says that container sessions keep the harness off the host. If no container is available, local use remains selectable and the existing raw-target warning remains authoritative. The session wizard, not profile setup, records the eventual target.
+The chooser must explain target implications without selecting a target for the user. It points to local container sessions as the isolation option and leaves local use selectable. The existing target readiness checks and raw-target warning remain authoritative. The session wizard, not profile setup, records the eventual target.
 
 Fifth, update first-run messaging and documentation. Welcome output should say that managed setup is available in Settings instead of instructing a novice to install an agent CLI. The quickstart should present two ordered paths: use existing installations, or use managed setup. Profile and runtime docs should describe the actual cold-start downloads and no longer claim that users need `curl`, Bash, npx, or tar. Keep the explicit container Git behavior documented, including the root/passwordless-sudo condition.
 
@@ -203,3 +269,8 @@ In `mj-core/src/config/harness.rs`, add a pure helper that returns the absolute 
 In `mj-tui/src/setup.rs`, add a managed-setup control and a small chooser state. Profile creation must produce a serialized profile draft, then use the existing save and `SetupLogin` actions rather than performing filesystem, network, or login work on the render/event loop.
 
 In `mj-cli/src/dashboard/actions.rs`, route the chosen managed profile through the existing supervised save path and then the existing terminal login handoff. No TUI event handler may block on artifact download or authentication.
+
+Revision note (2026-10-25T10:23Z): Recorded final validation results, stale test
+updates, the zero-open-PR count, the PID-1 test limitation, and the remaining
+musl Node and broader-onboarding boundaries. No product design changed in this
+revision.

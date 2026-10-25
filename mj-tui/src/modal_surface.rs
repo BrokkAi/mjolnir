@@ -128,11 +128,15 @@ macro_rules! dialog_form {
 }
 
 impl DialogModal for crate::welcome::WelcomeDialog {
-    dialog_form!(());
+    dialog_form!(crate::welcome::WelcomeAction);
 
     fn prepare(&mut self) {
-        self.form.get_mut().set_dismiss_actions(&[()]);
-        self.form.get_mut().set_default_action(());
+        self.form
+            .get_mut()
+            .set_dismiss_actions(&[crate::welcome::WelcomeAction::Continue]);
+        self.form
+            .get_mut()
+            .set_default_action(crate::welcome::WelcomeAction::Continue);
     }
 }
 

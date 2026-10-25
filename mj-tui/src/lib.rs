@@ -590,6 +590,15 @@ pub enum DashboardAction {
         original: String,
         updated: String,
     },
+    /// Save a managed profile and then hand the terminal to its sign-in flow.
+    SaveSetupAndLogin {
+        generation: u64,
+        original: String,
+        updated: String,
+        profile_id: String,
+    },
+    /// Open the guided chooser for a harness Mjolnir installs itself.
+    OpenManagedSetup,
     /// Hand the terminal to `mj login` for the selected profile, then resume
     /// the dashboard. The generation anchors the result to the open dialog.
     SetupLogin {
@@ -883,6 +892,9 @@ pub struct DashboardState {
     profile_login_refresh: bool,
     /// Orders status reads so a slow earlier read cannot replace a newer one.
     profile_login_generation: u64,
+    /// A managed profile saved from setup whose login starts after the save
+    /// result and updated configuration have been applied.
+    pending_setup_login: Option<(u64, String)>,
     pub(crate) profile_hydration_requests: BTreeMap<String, BTreeSet<String>>,
     pub(crate) profile_hydration_errors: BTreeMap<String, String>,
     /// The resolved `[keys]` bindings, refreshed whenever configuration is
@@ -1221,6 +1233,7 @@ impl DashboardState {
             profile_login_statuses: Default::default(),
             profile_login_refresh: false,
             profile_login_generation: 0,
+            pending_setup_login: None,
             profile_hydration_requests: Default::default(),
             profile_hydration_errors: Default::default(),
             config: config.into(),

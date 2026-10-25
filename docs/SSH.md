@@ -12,7 +12,7 @@ Four runtimes can run on it:
 - `docker` — uses the remote host's Linux Docker daemon; see
   [Docker for Mjolnir](DOCKER.md).
 - `apple-container` — runs Apple's Linux container runtime on an Apple-silicon
-  Mac; see [Apple container](apple-container.md).
+  Mac; see [Apple container](/apple-container/).
 
 All four shell out to the local `ssh` CLI rather than using an SSH library.
 

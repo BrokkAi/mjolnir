@@ -528,9 +528,29 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
 
 #[cfg(unix)]
 #[test]
-fn node_preflight_accepts_a_downloader_when_node_is_missing() {
+fn node_preflight_accepts_a_managed_runtime_when_node_is_missing() {
     let directory = tempfile::tempdir().unwrap();
-    mj_core::test_hooks::install_fake_command(directory.path(), "curl", "#!/bin/sh\nexit 0\n");
+    let system = if cfg!(target_os = "macos") {
+        "Darwin"
+    } else {
+        "Linux"
+    };
+    let machine = match std::env::consts::ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" => {
+            if cfg!(target_os = "macos") {
+                "arm64"
+            } else {
+                "aarch64"
+            }
+        }
+        architecture => panic!("test has no uname mapping for {architecture}"),
+    };
+    mj_core::test_hooks::install_fake_command(
+        directory.path(),
+        "uname",
+        &format!("#!/bin/sh\ncase \"$1\" in -s) echo {system} ;; -m) echo {machine} ;; esac\n"),
+    );
     let profile = HarnessProfile {
         enabled: true,
         kind: HarnessKind::Codex,
@@ -555,7 +575,7 @@ fn node_preflight_accepts_a_downloader_when_node_is_missing() {
 
 #[cfg(unix)]
 #[test]
-fn node_preflight_explains_when_it_cannot_install_node() {
+fn node_preflight_explains_when_the_target_has_no_managed_runtime() {
     let directory = tempfile::tempdir().unwrap();
     let profile = HarnessProfile {
         enabled: true,
@@ -582,15 +602,12 @@ fn node_preflight_explains_when_it_cannot_install_node() {
     );
     assert!(
         error.starts_with(
-            "Codex launch preflight failed on local host; install curl or provide Node.js 22+ \
-             with npm and npx on the target PATH"
+            "Codex launch preflight failed on local host; provide Node.js 22+ with npm and npx \
+             on the target PATH"
         ),
         "{error}"
     );
-    assert!(
-        error.contains("curl is unavailable to install Mjolnir pinned Node.js runtime"),
-        "{error}"
-    );
+    assert!(error.contains("managed Node.js has no artifact"), "{error}");
 }
 
 #[cfg(unix)]
@@ -2241,25 +2258,22 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     );
 }
 
-/// Runs a default bridge script with no harness installed, a fake `curl`
-/// that serves `installer`, and nothing else from the host's harnesses on
-/// PATH. Returns the script's stdout and stderr.
+/// Runs a default bridge script with `launcher` in the target's home and no
+/// harness on PATH. Returns the script's stdout and stderr.
 #[cfg(unix)]
-fn run_default_bridge_install(
+fn run_default_bridge(
     harness: mj_core::config::HarnessKind,
-    installer: &str,
+    launcher: &str,
+    script: &str,
 ) -> (String, String) {
     use std::os::unix::fs::PermissionsExt;
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join("fake-bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let curl = bin.join("curl");
-    std::fs::write(
-        &curl,
-        format!("#!/bin/sh\ncat <<'INSTALLER'\n{installer}\nINSTALLER\n"),
-    )
-    .unwrap();
-    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let executable = home.path().join(launcher);
+    std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    std::fs::write(&executable, script).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     let (command, arguments) = bridge_launch(harness, ExecutionPolicy::ConfiguredApprovals);
     let mut process = std::process::Command::new(command);
     process
@@ -2490,52 +2504,31 @@ fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
 }
 
 /// A Kimi launcher's installer lines on stdout reached the ACP transport and
-/// broke initialize (#1136). The installer's output goes to stderr, which the
-/// worker keeps, and the ACP server starts with a clean stdout.
+/// broke initialize (#1136). The managed path installs the pinned artifact
+/// before launch, so the default bridge starts the ACP server directly.
 #[cfg(unix)]
 // Hard-won: 2fe3b29: Kimi installer output contaminated ACP stdout
 #[test]
-fn kimi_default_bridge_sends_installer_output_to_stderr() {
-    let (stdout, stderr) = run_default_bridge_install(
+fn kimi_default_bridge_starts_installed_acp_with_clean_stdout() {
+    let (stdout, stderr) = run_default_bridge(
         mj_core::config::HarnessKind::Kimi,
-        r#"echo "==> Detected target: linux-x64"
-echo "==> Installing $KIMI_VERSION"
-mkdir -p "$HOME/.kimi-code/bin"
-printf '#!/bin/sh\necho "{\\"jsonrpc\\":\\"2.0\\",\\"args\\":\\"$*\\"}"\n' > "$HOME/.kimi-code/bin/kimi"
-chmod +x "$HOME/.kimi-code/bin/kimi""#,
+        ".kimi-code/bin/kimi",
+        "#!/bin/sh\nprintf '{\"jsonrpc\":\"2.0\",\"args\":\"%s\"}\\n' \"$*\"\n",
     );
     assert_eq!(stdout, "{\"jsonrpc\":\"2.0\",\"args\":\"acp\"}\n");
-    assert!(
-        stderr.contains("==> Detected target: linux-x64"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains(&format!(
-            "==> Installing {}",
-            mj_core::harness_runtime::KIMI_VERSION
-        )),
-        "{stderr}"
-    );
+    assert!(stderr.is_empty(), "{stderr}");
 }
 
 #[cfg(unix)]
 #[test]
-fn grok_default_bridge_sends_installer_output_to_stderr() {
-    let (stdout, stderr) = run_default_bridge_install(
+fn grok_default_bridge_starts_installed_acp_with_clean_stdout() {
+    let (stdout, stderr) = run_default_bridge(
         mj_core::config::HarnessKind::Grok,
-        r#"echo "==> Installing $1"
-mkdir -p "$HOME/.grok/bin"
-printf '#!/bin/sh\necho "{\\"jsonrpc\\":\\"2.0\\",\\"args\\":\\"$*\\"}"\n' > "$HOME/.grok/bin/grok"
-chmod +x "$HOME/.grok/bin/grok""#,
+        ".grok/bin/grok",
+        "#!/bin/sh\nprintf '{\"jsonrpc\":\"2.0\",\"args\":\"%s\"}\\n' \"$*\"\n",
     );
     assert_eq!(stdout, "{\"jsonrpc\":\"2.0\",\"args\":\"agent stdio\"}\n");
-    assert!(
-        stderr.contains(&format!(
-            "==> Installing {}",
-            mj_core::harness_runtime::GROK_VERSION
-        )),
-        "{stderr}"
-    );
+    assert!(stderr.is_empty(), "{stderr}");
 }
 
 #[test]

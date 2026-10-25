@@ -376,6 +376,22 @@ impl HarnessKind {
             .is_some_and(|user| home == user.join(self.default_home_leaf()))
     }
 
+    /// The profile home Mjolnir creates during managed onboarding. Keeping it
+    /// below the configuration directory identifies Mjolnir, rather than the
+    /// harness's own installation, as the owner of the login and native data.
+    pub fn managed_profile_home(self, profile_id: &str) -> PathBuf {
+        self.managed_profile_home_in(&super::config_dir(), profile_id)
+    }
+
+    /// [`Self::managed_profile_home`] with an explicit configuration root for
+    /// tests and callers that are already operating on another instance.
+    pub fn managed_profile_home_in(self, config_root: &Path, profile_id: &str) -> PathBuf {
+        config_root
+            .join("profiles")
+            .join(profile_id)
+            .join(self.id())
+    }
+
     /// The configuration trees a session stages for `home`, lowest priority
     /// first.
     ///

@@ -519,9 +519,31 @@ pub(crate) async fn apply_dashboard_action(
                 generation,
                 original,
                 updated,
+                None,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );
+        }
+        DashboardAction::SaveSetupAndLogin {
+            generation,
+            original,
+            updated,
+            profile_id,
+        } => {
+            if let Some(cancelled) = context.review_discovery_cancel.take() {
+                cancelled.store(true, Ordering::Release);
+            }
+            super::io::spawn_setup_save(
+                generation,
+                original,
+                updated,
+                Some(profile_id),
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
+        DashboardAction::OpenManagedSetup => {
+            context.dashboard.begin_managed_setup();
         }
         DashboardAction::SetupLogin {
             generation,
