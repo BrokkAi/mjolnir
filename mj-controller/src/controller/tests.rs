@@ -854,6 +854,10 @@ fn registration_rejects_a_start_commit_it_cannot_honour() {
 
 // Hard-won: d81795bc9: creation probed Git separately and forgot to record a
 // plain local project, leaving a session whose bundle ID described nothing.
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 #[test]
 fn registration_records_a_plain_local_directory_as_its_project() {
     const MARKER: &str = "MJ_TEST_PLAIN_PROJECT_CHILD";
