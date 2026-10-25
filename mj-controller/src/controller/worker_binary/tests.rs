@@ -2322,17 +2322,14 @@ fn run_default_bridge(
 #[test]
 fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
     use mj_core::harness_runtime::DSH_ACP_VERSION;
-    use std::os::unix::fs::PermissionsExt;
 
     let root = tempfile::tempdir().unwrap();
     let bin = root.path().join("fake-bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let dsh = bin.join("dsh-acp");
     let script = format!(
         "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'dsh-acp {DSH_ACP_VERSION}\\n'; exit 0; fi\nprintf '%s|%s|%s' \"$*\" \"$DSH_ACP_SYSTEM_PROMPT\" \"$DSH_ACP_DATA_DIR\"\n"
     );
-    std::fs::write(&dsh, script).unwrap();
-    std::fs::set_permissions(&dsh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    mj_core::test_hooks::install_fake_command(&bin, "dsh-acp", &script);
     let staged = root.path().join("staged");
     std::fs::create_dir_all(&staged).unwrap();
     let instructions =
@@ -2502,28 +2499,24 @@ fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
 // Hard-won: c330ea5f2: a pre-0.4 dsh-acp on PATH silently received no staged instructions.
 #[test]
 fn dsh_launch_does_not_select_a_pre_native_loader() {
-    use std::os::unix::fs::PermissionsExt;
-
     let root = tempfile::tempdir().unwrap();
     let legacy_bin = root.path().join("legacy-bin");
     let tools_bin = root.path().join("tools-bin");
     std::fs::create_dir_all(&legacy_bin).unwrap();
     std::fs::create_dir_all(&tools_bin).unwrap();
-    let legacy = legacy_bin.join("dsh-acp");
-    std::fs::write(
-        &legacy,
+    mj_core::test_hooks::install_fake_command(
+        &legacy_bin,
+        "dsh-acp",
         "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'dsh-acp 0.3.0'; else echo legacy; fi\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     for tool in ["node", "npm"] {
-        let path = tools_bin.join(tool);
-        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        mj_core::test_hooks::install_fake_command(&tools_bin, tool, "#!/bin/sh\nexit 0\n");
     }
-    let npx = tools_bin.join("npx");
-    std::fs::write(&npx, "#!/bin/sh\nprintf 'npx|%s' \"$*\"\n").unwrap();
-    std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
+    mj_core::test_hooks::install_fake_command(
+        &tools_bin,
+        "npx",
+        "#!/bin/sh\nprintf 'npx|%s' \"$*\"\n",
+    );
 
     let launch = |path: &Path| {
         let staged = root.path().join("staged");

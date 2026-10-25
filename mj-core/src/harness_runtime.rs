@@ -218,11 +218,8 @@ pub fn dsh_acp_script() -> String {
     )
 }
 
-/// A POSIX shell command that succeeds when the `dsh-acp` on `PATH` can load
-/// staged instructions from its data directory. The caller checks that the
-/// command exists first.
-pub fn dsh_acp_version_supported_script() -> String {
-    let (required_major, required_minor) = DSH_ACP_VERSION
+fn dsh_acp_required_major_minor() -> (u64, u64) {
+    DSH_ACP_VERSION
         .split_once('.')
         .and_then(|(major, minor)| {
             Some((
@@ -230,7 +227,31 @@ pub fn dsh_acp_version_supported_script() -> String {
                 minor.split('.').next()?.parse::<u64>().ok()?,
             ))
         })
-        .expect("DSH_ACP_VERSION starts with numeric major and minor versions");
+        .expect("DSH_ACP_VERSION starts with numeric major and minor versions")
+}
+
+/// Whether `dsh-acp --version` output names a release that loads staged
+/// instructions from its data directory.
+pub fn dsh_acp_version_supports_native_instructions(version_output: &str) -> bool {
+    let Some(version) = version_output.strip_prefix("dsh-acp ") else {
+        return false;
+    };
+    let mut version = version.trim().split('.');
+    let Some(Ok(major)) = version.next().map(str::parse::<u64>) else {
+        return false;
+    };
+    let Some(Ok(minor)) = version.next().map(str::parse::<u64>) else {
+        return false;
+    };
+    let (required_major, required_minor) = dsh_acp_required_major_minor();
+    major > required_major || (major == required_major && minor >= required_minor)
+}
+
+/// A POSIX shell command that succeeds when the `dsh-acp` on `PATH` can load
+/// staged instructions from its data directory. The caller checks that the
+/// command exists first.
+pub fn dsh_acp_version_supported_script() -> String {
+    let (required_major, required_minor) = dsh_acp_required_major_minor();
     format!(
         "{{ reported=\"$(dsh-acp --version 2>/dev/null)\" || reported=; case \"$reported\" in 'dsh-acp '*) reported=\"${{reported#dsh-acp }}\" ;; *) reported= ;; esac; major=\"${{reported%%.*}}\"; rest=\"${{reported#*.}}\"; minor=\"${{rest%%.*}}\"; case \"$major\" in ''|*[!0-9]*) major= ;; esac; case \"$minor\" in ''|*[!0-9]*) minor= ;; esac; [ -n \"$major\" ] && [ -n \"$minor\" ] && {{ [ \"$major\" -gt {required_major} ] || {{ [ \"$major\" -eq {required_major} ] && [ \"$minor\" -ge {required_minor} ]; }}; }}; }}",
         required_major = required_major,

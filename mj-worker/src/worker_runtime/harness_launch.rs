@@ -50,7 +50,7 @@ pub async fn prepare_harness_launch(
         environment.insert("PATH".into(), path.clone());
         spec.environment.insert("PATH".into(), path);
     }
-    let managed_node = if needs_node_runtime(harness, &environment)? {
+    let managed_node = if needs_node_runtime(harness, &environment).await? {
         let node = harness::ensure_node_runtime(&mut environment)
             .await
             .with_context(|| format!("prepare Node.js for {}", harness.display_name()))?;
@@ -264,13 +264,36 @@ fn ambient_native_harness_is_available(
 /// DSH can launch its own native binary. Its npm fallback is the only branch
 /// that needs Node.js. Other Node-using harnesses always need the runtime,
 /// even when their adapter is already installed.
-pub(super) fn needs_node_runtime(
+pub(super) async fn needs_node_runtime(
     harness: HarnessKind,
     environment: &BTreeMap<String, String>,
 ) -> Result<bool> {
     let dsh_is_native = if harness == HarnessKind::Dsh {
         if environment.contains_key("PATH") {
-            find_command(Path::new("dsh-acp"), environment)?.is_some()
+            match find_command_path(Path::new("dsh-acp"), environment)? {
+                Some(command) => {
+                    let mut probe = tokio::process::Command::new(command);
+                    probe.arg("--version").env_clear().envs(environment);
+                    match mj_core::subprocess::run_bounded(&mut probe, 4096, Duration::from_secs(5))
+                        .await
+                    {
+                        Ok(output) if output.status.success() => {
+                            mj_core::harness_runtime::dsh_acp_version_supports_native_instructions(
+                                &String::from_utf8_lossy(&output.stdout),
+                            )
+                        }
+                        Ok(_) => false,
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "could not read dsh-acp version; using the pinned Node.js fallback"
+                            );
+                            false
+                        }
+                    }
+                }
+                None => false,
+            }
         } else {
             false
         }
@@ -371,6 +394,19 @@ pub(super) fn find_command(
     command: &Path,
     environment: &BTreeMap<String, String>,
 ) -> Result<Option<PathBuf>> {
+    let Some(selected) = find_command_path(command, environment)? else {
+        return Ok(None);
+    };
+    selected
+        .canonicalize()
+        .map(Some)
+        .context("resolve selected runtime command")
+}
+
+fn find_command_path(
+    command: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<Option<PathBuf>> {
     let selected = if command.is_absolute() {
         command.to_path_buf()
     } else {
@@ -393,30 +429,50 @@ pub(super) fn find_command(
     if !super::harness::entrypoint_is_executable(&selected) {
         return Ok(None);
     }
-    selected
-        .canonicalize()
-        .map(Some)
-        .context("resolve selected runtime command")
+    Ok(Some(selected))
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[test]
-    fn dsh_without_path_uses_the_managed_node_runtime() {
+    // Hard-won: 7da1ad2bc: a pre-native dsh-acp incorrectly skipped managed Node provisioning.
+    #[tokio::test]
+    async fn dsh_uses_the_managed_node_runtime_without_a_native_loader() {
         assert!(
-            needs_node_runtime(HarnessKind::Dsh, &BTreeMap::new()).unwrap(),
+            needs_node_runtime(HarnessKind::Dsh, &BTreeMap::new())
+                .await
+                .unwrap(),
             "a missing PATH must select the managed Node fallback, not fail discovery"
         );
 
         let tools = tempfile::tempdir().unwrap();
-        mj_core::test_hooks::install_fake_command(tools.path(), "dsh-acp", "#!/bin/sh\nexit 0\n");
+        let current = format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'dsh-acp {}'; fi\n",
+            mj_core::harness_runtime::DSH_ACP_VERSION
+        );
+        mj_core::test_hooks::install_fake_command(tools.path(), "dsh-acp", &current);
         let environment = BTreeMap::from([(
             "PATH".to_owned(),
             tools.path().to_string_lossy().into_owned(),
         )]);
-        assert!(!needs_node_runtime(HarnessKind::Dsh, &environment).unwrap());
+        assert!(
+            !needs_node_runtime(HarnessKind::Dsh, &environment)
+                .await
+                .unwrap()
+        );
+
+        mj_core::test_hooks::install_fake_command(
+            tools.path(),
+            "dsh-acp",
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'dsh-acp 0.3.0'; fi\n",
+        );
+        assert!(
+            needs_node_runtime(HarnessKind::Dsh, &environment)
+                .await
+                .unwrap(),
+            "a pre-native loader needs the pinned Node.js npx fallback"
+        );
     }
 
     #[test]
