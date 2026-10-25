@@ -125,7 +125,7 @@ pub const MUSE_ACP_VERSION: &str = "0.16.0";
 pub const MUSE_VERSION: &str = "1.4.12-R6909.1";
 pub const OPENCODE_VERSION: &str = "2.1.2";
 pub const MIMO_CLI_VERSION: &str = "0.1.15";
-pub const DSH_ACP_VERSION: &str = "0.3.0";
+pub const DSH_ACP_VERSION: &str = "0.4.0";
 pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
 
 /// The shell commands that start OpenCode's ACP server with the executable
@@ -484,8 +484,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             cli_entrypoint: "node_modules/.bin/mimo",
         },
         HarnessKind::Dsh => HarnessPin {
-            install_id: "dsh-acp-0.3.0",
-            display_version: "dsh-acp 0.3.0",
+            install_id: "dsh-acp-0.4.0",
+            display_version: "dsh-acp 0.4.0",
             entrypoint: "dsh-acp",
             cli_entrypoint: "dsh-acp",
         },
