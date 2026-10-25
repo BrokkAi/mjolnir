@@ -511,23 +511,23 @@ that speaks ACP itself, so there is no separate bridge. It is not the DeepSeek
 harness earlier releases offered as `kind = "deepseek"`; that kind still fails
 to load. The home is a `DSH_ACP_DATA_DIR` root. It holds an optional
 `AGENTS.md` and dsh-acp's native session records, `sessions/<id>.json`; there
-is no configuration file, no login file, and no skills support. dsh-acp
-receives `AGENTS.md` in one environment variable, so the file must be UTF-8
-text of at most 131049 bytes, including the notes Mjolnir adds to describe a
-container or EC2 session's environment. Mjolnir refuses to start a session whose
-file breaks either rule and says which rule and by how much, and `mj doctor`
-reports the profile's own file the same way. Nothing creates the home
-automatically, and it is optional: a session stages its own home, which simply
-starts without an `AGENTS.md`. Create `~/.dsh` when you want to keep
-instructions there or move the profile; `mj doctor` reports it missing until
-you do. DSH reads no
-instruction file itself, so Mjolnir passes the staged `AGENTS.md` as dsh-acp's
-system prompt through `DSH_ACP_SYSTEM_PROMPT` on every launch. The staged file
-is the profile's own `AGENTS.md` plus any guidance Mjolnir adds for the
-session: a disposable-environment note on container and EC2 targets, container
-storage notes, and sub-agent instructions when sub-agent delegation applies. On
-a bare local or SSH target with none of these, it is the profile's file
-unchanged.
+is no configuration file, no login file, and no skills support. dsh-acp reads
+`AGENTS.md` itself from the data directory, the session working directory, and
+each additional workspace root. Each file must be UTF-8 text of at most 1 MiB.
+Mjolnir checks the staged data-directory file, including the notes it adds to
+describe a container or EC2 session's environment, and refuses to start a
+session whose file breaks either rule. The refusal says which rule and by how
+much, and `mj doctor` reports the profile's own file the same way. Nothing
+creates the home automatically, and it is optional: a session stages its own
+home, which simply starts without an `AGENTS.md`. Create `~/.dsh` when you want
+to keep instructions there or move the profile; `mj doctor` reports it missing
+until you do. Mjolnir stages its instructions as the data directory's
+`AGENTS.md` and clears `DSH_ACP_SYSTEM_PROMPT` so a target login shell cannot
+add a duplicate prompt. The staged file is the profile's own `AGENTS.md` plus
+any guidance Mjolnir adds for the session: a disposable-environment note on
+container and EC2 targets, container storage notes, and sub-agent instructions
+when sub-agent delegation applies. On a bare local or SSH target with none of
+these, it is the profile's file unchanged.
 
 DSH authenticates with an API key in `DEEPSEEK_API_KEY`. As with a
 [Codex custom provider](#codex-with-a-custom-provider), Mjolnir takes the key
@@ -700,9 +700,10 @@ Mjolnir then adds its own files to the staged home:
   setting in `opencode.json`;
 - for MiMo Code under an unconstrained policy,
   `MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS=1` in the launch environment;
-- for DSH, the staged `AGENTS.md` as `DSH_ACP_SYSTEM_PROMPT` in the launch
-  environment, and dsh-acp's `permission_mode` on every session open: `ask`
-  under configured approvals, `allow` under an unconstrained policy;
+- for DSH, the staged `AGENTS.md` in the session's `DSH_ACP_DATA_DIR` (with
+  `DSH_ACP_SYSTEM_PROMPT` cleared), and dsh-acp's `permission_mode` on every
+  session open: `ask` under configured approvals, `allow` under an
+  unconstrained policy;
 - in a container or on an EC2 instance, a note in the instruction file
   (`AGENTS.md` or `CLAUDE.md`) that the environment is disposable.
 

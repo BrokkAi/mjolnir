@@ -2289,16 +2289,14 @@ fn run_default_bridge(
     )
 }
 
-/// dsh-acp reads no instruction file, so its launch passes the staged one as
-/// the system prompt dsh-acp appends to its own, byte for byte, up to the one
-/// environment string the operating system allows, and only as UTF-8. A
-/// value the target's login
-/// shell exports never reaches the session, and a launch without a staged home
-/// refuses rather than let dsh-acp keep its sessions in the repository it runs
-/// in.
+/// dsh-acp reads the staged AGENTS.md from DSH_ACP_DATA_DIR itself. The launch
+/// clears DSH_ACP_SYSTEM_PROMPT so a value from the target's login shell cannot
+/// deliver the same instructions a second time, and a launch without a staged
+/// home refuses rather than let dsh-acp keep its sessions in the repository it
+/// runs in.
 #[cfg(unix)]
 #[test]
-fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
+fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
     let bin = root.path().join("fake-bin");
@@ -2306,7 +2304,7 @@ fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
     let dsh = bin.join("dsh-acp");
     std::fs::write(
         &dsh,
-        "#!/bin/sh\nprintf '%s|%s' \"$*\" \"$DSH_ACP_SYSTEM_PROMPT\"\n",
+        "#!/bin/sh\nprintf '%s|%s|%s' \"$*\" \"$DSH_ACP_SYSTEM_PROMPT\" \"$DSH_ACP_DATA_DIR\"\n",
     )
     .unwrap();
     std::fs::set_permissions(&dsh, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2335,13 +2333,12 @@ fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        format!("|{instructions}")
+        format!("||{}", staged.display())
     );
 
-    // The variable holds at most one environment string, and dsh-acp takes
-    // only UTF-8 from it. The controller refuses anything else before a
-    // session launches, as the reason the client is shown, naming the
-    // profile's own file; the launch refuses it again on the target.
+    // The native loader accepts instruction files up to 1 MiB. Mjolnir checks
+    // the staged file first so an oversized file names the profile's own file
+    // before a session launches rather than failing later in dsh-acp.
     let home = root.path().join("profile");
     std::fs::create_dir_all(&home).unwrap();
     let own = home.join("AGENTS.md");
@@ -2367,22 +2364,11 @@ fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
         );
         message
     };
-    let refused_on_target = |expected: &[&str]| {
-        let output = launch(Some(&staged));
-        assert!(!output.status.success(), "{:?}", output.status);
-        assert!(output.stdout.is_empty());
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        assert!(
-            expected.iter().all(|part| stderr.contains(part)),
-            "{stderr}"
-        );
-    };
 
-    // The largest file starts, and one byte more is refused. The largest is
-    // mostly two-byte characters, so the target's UTF-8 check reads more
-    // than a pipe holds.
+    // The largest native instruction file starts, and one byte more is
+    // refused before the launch.
     let limit = mj_core::harness_runtime::DSH_ACP_INSTRUCTIONS_LIMIT;
-    let largest = format!("x{}", "é".repeat((limit - 1) / 2));
+    let largest = "é".repeat(limit / 2);
     assert_eq!(largest.len(), limit);
     std::fs::write(&own, &largest).unwrap();
     profile.ensure_ready("dsh").unwrap();
@@ -2394,7 +2380,7 @@ fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
     assert!(output.status.success(), "{:?}", output.status);
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        format!("|{largest}")
+        format!("||{}", staged.display())
     );
     std::fs::write(&own, format!("{largest}x")).unwrap();
     // Hard-won: DSH campaign 2026-10-23: one byte too many reached the user only as relay noise naming the staged copy
@@ -2406,14 +2392,19 @@ fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
         "{message}"
     );
     stage_profile(&profile, &staged).unwrap();
-    refused_on_target(&[
-        &format!("is {} bytes", limit + 1),
-        &format!("at most {limit} bytes"),
-    ]);
+    let message = refusal(
+        profile
+            .ensure_staged_instructions_deliverable("dsh", &staged)
+            .unwrap_err(),
+    );
+    assert!(
+        message.contains(&format!("is {} bytes", limit + 1))
+            && message.contains(&format!("at most {limit} bytes")),
+        "{message}"
+    );
 
     // Mjolnir's note about a container can take a file the profile alone
-    // could deliver over the limit; the staged file is refused before it
-    // travels.
+    // could load over the limit; the staged file is refused before it travels.
     let within = limit - 10;
     std::fs::write(&own, "x".repeat(within)).unwrap();
     profile.ensure_ready("dsh").unwrap();
@@ -2444,55 +2435,23 @@ fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
             && message.contains(&format!("at least {} bytes", total - limit)),
         "{message}"
     );
-    refused_on_target(&[&format!("is {total} bytes")]);
 
-    // Hard-won: DSH campaign 2026-10-23: instructions that were not UTF-8 failed as dsh-acp's usage error, naming neither the file nor the variable
+    // Hard-won: DSH campaign 2026-10-23: invalid instructions reached the user
+    // as relay noise instead of a refusal naming the profile's file.
     std::fs::write(&own, b"\xff\xfeK\0e\0e\0p\0\n\0").unwrap();
     let message = refusal(profile.ensure_ready("dsh").unwrap_err());
     assert!(
         message.contains("is not UTF-8 text (line 1 has"),
         "{message}"
     );
-    // The target's check accepts exactly what Rust's UTF-8 check accepts and
-    // names the same line.
-    for bytes in [
-        &b"Keep this.\n\xff\xfe\n"[..],
-        "U+0080 \u{80}, U+07FF \u{7ff}, U+0800 \u{800}, U+D7FF \u{d7ff}, U+E000 \u{e000}, U+FFFF \u{ffff}, U+10000 \u{10000}, U+10FFFF \u{10ffff}".as_bytes(),
-        b"overlong\n\xc0\xaf",
-        b"overlong\n\xe0\x9f\xbf",
-        b"overlong\n\xf0\x8f\xbf\xbf",
-        b"surrogate\n\n\xed\xa0\x80",
-        b"above U+10FFFF\n\xf4\x90\x80\x80",
-        b"\xf5\x80\x80\x80",
-        b"continuation alone \x80",
-        b"cut off\n\xe2\x80",
-        b"cut off before text \xe2\x80 here",
-    ] {
-        std::fs::write(staged.join("AGENTS.md"), bytes).unwrap();
-        match std::str::from_utf8(bytes) {
-            Ok(text) => {
-                let output = launch(Some(&staged));
-                assert!(output.status.success(), "{text:?}: {output:?}");
-                assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("|{text}"));
-            }
-            Err(error) => {
-                let line = bytes[..error.valid_up_to()]
-                    .iter()
-                    .filter(|&&byte| byte == b'\n')
-                    .count()
-                    + 1;
-                refused_on_target(&[
-                    &format!("is not UTF-8 text (line {line} has"),
-                    "Save AGENTS.md in the DSH profile home as UTF-8.",
-                ]);
-            }
-        }
-    }
 
     std::fs::remove_file(staged.join("AGENTS.md")).unwrap();
     let output = launch(Some(&staged));
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), "|");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("||{}", staged.display())
+    );
 
     let output = launch(None);
     assert!(!output.status.success(), "{output:?}");

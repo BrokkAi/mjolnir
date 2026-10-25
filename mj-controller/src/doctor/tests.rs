@@ -1701,7 +1701,7 @@ fn doctor_reports_a_profile_or_target_that_cannot_start_with_the_fix() {
         "{}",
         profile.detail
     );
-    // Hard-won: DSH campaign 2026-10-23: doctor reported a DSH profile ready while its AGENTS.md was too long to deliver
+    // Hard-won: DSH campaign 2026-10-23: doctor reported a DSH profile ready while its AGENTS.md could not be loaded
     let dsh_check = profiles
         .iter()
         .find(|check| check.id == "harness.dsh")
@@ -1709,7 +1709,7 @@ fn doctor_reports_a_profile_or_target_that_cannot_start_with_the_fix() {
     assert_eq!(dsh_check.status, CheckStatus::Fixable);
     assert!(
         dsh_check.detail.contains(&format!(
-            "{} is {} bytes, but DSH can receive at most {limit} bytes",
+            "{} is {} bytes, but dsh-acp loads at most {limit} bytes",
             dsh.join("AGENTS.md").display(),
             limit + 1
         )),

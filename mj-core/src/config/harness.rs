@@ -651,9 +651,8 @@ impl HarnessKind {
     pub const fn agent_instructions_file(self) -> &'static str {
         match self {
             Self::Claude => "CLAUDE.md",
-            // dsh-acp reads no instruction file of its own; its launch passes
-            // the staged one as its system prompt
-            // ([`crate::harness_runtime::dsh_acp_script`]).
+            // dsh-acp reads AGENTS.md from its data directory and workspace
+            // roots ([`crate::harness_runtime::dsh_acp_script`]).
             Self::Codex
             | Self::Kimi
             | Self::Grok
@@ -1629,9 +1628,9 @@ impl HarnessProfile {
             .map_err(|error| profile_refusal(id, &error))
     }
 
-    /// dsh-acp receives its instructions in one environment variable
+    /// dsh-acp limits each instruction file it reads
     /// ([`crate::harness_runtime::UndeliverableDshInstructions`]); every
-    /// other harness reads its instruction file itself.
+    /// other harness owns its instruction-file validation.
     fn ensure_instructions_deliverable(&self, staged: Option<&Path>) -> Result<()> {
         use crate::harness_runtime::{DSH_ACP_INSTRUCTIONS_LIMIT, UndeliverableDshInstructions};
         if self.kind != HarnessKind::Dsh {
@@ -1662,7 +1661,7 @@ impl HarnessProfile {
                     excess => format!("{excess} bytes"),
                 };
                 bail!(
-                    "{size}, but DSH can receive at most {limit} bytes of instructions, because dsh-acp takes them in one environment variable. Shorten the file by at least {excess}."
+                    "{size}, but dsh-acp loads at most {limit} bytes from each instruction file. Shorten the file by at least {excess}."
                 )
             }
         }
