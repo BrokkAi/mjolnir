@@ -24,6 +24,7 @@ pub(crate) fn snapshot(
         bundle: bundle.clone(),
         identities: BTreeMap::new(),
         network_sources: BTreeMap::new(),
+        plain_directories: Default::default(),
     };
     for repository in &bundle.repositories {
         let identity = if let Some(source) = &repository.github {
@@ -66,7 +67,7 @@ pub(crate) fn resolve_directory(
     match target {
         TargetTemplate::LocalBare => Ok((
             "local".into(),
-            mj_core::repository::resolve_directory(path, None, executor)?,
+            mj_core::repository::resolve_local_directory(path, executor)?,
         )),
         TargetTemplate::SshBare { ssh, .. } => {
             let host = mj_core::config::project_history_host(target)
@@ -86,7 +87,7 @@ pub(crate) fn resolve_directory(
     }
 }
 
-fn directory_snapshot(resolved: &ResolvedDirectory) -> ProjectBundleSnapshot {
+pub(crate) fn directory_snapshot(resolved: &ResolvedDirectory) -> ProjectBundleSnapshot {
     let id = crate::import::setup_style_id(&resolved.identity.name());
     ProjectBundleSnapshot {
         bundle: ProjectBundle {
@@ -99,8 +100,13 @@ fn directory_snapshot(resolved: &ResolvedDirectory) -> ProjectBundleSnapshot {
                 git_ref: None,
             }],
         },
-        identities: BTreeMap::from([(id, resolved.identity.clone())]),
+        identities: BTreeMap::from([(id.clone(), resolved.identity.clone())]),
         network_sources: BTreeMap::new(),
+        plain_directories: if resolved.plain_directory {
+            BTreeSet::from([id])
+        } else {
+            BTreeSet::new()
+        },
     }
 }
 
@@ -110,6 +116,14 @@ pub(crate) fn accept_directory(
     executor: &impl CommandExecutor,
 ) -> Result<(String, ProjectBundleSnapshot)> {
     let (host, resolved) = resolve_directory(target, directory, executor)?;
+    accept_resolved_directory(host, directory, resolved)
+}
+
+pub(crate) fn accept_resolved_directory(
+    host: String,
+    directory: &Path,
+    resolved: ResolvedDirectory,
+) -> Result<(String, ProjectBundleSnapshot)> {
     let project = directory_snapshot(&resolved);
     let id = database::store_directory_project(&project)?;
     database::store_project_location(&ProjectLocation {
@@ -233,7 +247,19 @@ fn reconcile_config(
 /// Record a local directory found in history in the catalog. Discovery never
 /// writes `config.toml`: saved bundles are the ones the user created, and a
 /// discovered project becomes one only when the user chooses it.
+///
+/// Discovery stays strict about Git. Any directory a harness recorded is not
+/// necessarily a project - a person may have run an agent from a scratch
+/// folder - so only a checkout is listed automatically. A plain folder is
+/// still openable: the project-directory dialog accepts one when a person
+/// names it, which is a deliberate choice rather than a guess from history.
 fn discover_local(path: &Path, executor: &impl CommandExecutor) -> Result<()> {
+    let resolved = mj_core::repository::resolve_local_directory(path, executor)?;
+    if resolved.plain_directory {
+        return Err(
+            mj_core::repository::RepositoryUnavailable::NotRepository(path.to_owned()).into(),
+        );
+    }
     accept_directory(&TargetTemplate::LocalBare, path, executor)?;
     Ok(())
 }
@@ -599,6 +625,9 @@ mod tests {
                 "origin",
                 "https://github.com/Example/new-name.git",
             ],
+            vec!["config", "user.name", "Discovery Test"],
+            vec!["config", "user.email", "discovery@example.invalid"],
+            vec!["commit", "--allow-empty", "-qm", "initial"],
         ] {
             let mut command = CommandSpec::new("git", ["-C", &checkout.to_string_lossy()])
                 .purpose("initialize discovery recovery checkout");
@@ -830,13 +859,18 @@ mod tests {
         index.execute_batch("CREATE TABLE threads(id TEXT,rollout_path TEXT,updated_at INTEGER,name TEXT,title TEXT,cwd TEXT,git_branch TEXT,history_mode TEXT,archived INTEGER,source TEXT,preview TEXT)").unwrap();
         let initialize = |path: &Path| {
             std::fs::create_dir_all(path).unwrap();
-            let output = ProcessExecutor
-                .execute(
-                    &CommandSpec::new("git", ["-C", &path.to_string_lossy(), "init", "-q"])
-                        .purpose("initialize discovery fixture"),
-                )
-                .unwrap();
-            assert_eq!(output.status, 0);
+            for args in [
+                vec!["init", "-q"],
+                vec!["config", "user.name", "Discovery Test"],
+                vec!["config", "user.email", "discovery@example.invalid"],
+                vec!["commit", "--allow-empty", "-qm", "initial"],
+            ] {
+                let mut command = CommandSpec::new("git", ["-C", &path.to_string_lossy()])
+                    .purpose("initialize discovery fixture");
+                command.args.extend(args.into_iter().map(str::to_owned));
+                let output = ProcessExecutor.execute(&command).unwrap();
+                assert_eq!(output.status, 0);
+            }
         };
         for i in 0..12 {
             let project = root.path().join(format!("project-{i:02}"));

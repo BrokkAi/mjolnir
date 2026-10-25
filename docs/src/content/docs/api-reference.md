@@ -312,7 +312,8 @@ without reading `config.toml`. It never fails.
   with the same revision describe the same configuration.
 - `profiles[].harness` is the harness kind, such as `codex` or `claude`.
 - `targets[].requires_project_directory` is `true` when the target needs an
-  existing Git directory (`project_directory` on create) instead of a bundle.
+  existing directory (`project_directory` on create) instead of a bundle. Only
+  SSH bare targets require that directory to be a Git project.
 - `targets[].availability` is `ready` (the last check passed), `stale` (the
   reading is old), `unavailable` (the last check failed), or `unknown` (no
   check yet, normal just after startup). A local Podman, Docker, or Apple

@@ -480,6 +480,8 @@ pub(crate) fn hide_catalog_project(bundle_id: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use mj_core::config::{ProjectBundle, ProjectRepository};
     use mj_core::repository::RepositoryIdentity;
@@ -504,6 +506,7 @@ mod tests {
                 RepositoryIdentity::Github("acme".into(), "app".into()),
             )]),
             network_sources: BTreeMap::new(),
+            plain_directories: BTreeSet::new(),
         };
         let session = super::super::tests::session("old-session", "project");
         super::super::sessions::save_session_to(&path, &session).unwrap();
@@ -584,6 +587,7 @@ mod tests {
                 RepositoryIdentity::Github("acme".into(), "app".into()),
             )]),
             network_sources: BTreeMap::new(),
+            plain_directories: BTreeSet::new(),
         };
         let primary = make("app");
         let alias = make("legacy-app");
@@ -671,6 +675,7 @@ mod tests {
                 RepositoryIdentity::Github("acme".into(), "app".into()),
             )]),
             network_sources: BTreeMap::new(),
+            plain_directories: BTreeSet::new(),
         };
         let canonical = make("app");
         let legacy = make("legacy-app");

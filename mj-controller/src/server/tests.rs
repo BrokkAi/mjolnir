@@ -1826,7 +1826,7 @@ async fn a_bare_preflight_validation_failure_is_actionable_without_its_details()
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
         serde_json::json!({
-            "error": "project validation failed; check that the directory exists, is accessible, and contains a Git repository with a valid HEAD"
+            "error": "project validation failed; check that the directory exists and is accessible, and that Git can inspect it if it is a Git project"
         })
     );
     assert!(!String::from_utf8_lossy(&body).contains("/private/project"));

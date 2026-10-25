@@ -247,6 +247,12 @@ pub(super) fn restore_repositories_from_archive(
     restore_contents: bool,
 ) -> Result<()> {
     for repository in &archive.manifest.repositories {
+        // A plain project folder is the user's own directory on a bare local
+        // target. Its files were never captured, so a restore must never
+        // check out, rewrite or remove anything in it.
+        if repository.metadata.plain_directory {
+            continue;
+        }
         if !restore_contents
             && !repository
                 .metadata
@@ -366,6 +372,10 @@ pub fn restore_single_repository_onto_branch(
             archive.manifest.repositories.len()
         );
     };
+    ensure!(
+        !repository.metadata.plain_directory,
+        "this session's project is a directory without a committed Git checkout, so it cannot be restored into one"
+    );
     let mut snapshot = archived_repository_snapshot(&archive, repository)?;
     let archived_branch = snapshot.metadata.branch.replace(branch.to_owned());
     // This explicit host restore uses a linked worktree whose local Git
@@ -394,6 +404,10 @@ pub fn restore_single_repository_into_checkout(
     let [repository] = archive.manifest.repositories.as_slice() else {
         bail!("an isolated checkout requires exactly one archived repository");
     };
+    ensure!(
+        !repository.metadata.plain_directory,
+        "this session's project is a directory without a committed Git checkout, so it cannot be restored into one"
+    );
     let mut snapshot = archived_repository_snapshot(&archive, repository)?;
     snapshot.metadata.remote_workspace = false;
     crate::archive::restore_git_snapshot_for_session(

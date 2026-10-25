@@ -39,8 +39,8 @@ A Mjolnir installation has four main parts:
 
 A profile selects a harness account, and a target selects the execution
 boundary. Managed container and EC2 sessions use a bundle describing the
-repositories in their workspace; bare sessions instead select an existing Git
-project directory. See [Profiles and harnesses](/profiles/), [Workspaces and
+repositories in their workspace; bare sessions instead select an existing
+project directory, which may be a plain local folder. See [Profiles and harnesses](/profiles/), [Workspaces and
 bundles](/workspaces-bundles/), and [Targets](/targets/).
 
 ## Goals

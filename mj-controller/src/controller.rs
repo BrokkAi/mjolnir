@@ -1006,33 +1006,23 @@ impl Controller {
             let canonical = crate::database::store_catalog_project(bundle_id, &project, true)?;
             (canonical, Some(project))
         } else if let Some(directory) = project_directory.as_deref() {
-            let git = match template {
-                TargetTemplate::LocalBare => {
-                    executor
-                        .execute(
-                            &targets::CommandSpec::new(
-                                "git",
-                                [
-                                    "-C",
-                                    &directory.to_string_lossy(),
-                                    "rev-parse",
-                                    "--is-inside-work-tree",
-                                ],
-                            )
-                            .purpose("inspect raw project repository"),
-                        )?
-                        .status
-                        == 0
-                }
-                _ => true,
-            };
-            if git {
-                let (id, project) =
-                    crate::project_catalog::accept_directory(template, directory, executor)?;
-                (id, Some(project))
-            } else {
-                (bundle_id.to_owned(), None)
-            }
+            // A bare local session may run in any directory, including one
+            // without a committed Git checkout; such a project is identified
+            // by its path.
+            // A remote bare session must still be a repository, and its
+            // validation has already refused anything else.
+            let (host, resolved) =
+                crate::project_catalog::resolve_directory(template, directory, executor)?;
+            let review_requested = self.config.review.for_session(review.as_ref()).trigger
+                != mj_core::config::ReviewTrigger::Off
+                && mj_core::review::settings::can_review(&self.config, review.as_ref());
+            ensure!(
+                !resolved.plain_directory || !review_requested,
+                "a directory without a committed Git checkout cannot be reviewed; select a committed Git project or turn review off for this session"
+            );
+            let (id, project) =
+                crate::project_catalog::accept_resolved_directory(host, directory, resolved)?;
+            (id, Some(project))
         } else {
             (bundle_id.to_owned(), None)
         };

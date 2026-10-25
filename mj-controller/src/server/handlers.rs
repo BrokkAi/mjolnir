@@ -650,7 +650,7 @@ pub(super) async fn preflight_new(
                 "attached directory validation failed; check that each host directory exists and is accessible on the selected target's host",
             ),
             PreflightFailure::Validation if project_validation => ApiError::bad_request(
-                "project validation failed; check that the directory exists, is accessible, and contains a Git repository with a valid HEAD",
+                "project validation failed; check that the directory exists and is accessible, and that Git can inspect it if it is a Git project",
             ),
             PreflightFailure::InvalidRepository(_) => ApiError::bad_request(
                 "could not resolve the network repository; check its remote URL, authentication, connectivity, and default branch. Repositories without network remotes require a raw local session",
