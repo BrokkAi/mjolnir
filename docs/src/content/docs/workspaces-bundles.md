@@ -102,10 +102,10 @@ Workspaces are stored in `mj.sqlite3`, not `config.toml`. Do not add a
 
 ## Bundles define managed projects
 
-Container, SSH Podman, and EC2 targets start from a bundle. A bundle can contain
-one repository or assemble several repositories into a virtual monorepo. Its
-`primary_repo` becomes the ACP session working directory; every other member is
-provided to the harness as an additional workspace root.
+Container, SSH container, and EC2 targets start from a bundle. A bundle can
+contain one repository or assemble several repositories into a virtual
+monorepo. Its `primary_repo` becomes the ACP session working directory; every
+other member is provided to the harness as an additional workspace root.
 
 ```toml
 [bundles.product]
@@ -197,11 +197,12 @@ Isolated sessions begin at the fetch remote's default branch. Local unpublished
 commits and working-tree changes are excluded; the review shows the source before
 launch. `git_ref` is obsolete and is rejected with migration guidance.
 
-Bare runtimes work differently. A new bare session, on this machine or on an
-SSH machine, selects an existing absolute Git project directory instead of a
-configured bundle. Its directory is represented internally as a project with
-one repository; the selected directory remains the session's working directory.
-Its history and memory share repository identity with a managed project of one.
+Bare runtimes work differently. A new bare session selects an existing absolute
+directory instead of a configured bundle. A local bare directory may be a plain
+folder; an SSH bare directory must be a committed Git project. The selected
+directory remains the session's working directory. A Git-backed session's
+history and memory share repository identity with a managed project of one;
+plain local folders use their canonical path as project identity.
 The final review offers **Create isolated checkout**, on by default for a
 primary checkout and off for an existing linked worktree. When checked,
 Mjolnir creates a session-specific independent clone under `.mj/clones/` and
@@ -216,11 +217,11 @@ repositories, Mjolnir looks for a token in `GH_TOKEN`, then `GITHUB_TOKEN`, then
 the authenticated GitHub CLI. The active token is injected into managed
 non-local sessions and kept out of checkpoints and recovery archives.
 
-Local Podman, Docker, SSH Podman, SSH Docker, and Apple Container targets maintain a
-read-only Git object cache on the container host under
-`~/.cache/mjolnir/git`. Mjolnir refreshes a bare mirror, makes an isolated
-per-session snapshot with hardlinked immutable objects, and lets the target
-clone borrow from it. If cache setup is unavailable, the launch falls back to a
+Local Podman, Docker, SSH Podman, SSH Docker, Apple Container, and Apple
+Container on an SSH machine all maintain a read-only Git object cache on the
+container host under `~/.cache/mjolnir/git`. Mjolnir refreshes a bare mirror,
+makes an isolated per-session snapshot with hardlinked immutable objects, and
+lets the target clone borrow from it. If cache setup is unavailable, the launch falls back to a
 normal network clone.
 
 The cache can contain objects from private repositories and is created with

@@ -7,7 +7,7 @@ A runtime is a named execution template under `[targets.<id>]`, and it names
 the machine it runs on under `[machines.<id>]`. A session combines one
 [profile](/profiles/), one target, and either a configured
 [bundle](/workspaces-bundles/#bundles-define-managed-projects) or an existing
-Git project directory. The target decides where work runs, what isolation
+project directory. The target decides where work runs, what isolation
 contains unrestricted agent actions, how the workspace is created, and what is
 removed after a verified stop.
 
@@ -36,6 +36,7 @@ command exercises container creation and removal.
 | `podman` | an `ssh` machine | rootless container | Bundle | remote-host copy-on-write or read-only mounts | CPU and memory | Remote container and workspace storage are removed after verified stop. |
 | `docker` | `local` with a Linux Docker daemon (including a VM on macOS), or an `ssh` machine | Docker container | Bundle | copy-on-write or read-only OverlayFS views | CPU and memory | Container and managed workspace volume are removed after verified stop. |
 | `apple-container` | `local` (Apple-silicon macOS 26+) | Apple container VM | Bundle | read-only mounts | CPU and memory | Container is removed after verified stop. |
+| `apple-container` | an `ssh` machine (Apple-silicon macOS 26+) | Apple container VM on the remote Mac | Bundle | remote-host read-only mounts | CPU and memory | Remote container is removed after verified stop. |
 
 “Verified stop” means Mjolnir has created a recovery archive and checked its
 SHA-256 on the controller before tearing the resource down. See
@@ -91,9 +92,24 @@ before choosing a raw or `yolo` target.
 
 ## Bare runtimes
 
-A bare runtime selects an existing absolute Git project directory rather than a
-bundle. They do not accept supplemental directory attachments or container
-resource sizing.
+A bare runtime selects an existing absolute project directory rather than a
+bundle. A local bare runtime accepts a plain folder; an SSH bare runtime
+requires a Git project. Bare runtimes do not accept supplemental directory
+attachments or container resource sizing.
+
+On `local`, that directory need not be a Git checkout, Git need not be
+installed, and a new repository does not need its first commit. Such a folder
+is a project in its own right, identified by its path, and the whole session
+works in it. Nothing about it is captured in a checkpoint and no restore touches
+its files, because the folder belongs to you and not to a managed checkout. A
+committed Git checkout is still required wherever Mjolnir has to clone or move
+the project into a bundle workspace, and on SSH and EC2 targets, which address a
+project by the repository it shares with its sessions.
+
+Review captures changes from Git history, so a local directory without a
+committed checkout must be created with `--review off`. A review-enabled launch
+is refused with that remedy, and `/review` reports that it has no Git changes to
+capture.
 
 ### Bare on this machine
 
@@ -219,6 +235,24 @@ Supplemental directories are mounted read-only; writable OverlayFS views and
 Podman workspace-storage overrides are unavailable. See
 [Apple container](/apple-container/).
 
+An `apple-container` runtime on an `ssh` machine runs on that Mac. This lets a
+Linux controller, or an Intel Mac, reach the Apple-silicon Mac beside it:
+
+```toml
+[machines.mac]
+kind = "ssh"
+host = "mac.example.com"
+user = "dev"
+
+[targets.mac-apple]
+kind = "apple-container"
+machine = "mac"
+```
+
+Settings › Runtimes offers that runtime when the probe finds Apple-silicon
+macOS 26 or newer with a running Apple container daemon; `mj doctor` checks it
+the way it checks a local one.
+
 ### Podman on an SSH machine
 
 ```toml
@@ -267,12 +301,13 @@ permissions, launch-template contract, and connectivity.
 
 ## Bundles, clones, and workspace roots
 
-Managed targets—Podman, Docker, Apple Container, SSH Podman, and EC2—clone a
-configured bundle into a new session workspace. `primary_repo` is the agent's
-working directory and every other repository is an additional ACP workspace
-root. Every repository clones its network fetch remote's default branch. A
-controller-side `local` path supplies only its configured network fetch and
-push destinations; no Git connection back to that checkout is created.
+Managed targets—Podman, Docker, Apple Container, SSH Podman, SSH Docker, Apple
+Container over SSH, and EC2—clone a configured bundle into a new session
+workspace. `primary_repo` is the agent's working directory and every other
+repository is an additional ACP workspace root. Every repository clones its
+network fetch remote's default branch. A controller-side `local` path supplies
+only its configured network fetch and push destinations; no Git connection
+back to this checkout is created.
 
 Local and SSH bare sessions instead choose an existing project directory.
 A single-repository isolated session can move into a raw local worktree when
@@ -286,7 +321,8 @@ commits, staged, unstaged, and untracked files are restored over the clone. A
 checkout with no network remote stays bare-only: add a remote (`git remote add
 origin <url>`) or keep resuming on a bare target. A subdirectory of a checkout,
 an SSH-hosted checkout, and a multi-repository bundle cannot become one
-checkout either way.
+checkout either way. A plain local folder has no repository to clone from, so
+it also stays bare-only.
 
 Muse Code supports one ACP workspace root, so it requires a single-repository
 bundle or one existing bare project directory, with no supplemental directories.

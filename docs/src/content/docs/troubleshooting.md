@@ -49,7 +49,8 @@ matter, but only `fixable` means the doctor loop has not converged.
 If `config.toml` does not exist, run `mj` and open **prefix+s Settings** to add or detect
 an agent profile. Local target choices are supplied automatically.
 Managed container and EC2 sessions also need a bundle; a bare session selects
-an existing Git project directory instead.
+an existing directory instead. Only an SSH bare directory must be a committed
+Git project.
 
 For a TOML error, fix the exact path and type named by `mj doctor`. Mjolnir's
 schema rejects unknown fields rather than silently ignoring a misspelling. See
@@ -236,6 +237,11 @@ Then follow the target-specific result:
 - **Apple container:** the controller must be Apple silicon on macOS 26 or
   newer. The daemon starts an installed service automatically; if doctor still
   reports it stopped, run `container system start` and review its output. See
+  [Apple container](/apple-container/).
+- **Apple container over SSH:** run `ssh <destination> container --version`
+  and `ssh <destination> container system status` as the configured user.
+  Install the signed package, start the service, use macOS 26 or newer on Apple
+  silicon, and make sure noninteractive SSH can find `container` on `PATH`. See
   [Apple container](/apple-container/).
 - **SSH Podman:** run the Podman prerequisite and image checks on the remote
   host as the same user selected by SSH. See [SSH and SSH Podman](/ssh/).

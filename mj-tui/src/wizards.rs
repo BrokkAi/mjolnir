@@ -751,6 +751,7 @@ fn target_label(target: &TargetTemplate) -> &'static str {
         TargetTemplate::SshBare { .. } => "named SSH machine",
         TargetTemplate::SshPodman { .. } => "Podman over SSH",
         TargetTemplate::SshDocker { .. } => "Docker over SSH",
+        TargetTemplate::SshAppleContainer { .. } => "Apple container over SSH",
     }
 }
 

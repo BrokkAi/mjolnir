@@ -553,6 +553,7 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
         )]),
         bundle,
         network_sources: Default::default(),
+        plain_directories: Default::default(),
     });
     state.sessions.insert(
         saved_project_workspace.id.clone(),

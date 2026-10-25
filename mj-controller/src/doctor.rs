@@ -16,13 +16,13 @@ use crate::setup::{
     DiscoveredHome, discover_harness_homes_with_executor, harness_is_authenticated_with_executor,
 };
 use crate::targets::{
-    BoundedProcessExecutor, CommandExecutor, CommandSpec, CommandTimedOut,
-    ContainerTemplate as RuntimeContainerTemplate, DockerUnavailable, PODMAN_DOCUMENTATION_URL,
-    PodmanPostcondition, ProcessExecutor, SshTarget as RuntimeSshTarget,
+    APPLE_CONTAINER_MINIMUM_MACOS, BoundedProcessExecutor, CommandExecutor, CommandSpec,
+    CommandTimedOut, ContainerTemplate as RuntimeContainerTemplate, DockerUnavailable,
+    PODMAN_DOCUMENTATION_URL, PodmanPostcondition, ProcessExecutor, SshTarget as RuntimeSshTarget,
     TargetTemplate as RuntimeTargetTemplate, failed_podman_postcondition, local_docker_vm_share,
     podman_probe_observation, run_setup_smoke_test, ssh_command, ssh_connectivity_probe,
-    ssh_validation_command, verify_local_docker, verify_local_podman, verify_ssh_docker,
-    verify_ssh_podman,
+    ssh_validation_command, verify_local_docker, verify_local_podman, verify_ssh_apple_container,
+    verify_ssh_docker, verify_ssh_podman,
 };
 use mj_core::config::{
     Config, ContainerTemplate, HarnessKind, HarnessProfile, TargetTemplate, config_path,
@@ -35,7 +35,9 @@ use mj_core::credentials::login_command;
 // container, and pulling the multi-gigabyte agent-dev image to do that would be
 // a poor trade.
 const DEFAULT_CONTAINER_IMAGE: &str = "ubuntu:24.04";
-const APPLE_CONTAINER_INSTALL_URL: &str = "https://github.com/apple/container#initial-install";
+/// The official signed package Apple publishes for its container runtime.
+pub(crate) const APPLE_CONTAINER_INSTALL_URL: &str =
+    "https://github.com/apple/container#initial-install";
 
 /// How long a single prerequisite probe may take before doctor reports it as a
 /// fixable check instead of waiting for it.
@@ -220,6 +222,7 @@ pub fn run_with_config_path(
     checks.extend(ssh_bare_checks(config, executor));
     checks.extend(ssh_podman_checks(config, executor, options.smoke));
     checks.extend(ssh_docker_checks(config, executor, options.smoke));
+    checks.extend(ssh_apple_container_checks(config, executor, options.smoke));
     checks.extend(machine_runtime_checks(config, executor));
     checks.extend(storage_checks(config, executor));
     checks.extend(build_cache_checks(offered, executor));
@@ -2469,6 +2472,143 @@ fn ssh_docker_check(
     }
 }
 
+/// One check per `ssh-apple-container` target: the same platform and daemon
+/// probes the local runtime runs, executed on the SSH host, then the target's
+/// image and the disposable smoke test.
+fn ssh_apple_container_checks(
+    config: ConfigStatus<'_>,
+    executor: &impl CommandExecutor,
+    smoke: bool,
+) -> Vec<DoctorCheck> {
+    let Ok(config) = config else {
+        return Vec::new();
+    };
+    config
+        .targets
+        .iter()
+        .filter_map(|(id, target)| match target {
+            TargetTemplate::SshAppleContainer { ssh, container } => {
+                Some(ssh_apple_container_check(
+                    id,
+                    &RuntimeSshTarget::from(ssh),
+                    &container.image,
+                    executor,
+                    smoke,
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn ssh_apple_container_check(
+    id: &str,
+    ssh: &RuntimeSshTarget,
+    image: &str,
+    executor: &impl CommandExecutor,
+    smoke: bool,
+) -> DoctorCheck {
+    let check_id = format!("runtime.ssh-apple-container.{id}");
+    let title = format!("Remote Apple container for target {id}");
+    let destination = &ssh.destination;
+    if let SshConnectivity::Failed {
+        detail,
+        remediation,
+    } = ssh_connectivity(ssh, executor)
+    {
+        return DoctorCheck::fixable(check_id, title, detail, remediation);
+    }
+
+    let preflight = match verify_ssh_apple_container(ssh, executor) {
+        Ok(preflight) => preflight,
+        Err(error) => {
+            return DoctorCheck::fixable(
+                check_id,
+                title,
+                format!("{error:#}"),
+                format!(
+                    "Verify `ssh {destination}` succeeds noninteractively from this host, that the remote Mac is Apple silicon running macOS {APPLE_CONTAINER_MINIMUM_MACOS} or newer, and that `container system status` succeeds there. Install the runtime from {APPLE_CONTAINER_INSTALL_URL}."
+                ),
+            );
+        }
+    };
+
+    let container = RuntimeContainerTemplate {
+        build_cache: None,
+        image: image.to_owned(),
+        pull_policy: Default::default(),
+        extra_run_args: vec![],
+        workspace_storage: Default::default(),
+    };
+    if smoke {
+        let target = RuntimeTargetTemplate::SshAppleContainer {
+            ssh: ssh.clone(),
+            container,
+        };
+        return match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
+            Ok(()) => DoctorCheck::ready(
+                check_id,
+                title,
+                format!(
+                    "Apple container {} is available via {destination} on macOS {}; disposable run/exec/remove smoke test passed for image {image}.",
+                    preflight.version, preflight.macos_version
+                ),
+            ),
+            Err(error) => DoctorCheck::fixable(
+                check_id,
+                title,
+                format!(
+                    "Disposable run/exec/remove smoke test failed for image {image} on {destination}: {error:#}"
+                ),
+                format!(
+                    "Fix the configured image or Apple container runtime on {destination}, then run `mj doctor --json --smoke` again."
+                ),
+            ),
+        };
+    }
+
+    // Apple's `container` CLI has no `--format` on `image inspect`, so the
+    // exit status is what says the image is present.
+    let image_command = ssh_command(
+        ssh,
+        ["container", "image", "inspect", image]
+            .map(str::to_owned)
+            .to_vec(),
+    )
+    .purpose("check remote Apple container image presence");
+    match executor.execute(&image_command) {
+        Ok(output) if output.status == 0 => DoctorCheck::ready(
+            check_id,
+            title,
+            format!(
+                "Apple container {} is available via {destination} on macOS {}; image {image} is present. Run `mj doctor --json --smoke` to verify a disposable run.",
+                preflight.version, preflight.macos_version
+            ),
+        ),
+        Ok(output) => DoctorCheck::fixable(
+            check_id,
+            title,
+            format!(
+                "Image {image} is not present in Apple container storage on {destination}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            format!(
+                "Pull it on {destination} with `ssh {destination} container image pull {image}`, or run `mj doctor --json --smoke`."
+            ),
+        ),
+        Err(error) => DoctorCheck::fixable(
+            check_id,
+            title,
+            format!(
+                "Could not inspect remote Apple container image {image} on {destination}: {error}"
+            ),
+            format!(
+                "Verify `ssh {destination} container system status` succeeds, then pull {image} on that host."
+            ),
+        ),
+    }
+}
+
 /// Shared disposable-container identity for every doctor smoke test.
 fn doctor_smoke_id() -> String {
     format!(
@@ -2915,18 +3055,25 @@ fn worker_binary_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
             )];
         }
     };
+    // `remote_kind` names the kinds whose architecture is unknown until the
+    // host is asked; `known_arch` is an architecture the kind fixes itself.
     let containers = config
         .targets
         .iter()
         .filter_map(|(id, target)| match target {
             TargetTemplate::LocalPodman { container }
             | TargetTemplate::LocalDocker { container }
-            | TargetTemplate::AppleContainer { container } => Some((id, container, None)),
+            | TargetTemplate::AppleContainer { container } => Some((id, container, None, None)),
             TargetTemplate::SshPodman { container, .. } => {
-                Some((id, container, Some("ssh-podman")))
+                Some((id, container, Some("ssh-podman"), None))
             }
             TargetTemplate::SshDocker { container, .. } => {
-                Some((id, container, Some("ssh-docker")))
+                Some((id, container, Some("ssh-docker"), None))
+            }
+            // Apple container runs only native images, so this remote target
+            // is Apple silicon whatever the controller's own machine is.
+            TargetTemplate::SshAppleContainer { container, .. } => {
+                Some((id, container, None, Some("aarch64")))
             }
             _ => None,
         })
@@ -2940,7 +3087,7 @@ fn worker_binary_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
     }
     containers
         .into_iter()
-        .map(|(id, container, remote_kind)| {
+        .map(|(id, container, remote_kind, known_arch)| {
             if let Some(remote_kind) = remote_kind
                 && container.platform.is_none()
             {
@@ -2954,7 +3101,7 @@ fn worker_binary_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
                     ),
                 );
             }
-            worker_binary_check(id, container)
+            worker_binary_check_on(id, container, known_arch)
         })
         .collect()
 }
@@ -2990,7 +3137,14 @@ fn ssh_bare_worker_checks(
         .collect()
 }
 
-fn worker_binary_check(id: &str, container: &ContainerTemplate) -> DoctorCheck {
+/// One worker-binary check. `known_arch` is the architecture the target kind
+/// itself fixes, such as Apple container's Apple-silicon-only images; `None`
+/// takes it from the container's `platform`, else this machine's.
+fn worker_binary_check_on(
+    id: &str,
+    container: &ContainerTemplate,
+    known_arch: Option<&'static str>,
+) -> DoctorCheck {
     let title = format!("Container worker binary for target {id}");
     let image = container.image.as_str();
     let default_image = image == mj_core::config::DEFAULT_CONTAINER_IMAGE;
@@ -3003,7 +3157,9 @@ fn worker_binary_check(id: &str, container: &ContainerTemplate) -> DoctorCheck {
             ),
         );
     }
-    let arch = match container_architecture(container.platform.as_deref()) {
+    let arch = match known_arch
+        .map_or_else(|| container_architecture(container.platform.as_deref()), Ok)
+    {
         Ok(arch) => arch,
         Err(reason) => {
             return DoctorCheck::unsupported(format!("worker.{id}"), title, reason);
@@ -3083,7 +3239,10 @@ fn apple_container_image(config: ConfigStatus<'_>) -> String {
         .ok()
         .and_then(|config| {
             config.targets.values().find_map(|target| match target {
-                TargetTemplate::AppleContainer { container } => Some(container.image.clone()),
+                TargetTemplate::AppleContainer { container }
+                | TargetTemplate::SshAppleContainer { container, .. } => {
+                    Some(container.image.clone())
+                }
                 _ => None,
             })
         })

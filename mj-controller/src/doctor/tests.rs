@@ -1853,3 +1853,65 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
         assert_eq!(file_check.status, CheckStatus::Ready, "{file_check:?}");
     }
 }
+
+/// The remote Apple container check runs every probe on the far side of SSH,
+/// and its failure names the one thing that is missing (a running daemon)
+/// rather than an unreachable host.
+#[test]
+fn remote_apple_container_check_reports_a_stopped_daemon_and_a_present_image() {
+    let ssh = RuntimeSshTarget {
+        destination: "dev@mac.example.test".to_owned(),
+        ssh_args: Vec::new(),
+    };
+    let ready = FakeExecutor::new([
+        Ok(output(b"")),
+        Ok(output(b"Darwin arm64\n")),
+        Ok(output(b"26.1\n")),
+        Ok(output(b"container 1.2.3\n")),
+        Ok(output(b"running\n")),
+        Ok(output(b"")),
+    ]);
+    let check = ssh_apple_container_check(
+        "mac-apple",
+        &ssh,
+        "example.invalid/agent:latest",
+        &ready,
+        false,
+    );
+    assert_eq!(check.status, CheckStatus::Ready);
+    assert_eq!(check.id, "runtime.ssh-apple-container.mac-apple");
+    assert!(check.detail.contains("1.2.3"), "{}", check.detail);
+    assert!(check.detail.contains("present"), "{}", check.detail);
+    assert!(
+        ready
+            .commands
+            .borrow()
+            .iter()
+            .all(|command| command.program == "ssh")
+    );
+
+    let stopped = FakeExecutor::new([
+        Ok(output(b"")),
+        Ok(output(b"Darwin arm64\n")),
+        Ok(output(b"26.1\n")),
+        Ok(output(b"container 1.2.3\n")),
+        Ok(failed(b"Error: container system service is not running\n")),
+    ]);
+    let check = ssh_apple_container_check(
+        "mac-apple",
+        &ssh,
+        "example.invalid/agent:latest",
+        &stopped,
+        false,
+    );
+    assert_eq!(check.status, CheckStatus::Fixable);
+    assert!(check.detail.contains("not running"), "{}", check.detail);
+    assert!(
+        check
+            .remediation
+            .as_deref()
+            .is_some_and(|fix| fix.contains("container system start") || fix.contains("container")),
+        "{:?}",
+        check.remediation
+    );
+}

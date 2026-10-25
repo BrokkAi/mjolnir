@@ -24,6 +24,7 @@ const HARNESS_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MANAGED_INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const NODE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_INSTALLER_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_NODE_DIST_URL: &str = "https://nodejs.org/dist";
 
 const CODEX_PACKAGE_JSON: &[u8] = include_bytes!("../assets/harnesses/codex/package.json");
 const CODEX_PACKAGE_LOCK: &[u8] = include_bytes!("../assets/harnesses/codex/package-lock.json");
@@ -55,6 +56,22 @@ pub struct ManagedNodeRuntime {
     path: PathBuf,
     lease_path: PathBuf,
     _lease: File,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ManagedNodeHealth {
+    Missing,
+    Usable,
+    Unusable(String),
+}
+
+impl ManagedNodeHealth {
+    fn unusable_reason(&self) -> Option<&str> {
+        match self {
+            Self::Unusable(reason) => Some(reason),
+            Self::Missing | Self::Usable => None,
+        }
+    }
 }
 
 impl ManagedNodeRuntime {
@@ -759,6 +776,7 @@ async fn install_managed_node(
     let target = field("target")?;
     let folder = format!("node-v{NODE_VERSION}-{target}");
     let install = root.join(&folder);
+    ensure_node_artifact_platform(platform)?;
 
     std::fs::create_dir_all(root)
         .with_context(|| format!("create managed Node.js cache {}", root.display()))?;
@@ -766,14 +784,18 @@ async fn install_managed_node(
     lock_file(&install_lock, false, "managed Node.js installer").await?;
     remove_abandoned_staging(root)?;
 
-    if !managed_node_is_usable(&install, environment).await? {
+    let cached = managed_node_health(&install, environment).await?;
+    if cached != ManagedNodeHealth::Usable {
         if install.exists() {
             let lease = open_lock(&install.join(LEASE_FILE))?;
             match lease.try_lock() {
                 Ok(()) => {}
                 Err(std::fs::TryLockError::WouldBlock) => bail!(
-                    "managed Node.js repair deferred: {} is still in use",
-                    install.display()
+                    "managed Node.js repair deferred: {} is still in use; the cached installation is unusable: {}",
+                    install.display(),
+                    cached
+                        .unusable_reason()
+                        .unwrap_or("the installation is missing or incomplete")
                 ),
                 Err(std::fs::TryLockError::Error(error)) => {
                     return Err(error).context("lock invalid managed Node.js for repair");
@@ -790,7 +812,7 @@ async fn install_managed_node(
             .with_context(|| format!("create Node.js staging directory in {}", root.display()))?;
         let file = format!("{folder}.tar.gz");
         let archive = staging.path().join(&file);
-        let url = format!("https://nodejs.org/dist/v{NODE_VERSION}/{file}");
+        let url = node_distribution_url(environment, &file)?;
         download_verified_async(&url, &archive, field("sha256")?, environment).await?;
         let staging_root = staging.path().to_path_buf();
         let folder_for_extract = folder.clone();
@@ -800,18 +822,27 @@ async fn install_managed_node(
         .await
         .context("Node.js extraction task failed")??;
         let extracted = staging.path().join(&folder);
-        if !managed_node_is_usable(&extracted, environment).await? {
+        if let ManagedNodeHealth::Unusable(reason) =
+            managed_node_health(&extracted, environment).await?
+        {
+            bail!("downloaded Node.js archive is not usable: {reason}");
+        } else if !extracted.is_dir() {
             bail!(
-                "downloaded Node.js archive did not contain usable node, npm, and npx executables"
+                "downloaded Node.js archive did not contain {}",
+                extracted.display()
             );
         }
         open_lock(&extracted.join(LEASE_FILE))?;
         match std::fs::rename(&extracted, &install) {
             Ok(()) => {}
             Err(error) if install.exists() => {
-                if !managed_node_is_usable(&install, environment).await? {
-                    return Err(error)
-                        .with_context(|| format!("publish managed Node.js {}", install.display()));
+                if let ManagedNodeHealth::Unusable(reason) =
+                    managed_node_health(&install, environment).await?
+                {
+                    return Err(error).context(format!(
+                        "publish managed Node.js {}: {reason}",
+                        install.display()
+                    ));
                 }
             }
             Err(error) => {
@@ -869,66 +900,182 @@ fn gc_node_root(root: &Path, keep: &str) -> Result<()> {
     Ok(())
 }
 
+fn node_distribution_url(environment: &BTreeMap<String, String>, file: &str) -> Result<String> {
+    let configured = environment
+        .get("NODEJS_ORG_MIRROR")
+        .or_else(|| environment.get("NVM_NODEJS_ORG_MIRROR"))
+        .map(String::as_str)
+        .filter(|value| !value.is_empty());
+    let base = configured.unwrap_or(DEFAULT_NODE_DIST_URL);
+    let parsed =
+        url::Url::parse(base).with_context(|| format!("parse Node.js download mirror {base:?}"))?;
+    anyhow::ensure!(
+        parsed.scheme() == "https",
+        "Node.js download mirror must use HTTPS: {base}"
+    );
+    anyhow::ensure!(
+        parsed.username().is_empty()
+            && parsed.password().is_none()
+            && parsed.query().is_none()
+            && parsed.fragment().is_none(),
+        "Node.js download mirror must be a plain HTTPS base URL without credentials, a query, or a fragment: {base}"
+    );
+    Ok(format!(
+        "{}/v{NODE_VERSION}/{file}",
+        base.trim_end_matches('/')
+    ))
+}
+
+fn ensure_node_artifact_platform(platform: &serde_json::Value) -> Result<()> {
+    let Some(interpreter) = platform
+        .get("interpreter")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        Path::new(interpreter).is_file(),
+        "Mjolnir's pinned Node.js for this target is a glibc build, but the required program interpreter {interpreter} is missing. Install Node.js 22 or newer with npm and npx on the target PATH"
+    );
+    Ok(())
+}
+
 async fn system_node_is_compatible(environment: &BTreeMap<String, String>) -> bool {
-    let Ok(output) = bounded_env_output(
+    if crate::program_path::find_program_on_path("node", environment.get("PATH").map(OsStr::new))
+        .is_none()
+    {
+        return false;
+    }
+    let output = match bounded_env_output(
         tokio::process::Command::new("node").arg("--version"),
         environment,
     )
     .await
-    else {
-        return false;
+    {
+        Ok(output) => output,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "system Node.js exists but its version probe failed; using Mjolnir's managed runtime"
+            );
+            return false;
+        }
     };
     if !output.status.success()
         || !node_version_is_supported(String::from_utf8_lossy(&output.stdout).trim())
     {
+        if !output.status.success() {
+            tracing::warn!(
+                status = %output.status,
+                "system Node.js exists but its version probe exited unsuccessfully; using Mjolnir's managed runtime"
+            );
+        }
         return false;
     }
     for command in ["npm", "npx"] {
-        let Ok(output) = bounded_env_output(
+        if crate::program_path::find_program_on_path(
+            command,
+            environment.get("PATH").map(OsStr::new),
+        )
+        .is_none()
+        {
+            return false;
+        }
+        let output = match bounded_env_output(
             tokio::process::Command::new(command).arg("--version"),
             environment,
         )
         .await
-        else {
-            return false;
+        {
+            Ok(output) => output,
+            Err(error) => {
+                tracing::warn!(
+                    command,
+                    %error,
+                    "system Node.js companion command exists but its probe failed; using Mjolnir's managed runtime"
+                );
+                return false;
+            }
         };
         if !output.status.success() {
+            tracing::warn!(
+                command,
+                status = %output.status,
+                "system Node.js companion command exited unsuccessfully; using Mjolnir's managed runtime"
+            );
             return false;
         }
     }
     true
 }
 
-async fn managed_node_is_usable(
+async fn managed_node_health(
     install: &Path,
     environment: &BTreeMap<String, String>,
-) -> Result<bool> {
+) -> Result<ManagedNodeHealth> {
+    if !install.exists() {
+        return Ok(ManagedNodeHealth::Missing);
+    }
+    if !install.is_dir() {
+        return Ok(ManagedNodeHealth::Unusable(format!(
+            "{} is not a directory",
+            install.display()
+        )));
+    }
     let bin = install.join("bin");
-    if ["node", "npm", "npx"].iter().any(|name| {
+    if let Some(name) = ["node", "npm", "npx"].into_iter().find(|name| {
         let path = bin.join(name);
         !entrypoint_is_executable(&path)
     }) {
-        return Ok(false);
-    }
+        return Ok(ManagedNodeHealth::Unusable(format!(
+            "{} is missing or not executable",
+            bin.join(name).display()
+        )));
+    };
     let mut probe_environment = environment.clone();
     prepend_path(&mut probe_environment, &bin)?;
     let mut node = tokio::process::Command::new(bin.join("node"));
     node.arg("--version");
-    let output = bounded_env_output(&mut node, &probe_environment).await?;
-    if !output.status.success()
-        || !node_version_is_supported(String::from_utf8_lossy(&output.stdout).trim())
-    {
-        return Ok(false);
+    let output = match bounded_env_output(&mut node, &probe_environment).await {
+        Ok(output) => output,
+        Err(error) => {
+            return Ok(ManagedNodeHealth::Unusable(format!(
+                "node --version could not run: {error:#}"
+            )));
+        }
+    };
+    let version = String::from_utf8_lossy(&output.stdout);
+    let version = version.trim();
+    if !output.status.success() {
+        return Ok(ManagedNodeHealth::Unusable(format!(
+            "node --version exited with {}",
+            output.status
+        )));
+    }
+    if !node_version_is_supported(version) {
+        return Ok(ManagedNodeHealth::Unusable(format!(
+            "node reports unsupported version {version:?}"
+        )));
     }
     for name in ["npm", "npx"] {
         let mut command = tokio::process::Command::new(bin.join(name));
         command.arg("--version");
-        let output = bounded_env_output(&mut command, &probe_environment).await?;
+        let output = match bounded_env_output(&mut command, &probe_environment).await {
+            Ok(output) => output,
+            Err(error) => {
+                return Ok(ManagedNodeHealth::Unusable(format!(
+                    "{name} --version could not run: {error:#}"
+                )));
+            }
+        };
         if !output.status.success() {
-            return Ok(false);
+            return Ok(ManagedNodeHealth::Unusable(format!(
+                "{name} --version exited with {}",
+                output.status
+            )));
         }
     }
-    Ok(true)
+    Ok(ManagedNodeHealth::Usable)
 }
 
 async fn bounded_env_output(
@@ -1391,6 +1538,65 @@ INSTALLER
     }
 
     #[test]
+    fn node_download_uses_a_validated_https_mirror() {
+        let file = format!("node-v{NODE_VERSION}-linux-x64.tar.gz");
+        let empty = BTreeMap::new();
+        assert_eq!(
+            node_distribution_url(&empty, &file).unwrap(),
+            format!("https://nodejs.org/dist/v{NODE_VERSION}/{file}")
+        );
+
+        let environment = BTreeMap::from([(
+            "NVM_NODEJS_ORG_MIRROR".into(),
+            "https://mirror.example/node/".into(),
+        )]);
+        assert_eq!(
+            node_distribution_url(&environment, &file).unwrap(),
+            format!("https://mirror.example/node/v{NODE_VERSION}/{file}")
+        );
+
+        let environment = BTreeMap::from([
+            (
+                "NVM_NODEJS_ORG_MIRROR".into(),
+                "https://nvm.example/node".into(),
+            ),
+            (
+                "NODEJS_ORG_MIRROR".into(),
+                "https://mjolnir.example/node/".into(),
+            ),
+        ]);
+        assert_eq!(
+            node_distribution_url(&environment, &file).unwrap(),
+            format!("https://mjolnir.example/node/v{NODE_VERSION}/{file}")
+        );
+
+        for mirror in [
+            "http://mirror.example/node",
+            "https://user:secret@mirror.example/node",
+            "https://mirror.example/node?token=secret",
+        ] {
+            let environment = BTreeMap::from([("NODEJS_ORG_MIRROR".into(), mirror.into())]);
+            assert!(
+                node_distribution_url(&environment, &file).is_err(),
+                "{mirror:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn linux_node_artifact_requires_its_program_interpreter() {
+        let metadata: serde_json::Value =
+            serde_json::from_str(include_str!("../assets/node/runtime.json")).unwrap();
+        let mut platform = metadata["platforms"][current_node_platform()].clone();
+        platform["interpreter"] = serde_json::Value::String(
+            "/definitely/missing/mjolnir-node-program-interpreter".into(),
+        );
+        let error = ensure_node_artifact_platform(&platform).unwrap_err();
+        assert!(error.to_string().contains("required program interpreter"));
+        assert!(error.to_string().contains("Install Node.js 22 or newer"));
+    }
+
+    #[test]
     fn muse_pin_matches_runtime_metadata() {
         use crate::harness_runtime::{MUSE_ACP_PACKAGE, MUSE_ACP_VERSION, MUSE_VERSION};
         let metadata: serde_json::Value =
@@ -1716,6 +1922,31 @@ INSTALLER
             std::env::split_paths(&environment["PATH"]).next(),
             Some(runtime.path().join("bin"))
         );
+    }
+
+    #[test]
+    fn corrupt_cached_node_is_repaired_from_the_verified_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        let (archive, metadata) = fake_node_archive(temp.path());
+        let (_, mut environment) = fake_curl_copying(&archive, temp.path());
+        let root = temp.path().join("node");
+        let install = root.join(format!("node-v{NODE_VERSION}-{}", environment_target()));
+        for name in ["node", "npm", "npx"] {
+            executable(
+                &install.join("bin").join(name),
+                "#!/definitely/missing/mjolnir-node-program-interpreter\nexit 1\n",
+            );
+        }
+        open_lock(&install.join(LEASE_FILE)).unwrap();
+
+        let runtime = run_async(install_managed_node(&root, &mut environment, &metadata)).unwrap();
+
+        assert_eq!(runtime.path(), install);
+        let output =
+            crate::subprocess::run_with_input(&mut Command::new(install.join("bin/node")), &[])
+                .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, format!("v{NODE_VERSION}\n").as_bytes());
     }
 
     #[test]

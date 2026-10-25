@@ -105,6 +105,15 @@ pub fn resume_compatibility_with_checkout(
                 "this session opens {directory} directly on its host; resume it on the same kind of bare target"
             ));
         }
+        if session
+            .project
+            .as_ref()
+            .is_some_and(mj_core::repository::ProjectBundleSnapshot::primary_is_plain_directory)
+        {
+            return Err(format!(
+                "{directory} is a directory project without a committed Git checkout; resume it on a local bare target"
+            ));
+        }
         // A checkout on this machine can become an isolated workspace: the
         // resume re-snapshots it against its own network remote. Whether the
         // recorded directory really is a whole checkout with such a remote

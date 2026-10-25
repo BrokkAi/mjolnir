@@ -23,7 +23,8 @@ pub(super) fn template_architecture(
         | Template::LocalDocker { container }
         | Template::AppleContainer { container }
         | Template::SshPodman { container, .. }
-        | Template::SshDocker { container, .. } => container.platform.as_deref()?,
+        | Template::SshDocker { container, .. }
+        | Template::SshAppleContainer { container, .. } => container.platform.as_deref()?,
         Template::LocalBare | Template::SshBare { .. } | Template::AwsEc2 { .. } => return None,
     };
     // Platform strings appear as "linux/arm64", "arm64", or "linux/arm64/v8".
@@ -50,6 +51,9 @@ pub(super) fn preflight_architectures(
         | Template::LocalPodman { .. }
         | Template::LocalDocker { .. }
         | Template::AppleContainer { .. } => vec![std::env::consts::ARCH],
+        // Apple container runs only native Apple-silicon images, so a remote
+        // one is arm64 by definition.
+        Template::SshAppleContainer { .. } => vec!["aarch64"],
         Template::SshBare { .. }
         | Template::SshPodman { .. }
         | Template::SshDocker { .. }

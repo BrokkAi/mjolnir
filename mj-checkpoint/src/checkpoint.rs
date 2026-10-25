@@ -33,9 +33,10 @@ use crate::archive::{
     ArchiveInput, BundleManifest, CanonicalSessionSnapshot, CanonicalTranscriptBody,
     GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode, NativeArtifact, PayloadRole,
     RepositorySnapshot, SessionManifest, SystemGit, TargetManifest, collect_git_metadata_snapshot,
-    collect_git_snapshot, ensure_no_symlink_ancestors, has_origin_refs, is_secret_like_path,
-    read_archive_verified, remote_workspace_base, validate_component, verify_archive_streaming,
-    write_archive_hashed, write_archive_hashed_borrowed,
+    collect_git_snapshot, collect_plain_directory_snapshot, ensure_no_symlink_ancestors,
+    has_origin_refs, is_secret_like_path, read_archive_verified, remote_workspace_base,
+    validate_component, verify_archive_streaming, write_archive_hashed,
+    write_archive_hashed_borrowed,
 };
 use mj_core::config::HarnessKind;
 /// Native state whose storage format is owned by the target runtime.
@@ -99,6 +100,11 @@ pub enum CheckpointRepositoryCapture {
     /// Preserve Git provenance and durable review refs. The existing worktree
     /// remains the source for working files and ordinary Git history.
     MetadataOnly,
+    /// The directory has no committed Git checkout. Its files belong to the
+    /// user's own directory on a bare local target, exactly as a raw
+    /// checkout's do, so the snapshot records no Git state, runs no Git
+    /// command, and never rewrites a working file.
+    PlainDirectory,
 }
 
 /// Uploaded target-side input. It contains provenance and paths, never secrets.

@@ -37,6 +37,13 @@ impl Controller {
             .context("target is still starting")?;
         let backend = backend_locator(locator, session, &self.config)?;
         let launch = self.current_worker_launch_config(session_id, &backend)?;
+        if session
+            .project
+            .as_ref()
+            .is_some_and(mj_core::repository::ProjectBundleSnapshot::primary_is_plain_directory)
+        {
+            return Ok((launch.cwd, "not a git checkout".to_owned()));
+        }
         let output = executor.execute(&targets::command_on_locator(
             &backend,
             session_id,
@@ -60,9 +67,9 @@ impl Controller {
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("not a git repository") {
-                // A plain folder opened through `mj go` has no branch. Say so
-                // briefly rather than echoing multi-line git stderr, which wraps
-                // the banner.
+                // An older or untracked session can still be a plain folder.
+                // Say so briefly rather than echoing multi-line git stderr,
+                // which wraps the banner.
                 "not a git checkout".to_owned()
             } else {
                 format!(
@@ -295,7 +302,8 @@ impl Controller {
                 }
                 TargetTemplate::SshBare { ssh, .. }
                 | TargetTemplate::SshPodman { ssh, .. }
-                | TargetTemplate::SshDocker { ssh, .. } => {
+                | TargetTemplate::SshDocker { ssh, .. }
+                | TargetTemplate::SshAppleContainer { ssh, .. } => {
                     let entry = ssh_hosts.entry(ssh.host.clone()).or_default();
                     entry.0.push(target_id.clone());
                     let connection = SshTarget::from(ssh);
@@ -531,7 +539,8 @@ pub(super) fn preflight_target(
     match template {
         TargetTemplate::SshBare { ssh, .. }
         | TargetTemplate::SshPodman { ssh, .. }
-        | TargetTemplate::SshDocker { ssh, .. } => {
+        | TargetTemplate::SshDocker { ssh, .. }
+        | TargetTemplate::SshAppleContainer { ssh, .. } => {
             verify_ssh_connectivity(&SshTarget::from(ssh), executor)
         }
         _ => verify_target(template, executor, check),
@@ -645,6 +654,17 @@ pub(super) fn verify_target(
                 .map_err(|error| {
                     anyhow::anyhow!(
                         "Apple container is not ready{then_retry}. Fix the problem below: {error:#}"
+                    )
+                })
+        }
+        TargetTemplate::SshAppleContainer { ssh, .. } => {
+            let ssh = SshTarget::from(ssh);
+            targets::verify_ssh_apple_container(&ssh, executor)
+                .map(|_| ())
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "remote Apple container preflight failed for {}. Fix the problem below{then_retry}: {error:#}",
+                        ssh.destination
                     )
                 })
         }
@@ -851,6 +871,12 @@ pub(super) fn backend_target(
         TargetTemplate::AppleContainer { container } => targets::TargetTemplate::AppleContainer(
             backend_container(container, allocation, overrides),
         ),
+        TargetTemplate::SshAppleContainer { ssh, container } => {
+            targets::TargetTemplate::SshAppleContainer {
+                ssh: SshTarget::from(ssh),
+                container: backend_container(container, allocation, overrides),
+            }
+        }
         TargetTemplate::AwsEc2 {
             aws_profile,
             region,
@@ -1049,7 +1075,8 @@ pub(super) fn configure_github_token_environment(target: &mut targets::TargetTem
         | targets::TargetTemplate::LocalDocker(container)
         | targets::TargetTemplate::AppleContainer(container)
         | targets::TargetTemplate::SshPodman { container, .. }
-        | targets::TargetTemplate::SshDocker { container, .. } => container,
+        | targets::TargetTemplate::SshDocker { container, .. }
+        | targets::TargetTemplate::SshAppleContainer { container, .. } => container,
         targets::TargetTemplate::LocalBare
         | targets::TargetTemplate::AwsEc2(_)
         | targets::TargetTemplate::SshBare { .. } => return false,
@@ -1228,6 +1255,11 @@ pub(super) fn locator_after_provision_named(
             }
         }
         TargetTemplate::SshDocker { ssh, .. } => TargetLocator::SshDocker {
+            borrowed_from: None,
+            host: ssh.host.clone(),
+            container_id: generated,
+        },
+        TargetTemplate::SshAppleContainer { ssh, .. } => TargetLocator::SshAppleContainer {
             borrowed_from: None,
             host: ssh.host.clone(),
             container_id: generated,

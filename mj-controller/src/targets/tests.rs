@@ -4743,6 +4743,110 @@ fn ssh_docker_provisions_overlay_mounts_and_streams_secret_without_local_docker(
     );
 }
 
+fn ssh_apple_container_template() -> TargetTemplate {
+    TargetTemplate::SshAppleContainer {
+        ssh: ssh(),
+        container: ContainerTemplate {
+            build_cache: None,
+            image: "example.invalid/agent:latest".into(),
+            pull_policy: ImagePullPolicy::Auto,
+            extra_run_args: vec![],
+            workspace_storage: Default::default(),
+        },
+    }
+}
+
+/// Apple's runtime keeps its VM disk image on the host that runs it, so a
+/// remote session is the local one with every command sent over SSH, and
+/// nothing is run here.
+#[test]
+fn ssh_apple_container_provisions_with_container_run_over_ssh_only() {
+    let template = ssh_apple_container_template();
+    let plan = provision_plan(&template, SESSION, &bundle(), &[], None).unwrap();
+    assert!(!plan.commands.is_empty());
+    assert!(plan.commands.iter().all(|command| command.program == "ssh"));
+    let create = plan
+        .commands
+        .iter()
+        .find(|command| command.creates_target)
+        .expect("a command creates the container");
+    let remote = create.args.last().unwrap();
+    assert!(remote.contains("'container' 'run'"), "{remote}");
+    assert!(!remote.contains("podman"), "{remote}");
+    assert!(!remote.contains("docker"), "{remote}");
+    assert_eq!(plan.commands[0].program, "ssh");
+}
+
+#[test]
+fn ssh_apple_container_closes_the_container_and_snapshot_over_ssh() {
+    let locator = TargetLocator::SshAppleContainer {
+        borrowed_from: None,
+        ssh: ssh(),
+        container_id: resource_name(SESSION).unwrap(),
+    };
+    let plan = close_plan(&locator, SESSION).unwrap();
+    let command = &plan.commands[0];
+    assert_eq!(command.program, "ssh");
+    let remote = command.args.last().unwrap();
+    assert!(remote.contains("container rm --force"), "{remote}");
+    assert!(
+        remote.contains("git/sessions/$2"),
+        "removing the shared cache names the session snapshot: {remote}"
+    );
+    assert!(
+        remote.contains(&format!(" '{SESSION}' ")),
+        "the session id the snapshot is named after is passed to the script: {remote}"
+    );
+}
+
+#[test]
+fn ssh_apple_container_absence_is_confirmed_on_the_remote_host() {
+    let locator = TargetLocator::SshAppleContainer {
+        borrowed_from: None,
+        ssh: ssh(),
+        container_id: resource_name(SESSION).unwrap(),
+    };
+    let executor = PodmanPreflightExecutor::with_outputs([podman_output("")]);
+    assert!(
+        cleanup_target_is_confirmed_absent(&locator, SESSION, &executor).unwrap(),
+        "no listed container means the target is absent"
+    );
+    assert_eq!(executor.seen.borrow()[0].program, "ssh");
+    assert_eq!(
+        executor.seen.borrow()[0].args.last().unwrap(),
+        "'container' 'list' '--all' '--quiet'"
+    );
+
+    let executor = PodmanPreflightExecutor::with_outputs([podman_output(format!(
+        "{}\n",
+        resource_name(SESSION).unwrap()
+    ))]);
+    assert!(
+        !cleanup_target_is_confirmed_absent(&locator, SESSION, &executor).unwrap(),
+        "a listed container means the target is still present"
+    );
+}
+
+#[test]
+fn ssh_apple_container_smoke_runs_and_removes_a_disposable_container_remotely() {
+    let plan = setup_smoke_plan(&ssh_apple_container_template(), SESSION).unwrap();
+    assert!(plan.commands.iter().all(|command| command.program == "ssh"));
+    assert!(
+        plan.commands.iter().any(|command| command
+            .args
+            .last()
+            .unwrap()
+            .contains("'container' 'run'"))
+    );
+    assert!(
+        plan.commands.iter().any(|command| command
+            .args
+            .last()
+            .unwrap()
+            .contains("'container' 'rm'"))
+    );
+}
+
 #[test]
 fn ssh_docker_smoke_attempts_cleanup_after_probe_failure_and_preserves_lower_on_cleanup_failure() {
     let fail = || CommandOutput {

@@ -182,9 +182,10 @@ already has and pull only when the host has no copy at all.
 
 A few seconds after the Mjolnir daemon starts, it downloads every configured
 container image the host does not have, so your first session does not wait on
-the registry. Local Podman, local Docker, SSH Podman, SSH Docker, and Apple
-container all take part. The dashboard shows "Downloading image ..." while a
-download runs and "Image ... is ready" when it finishes. If you create a
+the registry. Local Podman, local Docker, SSH Podman, SSH Docker, Apple
+container, and Apple container on an SSH machine all take part. The dashboard
+shows "Downloading image ..." while a download runs and "Image ... is ready"
+when it finishes. If you create a
 session while its image is still downloading, the session shows a "Pull image"
 stage and waits for that download instead of starting a second one.
 
@@ -203,12 +204,13 @@ in place.
 
 ## Git clone cache
 
-Local Podman, local Docker, SSH Podman, SSH Docker, and Apple container targets cache GitHub repository
-objects under the container host user's `~/.cache/mjolnir/git`. Before launch, Mjolnir
-refreshes a bare mirror and creates an isolated session snapshot whose
-immutable objects are shared with ordinary filesystem hardlinks. The snapshot
-is mounted read-only and the normal in-container clone borrows its objects, so
-branch selection, checkout filters, and image-specific Git behavior remain
+Local Podman, local Docker, SSH Podman, SSH Docker, Apple container, and Apple
+container on an SSH machine all cache GitHub repository objects under the
+container host user's `~/.cache/mjolnir/git`. Before launch, Mjolnir refreshes a
+bare mirror and creates an isolated session snapshot whose immutable objects
+are shared with ordinary filesystem hardlinks. The snapshot is mounted
+read-only and the normal in-container clone borrows its objects, so branch
+selection, checkout filters, and image-specific Git behavior remain
 unchanged.
 
 This is an optimization rather than a prerequisite. If host Git, credentials,
