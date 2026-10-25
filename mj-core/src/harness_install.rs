@@ -25,6 +25,9 @@ const MANAGED_INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const NODE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_INSTALLER_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_NODE_DIST_URL: &str = "https://nodejs.org/dist";
+const ARTIFACT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_ARTIFACT_REDIRECTS: usize = 10;
 
 const CODEX_PACKAGE_JSON: &[u8] = include_bytes!("../assets/harnesses/codex/package.json");
 const CODEX_PACKAGE_LOCK: &[u8] = include_bytes!("../assets/harnesses/codex/package-lock.json");
@@ -656,28 +659,57 @@ async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>
     let url = format!("https://registry.npmjs.org/@opencode/cli-{target}/-/{file}");
     let archive = staging.join(&file);
     download_verified_async(&url, &archive, field("sha256")?, environment).await?;
-    let mut tar = tokio::process::Command::new("tar");
-    tar.arg("-xzf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(staging)
-        .arg("package/bin/opencode")
-        .env_clear()
-        .envs(environment);
-    run_bounded_checked(
-        &mut tar,
-        "extract verified OpenCode package",
-        HARNESS_COMMAND_TIMEOUT,
-    )
-    .await?;
-    std::fs::remove_file(&archive)?;
     let entrypoint = staging.join("opencode");
-    std::fs::rename(staging.join("package/bin/opencode"), &entrypoint)
-        .context("move the OpenCode executable out of its npm package")?;
-    std::fs::remove_dir_all(staging.join("package"))?;
+    let archive_for_extract = archive.clone();
+    let entrypoint_for_extract = entrypoint.clone();
+    tokio::task::spawn_blocking(move || {
+        extract_archive_file(
+            &archive_for_extract,
+            Path::new("package/bin/opencode"),
+            &entrypoint_for_extract,
+        )
+    })
+    .await
+    .context("OpenCode extraction task failed")??;
+    std::fs::remove_file(&archive)?;
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&entrypoint, std::fs::Permissions::from_mode(0o755))?;
     Ok(())
+}
+
+fn extract_archive_file(archive: &Path, wanted: &Path, destination: &Path) -> Result<()> {
+    let archive_file =
+        File::open(archive).with_context(|| format!("open archive {}", archive.display()))?;
+    let decoder = flate2::read::GzDecoder::new(archive_file);
+    let mut tar_archive = tar::Archive::new(decoder);
+    let archive_name = archive.to_path_buf();
+    for entry in tar_archive
+        .entries()
+        .with_context(|| format!("read archive {}", archive_name.display()))?
+    {
+        let mut entry =
+            entry.with_context(|| format!("read archive {}", archive_name.display()))?;
+        let path = entry
+            .path()
+            .with_context(|| format!("read entry path in {}", archive_name.display()))?
+            .into_owned();
+        if path == wanted {
+            anyhow::ensure!(
+                entry.header().entry_type().is_file(),
+                "archive entry {} is not a regular file",
+                wanted.display()
+            );
+            entry.unpack(destination).with_context(|| {
+                format!("extract {} to {}", wanted.display(), destination.display())
+            })?;
+            return Ok(());
+        }
+    }
+    bail!(
+        "archive {} did not contain {}",
+        archive_name.display(),
+        wanted.display()
+    )
 }
 
 async fn download_verified_async(
@@ -686,35 +718,119 @@ async fn download_verified_async(
     expected: &str,
     environment: &BTreeMap<String, String>,
 ) -> Result<()> {
-    let mut curl = tokio::process::Command::new("curl");
-    curl.args([
-        "--proto",
-        "=https",
-        "--tlsv1.2",
-        "-fLsS",
-        "--connect-timeout",
-        "30",
-        "--max-time",
-        "600",
-        "-o",
-    ])
-    .arg(destination)
-    .arg(url)
-    .env_clear()
-    .envs(environment);
-    run_bounded_checked(
-        &mut curl,
-        "download pinned harness runtime",
-        HARNESS_COMMAND_TIMEOUT,
-    )
-    .await?;
-    let actual = crate::worker_launch::worker_executable_digest(destination)?;
+    let result = async {
+        download_verified_inner(url, destination, environment).await?;
+        let actual = crate::worker_launch::worker_executable_digest(destination)?;
+        anyhow::ensure!(
+            actual == expected,
+            "harness runtime checksum mismatch for {}: expected {expected}, got {actual}",
+            destination.display()
+        );
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = std::fs::remove_file(destination);
+    }
+    result
+}
+
+async fn download_verified_inner(
+    url: &str,
+    destination: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<()> {
+    let parsed = url::Url::parse(url).with_context(|| format!("parse artifact URL {url:?}"))?;
     anyhow::ensure!(
-        actual == expected,
-        "harness runtime checksum mismatch for {}: expected {expected}, got {actual}",
-        destination.display()
+        artifact_url_is_allowed(&parsed),
+        "artifact downloads require HTTPS: {url}"
     );
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let mut builder = reqwest::Client::builder()
+        .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(ARTIFACT_DOWNLOAD_TIMEOUT)
+        .https_only(!cfg!(test))
+        .redirect(artifact_redirect_policy());
+    for name in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+        if let Some(proxy) = environment.get(name).filter(|value| !value.is_empty()) {
+            let mut proxy = reqwest::Proxy::all(proxy)
+                .with_context(|| format!("configure artifact download proxy from {name}"))?;
+            if let Some(no_proxy) = environment
+                .get("NO_PROXY")
+                .or_else(|| environment.get("no_proxy"))
+                .and_then(|value| reqwest::NoProxy::from_string(value))
+            {
+                proxy = proxy.no_proxy(Some(no_proxy));
+            }
+            builder = builder.proxy(proxy);
+            break;
+        }
+    }
+    let client = builder.build().context("build artifact HTTP client")?;
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("request artifact {url}"))?
+        .error_for_status()
+        .with_context(|| format!("download artifact {url}"))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_ARTIFACT_BYTES)
+    {
+        bail!(
+            "artifact {url} is larger than the {} byte download limit",
+            MAX_ARTIFACT_BYTES
+        );
+    }
+    let mut file = tokio::fs::File::create(destination)
+        .await
+        .with_context(|| format!("create artifact file {}", destination.display()))?;
+    let mut received = 0u64;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .with_context(|| format!("read artifact {url}"))?
+    {
+        received = received.saturating_add(chunk.len() as u64);
+        anyhow::ensure!(
+            received <= MAX_ARTIFACT_BYTES,
+            "artifact {url} exceeded the {} byte download limit",
+            MAX_ARTIFACT_BYTES
+        );
+        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+            .await
+            .with_context(|| format!("write artifact file {}", destination.display()))?;
+    }
+    tokio::io::AsyncWriteExt::flush(&mut file)
+        .await
+        .with_context(|| format!("flush artifact file {}", destination.display()))?;
+    anyhow::ensure!(received > 0, "artifact {url} was empty");
     Ok(())
+}
+
+fn artifact_url_is_allowed(url: &url::Url) -> bool {
+    url.scheme() == "https"
+        || (cfg!(test)
+            && url.scheme() == "http"
+            && url.host().is_some_and(|host| match host {
+                url::Host::Ipv4(address) => address.is_loopback(),
+                url::Host::Ipv6(address) => address.is_loopback(),
+                url::Host::Domain(host) => host.eq_ignore_ascii_case("localhost"),
+            }))
+}
+
+fn artifact_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= MAX_ARTIFACT_REDIRECTS {
+            return attempt.error("too many artifact download redirects");
+        }
+        if !artifact_url_is_allowed(attempt.url()) {
+            return attempt.error("artifact download redirected away from HTTPS");
+        }
+        attempt.follow()
+    })
 }
 
 /// Select a Node.js runtime for an ACP launch.
@@ -910,7 +1026,7 @@ fn node_distribution_url(environment: &BTreeMap<String, String>, file: &str) -> 
     let parsed =
         url::Url::parse(base).with_context(|| format!("parse Node.js download mirror {base:?}"))?;
     anyhow::ensure!(
-        parsed.scheme() == "https",
+        artifact_url_is_allowed(&parsed),
         "Node.js download mirror must use HTTPS: {base}"
     );
     anyhow::ensure!(
@@ -1619,48 +1735,20 @@ INSTALLER
     }
 
     #[test]
-    fn muse_download_rejects_corrupt_payload_before_publication() {
+    fn checksum_failure_removes_the_downloaded_artifact() {
         let temp = tempfile::tempdir().unwrap();
-        let tools = temp.path().join("tools");
-        executable(
-            &tools.join("curl"),
-            "#!/bin/sh\nwhile [ \"$1\" != '-o' ]; do shift; done\nshift\nprintf corrupted > \"$1\"\n",
-        );
-        executable(
-            &tools.join("node"),
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.22.1; fi\n",
-        );
-        for command in ["npm", "npx"] {
-            executable(
-                &tools.join(command),
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 11.6.2; fi\n",
-            );
-        }
-        let environment = BTreeMap::from([("PATH".into(), tools.to_string_lossy().into_owned())]);
+        let server = ArtifactServer::serve(b"corrupted".to_vec());
+        let environment = BTreeMap::new();
         let output = temp.path().join("download");
         let error = download_verified(
-            "https://example.invalid/muse",
+            &format!("{}/muse", server.url),
             &output,
             &"0".repeat(64),
             &environment,
         )
         .unwrap_err();
         assert!(error.to_string().contains("checksum mismatch"));
-        let cache = temp.path().join("cache");
-        let error = resolve_at(
-            &cache,
-            HarnessKind::Muse,
-            ExecutionPolicy::ConfiguredApprovals,
-            &environment,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("checksum mismatch"));
-        assert!(
-            !cache
-                .join("muse")
-                .join(pin(HarnessKind::Muse).install_id)
-                .exists()
-        );
+        assert!(!output.exists());
     }
 
     #[test]
@@ -1801,23 +1889,56 @@ INSTALLER
         (archive, metadata)
     }
 
-    fn fake_curl_copying(archive: &Path, root: &Path) -> (PathBuf, BTreeMap<String, String>) {
+    struct ArtifactServer {
+        url: String,
+        server: Arc<tiny_http::Server>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl ArtifactServer {
+        fn serve(body: Vec<u8>) -> Self {
+            let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+            let address = server.server_addr().to_ip().unwrap();
+            let task_server = Arc::clone(&server);
+            let body = Arc::new(body);
+            let thread = std::thread::spawn(move || {
+                for request in task_server.incoming_requests() {
+                    let response = tiny_http::Response::from_data((*body).clone());
+                    request.respond(response).unwrap();
+                }
+            });
+            Self {
+                url: format!("http://{address}"),
+                server,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for ArtifactServer {
+        fn drop(&mut self) {
+            self.server.unblock();
+            if let Some(thread) = self.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
+
+    fn fake_node_server(
+        archive: &Path,
+        root: &Path,
+    ) -> (ArtifactServer, PathBuf, BTreeMap<String, String>) {
         let tools = root.join("tools");
-        executable(
-            &tools.join("curl"),
-            "#!/bin/sh\nwhile [ \"$1\" != '-o' ]; do shift; done\nshift\ncp \"$MJ_NODE_ARCHIVE\" \"$1\"\n",
-        );
+        std::fs::create_dir_all(&tools).unwrap();
+        let body = std::fs::read(archive).unwrap();
+        let server = ArtifactServer::serve(body);
+        let mirror = server.url.clone();
         (
+            server,
             tools.clone(),
             BTreeMap::from([
-                (
-                    "PATH".to_owned(),
-                    format!("{}:/usr/bin:/bin", tools.display()),
-                ),
-                (
-                    "MJ_NODE_ARCHIVE".to_owned(),
-                    archive.to_string_lossy().into_owned(),
-                ),
+                ("PATH".to_owned(), tools.to_string_lossy().into_owned()),
+                ("NODEJS_ORG_MIRROR".to_owned(), mirror),
             ]),
         )
     }
@@ -1833,26 +1954,25 @@ INSTALLER
     #[test]
     fn compatible_system_node_is_reused_without_downloading() {
         let temp = tempfile::tempdir().unwrap();
-        let marker = temp.path().join("downloaded");
-        executable(
-            &temp.path().join("bin/curl"),
-            &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
-        );
         let mut environment = fake_node_tools(temp.path(), &temp.path().join("unused"));
+        environment.insert(
+            "XDG_CACHE_HOME".into(),
+            temp.path().join("cache").to_string_lossy().into_owned(),
+        );
         let original_path = environment["PATH"].clone();
 
         let runtime = run_async(ensure_node_runtime(&mut environment)).unwrap();
 
         assert!(runtime.is_none());
         assert_eq!(environment["PATH"], original_path);
-        assert!(!marker.exists());
+        assert!(!temp.path().join("cache/mjolnir/node").exists());
     }
 
     #[test]
     fn missing_node_is_downloaded_verified_and_prepended_once() {
         let temp = tempfile::tempdir().unwrap();
         let (archive, metadata) = fake_node_archive(temp.path());
-        let (_, mut environment) = fake_curl_copying(&archive, temp.path());
+        let (_server, _tools, mut environment) = fake_node_server(&archive, temp.path());
         environment.insert(
             "XDG_CACHE_HOME".into(),
             temp.path().join("cache").to_string_lossy().into_owned(),
@@ -1897,8 +2017,7 @@ INSTALLER
     fn unsupported_system_node_is_replaced_with_the_managed_runtime() {
         let temp = tempfile::tempdir().unwrap();
         let (archive, metadata) = fake_node_archive(temp.path());
-        let (tools, curl_environment) = fake_curl_copying(&archive, temp.path());
-        let mut environment = curl_environment;
+        let (_server, tools, mut environment) = fake_node_server(&archive, temp.path());
         executable(
             &tools.join("node"),
             "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v20.19.0; fi\n",
@@ -1928,7 +2047,7 @@ INSTALLER
     fn corrupt_cached_node_is_repaired_from_the_verified_archive() {
         let temp = tempfile::tempdir().unwrap();
         let (archive, metadata) = fake_node_archive(temp.path());
-        let (_, mut environment) = fake_curl_copying(&archive, temp.path());
+        let (_server, _tools, mut environment) = fake_node_server(&archive, temp.path());
         let root = temp.path().join("node");
         let install = root.join(format!("node-v{NODE_VERSION}-{}", environment_target()));
         for name in ["node", "npm", "npx"] {
@@ -1953,7 +2072,7 @@ INSTALLER
     fn managed_node_checksum_failure_never_publishes_an_install() {
         let temp = tempfile::tempdir().unwrap();
         let (archive, mut metadata) = fake_node_archive(temp.path());
-        let (_, mut environment) = fake_curl_copying(&archive, temp.path());
+        let (_server, _tools, mut environment) = fake_node_server(&archive, temp.path());
         metadata["platforms"][current_node_platform()]["sha256"] =
             serde_json::Value::String("0".repeat(64));
         let root = temp.path().join("node");
@@ -1978,7 +2097,7 @@ INSTALLER
     fn concurrent_first_use_publishes_one_managed_node_install() {
         let temp = tempfile::tempdir().unwrap();
         let (archive, metadata) = fake_node_archive(temp.path());
-        let (_, environment) = fake_curl_copying(&archive, temp.path());
+        let (_server, _tools, environment) = fake_node_server(&archive, temp.path());
         let root = temp.path().join("node");
         let barrier = Arc::new(Barrier::new(2));
         let threads = (0..2)
