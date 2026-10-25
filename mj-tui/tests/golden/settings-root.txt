@@ -8,34 +8,34 @@
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
 │  │ No messages yet  │   Setup                                                                                      │                     │
-│  │                  │   Agent Profiles                                                 claude-1, codex-1, codex-2  │                     │
-│                     │   Projects                                                                              hel  │                     │
-│                     │   Runtimes                                                                           podman  │                     │
-│                     │   Machines                                                                            local  │                     │
+│  │                  │   Agent Profiles                  claude-1, codex-1, codex-2                                 │                     │
+│                     │   Projects                        hel                                                        │                     │
+│                     │   Runtimes                        podman                                                     │                     │
+│                     │   Machines                        local                                                      │                     │
 │                     │                                                                                              │                     │
 │                     │   Sessions                                                                                   │                     │
-│                     │   Code Review                                                                           Off  │                     │
-│                     │   Continuation                                     On · 3 continuations plus quota recovery  │                     │
-│                     │   Sub-agents                                                                Up to 6 at once  │                     │
-│                     │   SessionWiki                                                           Keeps every session  │                     │
-│                     │   Web Access                                                            On · 127.0.0.1:3765  │                     │
+│                     │   Code Review                     Off                                                        │                     │
+│                     │   Continuation                    On · 3 continuations plus quota recovery                   │                     │
+│                     │   Sub-agents                      Up to 6 at once                                            │                     │
+│                     │   SessionWiki                     Keeps every session                                        │                     │
+│                     │   Web Access                      On · 127.0.0.1:3765                                        │                     │
 │                     │                                                                                              │                     │
 │                     │   Display                                                                                    │                     │
-│                     │   Interface                      Monochrome (NO_COLOR; configured: Midnight) · sidebar left  │                     │
-│                     │   Notifications                                                                    Terminal  │                     │
-│                     │   Advanced                                                                          All off  │                     │
+│                     │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │                     │
+│                     │   Notifications                   Terminal                                                   │                     │
+│                     │   Advanced                        All off                                                    │                     │
 │                     │                                                                                              │                     │
 │                     │   Privacy                                                                                    │                     │
-│                     │   Jev (hosted service)                              On · sends turn text for classification  │  ───────────────────╯
+│                     │   Jev (hosted service)            On · sends turn text for classification                    │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │   Other                                                                                      │                     │
-│                     │   GitHub events                                                        On · GitHub activity  │                     │
+│                     │   GitHub events                   On · GitHub activity                                       │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │   Save and Close                                                                             │  ──────────── ▁   ▄ ╮
-│                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 │                                                                                                                                          │
 │                                                                                                                                          │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
@@ -51,10 +51,10 @@ root footer alignment: save=(24,35); body=(26,11)
   │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
   │                                                                                              │
   │                                                                                              │
-  │   Prefix key                                                                         ctrl+b  │
-  │   Session sidebar position                                                           Left ▾  │
-  │   Activity animation                                                                 scan ▾  │
-  │   Theme                                       Monochrome (NO_COLOR; configured: Midnight) ▾  │
+  │ Prefix key                        ctrl+b                                                     │
+  │ Session sidebar position          Left ▾                                                     │
+  │ Activity animation                scan ▾                                                     │
+  │ Theme                             Midnight ▾                                                 │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -71,7 +71,7 @@ root footer alignment: save=(24,35); body=(26,11)
   │                                                                                              │
   │                                                                                              │
   │   Back     Save and Close                                                                    │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 
@@ -83,10 +83,10 @@ root footer alignment: save=(24,35); body=(26,11)
   │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
   │                                                                                              │
   │                                                                                              │
-  │   Prefix key                                                                         ctrl+b  │
-  │   Session sidebar position                                                           Left ▾  │
-  │   Activity animation                                                                 scan ▾  │
-  │   Theme                           Midnight ▾                                                 │
+  │ Prefix key                        ctrl+b                                                     │
+  │ Session sidebar position          Left ▾                                                     │
+  │ Activity animation                scan ▾                                                     │
+  │ Theme                             Midnight ▾                                                 │
   │                                   ╭ values · ↑/↓ select · Tab/Enter accept ╮                 │
   │                                   │Auto                                   ▐│                 │
   │                                   │Midnight                               ▐│                 │
@@ -103,7 +103,7 @@ root footer alignment: save=(24,35); body=(26,11)
   │                                                                                              │
   │                                                                                              │
   │   Back     Save and Close                                                                    │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 
@@ -115,10 +115,10 @@ root footer alignment: save=(24,35); body=(26,11)
   │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
   │                                                                                              │
   │                                                                                              │
-  │   Prefix key                                                                         ctrl+b  │
-  │   Session sidebar position                                                           Left ▾  │
-  │   Activity animation                                                                 scan ▾  │
-  │   Theme                                          Monochrome (NO_COLOR; configured: Light) ▾  │
+  │ Prefix key                        ctrl+b                                                     │
+  │ Session sidebar position          Left ▾                                                     │
+  │ Activity animation                scan ▾                                                     │
+  │ Theme                             Light ▾                                                    │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -135,7 +135,7 @@ root footer alignment: save=(24,35); body=(26,11)
   │                                                                                              │
   │                                                                                              │
   │   Back     Save and Close                                                                    │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 draft paths: theme="light"; interface.theme present=false; keys.prefix="ctrl+b"
@@ -148,27 +148,27 @@ draft paths: theme="light"; interface.theme present=false; keys.prefix="ctrl+b"
   │                                                                                              │
   │                                                                                              │
   │   Setup                                                                                      │
-  │   Agent Profiles                                                 claude-1, codex-1, codex-2  │
-  │   Projects                                                                              hel  │
-  │   Runtimes                                                                           podman  │
-  │   Machines                                                                            local  │
+  │   Agent Profiles                  claude-1, codex-1, codex-2                                 │
+  │   Projects                        hel                                                        │
+  │   Runtimes                        podman                                                     │
+  │   Machines                        local                                                      │
   │                                                                                              │
   │   Sessions                                                                                   │
-  │   Code Review                                                                           Off  │
-  │   Continuation                                     On · 3 continuations plus quota recovery  │
-  │   Sub-agents                                                                Up to 6 at once  │
-  │   SessionWiki                                                           Keeps every session  │
-  │   Web Access                                                            On · 127.0.0.1:3765  │
+  │   Code Review                     Off                                                        │
+  │   Continuation                    On · 3 continuations plus quota recovery                   │
+  │   Sub-agents                      Up to 6 at once                                            │
+  │   SessionWiki                     Keeps every session                                        │
+  │   Web Access                      On · 127.0.0.1:3765                                        │
   │                                                                                              │
   │   Display                                                                                    │
-  │   Interface                      Monochrome (NO_COLOR; configured: Midnight) · sidebar left  │
-  │   Notifications                                                                    Terminal  │
-  │   Advanced                                                                          All off  │
+  │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │
+  │   Notifications                   Terminal                                                   │
+  │   Advanced                        All off                                                    │
   │                                                                                              │
   │   Privacy                                                                                    │
-  │   Jev (hosted service)                              On · sends turn text for classification  │
+  │   Jev (hosted service)            On · sends turn text for classification                    │
   │   Save and Close                                                                             │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
@@ -181,10 +181,10 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
   │                                                                                              │
   │                                                                                              │
-  │   Prefix key                                                                         ctrl+b  │
-  │   Session sidebar position                                                           Left ▾  │
-  │   Activity animation                                                                 scan ▾  │
-  │   Theme                                       Monochrome (NO_COLOR; configured: Midnight) ▾  │
+  │ Prefix key                        ctrl+b                                                     │
+  │ Session sidebar position          Left ▾                                                     │
+  │ Activity animation                scan ▾                                                     │
+  │ Theme                             Midnight ▾                                                 │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -201,7 +201,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │                                                                                              │
   │                                                                                              │
   │   Back     Save and Close                                                                    │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
@@ -214,10 +214,10 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
   │                                                                                              │
   │                                                                                              │
-  │   Prefix key                                                                         ctrl+b  │
-  │   Session sidebar position                                                           Left ▾  │
-  │   Activity animation                                                                 scan ▾  │
-  │   Theme                           Midnight ▾                                                 │
+  │ Prefix key                        ctrl+b                                                     │
+  │ Session sidebar position          Left ▾                                                     │
+  │ Activity animation                scan ▾                                                     │
+  │ Theme                             Midnight ▾                                                 │
   │                                   ╭ values · ↑/↓ select · Tab/Enter accept ╮                 │
   │                                   │Auto                                   ▐│                 │
   │                                   │Midnight                               ▐│                 │
@@ -234,7 +234,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │                                                                                              │
   │                                                                                              │
   │   Back     Save and Close                                                                    │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
@@ -247,11 +247,11 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Display options: activity clocks, session order, symbols, and how tool calls show.           │
   │                                                                                              │
   │                                                                                              │
-  │   Detailed activity clocks                                                                ☐  │
-  │   Session order                                                                   project ▾  │
-  │   Symbols                                                            Follows the terminal ▾  │
-  │   Tool calls                                                                      Grouped ▾  │
-  │   Tool output lines                                                                       5  │
+  │ ☐ Detailed activity clocks                                                                   │
+  │ Session order                     project ▾                                                  │
+  │ Symbols                           Default (Follows the terminal) ▾                           │
+  │ Tool calls                        Grouped ▾                                                  │
+  │ Tool output lines                 5                                                          │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -267,7 +267,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │                                                                                              │
   │                                                                                              │
   │   Back     Save and Close                                                                    │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
@@ -276,18 +276,15 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
 
   ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
-  │ Settings › Web Access › Listen address and port                                              │
-  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
+  │ Settings › Web Access                                                                        │
+  │ Web access changes take effect when the background server next starts. Remote access         │
+  │ requires a certificate and key.                                                              │
   │                                                                                              │
-  │                                                                                              │
-  │ Listen address and port                                                        Use default   │
-  │ 127.0.0.1:3765                                                                 Apply         │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
+  │ ☒ Enabled                                                                                    │
+  │ Listen address and port           127.0.0.1:3765                                             │
+  │ ☒ Detect Tailscale                                                                           │
+  │ TLS certificate file              Default                                                    │
+  │ TLS private key file              Default                                                    │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -299,8 +296,11 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
-  │   Back                                                                                       │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
@@ -346,27 +346,27 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │                                                                                              │
   │                                                                                              │
   │   Setup                                                                                      │
-  │   Agent Profiles                                                 claude-1, codex-1, codex-2  │
-  │   Projects                                                                              hel  │
-  │   Runtimes                                                                           podman  │
-  │   Machines                                                                            local  │
+  │   Agent Profiles                  claude-1, codex-1, codex-2                                 │
+  │   Projects                        hel                                                        │
+  │   Runtimes                        podman                                                     │
+  │   Machines                        local                                                      │
   │                                                                                              │
   │   Sessions                                                                                   │
-  │   Code Review                                                                           Off  │
-  │   Continuation                                     On · 3 continuations plus quota recovery  │
-  │   Sub-agents                                                                Up to 6 at once  │
-  │   SessionWiki                                                           Keeps every session  │
-  │   Web Access                                                            On · 127.0.0.1:3765  │
+  │   Code Review                     Off                                                        │
+  │   Continuation                    On · 3 continuations plus quota recovery                   │
+  │   Sub-agents                      Up to 6 at once                                            │
+  │   SessionWiki                     Keeps every session                                        │
+  │   Web Access                      On · 127.0.0.1:3765                                        │
   │                                                                                              │
   │   Display                                                                                    │
-  │   Interface                      Monochrome (NO_COLOR; configured: Midnight) · sidebar left  │
-  │   Notifications                                                                    Terminal  │
-  │   Advanced                                                                          All off  │
+  │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │
+  │   Notifications                   Terminal                                                   │
+  │   Advanced                        All off                                                    │
   │                                                                                              │
   │   Privacy                                                                                    │
-  │   Jev (hosted service)                              On · sends turn text for classification  │
+  │   Jev (hosted service)            On · sends turn text for classification                    │
   │   Save and Close                                                                             │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 
@@ -378,8 +378,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │
   │ run.                                                                                         │
   │                                                                                              │
-  │   podman                                                 9 settings  ›     Add               │
-  │                                                                            Remove            │
+  │   podman                          9 settings  ›                            Add               │
   │                                                                            Detect runtimes   │
   │                                                                                              │
   │                                                                                              │
@@ -397,8 +396,9 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
+  │                                                                                              │
   │   Back     Save and Close                                                                    │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 
@@ -410,8 +410,8 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Projects can contain one or more repositories. Choose the main repository where the agent    │
   │ starts.                                                                                      │
   │                                                                                              │
-  │   hel                                                             2 settings  ›     Create   │
-  │                                                                                     Remove   │
+  │   hel                             2 settings  ›                                     Create   │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -430,7 +430,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │                                                                                              │
   │                                                                                              │
   │   Back     Save and Close                                                                    │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 
@@ -442,10 +442,10 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Add a profile, then choose Sign in. Detect profiles finds installed agents.                  │
   │                                                                                              │
   │                                                                                              │
-  │   claude-1                                               7 settings  ›     Add               │
-  │   codex-1                                                7 settings  ›     Remove            │
-  │   codex-2                                                7 settings  ›     Detect profiles   │
-  │                                                                            Sign in           │
+  │   claude-1                        7 settings  ›                            Add               │
+  │   codex-1                         7 settings  ›                            Detect profiles   │
+  │   codex-2                         7 settings  ›                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -462,7 +462,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │                                                                                              │
   │                                                                                              │
   │   Back     Save and Close                                                                    │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 
@@ -474,11 +474,11 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Web access changes take effect when the background server next starts. Remote access         │
   │ requires a certificate and key.                                                              │
   │                                                                                              │
-  │   Enabled                                                                                 ☒  │
-  │   Listen address and port                                                    127.0.0.1:3765  │
-  │   Detect Tailscale                                                                        ☒  │
-  │   TLS certificate file                                                     None (HTTP only)  │
-  │   TLS private key file                                                     None (HTTP only)  │
+  │ ☒ Enabled                                                                                    │
+  │ Listen address and port           127.0.0.1:3765                                             │
+  │ ☒ Detect Tailscale                                                                           │
+  │ TLS certificate file              Default                                                    │
+  │ TLS private key file              Default                                                    │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -494,7 +494,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │                                                                                              │
   │                                                                                              │
   │   Back     Save and Close                                                                    │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 
@@ -502,18 +502,15 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
 
   ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
-  │ Settings › Web Access › Listen address and port                                              │
-  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
+  │ Settings › Web Access                                                                        │
+  │ Web access changes take effect when the background server next starts. Remote access         │
+  │ requires a certificate and key.                                                              │
   │                                                                                              │
-  │                                                                                              │
-  │ Listen address and port                                                        Use default   │
-  │ 127.0.0.1:3765                                                                 Apply         │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
+  │ ☒ Enabled                                                                                    │
+  │ Listen address and port           127.0.0.1:3765                                             │
+  │ ☒ Detect Tailscale                                                                           │
+  │ TLS certificate file              Default                                                    │
+  │ TLS private key file              Default                                                    │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -525,8 +522,11 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
-  │   Back                                                                                       │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 
@@ -538,8 +538,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │
   │ run.                                                                                         │
   │                                                                                              │
-  │   podman                                                 9 settings  ›     Add               │
-  │                                                                            Remove            │
+  │   podman                          9 settings  ›                            Add               │
   │                                                                            Detect runtimes   │
   │                                                                                              │
   │                                                                                              │
@@ -557,8 +556,9 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
+  │                                                                                              │
   │   Back     Save and Close                                                                    │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 
@@ -570,8 +570,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │
   │ run.                                                                                         │
   │                                                                                              │
-  │   podman                                                 9 settings  ›     Add               │
-  │                                                                            Remove            │
+  │   podman                          9 settings  ›                            Add               │
   │                                                                            Detect runtimes   │
   │                                                                                              │
   │                                                                                              │
@@ -589,8 +588,9 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
+  │                                                                                              │
   │   Back     Save and Close                                                                    │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 focused control: Some(Add)
@@ -623,7 +623,7 @@ focused control: Some(Add)
   │                                                                                              │
   │                                                                                              │
   │   Back                                                                                       │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 action: None; new entry: true
@@ -636,8 +636,8 @@ action: None; new entry: true
   │ Projects can contain one or more repositories. Choose the main repository where the agent    │
   │ starts.                                                                                      │
   │                                                                                              │
-  │   hel                                                             2 settings  ›     Create   │
-  │                                                                                     Remove   │
+  │   hel                             2 settings  ›                                     Create   │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -650,7 +650,7 @@ action: None; new entry: true
   │                                                                                              │
   │                                                                                              │
   │   Back     Save and Close                                                                    │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 entry editor adding: false
@@ -663,8 +663,8 @@ entry editor adding: false
   │ Projects can contain one or more repositories. Choose the main repository where the agent    │
   │ starts.                                                                                      │
   │                                                                                              │
-  │   hel                                                             2 settings  ›     Create   │
-  │                                                                                     Remove   │
+  │   hel                             2 settings  ›                                     Create   │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -677,7 +677,7 @@ entry editor adding: false
   │                                                                                              │
   │                                                                                              │
   │   Back     Save and Close                                                                    │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 entry editor adding: false
@@ -690,10 +690,10 @@ entry editor adding: false
   │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
   │                                                                                              │
   │                                                                                              │
-  │   Prefix key                                                                         ctrl+b  │
-  │   Session sidebar position                                                           Left ▾  │
-  │   Activity animation                                                                 scan ▾  │
-  │   Theme                                          Monochrome (NO_COLOR; configured: Light) ▾  │
+  │ Prefix key                        ctrl+b                                                     │
+  │ Session sidebar position          Left ▾                                                     │
+  │ Activity animation                scan ▾                                                     │
+  │ Theme                             Light ▾                                                    │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -710,7 +710,7 @@ entry editor adding: false
   │                                                                                              │
   │                                                                                              │
   │   Back     Save and Close                                                                    │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43); accent fg=Rgb(157, 229, 202)
@@ -724,10 +724,12 @@ saved theme: Light
   │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
   │                                                                                              │
   │                                                                                              │
-  │   Prefix key                                                                         ctrl+b  │
-  │   Session sidebar position                                                           Left ▾  │
-  │   Activity animation                                                                 scan ▾  │
-  │   Theme                                          Monochrome (NO_COLOR; configured: Light) ▾  │
+  │ Prefix key                        ctrl+b                                                     │
+  │ Session sidebar position          Left ▾                                                     │
+  │ Activity animation                scan ▾                                                     │
+  │ Theme                             Light ▾                                                    │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -741,10 +743,8 @@ saved theme: Light
   │                                                                                              │
   │                                                                                              │
   │ Saving settings…                                                                             │
-  │                                                                                              │
-  │                                                                                              │
   │   Back     Saving…                                                                           │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43); accent fg=Rgb(157, 229, 202)
@@ -790,10 +790,10 @@ rendered colors: text fg=Rgb(38, 51, 46) bg=Rgb(251, 250, 247); accent fg=Rgb(35
   │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
   │                                                                                              │
   │                                                                                              │
-  │   Prefix key                                                                         ctrl+b  │
-  │   Session sidebar position                                                           Left ▾  │
-  │   Activity animation                                                                 scan ▾  │
-  │   Theme                           Light ▾                                                    │
+  │ Prefix key                        ctrl+b                                                     │
+  │ Session sidebar position          Left ▾                                                     │
+  │ Activity animation                scan ▾                                                     │
+  │ Theme                             Light ▾                                                    │
   │                                   ╭ values · ↑/↓ select · Tab/Enter accept ╮                 │
   │                                   │Auto                                   ▐│                 │
   │                                   │Midnight                               ▐│                 │
@@ -810,7 +810,7 @@ rendered colors: text fg=Rgb(38, 51, 46) bg=Rgb(251, 250, 247); accent fg=Rgb(35
   │                                                                                              │
   │                                                                                              │
   │   Back     Save and Close                                                                    │
-  ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 reopened selected theme: "light"

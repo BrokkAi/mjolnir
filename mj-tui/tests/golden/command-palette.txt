@@ -321,27 +321,27 @@ mode after selecting Open settings: "Setup"
 │ Create    │                                                                                              │           │
 │hel ─────  │                                                                                              │           │
 │› · ACP p  │   Setup                                                                                      │           │
-│  Idle  p  │   Agent Profiles                                                 claude-1, codex-1, codex-2  │           │
-│  │ No me  │   Projects                                                                              hel  │           │
-│  │        │   Runtimes                                                                           podman  │           │
-│           │   Machines                                                                            local  │           │
+│  Idle  p  │   Agent Profiles                  claude-1, codex-1, codex-2                                 │           │
+│  │ No me  │   Projects                        hel                                                        │           │
+│  │        │   Runtimes                        podman                                                     │           │
+│           │   Machines                        local                                                      │           │
 │           │                                                                                              │           │
 │           │   Sessions                                                                                   │           │
-│           │   Code Review                                                                           Off  │           │
-│           │   Continuation                                     On · 3 continuations plus quota recovery  │           │
-│           │   Sub-agents                                                                Up to 6 at once  │  ─────────╯
-│           │   SessionWiki                                                           Keeps every session  │  ─────────╮
-│           │   Web Access                                                            On · 127.0.0.1:3765  │           │
+│           │   Code Review                     Off                                                        │           │
+│           │   Continuation                    On · 3 continuations plus quota recovery                   │           │
+│           │   Sub-agents                      Up to 6 at once                                            │  ─────────╯
+│           │   SessionWiki                     Keeps every session                                        │  ─────────╮
+│           │   Web Access                      On · 127.0.0.1:3765                                        │           │
 │           │                                                                                              │           │
 │           │   Display                                                                                    │  ─────────╯
-│           │   Interface                      Monochrome (NO_COLOR; configured: Midnight) · sidebar left  │  ── ▁   ▄ ╮
-│           │   Notifications                                                                    Terminal  │           │
-│           │   Advanced                                                                          All off  │  ─────────╯
+│           │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │  ── ▁   ▄ ╮
+│           │   Notifications                   Terminal                                                   │           │
+│           │   Advanced                        All off                                                    │  ─────────╯
 │           │                                                                                              │  ── ▁   ▄ ╮
 │           │   Privacy                                                                                    │           │
-│           │   Jev (hosted service)                              On · sends turn text for classification  │           │
+│           │   Jev (hosted service)            On · sends turn text for classification                    │           │
 │           │   Save and Close                                                                             │           │
-│           ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯           │
+│           ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯           │
 ╰─────────                                                                                                    ─────────╯
 Enter open                                                                                                    e · ? keys
 === non-container session commands (120x44) ===

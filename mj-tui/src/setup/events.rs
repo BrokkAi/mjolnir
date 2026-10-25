@@ -132,6 +132,17 @@ impl DashboardState {
     }
 
     pub(crate) fn take_profile_hydration(&mut self) -> Option<DashboardAction> {
+        // This is Settings' existing prerequisite poll after every background reply.
+        // Complete an accepted Save before starting optional capability hydration.
+        if let Mode::Setup(dialog) = &mut self.mode
+            && dialog.pending_save == PendingSave::Ready
+        {
+            dialog.pending_save = PendingSave::Idle;
+            let action = dialog.save(&self.profile_capabilities);
+            if action != DashboardAction::None {
+                return Some(action);
+            }
+        }
         let Mode::Setup(dialog) = &self.mode else {
             return None;
         };
@@ -203,30 +214,7 @@ impl DashboardState {
                 dialog.draft["_subagent_options"][task] = Value::Null;
             }
         }
-        if let Some(editor) = &mut dialog.editor
-            && editor.path.len() == 3
-            && editor.path[0] == "subagents"
-        {
-            let choices = schema::choices(&editor.path, &dialog.draft);
-            if choices != editor.choices {
-                let current = if editor.choices.len() == 1 {
-                    dialog
-                        .draft
-                        .pointer(&pointer(&editor.path))
-                        .cloned()
-                        .unwrap_or(Value::Null)
-                } else {
-                    editor
-                        .choices
-                        .get(editor.selected)
-                        .cloned()
-                        .unwrap_or(Value::Null)
-                };
-                editor.selected = choices.iter().position(|v| v == &current).unwrap_or(0);
-                editor.choices = choices;
-                editor.combo.open(SetupControl::Choices, editor.selected);
-            }
-        }
+        dialog.prepare();
         None
     }
 
@@ -252,8 +240,8 @@ impl DashboardState {
             if save_shortcut {
                 dialog.sync_review_validation(&review);
                 let action = dialog.save(&self.profile_capabilities);
-                if dialog.saving {
-                    dialog.form = RefCell::new(Dialog::default());
+                if dialog.saving || dialog.fields.values().any(|field| field.error.is_some()) {
+                    dialog.prepare();
                     self.mode = Mode::Setup(dialog);
                 } else {
                     review.save_error = dialog.notice.clone();
@@ -271,6 +259,7 @@ impl DashboardState {
                 ReviewSettingsOutcome::Back => {
                     dialog.sync_review_validation(&review);
                     dialog.form = RefCell::new(Dialog::default());
+                    dialog.focus_path(&["review".to_owned()]);
                 }
                 ReviewSettingsOutcome::CancelSetup => {
                     review.cancel_discovery(self);
@@ -285,7 +274,8 @@ impl DashboardState {
                     dialog.review_editor = None;
                     dialog.form = RefCell::new(Dialog::default());
                     action = dialog.save(&self.profile_capabilities);
-                    if !dialog.saving {
+                    if !dialog.saving && !dialog.fields.values().any(|field| field.error.is_some())
+                    {
                         review.save_error = dialog.notice.clone();
                         dialog.review_editor = Some(review);
                         dialog.prepare();
@@ -298,10 +288,12 @@ impl DashboardState {
             self.mode = Mode::Setup(dialog);
             return action;
         }
-        let choice_editor = dialog
-            .editor
-            .as_ref()
-            .is_some_and(|editor| !editor.choices.is_empty());
+        dialog.prepare();
+        let field_focused = dialog.text_input_focused();
+        let popup_open = dialog.combo.open_id().is_some()
+            || dialog.focused_field_path().and_then(|path| dialog.fields.get(&path)).is_some_and(|field| {
+                matches!(&field.input, EditorInput::Path(input) if input.is_completing() || input.completion_pending().is_some())
+            });
         let shortcut = match &event {
             Event::Key(key)
                 if key.kind != KeyEventKind::Release
@@ -314,13 +306,16 @@ impl DashboardState {
                     // Every shortcut below is a bare key, so none of them may
                     // fire while the search query has the keyboard.
                     KeyCode::Char('/')
-                        if dialog.editor.is_none()
+                        if !field_focused
+                            && !popup_open
                             && dialog.search.is_none()
                             && key.modifiers.is_empty() =>
                     {
                         Some(Interaction::Activate(OpenSearch))
                     }
-                    KeyCode::Backspace if dialog.editor.is_none() && dialog.search.is_none() => {
+                    KeyCode::Backspace
+                        if !field_focused && !popup_open && dialog.search.is_none() =>
+                    {
                         Some(Interaction::Activate(Back))
                     }
                     // The dialog's own border promises `Esc back`, so on a
@@ -329,16 +324,19 @@ impl DashboardState {
                     // only the title's × closes from anywhere.
                     KeyCode::Esc
                         if dialog.editor.is_none()
+                            && !popup_open
                             && dialog.search.is_none()
                             && !dialog.path.is_empty()
                             && key.modifiers.is_empty() =>
                     {
                         Some(Interaction::Activate(Back))
                     }
-                    KeyCode::Char('a') if dialog.editor.is_none() && dialog.search.is_none() => {
+                    KeyCode::Char('a')
+                        if !field_focused && !popup_open && dialog.search.is_none() =>
+                    {
                         Some(Interaction::Activate(Add))
                     }
-                    KeyCode::Delete if dialog.editor.is_none() && dialog.search.is_none() => {
+                    KeyCode::Delete if !field_focused && !popup_open && dialog.search.is_none() => {
                         Some(Interaction::Activate(Remove))
                     }
                     _ => None,
@@ -375,15 +373,7 @@ impl DashboardState {
             self.last_event_consumed.set(result.consumed);
         }
         let interaction = shortcut.or_else(|| form_result.and_then(|result| result.action));
-        let interaction = if choice_editor {
-            if let Some(editor) = dialog.editor.as_mut() {
-                editor.combo.route(interaction)
-            } else {
-                interaction
-            }
-        } else {
-            interaction
-        };
+        let interaction = dialog.combo.route(interaction);
         let interaction =
             match crate::wizards::route_path_completion(self, &mut dialog, interaction) {
                 Ok(action) => {
@@ -418,6 +408,13 @@ impl DashboardState {
                 }
             }
             Some(Interaction::Activate(Search | Results) | Interaction::Toggle(Results)) => {
+                if let Some(search) = &mut dialog.search {
+                    search.selected = dialog
+                        .form
+                        .borrow()
+                        .selected(Results)
+                        .unwrap_or(search.selected);
+                }
                 let target = dialog
                     .search
                     .as_ref()
@@ -441,129 +438,144 @@ impl DashboardState {
                     return self.dismiss_setup(dialog);
                 }
             }
-            Some(Interaction::Select(List, index)) => {
-                if dialog.selected != index {
-                    dialog.selected = index;
+            Some(Interaction::Activate(id @ Row(_)) | Interaction::Toggle(id @ Row(_))) => {
+                if let Some(control) = dialog.descriptor(id).cloned() {
+                    match control.kind {
+                        SettingKind::Page if control.path == ["review"] => {
+                            action = dialog.open_review(self)
+                        }
+                        SettingKind::Page => dialog.open_page(control.path),
+                        SettingKind::Checkbox => dialog.toggle_path(&control.path),
+                        SettingKind::Choices(values) => {
+                            let selected = values
+                                .iter()
+                                .position(|v| {
+                                    dialog.draft.pointer(&pointer(&control.path)) == Some(v)
+                                })
+                                .unwrap_or(0);
+                            dialog.combo.open(id, selected);
+                        }
+                        SettingKind::Field => match dialog.resolve_path_action(&control.path) {
+                            Ok(Some(resolve)) => action = resolve,
+                            Ok(None) => {
+                                // Validation feedback belongs to the field; preserve page notices.
+                                let _ = dialog.apply_pending(&control.path);
+                            }
+                            Err(error) => {
+                                if let Some(field) = dialog.fields.get_mut(&control.path) {
+                                    field.error = Some(error);
+                                }
+                                dialog.form.get_mut().reveal_focused();
+                            }
+                        },
+                        SettingKind::ReadOnly => {}
+                    }
                 }
-                // Checkboxes and dropdowns act on one click, as they do
-                // elsewhere; rows that navigate keep select-then-open.
-                if matches!(&event, Event::Mouse(mouse) if mouse.kind == MouseEventKind::Up(MouseButton::Left))
-                    && dialog.selected_path().is_some_and(|path| {
-                        let value = dialog.draft.pointer(&pointer(&path));
-                        is_build_cache_field(&path, "enabled")
-                            || value.is_some_and(Value::is_boolean)
-                            || (value.is_some_and(|value| !value.is_object() && !value.is_array())
-                                && !schema::choices(&storage_path(&path), &dialog.draft).is_empty())
-                    })
+            }
+            Some(Interaction::Edit(id @ Row(_), edit)) => {
+                if let Some(path) = dialog.descriptor(id).map(|c| c.path.clone())
+                    && let Some(field) = dialog.fields.get_mut(&path)
                 {
-                    dialog.open_selected();
-                }
-            }
-            Some(Interaction::Toggle(List)) => {
-                dialog.open_selected();
-            }
-            Some(Interaction::Activate(List)) => {
-                if dialog.selected_is_review() {
-                    action = dialog.open_review(self);
-                } else {
-                    dialog.open_selected();
-                }
-            }
-            Some(Interaction::Edit(Field, edit)) => {
-                if let Some(editor) = &mut dialog.editor {
-                    // A path field's own apply closes its completion popup
-                    // when the edit changes the text it was completing.
-                    let outcome = match &mut editor.input {
+                    let outcome = match &mut field.input {
                         EditorInput::Path(input) => PathField::apply(input, edit),
                         EditorInput::Text(input) => TextField::apply(input, edit),
                     };
                     if outcome == mj_chat::components::EditOutcome::Changed {
-                        dialog.prepare();
+                        field.error = None;
+                        dialog.pending_save = PendingSave::Idle;
                         self.record_event_handled();
                     }
                 }
             }
-            Some(Interaction::ComboBoxCommit(Choices, index)) => {
-                if let Some(editor) = &mut dialog.editor {
-                    editor.selected = index;
+            Some(Interaction::ComboBoxCommit(id @ Row(_), index)) => {
+                if let Some(control) = dialog.descriptor(id).cloned()
+                    && let SettingKind::Choices(values) = control.kind
+                    && let Some(value) = values.get(index)
+                {
+                    dialog.notice = dialog
+                        .apply_value(&control.path, None, Some(value.clone()))
+                        .err();
                 }
-                dialog.notice = dialog.apply_editor(false).err();
             }
-            Some(Interaction::ComboBoxDismiss(Choices)) => {
-                dialog.editor = None;
-                dialog.form = RefCell::new(Dialog::default());
+            Some(Interaction::ComboBoxDismiss(Row(_))) => {}
+            Some(Interaction::Edit(Field, edit)) => {
+                if let Some(editor) = &mut dialog.editor {
+                    TextField::apply(&mut editor.input, edit);
+                }
             }
-            Some(Interaction::Activate(Field | Apply)) => match dialog.resolve_path_action() {
-                Ok(Some(resolve)) => action = resolve,
-                Ok(None) => dialog.notice = dialog.apply_editor(false).err(),
-                Err(error) => dialog.notice = Some(error),
-            },
-            Some(Interaction::Activate(Clear)) => {
-                dialog.notice = dialog.apply_editor(true).err();
+            Some(Interaction::Activate(Field | Apply)) => {
+                dialog.notice = dialog.apply_editor().err();
             }
             Some(Interaction::Activate(Add)) => {
                 dialog.add();
             }
-            Some(Interaction::Activate(Remove)) if dialog.collection() => {
-                if let Some(key) = dialog.keys().get(dialog.selected).cloned() {
-                    // This machine is where Mjolnir runs; it cannot be taken
-                    // out of the list.
-                    if dialog.path == ["machines"] && key == mj_core::config::LOCAL_MACHINE_ID {
+            Some(Interaction::Activate(Remove)) => {
+                let mut parent = dialog.path.clone();
+                if let Some(key) = parent.pop()
+                    && dialog
+                        .draft
+                        .pointer(&pointer(&parent))
+                        .is_some_and(|v| is_collection(&parent, v))
+                {
+                    if parent == ["machines"] && key == mj_core::config::LOCAL_MACHINE_ID {
                         dialog.notice = Some("This machine is always available.".into());
                     } else {
-                        match dialog.draft.pointer_mut(&pointer(&dialog.path)).unwrap() {
+                        let removed_path = dialog.path.clone();
+                        match dialog.draft.pointer_mut(&pointer(&parent)).unwrap() {
                             Value::Object(object) => {
                                 object.remove(&key);
                             }
                             Value::Array(array) => {
-                                array.remove(dialog.selected);
+                                array.remove(key.parse::<usize>().expect("array entry path"));
                             }
                             _ => {}
                         }
-                        if dialog.path.first().is_some_and(|path| path == "profiles") {
-                            let profile_id = dialog.path.get(1).unwrap_or(&key).clone();
-                            dialog.invalidate_review_validation_for(Some(&profile_id));
+                        let array_index = dialog
+                            .draft
+                            .pointer(&pointer(&parent))
+                            .is_some_and(Value::is_array)
+                            .then(|| key.parse::<usize>().expect("array entry path"));
+                        // Rebind pending text to the surviving entry when array indices shift.
+                        dialog.fields = std::mem::take(&mut dialog.fields)
+                            .into_iter()
+                            .filter_map(|(mut path, field)| {
+                                if path.starts_with(&removed_path) {
+                                    return None;
+                                }
+                                if let Some(removed) = array_index
+                                    && path.starts_with(&parent)
+                                    && let Some(index) = path
+                                        .get(parent.len())
+                                        .and_then(|part| part.parse::<usize>().ok())
+                                    && index > removed
+                                {
+                                    path[parent.len()] = (index - 1).to_string();
+                                }
+                                Some((path, field))
+                            })
+                            .collect();
+                        if parent.first().is_some_and(|p| p == "profiles") {
+                            dialog.invalidate_review_validation_for(Some(
+                                parent.get(1).unwrap_or(&key),
+                            ));
                         }
+                        dialog.descriptors.clear();
+                        dialog.open_page(parent);
                     }
                 }
             }
-            Some(Interaction::Activate(SignIn)) if dialog.path == ["profiles"] => {
-                match dialog.keys().get(dialog.selected) {
-                    Some(profile_id) if dialog.saved_profiles.contains(profile_id) => {
-                        if !dialog.saved_identity_matches(profile_id) {
-                            dialog.notice =
-                                Some("Save changes before signing in to this profile.".into());
-                        } else {
-                            let enabled = dialog.draft["profiles"]
-                                .get(profile_id)
-                                .and_then(|profile| profile.get("enabled"))
-                                .and_then(Value::as_bool)
-                                .unwrap_or(true);
-                            let no_login = matches!(
-                                dialog.login_statuses.get(profile_id),
-                                Some(mj_core::credentials::LoginStatus::NotRequired(_))
-                            );
-                            if !enabled {
-                                dialog.notice =
-                                    Some("Enable this profile before signing in.".into());
-                            } else if no_login {
-                                dialog.notice = Some(
-                                    "This profile authenticates without an interactive login."
-                                        .into(),
-                                );
-                            } else {
-                                action = DashboardAction::SetupLogin {
-                                    generation: dialog.generation,
-                                    profile_id: profile_id.clone(),
-                                };
-                            }
-                        }
-                    }
-                    Some(_) => {
-                        dialog.notice =
-                            Some("Save settings before signing in to a new profile.".into());
-                    }
-                    None => {}
+            Some(Interaction::Activate(SignIn))
+                if dialog.path.len() == 2 && dialog.path[0] == "profiles" =>
+            {
+                if dialog
+                    .actions()
+                    .iter()
+                    .any(|(id, _, enabled)| *id == SignIn && *enabled)
+                {
+                    action = DashboardAction::SetupLogin {
+                        generation: dialog.generation,
+                        profile_id: dialog.path[1].clone(),
+                    };
                 }
             }
             Some(Interaction::Activate(Save)) if dialog.editor.is_none() => {

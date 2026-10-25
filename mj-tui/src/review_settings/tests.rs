@@ -88,13 +88,11 @@ fn open_review_from_setup(dashboard: &mut DashboardState) -> DashboardAction {
     let _ = chord(dashboard, CommandId::OpenConfig);
     let lines = drawn(dashboard, 100, 30);
     let code_review = point(&lines, "Code Review");
-    for _ in 0..2 {
-        dashboard.handle_mouse(mouse_at(
-            MouseEventKind::Down(MouseButton::Left),
-            code_review,
-        ));
-        dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), code_review));
-    }
+    dashboard.handle_mouse(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        code_review,
+    ));
+    dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), code_review));
     DashboardAction::None
 }
 

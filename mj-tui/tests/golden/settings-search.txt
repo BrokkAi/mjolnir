@@ -31,23 +31,23 @@
 Enter open · / searc                                                                                                     : palette · ? keys
 matching paths: [["targets", "podman", "memory"]]
 
-=== memory result opens its nested editor (140x30) ===
+=== memory result focuses its inline field (140x30) ===
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-╭ Sessions ─────────  │ Settings › Runtimes › podman › Memory limit                                                  │                     │
-│ Create   Open   Fi  │ Examples: 8g or 4096m. Leave blank for no limit.                                             │                     │
+╭ Sessions ─────────  │ Settings › Runtimes › podman                                                                 │                     │
+│ Create   Open   Fi  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                     │
 │hel ───────────────  │                                                                                              │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Memory limit                                                                   Use default   │                     │
-│  │ No messages yet  │                                                                                Apply         │                     │
-│  │                  │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
+│  Stopped  podman    │ Type                              Podman ▾                                          Remove   │                     │
+│  │ No messages yet  │ Machine                           local ▾                                                    │                     │
+│  │                  │ Container image                   ubuntu:24.04                                               │                     │
+│                     │ Download image policy             Pull if missing ▾                                          │                     │
+│                     │ CPU platform                      Default                                                    │                     │
+│                     │ CPU limit                         Default                                                    │                     │
+│                     │ Memory limit                      Default                                                    │                     │
+│                     │   Environment variables           0 settings  ›                                              │                     │
+│                     │   Workspace storage               1 setting  ›                                               │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -58,11 +58,11 @@ matching paths: [["targets", "podman", "memory"]]
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │   Back                                                                                       │                     │
-│                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
+│                     │   Back     Save and Close                                                                    │                     │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : palette · ? keys
-landed page and editor: ["targets", "podman"] / Some(["targets", "podman", "memory"])
+landed page and focused setting: ["targets", "podman"] / Some(["targets", "podman", "memory"])
 
 === help text finds context budget by compaction (140x30) ===
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮

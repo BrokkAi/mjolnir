@@ -150,17 +150,6 @@ pub(super) fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
     }
 }
 
-/// One row of a settings page: its name on the left and what it is set to on
-/// the right, against the far edge, so the column reads down the page.
-///
-/// Nothing here may depend on whether the row is selected. A list identifies
-/// its contents by the text it draws (`Form::set_list_contents`), so a caret
-/// in the gutter would read as a different list the moment the selection
-/// moved, cancelling the gesture a double-click is halfway through.
-///
-/// When both do not fit, the label gives way first: the value keeps its
-/// width, less a few cells of label, and the two are always separated by at
-/// least one space.
 /// Whether `path` lists entries the user named rather than fixed settings.
 pub(super) fn is_collection(path: &[String], value: &Value) -> bool {
     value.is_array()

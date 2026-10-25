@@ -6,13 +6,13 @@
 │ Create   Open   Fi  │ Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its │                     │
 │hel ───────────────  │ build cache settings.                                                                        │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   nas                                                             No runtime  ›     Add      │                     │
-│  │ No messages yet  │       No runtime: it did not answer. `ssh dev@nas.example.test true` failed:        Remove   │                     │
-│  │                  │       ssh: connect to host nas.example.test port 22: Connection timed out. Check             │                     │
-│                     │       that nas.example.test is up and reachable from this machine.                           │                     │
-│                     │   local                                                           2 settings  ›              │                     │
-│                     │   builder                                                         No runtime  ›              │                     │
-│                     │       Save to find what it can run and add those runtimes.                                   │                     │
+│  Stopped  podman    │   nas                             No runtime  ›                                        Add   │                     │
+│  │ No messages yet  │ No runtime: it did not answer. `ssh dev@nas.example.test true` failed: ssh: connect          │                     │
+│  │                  │ to host nas.example.test port 22: Connection timed out. Check that nas.example.test          │                     │
+│                     │ is up and reachable from this machine.                                                       │                     │
+│                     │   local                           2 settings  ›                                              │                     │
+│                     │   builder                         No runtime  ›                                              │                     │
+│                     │ Save to find what it can run and add those runtimes.                                         │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -30,7 +30,7 @@
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Machine nas has no r                                                                                                    test port 22: Connec
 
@@ -42,9 +42,9 @@ Machine nas has no r                                                            
 │ Create   Open   Fi  │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │                     │
 │hel ───────────────  │ run.                                                                                         │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   podman                                                 9 settings  ›     Add               │                     │
-│  │ No messages yet  │   builder                                                3 settings  ›     Remove            │                     │
-│  │                  │   builder-docker                                         9 settings  ›     Detect runtimes   │                     │
+│  Stopped  podman    │   podman                          9 settings  ›                            Add               │                     │
+│  │ No messages yet  │   builder                         3 settings  ›                            Detect runtimes   │                     │
+│  │                  │   builder-docker                  9 settings  ›                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -66,7 +66,7 @@ Machine nas has no r                                                            
 │                     │ Skipped nas: it did not answer. `ssh dev@nas.example.test true` failed: Connection timed     │                     │
 │                     │ out. Check that nas.example.test is up. Review them, then Save.                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Machine nas has no r                                                                                                    test port 22: Connec
 
@@ -78,12 +78,12 @@ Machine nas has no r                                                            
 │ Create   Open   Fi  │ Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its │                     │
 │hel ───────────────  │ build cache settings.                                                                        │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   nas                                                             No runtime  ›     Add      │                     │
-│  │ No messages yet  │       No runtime: it did not answer. `ssh dev@nas.example.test true` failed:        Remove   │                     │
-│  │                  │       ssh: connect to host nas.example.test port 22: Connection timed out. Check             │                     │
-│                     │       that nas.example.test is up and reachable from this machine.                           │                     │
-│                     │   local                                                           2 settings  ›              │                     │
-│                     │   builder                                                         7 settings  ›              │                     │
+│  Stopped  podman    │   nas                             No runtime  ›                                        Add   │                     │
+│  │ No messages yet  │ No runtime: it did not answer. `ssh dev@nas.example.test true` failed: ssh: connect          │                     │
+│  │                  │ to host nas.example.test port 22: Connection timed out. Check that nas.example.test          │                     │
+│                     │ is up and reachable from this machine.                                                       │                     │
+│                     │   local                           2 settings  ›                                              │                     │
+│                     │   builder                         7 settings  ›                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -102,6 +102,6 @@ Machine nas has no r                                                            
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Machine nas has no r                                                                                                    test port 22: Connec

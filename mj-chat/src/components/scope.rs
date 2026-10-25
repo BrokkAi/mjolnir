@@ -391,6 +391,12 @@ impl<K: Copy + Eq> Form<K> {
         viewport
     }
 
+    /// Reveals the focused block on the next layout, even if focus did not change.
+    /// Use after validation adds error or help rows beneath an existing field.
+    pub fn reveal_focused(&mut self) {
+        self.viewport_reveal = true;
+    }
+
     /// Reserves vertical arrows for a field's editor or screen-owned history.
     /// TextField and PathField register TextInput's capability automatically;
     /// custom history owners set this after rendering and during declaration.

@@ -14,14 +14,8 @@ impl SetupDialog {
                 (Save, self.save_label(), !self.saving),
             ];
         }
-        if let Some(editor) = &self.editor
-            && editor.choices.is_empty()
-        {
+        if self.editor.is_some() {
             let mut actions = vec![(Back, "Back", true)];
-            if !editor.adding {
-                // A name that does not exist yet has no default to restore.
-                actions.push((Clear, "Use default", true));
-            }
             actions.push((Apply, "Apply", true));
             return actions;
         }
@@ -42,7 +36,16 @@ impl SetupDialog {
                 "Add"
             };
             actions.push((Add, add_label, interactive));
-            actions.push((Remove, "Remove", interactive && !self.keys().is_empty()));
+        }
+        let mut parent = self.path.clone();
+        if let Some(key) = parent.pop()
+            && self
+                .draft
+                .pointer(&pointer(&parent))
+                .is_some_and(|value| is_collection(&parent, value))
+        {
+            let local = parent == ["machines"] && key == mj_core::config::LOCAL_MACHINE_ID;
+            actions.push((Remove, "Remove", interactive && !local));
         }
         // Each detection writes only the section it belongs to, so each button
         // appears on that section's page alone.
@@ -58,31 +61,22 @@ impl SetupDialog {
                 interactive && !self.discovering && !self.saving,
             ));
         }
-        // Signing in applies to the selected row, so the button belongs to the
-        // profiles list rather than to every page. A profile added in this
-        // draft is not on disk yet, a disabled profile cannot be selected for
-        // work, and an API-key profile has no interactive login.
-        if self.path == ["profiles"] {
-            let selected = self.keys().get(self.selected).cloned();
-            let saved = selected
-                .as_deref()
-                .is_some_and(|key| self.saved_profiles.contains(key));
-            let unchanged = selected
-                .as_deref()
-                .is_some_and(|key| self.saved_identity_matches(key));
-            let enabled = selected.as_deref().is_some_and(|key| {
-                self.draft["profiles"]
-                    .get(key)
-                    .and_then(|profile| profile.get("enabled"))
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true)
-            });
-            let needs_login = selected.as_deref().is_some_and(|key| {
-                !matches!(
-                    self.login_statuses.get(key),
-                    Some(mj_core::credentials::LoginStatus::NotRequired(_))
-                )
-            });
+        // Login operates on a saved profile identified by this detail page.
+        if let [section, profile_id] = self.path.as_slice()
+            && section == "profiles"
+        {
+            let saved = self.saved_profiles.contains(profile_id);
+            let unchanged = self.saved_identity_matches(profile_id)
+                && !self.fields.iter().any(|(path, field)| {
+                    path.starts_with(&self.path) && field.input.value() != field.applied
+                });
+            let enabled = self.draft["profiles"][profile_id]["enabled"]
+                .as_bool()
+                .unwrap_or(true);
+            let needs_login = !matches!(
+                self.login_statuses.get(profile_id),
+                Some(mj_core::credentials::LoginStatus::NotRequired(_))
+            );
             actions.push((
                 SignIn,
                 "Sign in",
@@ -160,6 +154,7 @@ impl SetupDialog {
             review.prepare();
             return;
         }
+        self.reconcile_host_owned_fields();
         self.expire_notice();
         use SetupControl::*;
         if let Some(search) = &self.search {
@@ -168,12 +163,13 @@ impl SetupDialog {
             let query = search.input.value().to_owned();
             let actions = self.actions();
             let form = self.form.get_mut();
-            form.begin_frame();
+            form.begin_update();
             form.declare(Search, ControlKind::TextField);
             form.declare_with_enabled(Results, ControlKind::ChoiceList { len, selected }, len > 0);
             // A new query is a new list, so the viewport starts at its top
             // rather than wherever the previous results were scrolled to.
             form.set_list_identity(Results, format!("search/{query}"));
+            form.set_list_activation(Results, mj_chat::components::ListActivation::SingleClick);
             form.set_menu(true);
             for (id, _, enabled) in actions {
                 form.declare_with_enabled(id, ControlKind::Button, enabled);
@@ -181,42 +177,54 @@ impl SetupDialog {
             form.end_frame(Search);
             return;
         }
-        let len = self.keys().len();
-        self.selected = self.selected.min(len.saturating_sub(1));
+        self.reconcile_controls();
         let actions = self.actions();
-        let identity = format!("{:?}/{:?}", self.path, self.keys());
         let form = self.form.get_mut();
-        form.begin_frame();
-        let initial = if let Some(editor) = &self.editor {
-            if editor.choices.is_empty() {
-                let kind = match &editor.input {
-                    EditorInput::Path(input) => input.control_kind(),
-                    EditorInput::Text(_) => ControlKind::TextField,
-                };
-                form.declare(Field, kind);
-                Field
-            } else {
-                form.declare(
-                    Choices,
-                    ControlKind::ComboBox {
-                        len: editor.choices.len(),
-                        selected: editor.combo.selection(Choices, editor.selected),
-                        expanded: editor.combo.is_open(Choices),
-                    },
-                );
-                Choices
-            }
+        form.begin_update();
+        let initial = if self.editor.is_some() {
+            form.declare(Field, ControlKind::TextField);
+            Field
         } else {
-            let kind = ControlKind::ChoiceList {
-                len,
-                selected: self.selected,
-            };
-            form.declare(List, kind);
-            form.set_list_identity(List, identity);
-            List
+            for control in &self.descriptors {
+                let kind = match &control.kind {
+                    SettingKind::Page => ControlKind::Button,
+                    SettingKind::Checkbox => ControlKind::Checkbox,
+                    SettingKind::Choices(values) => ControlKind::ComboBox {
+                        len: values.len(),
+                        selected: self.combo.selection(
+                            control.id,
+                            values
+                                .iter()
+                                .position(|v| {
+                                    self.draft.pointer(&pointer(&control.path)) == Some(v)
+                                })
+                                .unwrap_or(0),
+                        ),
+                        expanded: self.combo.is_open(control.id),
+                    },
+                    SettingKind::Field => match &self.fields[&control.path].input {
+                        EditorInput::Text(_) => ControlKind::TextField,
+                        EditorInput::Path(input) => input.control_kind(),
+                    },
+                    SettingKind::ReadOnly => continue,
+                };
+                form.declare_with_enabled(
+                    control.id,
+                    kind,
+                    self.combo.open_id().is_none_or(|id| id == control.id),
+                );
+            }
+            self.descriptors
+                .iter()
+                .find(|c| c.kind != SettingKind::ReadOnly)
+                .map_or(Save, |c| c.id)
         };
         for (id, _, enabled) in actions {
-            form.declare_with_enabled(id, ControlKind::Button, enabled);
+            form.declare_with_enabled(
+                id,
+                ControlKind::Button,
+                enabled && self.combo.open_id().is_none(),
+            );
         }
         form.end_frame(initial);
     }
@@ -276,11 +284,11 @@ impl ModalSurface for SetupDialog {
         }
     }
 
-    /// Only the setup form's own field counts. The review-settings editor on
-    /// top of it has text fields too, but routing has never consulted them and
-    /// this milestone does not change that.
+    /// Field ownership comes from this page's descriptor, not retained draft buffers.
     fn text_input_focused(&self) -> bool {
         self.form.borrow().is_focused(SetupControl::Field)
+            || self.focused_field_path().is_some()
+            || (self.search.is_some() && self.form.borrow().is_focused(SetupControl::Search))
     }
 
     fn prepare_dialog_state(&mut self) {
@@ -293,28 +301,9 @@ impl ModalSurface for SetupDialog {
             .set_action_role(SetupControl::Back, mj_chat::components::ActionRole::Back);
         if let Some(review) = &mut self.review_editor {
             review.prepare_dialog_state();
-        } else if let Some(editor) = &self.editor {
-            self.form
-                .get_mut()
-                .track_draft(vec![editor.input.to_string()]);
-            self.form
-                .get_mut()
-                .set_dismiss_actions(&[SetupControl::Back]);
-            // Leaving discards only this field's edit, so the prompt says so.
-            let field = if editor.adding {
-                "the new entry's name".to_owned()
-            } else {
-                format!(
-                    "“{}”",
-                    breadcrumb(&editor.path, &self.draft)
-                        .rsplit(" › ")
-                        .next()
-                        .unwrap_or_default()
-                )
-            };
-            self.form.get_mut().set_confirmation_message(Some(format!(
-                "Your edit to {field} will be lost. The rest of the Settings draft is kept."
-            )));
+        } else if self.editor.is_some() {
+            self.form.get_mut().set_dirty(false);
+            self.form.get_mut().set_dismiss_actions(&[]);
             self.form.get_mut().set_default_action(SetupControl::Apply);
         } else {
             // The outer setup draft uses its normalized saved-config comparison.
@@ -331,5 +320,196 @@ impl ModalSurface for SetupDialog {
             self.editor.as_ref().map(|editor| &editor.path),
             self.review_editor.is_some()
         )
+    }
+}
+
+impl SetupDialog {
+    fn reconcile_controls(&mut self) {
+        let previous = std::mem::take(&mut self.descriptors);
+        let open_value = self.combo.open_id().and_then(|id| {
+            let control = previous.iter().find(|c| c.id == id)?;
+            let SettingKind::Choices(values) = &control.kind else {
+                return None;
+            };
+            let committed = values
+                .iter()
+                .position(|v| self.draft.pointer(&pointer(&control.path)) == Some(v))
+                .unwrap_or(0);
+            Some((
+                id,
+                values.get(self.combo.selection(id, committed))?.clone(),
+                values.len(),
+            ))
+        });
+        let paths = if self.current().is_object() || self.current().is_array() {
+            self.keys()
+                .into_iter()
+                .map(|key| {
+                    let mut path = self.path.clone();
+                    path.push(key);
+                    path
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![self.path.clone()]
+        };
+        for path in paths {
+            let value = self
+                .draft
+                .pointer(&pointer(&path))
+                .expect("visible setting exists");
+            let mut choices = if is_build_cache_field(&path, "enabled") {
+                vec![Value::Null, Value::Bool(true), Value::Bool(false)]
+            } else {
+                schema::choices(&storage_path(&path), &self.draft)
+            };
+            let parent = &path[..path.len() - 1];
+            let defaults = schema::defaults(
+                &storage_path(parent),
+                self.draft.pointer(&pointer(parent)).unwrap(),
+            );
+            if !choices.is_empty()
+                && defaults
+                    .get(path.last().unwrap())
+                    .is_some_and(Value::is_null)
+                && !choices.contains(&Value::Null)
+            {
+                choices.insert(0, Value::Null);
+            }
+            let kind = if self.build_cache_field_user_managed(&path) {
+                SettingKind::ReadOnly
+            } else if value.is_object() || value.is_array() || self.collection() {
+                SettingKind::Page
+            } else if !choices.is_empty() {
+                SettingKind::Choices(choices)
+            } else if value.is_boolean() {
+                SettingKind::Checkbox
+            } else {
+                SettingKind::Field
+            };
+            let id = previous
+                .iter()
+                .find(|c| {
+                    c.path == path
+                        && std::mem::discriminant(&c.kind) == std::mem::discriminant(&kind)
+                })
+                .map(|c| c.id)
+                .unwrap_or_else(|| {
+                    let id = SetupControl::Row(self.next_control);
+                    self.next_control += 1;
+                    id
+                });
+            if kind == SettingKind::Field {
+                let text = field_text(&path, value);
+                let field = self
+                    .fields
+                    .entry(path.clone())
+                    .or_insert_with(|| PendingField {
+                        input: field_input(&path, &text),
+                        applied: text.clone(),
+                        source: value.clone(),
+                        error: None,
+                    });
+                // Background updates refresh untouched fields, never a pending edit.
+                if field.input.value() == field.applied && field.source != *value {
+                    field.input = field_input(&path, &text);
+                    field.applied = text;
+                    field.source = value.clone();
+                    field.error = None;
+                }
+            }
+            if let Some((open, value, old_len)) = &open_value
+                && *open == id
+                && let SettingKind::Choices(values) = &kind
+            {
+                let target = if *old_len == 1 {
+                    self.draft.pointer(&pointer(&path)).unwrap()
+                } else {
+                    value
+                };
+                self.combo
+                    .open(id, values.iter().position(|v| v == target).unwrap_or(0));
+            }
+            self.descriptors.push(SettingControl { id, path, kind });
+        }
+        if self
+            .combo
+            .open_id()
+            .is_some_and(|id| !self.descriptors.iter().any(|c| c.id == id))
+        {
+            self.combo = ComboBoxState::default();
+        }
+        self.fields
+            .retain(|path, _| self.draft.pointer(&pointer(path)).is_some());
+    }
+
+    pub(super) fn empty_field_hint(&self, path: &[String]) -> Option<String> {
+        let key = path.last()?;
+        let parent = &path[..path.len() - 1];
+        let defaults = schema::defaults(parent, self.draft.pointer(&pointer(parent))?);
+        if parent.last().is_some_and(|key| key == "environment") {
+            return None;
+        }
+        if path == ["interface", "prefix"] {
+            return Some(mj_core::config::DEFAULT_PREFIX.to_owned());
+        }
+        if let Some(hint) = self
+            .build_cache_automatic_label(key)
+            .or_else(|| self.archive_space_automatic_label(key))
+        {
+            return Some(hint);
+        }
+        if schema::whole_number(path).is_some_and(|number| number.defaulted) {
+            return Some(
+                defaults
+                    .get(key)
+                    .filter(|v| !v.is_null())
+                    .map(|v| field_text(path, v))
+                    .unwrap_or_else(|| "Default".to_owned()),
+            );
+        }
+        defaults
+            .get(key)
+            .filter(|v| v.is_null())
+            .map(|_| "Default".to_owned())
+    }
+
+    pub(super) fn choice_label(&self, path: &[String], value: &Value) -> String {
+        if is_build_cache_field(path, "enabled") {
+            match value {
+                Value::Null => "Default (on)",
+                Value::Bool(true) => "On",
+                _ => "Off",
+            }
+            .to_owned()
+        } else if value.is_null() {
+            format!(
+                "Default ({})",
+                schema::null_label(&storage_path(path), &self.draft)
+            )
+        } else {
+            schema::choice_label(path, value, &self.draft)
+        }
+    }
+}
+
+fn field_text(path: &[String], value: &Value) -> String {
+    if value.is_null() {
+        String::new()
+    } else if let Some(size) = value.as_str().filter(|_| is_build_cache_budget(path)) {
+        build_cache_gigabytes_label(size)
+    } else {
+        value
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| value.to_string())
+    }
+}
+
+fn field_input(path: &[String], text: &str) -> EditorInput {
+    if schema::path_kind(path).is_some() {
+        EditorInput::Path(PathInput::from(text))
+    } else {
+        EditorInput::Text(TextInput::from(text))
     }
 }

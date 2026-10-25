@@ -57,6 +57,61 @@ pub(super) fn is_build_cache_field(path: &[String], field: &str) -> bool {
     }
 }
 impl SetupDialog {
+    pub(super) fn build_cache_key(&self, machine_id: &str) -> Option<Value> {
+        let machine = self.draft.get("machines")?.get(machine_id)?;
+        Some(json!({ "machine": machine }))
+    }
+
+    fn machine_build_cache_preview(
+        &self,
+        machine_id: &str,
+    ) -> Option<&mj_core::state::BuildCachePreview> {
+        let preview = self.build_cache_previews.get(machine_id)?;
+        if Some(&preview.key) != self.build_cache_key(machine_id).as_ref() {
+            return None;
+        }
+        match &preview.result {
+            BuildCachePreviewResult::Ready(Some(preview)) => Some(preview),
+            _ => None,
+        }
+    }
+
+    pub(super) fn build_cache_field_user_managed(&self, path: &[String]) -> bool {
+        (is_build_cache_budget(path) || is_build_cache_field(path, "directory"))
+            && self
+                .machine_build_cache_preview(&path[1])
+                .is_some_and(|preview| preview.user_managed)
+    }
+
+    /// A late host reply can remove editability. Discard its pending text rather
+    /// than leaving an invalid, unfocusable field blocking Save on another page.
+    pub(super) fn reconcile_host_owned_fields(&mut self) {
+        let owned = self
+            .fields
+            .keys()
+            .filter(|path| self.build_cache_field_user_managed(path))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut machines = BTreeSet::new();
+        for path in owned {
+            if let Some(field) = self.fields.remove(&path)
+                && field.input.value() != field.applied
+            {
+                machines.insert(path[1].clone());
+            }
+            if matches!(&self.pending_save, PendingSave::Resolving { path: pending, .. } if *pending == path)
+            {
+                self.pending_save = PendingSave::Ready;
+            }
+        }
+        if !machines.is_empty() {
+            self.notice = Some(format!(
+                "Discarded pending build-cache edits for {}: this machine's mbx installation owns its budgets and directory. Mjolnir does not modify them.",
+                machines.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
+    }
+
     /// The machine whose build cache page is showing, with the settings its
     /// preview depends on.
     pub(super) fn build_cache_page(&self) -> Option<(String, Value)> {
@@ -66,9 +121,7 @@ impl SetupDialog {
         if section != "machines" || page != "build_cache" {
             return None;
         }
-        let key = serde_json::json!({
-            "machine": self.draft["machines"][machine_id],
-        });
+        let key = self.build_cache_key(machine_id)?;
         Some((machine_id.clone(), key))
     }
 
@@ -81,16 +134,14 @@ impl SetupDialog {
         if section != "machines" || self.draft["machines"][machine_id]["build_cache"].is_null() {
             return None;
         }
-        let key = serde_json::json!({
-            "machine": self.draft["machines"][machine_id],
-        });
+        let key = self.build_cache_key(machine_id)?;
         Some((machine_id.clone(), key))
     }
 
     /// Install eligibility and the exact machine draft a confirmation will use.
     pub(super) fn install_mbx_offer(&self) -> Option<MbxInstallOffer> {
         let (machine_id, key) = self.build_cache_machine_page()?;
-        let preview = self.build_cache_preview.as_ref()?;
+        let preview = self.build_cache_previews.get(&machine_id)?;
         if preview.key != key || !preview.install_mbx_available {
             return None;
         }
@@ -148,8 +199,8 @@ impl SetupDialog {
     /// shows the host cannot share the cache.
     pub(super) fn build_cache_row_unavailable(&self) -> Option<String> {
         use mj_core::state::BuildCacheOff;
-        let (_, key) = self.build_cache_machine_page()?;
-        let preview = self.build_cache_preview.as_ref()?;
+        let (machine_id, key) = self.build_cache_machine_page()?;
+        let preview = self.build_cache_previews.get(&machine_id)?;
         if preview.key != key {
             return None;
         }
@@ -171,15 +222,15 @@ impl SetupDialog {
     /// Start resolving the build cache page's automatic values on the target's
     /// host, unless the current settings are already resolved or in flight.
     pub(super) fn preview_build_cache_action(&mut self) -> DashboardAction {
-        let Some((_, key)) = self
+        let Some((machine_id, key)) = self
             .build_cache_page()
             .or_else(|| self.build_cache_machine_page())
         else {
             return DashboardAction::None;
         };
         if self
-            .build_cache_preview
-            .as_ref()
+            .build_cache_previews
+            .get(&machine_id)
             .is_some_and(|preview| preview.key == key)
         {
             return DashboardAction::None;
@@ -190,11 +241,14 @@ impl SetupDialog {
             // A draft that does not parse yet has nothing to resolve.
             Err(_) => return DashboardAction::None,
         };
-        self.build_cache_preview = Some(BuildCachePreviewState {
-            key: key.clone(),
-            result: BuildCachePreviewResult::Resolving,
-            install_mbx_available: false,
-        });
+        self.build_cache_previews.insert(
+            machine_id,
+            BuildCachePreviewState {
+                key: key.clone(),
+                result: BuildCachePreviewResult::Resolving,
+                install_mbx_available: false,
+            },
+        );
         self.notice = Some("Resolving the build cache defaults on the machine…".into());
         DashboardAction::PreviewBuildCache {
             generation: self.generation,
@@ -207,11 +261,11 @@ impl SetupDialog {
     /// resolves, shown bare in place of the "automatic" placeholder.
     pub(super) fn build_cache_automatic_label(&self, field: &str) -> Option<String> {
         use mj_core::state::BuildCacheLimit;
-        let (_, key) = self.build_cache_page()?;
+        let (machine_id, key) = self.build_cache_page()?;
         if field == "tools_directory" {
             return None;
         }
-        let preview = self.build_cache_preview.as_ref()?;
+        let preview = self.build_cache_previews.get(&machine_id)?;
         if preview.key != key {
             return None;
         }
@@ -271,15 +325,8 @@ impl SetupDialog {
     }
 
     pub(super) fn current_build_cache_preview(&self) -> Option<&mj_core::state::BuildCachePreview> {
-        let (_, key) = self.build_cache_page()?;
-        let preview = self.build_cache_preview.as_ref()?;
-        if preview.key != key {
-            return None;
-        }
-        match &preview.result {
-            BuildCachePreviewResult::Ready(Some(preview)) => Some(preview.as_ref()),
-            _ => None,
-        }
+        let (machine_id, _) = self.build_cache_page()?;
+        self.machine_build_cache_preview(&machine_id)
     }
 
     pub(super) fn build_cache_user_managed(&self) -> bool {
@@ -316,8 +363,8 @@ impl SetupDialog {
     /// What this machine's cache has actually done, for a line under the
     /// fields that configure it. The page otherwise only predicts.
     pub(super) fn build_cache_stats_line(&self) -> Option<String> {
-        let (_, key) = self.build_cache_page()?;
-        let preview = self.build_cache_preview.as_ref()?;
+        let (machine_id, key) = self.build_cache_page()?;
+        let preview = self.build_cache_previews.get(&machine_id)?;
         if preview.key != key {
             return None;
         }
@@ -340,8 +387,8 @@ impl SetupDialog {
     /// mbx availability does not govern native tool caches or their switch.
     pub(super) fn mbx_unavailable(&self) -> Option<&str> {
         use mj_core::state::BuildCacheOff;
-        let (_, key) = self.build_cache_page()?;
-        let preview = self.build_cache_preview.as_ref()?;
+        let (machine_id, key) = self.build_cache_page()?;
+        let preview = self.build_cache_previews.get(&machine_id)?;
         if preview.key != key {
             return None;
         }
@@ -364,14 +411,9 @@ impl SetupDialog {
         if !self.path.iter().map(String::as_str).eq(["sessionwiki"]) {
             return None;
         }
-        if let Some(editor) = self.editor.as_ref().filter(|editor| {
-            editor
-                .path
-                .last()
-                .is_some_and(|key| key == "archive_after_days")
-        }) {
-            // A half-typed or cleared number means "Never" until it parses.
-            return Some(editor.input.to_string().trim().parse::<u32>().ok());
+        let path = vec!["sessionwiki".to_owned(), "archive_after_days".to_owned()];
+        if let Some(field) = self.fields.get(&path) {
+            return Some(field.input.to_string().trim().parse::<u32>().ok());
         }
         // Edits store a number; a hand-written string is still read the same.
         Some(match &self.draft["sessionwiki"]["archive_after_days"] {

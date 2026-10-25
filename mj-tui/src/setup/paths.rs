@@ -6,32 +6,35 @@ impl SetupDialog {
             "settings:{}:{}:{:?}",
             self.generation,
             self.draft,
-            self.editor
-                .as_ref()
-                .map(|editor| (&editor.path, editor.input.value()))
+            self.focused_field_path().and_then(|path| self
+                .fields
+                .get(&path)
+                .map(|field| (path, field.input.value())))
         )
     }
 
-    pub(super) fn resolve_path_action(&mut self) -> Result<Option<DashboardAction>, String> {
-        let Some(editor) = &self.editor else {
+    pub(super) fn resolve_path_action(
+        &mut self,
+        path: &[String],
+    ) -> Result<Option<DashboardAction>, String> {
+        let Some(field) = self.fields.get(path) else {
             return Ok(None);
         };
-        if editor.adding
-            || schema::path_kind(&editor.path) != Some(schema::PathKind::Target)
-            || !mj_core::path_input::needs_home(std::path::Path::new(editor.input.value()))
+        if schema::path_kind(path) != Some(schema::PathKind::Target)
+            || !mj_core::path_input::needs_home(std::path::Path::new(field.input.value()))
                 .map_err(|e| e.to_string())?
         {
             return Ok(None);
         }
         let machine = self
-            .machine_for_path(&editor.path)
+            .machine_for_path(path)
             .ok_or_else(|| "This setting has no machine to resolve the path on".to_owned())?;
         self.notice = Some("Resolving path…".into());
         Ok(Some(DashboardAction::ResolveSetupPath {
             generation: self.generation,
             draft: self.draft.clone(),
-            path: editor.path.clone(),
-            value: editor.input.value().to_owned(),
+            path: path.to_vec(),
+            value: field.input.value().to_owned(),
             machine: Box::new(machine),
         }))
     }
@@ -75,40 +78,33 @@ impl crate::wizards::CompletesPaths for SetupDialog {
         mj_core::path_completion::CompletionKind,
     )> {
         use mj_core::path_completion::{CompletionHost, CompletionKind};
-        if !self.form.borrow().is_focused(SetupControl::Field) {
+        let path = self.focused_field_path()?;
+        if !matches!(self.fields.get(&path)?.input, EditorInput::Path(_)) {
             return None;
         }
-        let editor = self.editor.as_ref()?;
-        if editor.adding || !matches!(editor.input, EditorInput::Path(_)) {
-            return None;
-        }
-        let (host, kind) = match schema::path_kind(&editor.path)? {
-            schema::PathKind::Local => {
-                (CompletionHost::Local, schema::completion_kind(&editor.path))
-            }
+        let (host, kind) = match schema::path_kind(&path)? {
+            schema::PathKind::Local => (CompletionHost::Local, schema::completion_kind(&path)),
             // The machine is read before the input is borrowed mutably.
             schema::PathKind::Target => (
-                CompletionHost::Machine(Box::new(self.machine_for_path(&editor.path)?)),
+                CompletionHost::Machine(Box::new(self.machine_for_path(&path)?)),
                 CompletionKind::Directories,
             ),
             schema::PathKind::RelativeDestination => return None,
         };
-        let EditorInput::Path(input) = &mut self.editor.as_mut()?.input else {
+        let EditorInput::Path(input) = &mut self.fields.get_mut(&path)?.input else {
             return None;
         };
         Some((input, host, kind))
     }
 
     fn dismiss_unfocused_completions(&mut self) {
-        if self.form.borrow().is_focused(SetupControl::Field) {
-            return;
-        }
-        if let Some(Editor {
-            input: EditorInput::Path(input),
-            ..
-        }) = &mut self.editor
-        {
-            input.dismiss_completion();
+        let focused = self.focused_field_path();
+        for (path, field) in &mut self.fields {
+            if focused.as_ref() != Some(path)
+                && let EditorInput::Path(input) = &mut field.input
+            {
+                input.dismiss_completion();
+            }
         }
     }
 }

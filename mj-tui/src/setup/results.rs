@@ -11,12 +11,18 @@ impl DashboardState {
         let Some(dialog) = setup_dialog_mut(&mut self.mode) else {
             return;
         };
-        if dialog.generation != generation
-            || dialog
-                .build_cache_preview
-                .as_ref()
-                .is_none_or(|preview| &preview.key != key)
-        {
+        if dialog.generation != generation {
+            return;
+        }
+        let machines = dialog
+            .build_cache_previews
+            .iter()
+            .filter(|(machine_id, preview)| {
+                &preview.key == key && dialog.build_cache_key(machine_id).as_ref() == Some(key)
+            })
+            .map(|(machine_id, _)| machine_id.clone())
+            .collect::<Vec<_>>();
+        if machines.is_empty() {
             return;
         }
         let notice = match &result {
@@ -39,14 +45,19 @@ impl DashboardState {
             Ok(None) => "This target kind cannot share a build cache.".to_owned(),
             Err(error) => format!("Could not resolve the build cache defaults: {error}"),
         };
-        dialog.build_cache_preview = Some(BuildCachePreviewState {
+        let preview = BuildCachePreviewState {
             key: key.clone(),
             result: match result {
                 Ok(preview) => BuildCachePreviewResult::Ready(preview.map(Box::new)),
                 Err(error) => BuildCachePreviewResult::Failed(error),
             },
             install_mbx_available,
-        });
+        };
+        for machine_id in machines {
+            dialog
+                .build_cache_previews
+                .insert(machine_id, preview.clone());
+        }
         dialog.notice = Some(notice);
         dialog.prepare();
     }
@@ -109,20 +120,22 @@ impl DashboardState {
             dialog.mbx_install = None;
         }
         let mut notice = format_mbx_install_result(result, operation.as_ref());
-        let current = dialog.build_cache_machine_page();
-        if current
-            .as_ref()
-            .is_some_and(|(current_id, current_key)| current_id == machine_id && current_key == key)
-        {
+        if dialog.build_cache_key(machine_id).as_ref() == Some(key) {
             match preview {
                 Ok(preview) => {
-                    dialog.build_cache_preview = Some(BuildCachePreviewState {
-                        key: key.clone(),
-                        result: BuildCachePreviewResult::Ready(preview.map(Box::new)),
-                        install_mbx_available,
-                    });
+                    dialog.build_cache_previews.insert(
+                        machine_id.to_owned(),
+                        BuildCachePreviewState {
+                            key: key.clone(),
+                            result: BuildCachePreviewResult::Ready(preview.map(Box::new)),
+                            install_mbx_available,
+                        },
+                    );
                 }
                 Err(error) => {
+                    // The host may have changed even if its fresh preview failed.
+                    // Never let the pre-install result suppress a new resolution.
+                    dialog.build_cache_previews.remove(machine_id);
                     notice.push_str(&format!(
                         " Could not refresh the build cache preview: {error}"
                     ));
@@ -182,24 +195,48 @@ impl DashboardState {
         let Some(dialog) = setup_dialog_mut(&mut self.mode) else {
             return;
         };
-        if dialog.generation != generation || &dialog.draft != draft {
+        if dialog.generation != generation {
             return;
         }
-        let Some(editor) = &mut dialog.editor else {
+        let resumes_save = matches!(&dialog.pending_save, PendingSave::Resolving { path: pending_path, value: pending_value, draft: pending_draft }
+            if pending_path == path && pending_value == value && pending_draft == draft);
+        if &dialog.draft != draft {
+            if resumes_save {
+                dialog.pending_save = PendingSave::Idle;
+            }
+            return;
+        }
+        let Some(field) = dialog.fields.get_mut(path) else {
             return;
         };
-        if editor.path != path || editor.input.value() != value {
+        if field.input.value() != value {
             return;
         }
-        match result {
+        let applied = match result {
             Ok(resolved) => {
-                editor
+                field
                     .input
                     .set_value(resolved.to_string_lossy().into_owned());
-                dialog.notice = dialog.apply_editor(false).err();
+                dialog.apply_pending(path)
             }
-            Err(error) => dialog.notice = Some(error),
+            Err(error) => {
+                field.error = Some(error.clone());
+                Err(error)
+            }
+        };
+        dialog.notice = applied.clone().err();
+        if resumes_save {
+            dialog.pending_save = if applied.is_ok() {
+                PendingSave::Ready
+            } else {
+                PendingSave::Idle
+            };
+            if applied.is_err() {
+                dialog.open_page(path[..path.len() - 1].to_vec());
+                dialog.focus_path(path);
+            }
         }
+        dialog.form.get_mut().reveal_focused();
     }
 
     /// Report the result of an interactive sign-in started from the profiles

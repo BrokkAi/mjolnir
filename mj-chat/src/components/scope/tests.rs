@@ -851,3 +851,17 @@ fn viewport_wheel_yields_to_inner_lists_and_expanded_popups() {
         assert_eq!(form.viewport(area, 20, Some(1..4)).offset(), 0);
     }
 }
+
+#[test]
+fn validation_can_reveal_a_growing_block_without_changing_focus() {
+    let mut form = form();
+    let area = Rect::new(0, 0, 20, 4);
+    assert_eq!(form.viewport(area, 20, Some(3..4)).offset(), 0);
+    // Validation adds two rows below the field; ordinary redraw preserves scroll.
+    assert_eq!(form.viewport(area, 20, Some(3..6)).offset(), 0);
+    form.reveal_focused();
+    assert_eq!(form.viewport(area, 20, Some(3..6)).offset(), 2);
+    assert_eq!(form.focused(), Some(1));
+    form.handle(&mouse(MouseEventKind::ScrollDown, 12, 2));
+    assert_eq!(form.viewport(area, 20, Some(3..6)).offset(), 3);
+}

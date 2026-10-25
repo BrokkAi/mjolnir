@@ -160,91 +160,59 @@ impl SetupDialog {
             .unwrap_or_default();
     }
 
-    pub(super) fn selected_path(&self) -> Option<Vec<String>> {
-        let mut path = self.path.clone();
-        path.push(self.keys().get(self.selected)?.clone());
-        Some(path)
-    }
-
     pub(super) fn collection(&self) -> bool {
         is_collection(&self.path, self.current())
     }
 }
 impl SetupDialog {
-    pub(super) fn open_selected(&mut self) {
-        let Some(path) = self.selected_path() else {
-            return;
-        };
-        let value = self.draft.pointer(&pointer(&path)).unwrap();
-        if is_build_cache_field(&path, "enabled") {
-            // An unset value means on, so the box cycles on → off → unset.
-            let on = value.as_bool().unwrap_or(true);
-            *self.draft.pointer_mut(&pointer(&path)).unwrap() =
-                if on { Value::Bool(false) } else { Value::Null };
-            self.form = RefCell::new(Dialog::default());
-            return;
+    pub(super) fn descriptor(&self, id: SetupControl) -> Option<&SettingControl> {
+        self.descriptors.iter().find(|control| control.id == id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn focused_path(&self) -> Option<Vec<String>> {
+        self.descriptor(self.form.borrow().focused()?)
+            .map(|control| control.path.clone())
+    }
+
+    /// A cached buffer may also back a Page button on a collection page.
+    /// Only the current descriptor decides whether focus belongs to an editor.
+    pub(super) fn focused_field_path(&self) -> Option<Vec<String>> {
+        let control = self.descriptor(self.form.borrow().focused()?)?;
+        (control.kind == SettingKind::Field).then(|| control.path.clone())
+    }
+
+    pub(super) fn focus_path(&mut self, path: &[String]) {
+        self.prepare();
+        if let Some(control) = self.descriptors.iter().find(|control| control.path == path) {
+            self.form.get_mut().focus(control.id);
+            self.form.get_mut().reveal_focused();
         }
-        if (is_build_cache_budget(&path) || is_build_cache_field(&path, "directory"))
-            && self.build_cache_user_managed()
-        {
-            self.notice = Some(
-                "This machine's mbx installation owns its budgets. Mjolnir does not modify them."
-                    .into(),
-            );
-            return;
-        }
-        if value.is_object() || value.is_array() {
-            self.path = path;
-            self.selected = 0;
-        } else if let Some(value) = value.as_bool() {
-            let enabled = !value;
-            *self.draft.pointer_mut(&pointer(&path)).unwrap() = Value::Bool(enabled);
-            if let [section, profile_id, field] = path.as_slice()
-                && section == "profiles"
-                && field == "enabled"
-            {
-                self.invalidate_review_validation_for(Some(profile_id));
-                if !enabled {
-                    self.clear_disabled_profile_references(profile_id);
-                }
-            }
-        } else {
-            let choices = schema::choices(&storage_path(&path), &self.draft);
-            let selected = choices
-                .iter()
-                .position(|choice| choice == value)
-                .unwrap_or(0);
-            let mut combo = ComboBoxState::default();
-            if !choices.is_empty() {
-                combo.open(SetupControl::Choices, selected);
-            }
-            self.editor = Some(Editor {
-                input: if schema::path_kind(&path).is_some() {
-                    EditorInput::Path(PathInput::from(value.as_str().unwrap_or_default()))
-                } else {
-                    EditorInput::Text(TextInput::from(if value.is_null() {
-                        String::new()
-                    } else if let Some(size) =
-                        value.as_str().filter(|_| is_build_cache_budget(&path))
-                    {
-                        // The field is edited in whole GB, so a value written
-                        // in another unit is offered converted.
-                        build_cache_gigabytes_label(size)
-                    } else {
-                        value
-                            .as_str()
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| value.to_string())
-                    }))
-                },
-                path,
-                choices,
-                selected,
-                combo,
-                adding: false,
-            });
-        }
+    }
+
+    pub(super) fn open_page(&mut self, path: Vec<String>) {
+        self.review_editor = None;
+        self.path = path;
+        self.combo = ComboBoxState::default();
         self.form = RefCell::new(Dialog::default());
+    }
+
+    pub(super) fn toggle_path(&mut self, path: &[String]) {
+        let value = self
+            .draft
+            .pointer_mut(&pointer(path))
+            .expect("declared checkbox exists");
+        let enabled = !value.as_bool().expect("checkbox has a boolean value");
+        *value = Value::Bool(enabled);
+        if let [section, profile_id, field] = path
+            && section == "profiles"
+            && field == "enabled"
+        {
+            self.invalidate_review_validation_for(Some(profile_id));
+            if !enabled {
+                self.clear_disabled_profile_references(profile_id);
+            }
+        }
     }
 
     pub(super) fn clear_disabled_profile_references(&mut self, profile_id: &str) {
@@ -274,45 +242,44 @@ impl SetupDialog {
         self.form = RefCell::new(Dialog::default());
     }
 
-    /// Moves the dialog to `path` and opens it the way its own page would, so
-    /// a search result lands exactly where browsing to it would have.
+    /// Search navigates to pages and only focuses scalar controls.
     pub(super) fn jump_to(&mut self, path: &[String]) -> Jump {
-        let Some((key, parent)) = path.split_last() else {
+        let Some((_, parent)) = path.split_last() else {
             return Jump::Done;
         };
         self.close_search();
-        self.path = parent.to_vec();
-        let Some(index) = self.keys().iter().position(|candidate| candidate == key) else {
-            return Jump::Done;
-        };
-        self.selected = index;
         if path == ["review"] {
             return Jump::OpenReview;
         }
-        // Opening a boolean row is what toggles it, so a search only selects
-        // one: finding a setting must never be the same as changing it.
-        let toggles = self
+        if self
             .draft
             .pointer(&pointer(path))
-            .is_some_and(Value::is_boolean);
-        if !toggles {
-            self.open_selected();
+            .is_some_and(|v| v.is_object() || v.is_array())
+            || self
+                .draft
+                .pointer(&pointer(parent))
+                .is_some_and(|v| is_collection(parent, v))
+        {
+            self.open_page(path.to_vec());
+        } else {
+            self.open_page(parent.to_vec());
+            self.focus_path(path);
         }
         Jump::Done
     }
 
     pub(super) fn back(&mut self) -> bool {
-        let selected_key = if let Some(editor) = self.editor.take() {
-            editor.path.last().cloned()
-        } else if let Some(key) = self.path.pop() {
-            Some(key)
-        } else {
+        if self.editor.take().is_some() {
+            self.form = RefCell::new(Dialog::default());
+            return false;
+        }
+        let child = self.path.clone();
+        if self.path.pop().is_none() {
             return true;
-        };
-        self.selected = selected_key
-            .and_then(|key| self.keys().iter().position(|candidate| *candidate == key))
-            .unwrap_or(0);
+        }
+        self.combo = ComboBoxState::default();
         self.form = RefCell::new(Dialog::default());
+        self.focus_path(&child);
         false
     }
 
@@ -333,15 +300,13 @@ impl SetupDialog {
                 .as_array_mut()
                 .unwrap();
             array.push(value);
-            self.selected = array.len() - 1;
-            self.open_selected();
+            let mut path = self.path.clone();
+            path.push((array.len() - 1).to_string());
+            self.open_page(path);
         } else {
             self.editor = Some(Editor {
                 path: self.path.clone(),
                 input: EditorInput::Text(TextInput::new()),
-                choices: Vec::new(),
-                selected: 0,
-                combo: ComboBoxState::default(),
                 adding: true,
             });
             self.form = RefCell::new(Dialog::default());
@@ -349,7 +314,7 @@ impl SetupDialog {
     }
 }
 impl SetupDialog {
-    pub(super) fn apply_editor(&mut self, clear: bool) -> Result<(), String> {
+    pub(super) fn apply_editor(&mut self) -> Result<(), String> {
         let Some(editor) = self.editor.clone() else {
             return Ok(());
         };
@@ -381,10 +346,53 @@ impl SetupDialog {
                     editor.path.get(1).map_or(name, String::as_str),
                 ));
             }
-            self.selected = self.keys().iter().position(|key| key == name).unwrap();
-            self.open_selected();
+            self.open_page(new_path);
             return Ok(());
         }
+        Ok(())
+    }
+
+    pub(super) fn apply_pending(&mut self, path: &[String]) -> Result<(), String> {
+        let Some(field) = self.fields.get(path) else {
+            return Ok(());
+        };
+        let result = self.apply_value(path, Some(field.input.clone()), None);
+        if let Some(field) = self.fields.get_mut(path) {
+            field.error = result.clone().err();
+        }
+        if result.is_err() {
+            self.form.get_mut().reveal_focused();
+        }
+        result
+    }
+
+    /// All scalar controls share the schema-aware write and its side effects.
+    pub(super) fn apply_value(
+        &mut self,
+        path: &[String],
+        input: Option<EditorInput>,
+        choice: Option<Value>,
+    ) -> Result<(), String> {
+        if self.build_cache_field_user_managed(path) {
+            return Err(
+                "This machine's mbx installation owns its budgets. Mjolnir does not modify them."
+                    .into(),
+            );
+        }
+        let editor = Editor {
+            path: path.to_vec(),
+            input: input.unwrap_or_else(|| EditorInput::Text(TextInput::new())),
+            adding: false,
+        };
+        let parent = &path[..path.len() - 1];
+        let defaults = schema::defaults(parent, self.draft.pointer(&pointer(parent)).unwrap());
+        let clear = choice.is_none()
+            && editor.input.is_empty()
+            && (defaults
+                .get(path.last().unwrap())
+                .is_some_and(Value::is_null)
+                || path == ["interface", "prefix"]
+                || schema::whole_number(path).is_some_and(|n| n.defaulted));
         let mut editor = editor;
         if !clear && !editor.input.is_empty() {
             match schema::path_kind(&editor.path) {
@@ -410,8 +418,8 @@ impl SetupDialog {
             Value::String(mj_core::config::DEFAULT_PREFIX.to_owned())
         } else if clear {
             Value::Null
-        } else if !editor.choices.is_empty() {
-            editor.choices[editor.selected].clone()
+        } else if let Some(choice) = choice {
+            choice
         } else if let Some(number) = schema::whole_number(&editor.path) {
             schema::parse_whole_number(number, &editor.input.to_string())?
         } else if is_build_cache_budget(&editor.path) {
@@ -482,8 +490,19 @@ impl SetupDialog {
         if changed && editor.path.first().is_some_and(|path| path == "profiles") {
             self.invalidate_review_validation_for(editor.path.get(1).map(String::as_str));
         }
-        self.editor = None;
-        self.form = RefCell::new(Dialog::default());
+        if let Some(field) = self.fields.get_mut(path) {
+            field.input = editor.input;
+            field.applied = field.input.to_string();
+            field.source = self
+                .draft
+                .pointer(&pointer(path))
+                .expect("applied field exists")
+                .clone();
+            field.error = None;
+        }
+        // Kind edits may remove fields; reconcile pending buffers deliberately.
+        self.fields
+            .retain(|field_path, _| self.draft.pointer(&pointer(field_path)).is_some());
         Ok(())
     }
 
@@ -491,7 +510,46 @@ impl SetupDialog {
         &mut self,
         _capabilities: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
     ) -> DashboardAction {
-        if self.saving {
+        if self.saving || matches!(self.pending_save, PendingSave::Resolving { .. }) {
+            return DashboardAction::None;
+        }
+        self.pending_save = PendingSave::Idle;
+        self.reconcile_host_owned_fields();
+        let pending = self
+            .fields
+            .iter()
+            .filter(|(_, field)| field.input.value() != field.applied)
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        let mut first_invalid = None;
+        for path in pending {
+            // Target-home expansion is asynchronous, just as it is for Enter.
+            match self.resolve_path_action(&path) {
+                Ok(Some(resolve)) => {
+                    if first_invalid.is_none() {
+                        self.pending_save = PendingSave::Resolving {
+                            path: path.clone(),
+                            value: self.fields[&path].input.to_string(),
+                            draft: self.draft.clone(),
+                        };
+                        return resolve;
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    self.fields.get_mut(&path).unwrap().error = Some(error);
+                    first_invalid.get_or_insert(path);
+                    continue;
+                }
+                Ok(None) => {}
+            }
+            if self.apply_pending(&path).is_err() {
+                first_invalid.get_or_insert(path);
+            }
+        }
+        if let Some(path) = first_invalid {
+            self.open_page(path[..path.len() - 1].to_vec());
+            self.focus_path(&path);
             return DashboardAction::None;
         }
         let result = config_from_draft(self.draft.clone())
@@ -528,6 +586,17 @@ impl SetupDialog {
     /// expanded schema and all navigation/discovery fields are transient UI
     /// state and must not make a freshly opened Setup dialog dirty.
     pub(crate) fn is_dirty(&self) -> bool {
+        if self
+            .fields
+            .values()
+            .any(|field| field.input.value() != field.applied)
+            || self
+                .editor
+                .as_ref()
+                .is_some_and(|editor| !editor.input.is_empty())
+        {
+            return true;
+        }
         let original = mj_core::config::with_environment_sources_only(|| {
             serde_json::from_str::<Config>(&self.original)
         });
@@ -537,10 +606,6 @@ impl SetupDialog {
             (Err(_), _) => true,
             (_, Err(_)) => true,
         }
-    }
-
-    pub(super) fn selected_is_review(&self) -> bool {
-        self.selected_path().is_some_and(|path| path == ["review"])
     }
 
     pub(super) fn open_review(&mut self, dashboard: &mut DashboardState) -> DashboardAction {

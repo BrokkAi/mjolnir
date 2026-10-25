@@ -12,9 +12,7 @@ use crate::{
     },
     widgets::{centered_modal_fixed, dismissible_modal_title},
 };
-use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
-};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use mj_chat::components::PathField;
 use mj_chat::components::{
     Checkbox, ChoiceList, ColumnAlign, ColumnSplit, ComboBox, ComboBoxState, ControlKind, Dialog,
@@ -29,12 +27,12 @@ use ratatui::{
     Frame,
     layout::Rect,
     style::Modifier,
-    text::{Line, Span},
-    widgets::{List as RatatuiList, ListItem, ListState, Paragraph, Wrap},
+    text::Line,
+    widgets::{Paragraph, Wrap},
 };
 use serde_json::{Value, json};
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Deref, DerefMut};
 
 /// Which section of the configuration a detection run fills in. Each scope
@@ -67,9 +65,8 @@ pub struct SetupDetection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SetupControl {
-    List,
+    Row(u64),
     Field,
-    Choices,
     Search,
     Results,
     /// Not a drawn control: the key that opens the search, routed through the
@@ -78,7 +75,6 @@ pub(crate) enum SetupControl {
     Back,
     Add,
     Remove,
-    Clear,
     Apply,
     DetectProfiles,
     DetectRuntimes,
@@ -120,10 +116,44 @@ impl std::fmt::Display for EditorInput {
 struct Editor {
     path: Vec<String>,
     input: EditorInput,
-    choices: Vec<Value>,
-    selected: usize,
-    combo: ComboBoxState<SetupControl>,
     adding: bool,
+}
+
+/// One descriptor owns declaration, layout and interaction-to-path lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SettingControl {
+    id: SetupControl,
+    path: Vec<String>,
+    kind: SettingKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SettingKind {
+    Page,
+    Checkbox,
+    Choices(Vec<Value>),
+    Field,
+    ReadOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingField {
+    input: EditorInput,
+    applied: String,
+    source: Value,
+    error: Option<String>,
+}
+
+/// Save may await target-machine path expansion before continuing validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingSave {
+    Idle,
+    Resolving {
+        path: Vec<String>,
+        value: String,
+        draft: Value,
+    },
+    Ready,
 }
 
 /// The open search: the query, the index it filters, and the row the arrows
@@ -194,7 +224,11 @@ pub(crate) struct SetupDialog {
     original: String,
     draft: Value,
     path: Vec<String>,
-    selected: usize,
+    descriptors: Vec<SettingControl>,
+    next_control: u64,
+    fields: BTreeMap<Vec<String>, PendingField>,
+    combo: ComboBoxState<SetupControl>,
+    pending_save: PendingSave,
     editor: Option<Editor>,
     search: Option<SearchState>,
     pub(crate) review_editor: Option<Box<ReviewSettingsDialog>>,
@@ -214,9 +248,9 @@ pub(crate) struct SetupDialog {
     /// Where the notice was first shown. A status line belongs to the page
     /// or prompt that set it and goes when the dialog is no longer there.
     notice_anchor: Option<NoticeAnchor>,
-    /// The host-resolved values behind the blank fields of the build cache
-    /// page being viewed, keyed by the settings they were resolved from.
-    build_cache_preview: Option<BuildCachePreviewState>,
+    /// One owner for each machine's cache resolution, retained across navigation.
+    /// Each result is guarded by the settings it was requested for.
+    build_cache_previews: BTreeMap<String, BuildCachePreviewState>,
     /// What the SessionWiki page's archive window would reclaim, keyed by the
     /// number of days it was measured for.
     archive_space_preview: Option<ArchiveSpacePreviewState>,
@@ -319,7 +353,11 @@ impl SetupDialog {
             original,
             draft,
             path: Vec::new(),
-            selected: 0,
+            descriptors: Vec::new(),
+            next_control: 0,
+            fields: BTreeMap::new(),
+            combo: ComboBoxState::default(),
+            pending_save: PendingSave::Idle,
             editor: None,
             search: None,
             review_editor: None,
@@ -332,7 +370,7 @@ impl SetupDialog {
             login_statuses,
             notice: None,
             notice_anchor: None,
-            build_cache_preview: None,
+            build_cache_previews: BTreeMap::new(),
             archive_space_preview: None,
             mbx_install: None,
             preferred_width: preferred.width,

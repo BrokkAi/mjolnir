@@ -7,10 +7,10 @@
 │hel ───────────────  │ Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.                        │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │   Maximum concurrent children                                                             6  │                     │
-│  │                  │   Additional eligible profiles                                           0 of 3 selected  ›  │                     │
-│                     │   Straightforward                                                             2 settings  ›  │                     │
-│                     │   Subtle                                                                      2 settings  ›  │                     │
+│  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
+│  │                  │   Additional eligible profiles    0 of 3 selected  ›                                         │                     │
+│                     │   Straightforward                 2 settings  ›                                              │                     │
+│                     │   Subtle                          2 settings  ›                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -34,7 +34,7 @@
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 │                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -49,8 +49,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ───────────────  │ Work with a clear method. Choose a model and its effort.                                     │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │   Model                                                                            shared ▾  │                     │
-│  │                  │   Effort                                                                             high ▾  │                     │
+│  │ No messages yet  │ Model                             shared ▾                                                   │                     │
+│  │                  │ Effort                            high ▾                                                     │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -76,7 +76,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 │                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -91,8 +91,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ───────────────  │ Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward.  │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │   Model                                                                           smarter ▾  │                     │
-│  │                  │   Effort                                                                             high ▾  │                     │
+│  │ No messages yet  │ Model                             smarter ▾                                                  │                     │
+│  │                  │ Effort                            high ▾                                                     │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -118,7 +118,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 │                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -133,8 +133,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ───────────────  │ Work with a clear method. Choose a model and its effort.                                     │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │   Model                                                                           Not set ▾  │                     │
-│  │                  │   Effort                                                                  Harness default ▾  │                     │
+│  │ No messages yet  │ Model                             Default (Not set) ▾                                        │                     │
+│  │                  │ Effort                            Default (Harness default) ▾                                │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -160,7 +160,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 │                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
