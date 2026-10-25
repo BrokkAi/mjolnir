@@ -16,6 +16,8 @@ pub const PTY_COLUMNS: usize = 80;
 pub struct PtyOutput {
     raw: Vec<u8>,
     parser: vte::Parser,
+    answered_background_query: bool,
+    answered_device_query: bool,
     pub screen: PtyScreen,
 }
 
@@ -24,6 +26,8 @@ impl PtyOutput {
         Self {
             raw: Vec::new(),
             parser: vte::Parser::new(),
+            answered_background_query: false,
+            answered_device_query: false,
             screen: PtyScreen::new(),
         }
     }
@@ -36,6 +40,23 @@ impl PtyOutput {
     /// Start a new raw capture without forgetting unchanged screen cells.
     pub fn clear(&mut self) {
         self.raw.clear();
+    }
+
+    pub fn background_query_needs_answer(&self, query: &[u8]) -> bool {
+        !self.answered_background_query
+            && self.raw.windows(query.len()).any(|window| window == query)
+    }
+
+    pub fn mark_background_query_answered(&mut self) {
+        self.answered_background_query = true;
+    }
+
+    pub fn device_query_needs_answer(&self, query: &[u8]) -> bool {
+        !self.answered_device_query && self.raw.windows(query.len()).any(|window| window == query)
+    }
+
+    pub fn mark_device_query_answered(&mut self) {
+        self.answered_device_query = true;
     }
 }
 

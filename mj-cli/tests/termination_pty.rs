@@ -29,7 +29,6 @@ const DEVICE_ATTRIBUTES_RESPONSE: &[u8] = b"\x1b[?1;2c";
 /// terminal's answer: a white background, then device attributes.
 const BACKGROUND_QUERY: &[u8] = b"\x1b]11;?\x1b\\\x1b[c";
 const BACKGROUND_RESPONSE: &[u8] = b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\\x1b[?1;2c";
-const ENTER_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
 /// A local-target fixture's launches wait in the daemon until this file
 /// exists.
 const LAUNCH_RELEASE: &str = "release-launch";
@@ -229,34 +228,22 @@ fn wait_for_output_until(
     deadline: Instant,
     mut child: Option<&mut Child>,
 ) {
-    let mut answered_device_query = output
-        .windows(ENTER_ALTERNATE_SCREEN.len())
-        .any(|window| window == ENTER_ALTERNATE_SCREEN);
-    let mut answered_background_query = answered_device_query;
     loop {
         drain(master, output);
-        if expected.matches(output) {
-            return;
-        }
-        if !answered_background_query
-            && output
-                .windows(BACKGROUND_QUERY.len())
-                .any(|window| window == BACKGROUND_QUERY)
-        {
+        if output.background_query_needs_answer(BACKGROUND_QUERY) {
             master
                 .write_all(BACKGROUND_RESPONSE)
                 .expect("answer terminal background query");
-            answered_background_query = true;
+            output.mark_background_query_answered();
         }
-        if !answered_device_query
-            && output
-                .windows(DEVICE_ATTRIBUTES_QUERY.len())
-                .any(|window| window == DEVICE_ATTRIBUTES_QUERY)
-        {
+        if output.device_query_needs_answer(DEVICE_ATTRIBUTES_QUERY) {
             master
                 .write_all(DEVICE_ATTRIBUTES_RESPONSE)
                 .expect("answer terminal device attributes query");
-            answered_device_query = true;
+            output.mark_device_query_answered();
+        }
+        if expected.matches(output) {
+            return;
         }
         if let Some(child) = child.as_deref_mut()
             && let Some(status) = child.try_wait().expect("poll PTY startup")
@@ -661,6 +648,9 @@ image = "ubuntu:24.04"
         tools
     };
     common::AgentIsolation::under(storage.path()).apply(&mut command);
+    // These tests assert the bytes the real dashboard paints, so a host-wide
+    // NO_COLOR setting must not turn every frame monochrome.
+    command.env_remove("NO_COLOR");
     command.env("PATH", tools);
     command.args(["--instance", "terminal-regression"]);
     command.args(args);
