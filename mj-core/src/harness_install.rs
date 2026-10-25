@@ -23,7 +23,6 @@ const INSTALL_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const HARNESS_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MANAGED_INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const NODE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_INSTALLER_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_NODE_DIST_URL: &str = "https://nodejs.org/dist";
 const ARTIFACT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
@@ -1248,75 +1247,149 @@ fn extract_node_archive(archive: &Path, destination: &Path, folder: &str) -> Res
 }
 
 async fn install_kimi(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
-    let script = download_installer(
-        "https://code.kimi.com/kimi-code/install.sh",
-        environment,
-        "download Kimi Code installer",
-    )
-    .await?;
-    let mut bash = tokio::process::Command::new("bash");
-    bash.env_clear()
-        .envs(environment)
-        .env("KIMI_VERSION", KIMI_VERSION)
-        .env("KIMI_INSTALL_DIR", staging)
-        .env("KIMI_CODE_HOME", staging)
-        .env("KIMI_NO_MODIFY_PATH", "1")
-        .current_dir(staging);
-    run_bounded_with_input_checked(
-        &mut bash,
-        &script,
-        "install exact managed Kimi Code",
-        MANAGED_INSTALL_TIMEOUT,
-    )
-    .await
+    let metadata: serde_json::Value =
+        serde_json::from_str(include_str!("../assets/kimi/runtime.json"))?;
+    install_kimi_from_metadata(staging, environment, &metadata).await
+}
+
+async fn install_kimi_from_metadata(
+    staging: &Path,
+    environment: &BTreeMap<String, String>,
+    metadata: &serde_json::Value,
+) -> Result<()> {
+    anyhow::ensure!(
+        metadata["version"] == KIMI_VERSION,
+        "Kimi Code download metadata does not match the managed runtime pin"
+    );
+    let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let platform = metadata["platforms"]
+        .get(&key)
+        .with_context(|| format!("Kimi Code does not have a managed runtime for {key}"))?;
+    let field = |name: &str| {
+        platform[name]
+            .as_str()
+            .with_context(|| format!("missing Kimi Code artifact field {name}"))
+    };
+    let filename = field("filename")?;
+    let destinations = [
+        format!(
+            "{}/{KIMI_VERSION}/{filename}",
+            kimi_artifact_base(environment).trim_end_matches('/')
+        ),
+        format!("https://code.kimi.ai/kimi-code/binaries/{KIMI_VERSION}/{filename}"),
+    ];
+    let bin = staging.join("bin");
+    std::fs::create_dir_all(&bin)?;
+    let entrypoint = bin.join("kimi");
+    download_verified_first_async(&destinations, &entrypoint, field("sha256")?, environment)
+        .await?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&entrypoint, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
 }
 
 async fn install_grok(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
-    let script = download_installer(
-        "https://x.ai/cli/install.sh",
-        environment,
-        "download Grok installer",
-    )
-    .await?;
-    let isolated_home = staging.join("installer-home");
-    std::fs::create_dir_all(&isolated_home).context("create isolated Grok installer home")?;
-    let mut bash = tokio::process::Command::new("bash");
-    bash.arg("-s")
-        .arg(GROK_VERSION)
-        .env_clear()
-        .envs(environment)
-        .env("HOME", &isolated_home)
-        .env("GROK_BIN_DIR", staging.join("bin"))
-        .current_dir(staging);
-    run_bounded_with_input_checked(
-        &mut bash,
-        &script,
-        "install exact managed Grok",
-        MANAGED_INSTALL_TIMEOUT,
-    )
-    .await
+    let metadata: serde_json::Value =
+        serde_json::from_str(include_str!("../assets/grok/runtime.json"))?;
+    install_grok_from_metadata(staging, environment, &metadata).await
 }
 
-async fn download_installer(
-    url: &str,
+async fn install_grok_from_metadata(
+    staging: &Path,
     environment: &BTreeMap<String, String>,
-    operation: &str,
-) -> Result<Vec<u8>> {
-    let mut curl = tokio::process::Command::new("curl");
-    curl.args(["-fsSL", "--connect-timeout", "30", "--max-time", "600", url])
-        .env_clear()
-        .envs(environment);
-    let output =
-        crate::subprocess::run_bounded(&mut curl, MAX_INSTALLER_BYTES, HARNESS_COMMAND_TIMEOUT)
-            .await
-            .with_context(|| operation.to_owned())?;
-    if !output.status.success() {
-        bail!("{operation} failed: {}", output_summary(&output));
+    metadata: &serde_json::Value,
+) -> Result<()> {
+    anyhow::ensure!(
+        metadata["version"] == GROK_VERSION,
+        "Grok download metadata does not match the managed runtime pin"
+    );
+    let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let platform = metadata["platforms"]
+        .get(&key)
+        .with_context(|| format!("Grok does not have a managed runtime for {key}"))?;
+    let field = |name: &str| {
+        platform[name]
+            .as_str()
+            .with_context(|| format!("missing Grok artifact field {name}"))
+    };
+    let target = field("target")?;
+    let filename = format!("grok-{GROK_VERSION}-{target}.zst");
+    let destinations = [
+        format!(
+            "{}/{filename}",
+            grok_artifact_base(environment).trim_end_matches('/')
+        ),
+        format!("https://storage.googleapis.com/grok-build-public-artifacts/cli/{filename}"),
+    ];
+    let archive = staging.join(&filename);
+    download_verified_first_async(&destinations, &archive, field("sha256")?, environment).await?;
+    let bin = staging.join("bin");
+    std::fs::create_dir_all(&bin)?;
+    let entrypoint = bin.join("grok");
+    let archive_for_extract = archive.clone();
+    let entrypoint_for_extract = entrypoint.clone();
+    tokio::task::spawn_blocking(move || {
+        extract_zstd_file(&archive_for_extract, &entrypoint_for_extract)
+    })
+    .await
+    .context("Grok extraction task failed")??;
+    std::fs::remove_file(&archive)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&entrypoint, std::fs::Permissions::from_mode(0o755))?;
+    std::os::unix::fs::symlink("grok", bin.join("agent"))
+        .context("create managed Grok agent launcher")?;
+    Ok(())
+}
+
+fn extract_zstd_file(archive: &Path, destination: &Path) -> Result<()> {
+    let input =
+        File::open(archive).with_context(|| format!("open Grok archive {}", archive.display()))?;
+    let mut decoder = ruzstd::decoding::StreamingDecoder::new(std::io::BufReader::new(input))
+        .map_err(|error| anyhow!("read Grok archive {}: {error}", archive.display()))?;
+    let mut output = File::create(destination)
+        .with_context(|| format!("create Grok executable {}", destination.display()))?;
+    std::io::copy(&mut decoder, &mut output)
+        .with_context(|| format!("extract Grok executable to {}", destination.display()))?;
+    Ok(())
+}
+
+fn kimi_artifact_base(environment: &BTreeMap<String, String>) -> String {
+    #[cfg(test)]
+    if let Some(base) = environment.get("MJ_TEST_KIMI_ARTIFACT_BASE") {
+        return base.clone();
     }
-    if output.stdout.is_empty() {
-        bail!("{operation} returned an empty installer");
+    #[cfg(not(test))]
+    let _ = environment;
+    "https://code.kimi.com/kimi-code/binaries".to_owned()
+}
+
+fn grok_artifact_base(environment: &BTreeMap<String, String>) -> String {
+    #[cfg(test)]
+    if let Some(base) = environment.get("MJ_TEST_GROK_ARTIFACT_BASE") {
+        return base.clone();
     }
-    Ok(output.stdout)
+    #[cfg(not(test))]
+    let _ = environment;
+    "https://x.ai/cli".to_owned()
+}
+
+async fn download_verified_first_async(
+    urls: &[String],
+    destination: &Path,
+    expected: &str,
+    environment: &BTreeMap<String, String>,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    for url in urls {
+        match download_verified_async(url, destination, expected, environment).await {
+            Ok(()) => return Ok(()),
+            Err(error) => failures.push(format!("{url}: {error:#}")),
+        }
+    }
+    bail!(
+        "could not download a verified managed runtime from any configured source: {}",
+        failures.join("; ")
+    )
 }
 
 async fn run_bounded_checked(
@@ -1327,23 +1400,6 @@ async fn run_bounded_checked(
     let output = crate::subprocess::run_bounded(command, 4 * 1024 * 1024, timeout)
         .await
         .with_context(|| operation.to_owned())?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(anyhow!("{operation} failed: {}", output_summary(&output)))
-    }
-}
-
-async fn run_bounded_with_input_checked(
-    command: &mut tokio::process::Command,
-    input: &[u8],
-    operation: &str,
-    timeout: Duration,
-) -> Result<()> {
-    let output =
-        crate::subprocess::run_bounded_with_input(command, input, 4 * 1024 * 1024, timeout)
-            .await
-            .with_context(|| operation.to_owned())?;
     if output.status.success() {
         Ok(())
     } else {
@@ -1494,7 +1550,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "downloads the pinned Grok installer into a disposable cache"]
+    #[ignore = "downloads the pinned Grok artifact into a disposable cache"]
     fn grok_real_install_launches_from_final_directory() {
         let parent =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/grok-install-validation");
@@ -1519,64 +1575,98 @@ mod tests {
         }
     }
 
-    fn fake_grok_installer(root: &Path) -> BTreeMap<String, String> {
-        let tools = root.join("tools");
-        executable(
-            &tools.join("curl"),
-            r#"#!/bin/sh
-cat <<'INSTALLER'
-set -eu
-mkdir -p "$HOME/.grok/downloads" "$GROK_BIN_DIR"
-printf '#!/bin/sh\necho grok-fixture\n' > "$HOME/.grok/downloads/grok"
-chmod +x "$HOME/.grok/downloads/grok"
-ln -s "$HOME/.grok/downloads/grok" "$GROK_BIN_DIR/grok"
-ln -s "$HOME/.grok/downloads/grok" "$GROK_BIN_DIR/agent"
-INSTALLER
-"#,
-        );
-        BTreeMap::from([("PATH".into(), format!("{}:/usr/bin:/bin", tools.display()))])
+    #[test]
+    #[ignore = "downloads the pinned Kimi artifact into a disposable cache"]
+    fn kimi_real_install_launches_from_final_directory() {
+        let parent =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/kimi-install-validation");
+        std::fs::create_dir_all(&parent).unwrap();
+        let temp = tempfile::tempdir_in(parent).unwrap();
+        let environment = crate::login_environment::discover().unwrap();
+        let managed = resolve_at(
+            temp.path(),
+            HarnessKind::Kimi,
+            ExecutionPolicy::ConfiguredApprovals,
+            &environment,
+        )
+        .unwrap();
+        let mut command = Command::new(&managed.command);
+        command.arg("--version");
+        apply_environment(&mut command, &environment);
+        run_checked(&mut command, "verify relocated Kimi executable").unwrap();
     }
 
     #[test]
-    fn grok_launchers_execute_after_relocation_and_invalid_cache_repairs_itself() {
+    fn direct_kimi_artifact_installs_the_pinned_executable() {
         let temp = tempfile::tempdir().unwrap();
-        let environment = fake_grok_installer(temp.path());
-        let cache = temp.path().join("cache");
-        let selected = pin(HarnessKind::Grok);
-        let install = cache.join("grok").join(selected.install_id);
-        for attempt in 0..2 {
-            let managed = if attempt == 0 {
-                resolve_at(
-                    &cache,
-                    HarnessKind::Grok,
-                    ExecutionPolicy::ConfiguredApprovals,
-                    &environment,
-                )
-                .unwrap()
+        let body = b"#!/bin/sh\necho kimi-fixture\n".to_vec();
+        let server = ArtifactServer::serve(body.clone());
+        let fixture = temp.path().join("kimi-artifact");
+        std::fs::write(&fixture, &body).unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(include_str!("../assets/kimi/runtime.json")).unwrap();
+        metadata["platforms"][current_node_platform()]["sha256"] = serde_json::Value::String(
+            crate::worker_launch::worker_executable_digest(&fixture).unwrap(),
+        );
+        let environment =
+            BTreeMap::from([("MJ_TEST_KIMI_ARTIFACT_BASE".to_owned(), server.url.clone())]);
+        let staging = temp.path().join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+
+        run_async(install_kimi_from_metadata(
+            &staging,
+            &environment,
+            &metadata,
+        ))
+        .unwrap();
+
+        let output =
+            crate::subprocess::run_with_input(&mut Command::new(staging.join("bin/kimi")), &[])
+                .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"kimi-fixture\n");
+    }
+
+    #[test]
+    fn direct_grok_artifact_installs_relocatable_launchers() {
+        let temp = tempfile::tempdir().unwrap();
+        let body = b"#!/bin/sh\necho grok-fixture\n";
+        let compressed = ruzstd::encoding::compress_to_vec(
+            &body[..],
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        let server = ArtifactServer::serve(compressed.clone());
+        let fixture = temp.path().join("grok-artifact.zst");
+        std::fs::write(&fixture, &compressed).unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(include_str!("../assets/grok/runtime.json")).unwrap();
+        metadata["platforms"][current_node_platform()]["sha256"] = serde_json::Value::String(
+            crate::worker_launch::worker_executable_digest(&fixture).unwrap(),
+        );
+        let environment =
+            BTreeMap::from([("MJ_TEST_GROK_ARTIFACT_BASE".to_owned(), server.url.clone())]);
+        let staging = temp.path().join("staging");
+        let relocated = temp.path().join("relocated");
+        std::fs::create_dir_all(&staging).unwrap();
+
+        run_async(install_grok_from_metadata(
+            &staging,
+            &environment,
+            &metadata,
+        ))
+        .unwrap();
+        std::fs::rename(&staging, &relocated).unwrap();
+
+        for launcher in ["grok", "agent"] {
+            let path = relocated.join("bin").join(launcher);
+            if launcher == "agent" {
+                assert_eq!(std::fs::read_link(&path).unwrap(), Path::new("grok"));
             } else {
-                resolve_after_lease_release(&cache, &environment)
-            };
-            assert!(complete_install(&install, HarnessKind::Grok, selected).unwrap());
-            assert!(std::fs::read_dir(cache.join("grok")).unwrap().all(|entry| {
-                !entry
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".install-")
-            }));
-            for launcher in ["grok", "agent"] {
-                let path = install.join("bin").join(launcher);
-                assert!(!std::fs::read_link(&path).unwrap().is_absolute());
-                let output =
-                    crate::subprocess::run_with_input(&mut Command::new(path), &[]).unwrap();
-                assert!(output.status.success());
-                assert_eq!(output.stdout, b"grok-fixture\n");
+                assert!(path.is_file());
             }
-            drop(managed);
-            if attempt == 0 {
-                std::fs::remove_file(install.join("bin/agent")).unwrap();
-                assert!(!complete_install(&install, HarnessKind::Grok, selected).unwrap());
-            }
+            let output = crate::subprocess::run_with_input(&mut Command::new(path), &[]).unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout, b"grok-fixture\n");
         }
     }
 
@@ -1606,26 +1696,27 @@ INSTALLER
     fn invalid_install_is_not_removed_while_leased() {
         let temp = tempfile::tempdir().unwrap();
         let cache = temp.path().join("cache");
-        let environment = fake_grok_installer(temp.path());
-        let managed = resolve_at(
-            &cache,
+        let selected = pin(HarnessKind::Grok);
+        let install = cache.join("grok").join(selected.install_id);
+        complete_fake(
+            &cache.join("grok"),
             HarnessKind::Grok,
-            ExecutionPolicy::ConfiguredApprovals,
-            &environment,
-        )
-        .unwrap();
-        std::fs::remove_file(&managed.command).unwrap();
+            selected.install_id,
+            "bin/grok",
+        );
+        executable(&install.join("bin/agent"), "#!/bin/sh\nexit 0\n");
+        let lease = acquire_supervisor_lease(&install.join(LEASE_FILE)).unwrap();
+        std::fs::remove_file(install.join("bin/grok")).unwrap();
         let error = resolve_at(
             &cache,
             HarnessKind::Grok,
             ExecutionPolicy::ConfiguredApprovals,
-            &environment,
+            &BTreeMap::new(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("repair deferred"));
-        assert!(managed.lease_path.exists());
-        drop(managed);
-        resolve_after_lease_release(&cache, &environment);
+        assert!(install.exists());
+        drop(lease);
     }
 
     #[test]
@@ -1651,6 +1742,28 @@ INSTALLER
             serde_json::from_str(include_str!("../assets/node/runtime.json"))
                 .expect("parse Node.js runtime metadata");
         assert_eq!(metadata["version"], NODE_VERSION);
+    }
+
+    #[test]
+    fn kimi_pin_matches_runtime_metadata() {
+        use crate::harness_runtime::KIMI_VERSION;
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(include_str!("../assets/kimi/runtime.json"))
+                .expect("parse Kimi runtime metadata");
+        assert_eq!(metadata["version"], KIMI_VERSION);
+        assert!(metadata["platforms"][current_node_platform()]["sha256"].is_string());
+    }
+
+    #[test]
+    fn grok_pin_matches_runtime_metadata() {
+        use crate::harness_runtime::GROK_VERSION;
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(include_str!("../assets/grok/runtime.json"))
+                .expect("parse Grok runtime metadata");
+        assert_eq!(metadata["version"], GROK_VERSION);
+        assert!(metadata["platforms"][current_node_platform()]["sha256"].is_string());
     }
 
     #[test]
@@ -2280,29 +2393,6 @@ INSTALLER
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-    }
-
-    fn resolve_after_lease_release(
-        cache: &Path,
-        environment: &BTreeMap<String, String>,
-    ) -> ManagedHarness {
-        let mut resolved = None;
-        assert_lease_released(|| {
-            match resolve_at(
-                cache,
-                HarnessKind::Grok,
-                ExecutionPolicy::ConfiguredApprovals,
-                environment,
-            ) {
-                Ok(managed) => {
-                    resolved = Some(managed);
-                    true
-                }
-                Err(error) if error.to_string().contains("repair deferred") => false,
-                Err(error) => panic!("managed harness repair failed: {error:#}"),
-            }
-        });
-        resolved.unwrap()
     }
 
     #[test]

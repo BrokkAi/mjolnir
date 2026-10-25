@@ -29,6 +29,8 @@ include = [
     "assets/opencode-provider-environment.txt",
     # Pinned managed harness packages and verified runtime manifests.
     "assets/harnesses/**",
+    "assets/grok/runtime.json",
+    "assets/kimi/runtime.json",
     "assets/muse/runtime.json",
     "assets/node/runtime.json",
     "assets/opencode/runtime.json",
@@ -64,6 +66,7 @@ libc.workspace = true
 memchr.workspace = true
 regex = "1"
 reqwest.workspace = true
+ruzstd.workspace = true
 rustls.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true

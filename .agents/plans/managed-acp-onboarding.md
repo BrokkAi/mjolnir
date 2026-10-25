@@ -20,7 +20,7 @@ After this work, the default local workflow should have one user-facing bootstra
 - [x] (2026-10-25 09:48Z) Make managed Node cache probing recoverable, detect incompatible glibc artifacts before download, and report failed system probes.
 - [x] (2026-10-25 09:48Z) Add managed Node mirror support with checksum verification and tests.
 - [x] (2026-10-25 10:12Z) Use Mjolnir's bounded HTTPS client for verified Node, Muse, and OpenCode artifact downloads.
-- [ ] Replace Kimi and Grok vendor shell installers with direct pinned artifacts.
+- [x] (2026-10-25 10:32Z) Replace Kimi and Grok vendor shell installers with direct pinned artifacts.
 - [x] (2026-10-25 10:12Z) Replace the external OpenCode `tar` call with the Rust archive reader already used for Node.
 - [ ] Run Claude login and setup-token through the pinned Claude CLI.
 - [ ] Add a managed-agent onboarding action that creates a non-own profile home, saves it, and hands off to sign-in.
