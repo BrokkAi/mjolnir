@@ -1638,6 +1638,7 @@ impl DashboardContext {
         let runtime_state_rx = remote_worker.state;
         dashboard.set_move_snapshot(runtime_state_rx.borrow().moves.clone());
         dashboard.set_recent_launch(runtime_state_rx.borrow().recent_launch.clone());
+        dashboard.set_container_capacities(runtime_state_rx.borrow().container_capacities.clone());
         let runtime_reviews_rx = remote_worker.reviews;
         let runtime_review_views: BTreeMap<String, mj_controller::review_host::RuntimeReviewView> =
             runtime_reviews_rx

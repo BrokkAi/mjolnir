@@ -291,6 +291,7 @@ impl RuntimeState {
                         default_targets: controller.config.default_targets.clone(),
                         last_subagent_policy: controller.state.last_subagent_policy.clone(),
                         lifecycles,
+                        container_capacities: self.container_capacity_projection(&controller.state),
                         ..Default::default()
                     },
                     ..Default::default()

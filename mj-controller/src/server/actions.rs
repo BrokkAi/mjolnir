@@ -28,6 +28,11 @@ pub enum ControllerAction {
     New {
         #[serde(skip)]
         remember_launch_choices: bool,
+        /// Save this session's selected container size as the default for its
+        /// physical host. This is independent of the interactive profile,
+        /// target, and recent-launch defaults.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        remember_container_size: bool,
         #[serde(default)]
         create_managed_worktree: Option<bool>,
         /// Full commit object ID to start the bundle's primary repository at.
@@ -647,6 +652,7 @@ mod tests {
             "profile_id": "codex",
             "bundle_id": "project",
             "target_id": "podman",
+            "remember_container_size": true,
             "resource_allocation": {
                 "kind": "container",
                 "cpus": 4,
@@ -657,6 +663,7 @@ mod tests {
         assert!(matches!(
             &action,
             ControllerAction::New {
+                remember_container_size: true,
                 resource_allocation: Some(allocation),
                 ..
             } if matches!(allocation.as_ref(), SessionResourceAllocation::Container {
@@ -680,6 +687,7 @@ mod tests {
         assert!(matches!(
             &older_client,
             ControllerAction::New {
+                remember_container_size: false,
                 resource_allocation: None,
                 ..
             }

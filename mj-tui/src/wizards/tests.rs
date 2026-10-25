@@ -80,6 +80,29 @@ fn capture_render(width: u16, height: u16, lines: &[String]) {
     });
 }
 
+fn set_local_container_capacity(
+    dashboard: &mut DashboardState,
+    total: HostContainerSize,
+    committed: HostContainerSize,
+    remaining: HostContainerSize,
+    complete: bool,
+) {
+    let reserved = mj_core::state::reserved_container_capacity(total);
+    dashboard.set_container_capacities(BTreeMap::from([(
+        "local".into(),
+        mj_client::runtime_feed::RuntimeContainerCapacity {
+            target_ids: vec!["podman".into()],
+            capacity: mj_core::state::HostContainerCapacity {
+                total,
+                reserved,
+                committed,
+                remaining,
+                complete,
+            },
+        },
+    )]));
+}
+
 fn captured_drawn(dashboard: &mut DashboardState, width: u16, height: u16) -> Vec<String> {
     let lines = crate::test_support::drawn(dashboard, width, height);
     capture_render(width, height, &lines);
@@ -1579,6 +1602,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
     assert_eq!(
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateSession {
+            remember_container_size: false,
             subagents: Some(mj_core::subagent::SubagentPolicy::Native),
             review: None,
             create_managed_worktree: Some(true),
@@ -1860,6 +1884,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
     assert_eq!(
         dashboard.take_prerequisite_check().unwrap(),
         DashboardAction::CreateSession {
+            remember_container_size: false,
             subagents: Some(mj_core::subagent::SubagentPolicy::Native),
             review: None,
             create_managed_worktree: Some(true),
@@ -3080,7 +3105,7 @@ fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() 
         "local".into(),
         HostContainerSize {
             cpus: 24,
-            memory_bytes: 96 * gib,
+            memory_bytes: 36 * gib,
         },
     );
     let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
@@ -3106,6 +3131,22 @@ fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() 
         })),
         0,
     );
+    set_local_container_capacity(
+        &mut dashboard,
+        HostContainerSize {
+            cpus: 12,
+            memory_bytes: 48 * gib,
+        },
+        HostContainerSize {
+            cpus: 0,
+            memory_bytes: 0,
+        },
+        HostContainerSize {
+            cpus: 12,
+            memory_bytes: 48 * gib * 4 / 5,
+        },
+        true,
+    );
 
     ready_open_new_wizard(&mut dashboard);
     ready_key(&mut dashboard, key(KeyCode::Enter));
@@ -3116,9 +3157,172 @@ fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() 
         wizard.resource_allocation,
         Some(SessionResourceAllocation::Container {
             cpus: 12,
-            memory_bytes: 48 * gib,
+            memory_bytes: 36 * gib,
         })
     );
+}
+
+#[test]
+fn new_container_size_checkbox_is_explicit_and_reaches_the_create_action() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    dashboard.apply_deployment_capacity(
+        "local",
+        Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            cpu_percent: None,
+            memory_used_bytes: 0,
+            memory_total_bytes: 64 << 30,
+            logical_cores: 24,
+            disk_total_bytes: None,
+            storage: Vec::new(),
+        })),
+        0,
+    );
+    set_local_container_capacity(
+        &mut dashboard,
+        HostContainerSize {
+            cpus: 24,
+            memory_bytes: 64 << 30,
+        },
+        HostContainerSize {
+            cpus: 0,
+            memory_bytes: 0,
+        },
+        HostContainerSize {
+            cpus: 24,
+            memory_bytes: (64 << 30) * 4 / 5,
+        },
+        true,
+    );
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert_eq!(
+        new_wizard(&dashboard).resource_allocation,
+        Some(SessionResourceAllocation::Container {
+            cpus: 4,
+            memory_bytes: 8 << 30,
+        })
+    );
+    assert!(!new_wizard(&dashboard).remember_container_size);
+    let screen = captured_drawn(&mut dashboard, 100, 30).join("\n");
+    assert!(screen.contains("Save as default sizing"), "{screen}");
+    assert!(screen.contains("RAM left"), "{screen}");
+
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    assert_eq!(
+        new_wizard(&dashboard).form.borrow().focused(),
+        Some(WizardControl::RememberContainerSize)
+    );
+    ready_key(&mut dashboard, key(KeyCode::Char(' ')));
+    assert!(new_wizard(&dashboard).remember_container_size);
+
+    let action = dashboard.create_session_action_without_closing(new_wizard(&dashboard));
+    assert!(matches!(
+        action,
+        DashboardAction::CreateSession {
+            remember_container_size: true,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn unknown_live_container_capacity_is_not_reported_as_zero() {
+    let mut session = running_session();
+    session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        container_id: "unknown-size".into(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    });
+    session.resource_allocation = None;
+    let mut state = State::default();
+    state.sessions.insert(session.id.clone(), session);
+    let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
+    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    dashboard.apply_deployment_capacity(
+        "local",
+        Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            cpu_percent: None,
+            memory_used_bytes: 0,
+            memory_total_bytes: 64 << 30,
+            logical_cores: 24,
+            disk_total_bytes: None,
+            storage: Vec::new(),
+        })),
+        0,
+    );
+    set_local_container_capacity(
+        &mut dashboard,
+        HostContainerSize {
+            cpus: 24,
+            memory_bytes: 64 << 30,
+        },
+        HostContainerSize {
+            cpus: 24,
+            memory_bytes: (64 << 30) * 4 / 5,
+        },
+        HostContainerSize {
+            cpus: 0,
+            memory_bytes: 0,
+        },
+        false,
+    );
+
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+
+    let wizard = new_wizard(&dashboard);
+    assert!(wizard.resource_allocation.is_none());
+    let error = wizard.sizing_error.as_deref().unwrap();
+    assert!(error.contains("no recorded sizing"), "{error}");
+    assert!(!error.contains("0 CPUs"), "{error}");
+    let screen = captured_drawn(&mut dashboard, 100, 30).join("\n");
+    assert!(screen.contains("RAM left unavailable"), "{screen}");
+    assert!(!screen.contains("RAM left: 0"), "{screen}");
+}
+
+// Hard-won: d27eb9f56: the TUI ignored daemon reservations while sizing a new session.
+#[test]
+fn terminal_headroom_comes_from_the_daemons_reservation_adjusted_capacity() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    dashboard.apply_deployment_capacity(
+        "local",
+        Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            cpu_percent: Some(20),
+            memory_used_bytes: 16 << 30,
+            memory_total_bytes: 64 << 30,
+            logical_cores: 10,
+            disk_total_bytes: None,
+            storage: Vec::new(),
+        })),
+        0,
+    );
+    set_local_container_capacity(
+        &mut dashboard,
+        HostContainerSize {
+            cpus: 10,
+            memory_bytes: 64 << 30,
+        },
+        HostContainerSize {
+            cpus: 8,
+            memory_bytes: 16 << 30,
+        },
+        HostContainerSize {
+            cpus: 2,
+            memory_bytes: (64 << 30) * 4 / 5 - (16 << 30),
+        },
+        true,
+    );
+
+    let capacity = dashboard.host_container_capacity("podman").unwrap();
+    assert_eq!(capacity.remaining.cpus, 2);
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let screen = captured_drawn(&mut dashboard, 100, 30).join("\n");
+    assert!(screen.contains("2 CPUs"), "{screen}");
 }
 
 #[test]
@@ -3152,6 +3356,33 @@ fn resume_keeps_the_sessions_size_instead_of_the_hosts_latest_size() {
             memory_bytes: 16 * gib,
         })
     );
+}
+
+#[test]
+fn resume_keeps_a_legacy_allocation_below_the_new_session_minimum() {
+    let mut session = stopped_session();
+    session.resource_allocation = Some(SessionResourceAllocation::Container {
+        cpus: 1,
+        memory_bytes: 2 << 30,
+    });
+    let mut state = State::default();
+    state.sessions.insert(session.id.clone(), session);
+    let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
+
+    dashboard.begin_resume_for("session-1");
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("expected resume wizard on target step");
+    };
+    assert_eq!(
+        wizard.resource_allocation,
+        Some(SessionResourceAllocation::Container {
+            cpus: 1,
+            memory_bytes: 2 << 30,
+        })
+    );
+    assert_eq!(wizard.sizing_error, None);
 }
 
 #[test]
@@ -4827,7 +5058,7 @@ fn container_fields_are_underlined_before_focus_and_clickable_on_small_terminals
         assert_eq!(
             new_wizard(&dashboard).resource_allocation,
             Some(SessionResourceAllocation::Container {
-                cpus: 8,
+                cpus: 4,
                 memory_bytes: (12 << 30) + (1 << 29)
             })
         );
@@ -4916,18 +5147,34 @@ fn container_memory_errors_keep_the_draft_and_refuse_submission_above_host_limit
         Ok(Some(mj_core::targets::DeploymentCapacityUsage {
             cpu_percent: None,
             memory_used_bytes: 0,
-            memory_total_bytes: 4 << 30,
-            logical_cores: 2,
+            memory_total_bytes: 16 << 30,
+            logical_cores: 8,
             disk_total_bytes: None,
             storage: Vec::new(),
         })),
         0,
     );
+    set_local_container_capacity(
+        &mut dashboard,
+        HostContainerSize {
+            cpus: 8,
+            memory_bytes: 16 << 30,
+        },
+        HostContainerSize {
+            cpus: 0,
+            memory_bytes: 0,
+        },
+        HostContainerSize {
+            cpus: 8,
+            memory_bytes: (16 << 30) * 3 / 5,
+        },
+        true,
+    );
     ready_open_new_wizard(&mut dashboard);
     ready_key(&mut dashboard, key(KeyCode::Enter));
     ready_key(&mut dashboard, key(KeyCode::Tab));
-    replace_resource_text(&mut dashboard, "3");
-    assert_eq!(new_wizard(&dashboard).resource_editor.cpu.value(), "3");
+    replace_resource_text(&mut dashboard, "9");
+    assert_eq!(new_wizard(&dashboard).resource_editor.cpu.value(), "9");
     assert!(
         new_wizard(&dashboard)
             .sizing_error
@@ -4935,21 +5182,21 @@ fn container_memory_errors_keep_the_draft_and_refuse_submission_above_host_limit
             .unwrap()
             .contains("CPU exceeds")
     );
-    replace_resource_text(&mut dashboard, "2");
+    replace_resource_text(&mut dashboard, "4");
     ready_key(&mut dashboard, key(KeyCode::Tab));
-    for text in ["", "0", "NaN", "-1", "5", "18446744073709551615"] {
+    for text in ["", "0", "NaN", "-1", "3", "20", "18446744073709551615"] {
         replace_resource_text(&mut dashboard, text);
         assert_eq!(new_wizard(&dashboard).resource_editor.memory.value(), text);
         assert!(new_wizard(&dashboard).resource_allocation.is_none());
         ready_key(&mut dashboard, key(KeyCode::Enter));
         assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
     }
-    replace_resource_text(&mut dashboard, "3.25");
+    replace_resource_text(&mut dashboard, "8.5");
     assert_eq!(
         new_wizard(&dashboard).resource_allocation,
         Some(SessionResourceAllocation::Container {
-            cpus: 2,
-            memory_bytes: (3 << 30) + (1 << 28),
+            cpus: 4,
+            memory_bytes: (8 << 30) + (1 << 29),
         })
     );
 }
@@ -4961,9 +5208,10 @@ fn invalid_resource_text_survives_back_to_profile_and_reentering_target() {
     ready_key(&mut dashboard, key(KeyCode::Enter));
     ready_key(&mut dashboard, key(KeyCode::Tab));
     replace_resource_text(&mut dashboard, "invalid");
-    for _ in 0..3 {
-        ready_key(&mut dashboard, key(KeyCode::Tab));
-    }
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new session wizard");
+    };
+    wizard.form.get_mut().focus(WizardControl::Back);
     assert_eq!(
         new_wizard(&dashboard).form.borrow().focused(),
         Some(WizardControl::Back)
@@ -5001,6 +5249,22 @@ fn late_host_limits_preserve_typed_values_and_block_an_oversized_draft() {
         }))
     };
     dashboard.apply_deployment_capacity("local", sample(4), 0);
+    set_local_container_capacity(
+        &mut dashboard,
+        HostContainerSize {
+            cpus: 4,
+            memory_bytes: 64 << 30,
+        },
+        HostContainerSize {
+            cpus: 0,
+            memory_bytes: 0,
+        },
+        HostContainerSize {
+            cpus: 4,
+            memory_bytes: (64 << 30) * 4 / 5,
+        },
+        true,
+    );
     let wizard = new_wizard(&dashboard);
     assert_eq!(wizard.step, WizardStep::Target);
     assert_eq!(wizard.resource_editor.cpu.value(), "6");
@@ -5016,12 +5280,28 @@ fn late_host_limits_preserve_typed_values_and_block_an_oversized_draft() {
     ready_key(&mut dashboard, key(KeyCode::Enter));
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
     dashboard.apply_deployment_capacity("local", sample(8), 1);
+    set_local_container_capacity(
+        &mut dashboard,
+        HostContainerSize {
+            cpus: 8,
+            memory_bytes: 64 << 30,
+        },
+        HostContainerSize {
+            cpus: 0,
+            memory_bytes: 0,
+        },
+        HostContainerSize {
+            cpus: 8,
+            memory_bytes: (64 << 30) * 4 / 5,
+        },
+        true,
+    );
     assert_eq!(new_wizard(&dashboard).resource_editor.cpu.value(), "6");
     assert_eq!(
         new_wizard(&dashboard).resource_allocation,
         Some(SessionResourceAllocation::Container {
             cpus: 6,
-            memory_bytes: 32 << 30,
+            memory_bytes: 8 << 30,
         })
     );
 }

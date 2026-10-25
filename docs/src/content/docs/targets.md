@@ -361,15 +361,24 @@ command palette (**prefix+:**) → **Container settings** where supported. See [
 Container target `cpus` and `memory` values are backend fallbacks for launch
 requests that do not supply a per-session allocation. The terminal wizard does
 not seed from them: it starts with the remembered size for that physical host
-or a baseline of 8 CPUs and 32 GiB, then clamps choices to known host limits.
-Its per-session choice overrides the fallback. Later **Container settings**
-overrides win when that session's container is next created.
+or a baseline of 4 CPUs and 8 GiB. Checking **Save as default sizing** on a new
+session makes that session's choice the remembered size for the host. The
+minimum accepted size is 2 CPUs and 4 GiB. The per-session choice overrides the
+fallback. Later **Container settings** overrides win when that session's
+container is next created.
 
 EC2 uses an instance type rather than independent CPU and memory strings. Bare
 targets use the host directly and have no Mjolnir resource limit.
 
-These choices are capacity controls, not scheduling constraints. Mjolnir shows
-host and fleet usage but does not prevent overcommit.
+These choices are capacity controls. Mjolnir sums the CPU and memory limits of
+live containers that share a physical host and refuses a new container when
+the committed total would exceed the host's logical CPUs or usable RAM. The
+same check covers resuming a stopped container and moving a session onto a
+container target. RAM is treated as a hard commitment, with one fifth of
+physical RAM reserved for the host operating system and other processes.
+Compression, swap, and reclaimable memory do not increase the RAM available to
+another session. Mjolnir reports the RAM left rather than stopping or
+suspending sessions automatically.
 
 ## Image pull policy
 

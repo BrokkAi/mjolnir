@@ -298,6 +298,7 @@ pub enum DashboardAction {
         text: String,
     },
     CreateSession {
+        remember_container_size: bool,
         create_managed_worktree: Option<bool>,
         subagents: Option<mj_core::subagent::SubagentPolicy>,
         /// The session's automatic turn-review choice. `None` follows the
@@ -943,6 +944,10 @@ pub struct DashboardState {
     /// cancelled operations that still have an explicit recovery action.
     pub(crate) move_operations: mj_core::snapshot_map::SnapshotMap<String, MoveOperation>,
     pub(crate) capacity_details: BTreeMap<String, CapacityDetail>,
+    /// The daemon's hard container budget, including in-flight resume and
+    /// move reservations. Raw host utilization remains in `capacity_details`.
+    pub(crate) container_capacities:
+        BTreeMap<String, mj_client::runtime_feed::RuntimeContainerCapacity>,
     /// The daemon storage owner's verdict per target host. The daemon is the
     /// only judge of a full disk; this surface shows what it says.
     pub(crate) target_storage: Vec<mj_core::targets::storage::TargetStorageView>,
@@ -1260,6 +1265,7 @@ impl DashboardState {
             launch_standby: None,
             move_operations: Default::default(),
             capacity_details: BTreeMap::new(),
+            container_capacities: BTreeMap::new(),
             target_storage: Vec::new(),
             capacity_disks_areas: RefCell::new(Vec::new()),
             version_label: if cfg!(test) {

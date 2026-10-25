@@ -183,6 +183,7 @@ impl DashboardState {
             None => recipe.subagents.unwrap_or_default(),
         };
         DashboardAction::CreateSession {
+            remember_container_size: false,
             workspace_id,
             profile_id: recipe.profile_id,
             target_template_id: recipe.target_id,

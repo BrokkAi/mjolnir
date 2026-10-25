@@ -83,6 +83,10 @@ pub(super) fn track_capacity_targets(
 /// Project the capacity readings for the phone.
 pub(super) fn viewer_capacity(
     state: &std::collections::BTreeMap<String, PhoneCapacity>,
+    container_capacities: &std::collections::BTreeMap<
+        String,
+        mj_client::runtime_feed::RuntimeContainerCapacity,
+    >,
 ) -> Vec<crate::server::ViewerTargetCapacity> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -94,6 +98,9 @@ pub(super) fn viewer_capacity(
         .map(|entry| {
             let usage = entry.usage.as_ref();
             let hosts = mj_core::targets::storage::capacity_storage_hosts(&entry.target, usage);
+            let container_capacity = container_capacities
+                .get(&entry.target.id)
+                .map(|capacity| capacity.capacity);
             crate::server::ViewerTargetCapacity {
                 storage: crate::server::ViewerTargetStorage::list(
                     &mj_core::targets::storage::views_for(&storage, &hosts),
@@ -109,6 +116,7 @@ pub(super) fn viewer_capacity(
                 memory_used_bytes: usage.map(|usage| usage.memory_used_bytes),
                 memory_total_bytes: usage.map(|usage| usage.memory_total_bytes),
                 logical_cores: usage.map(|usage| usage.logical_cores),
+                container_capacity,
                 disk_total_bytes: usage.and_then(|usage| usage.disk_total_bytes),
                 // A fleet reports how many machines it is running; a plain host
                 // has no such count and says nothing rather than zero.
@@ -535,19 +543,19 @@ pub(super) fn viewer_snapshot_selected(
         target.runtime_missing = engines.runtime_missing(template);
         target.resource_allocation_kind = template.into();
         if mj_core::config::is_container_target(template) {
-            let limits = capacity
+            let host_capacity = capacity
                 .iter()
                 .find(|host| host.target_ids.iter().any(|id| id == &target.id))
-                .and_then(|host| {
-                    Some(mj_core::state::HostContainerSize {
-                        cpus: host.logical_cores?,
-                        memory_bytes: host.memory_total_bytes?,
-                    })
-                });
+                .and_then(|host| host.container_capacity);
+            let limits = host_capacity.map(|host| mj_core::state::HostContainerSize {
+                cpus: host.total.cpus,
+                memory_bytes: host.total.memory_bytes,
+            });
             target.remembered_container_size = mj_core::config::container_size_host(template)
                 .and_then(|host| controller.state.container_sizes.get(host))
                 .copied();
             target.container_host_limits = limits;
+            target.container_capacity = host_capacity;
             let size =
                 mj_core::state::default_container_size(target.remembered_container_size, limits);
             target.default_resource_allocation =
@@ -558,6 +566,7 @@ pub(super) fn viewer_snapshot_selected(
         } else {
             target.remembered_container_size = None;
             target.container_host_limits = None;
+            target.container_capacity = None;
             target.default_resource_allocation = None;
         }
     }

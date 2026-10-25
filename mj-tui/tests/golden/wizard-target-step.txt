@@ -563,7 +563,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
 │                           │   TARGET  KIND          CPU     MEM (GiB)     STATUS                             │                           │
-│                           │   docker  local Podman  8       32            checking…                          │                           │
+│                           │   docker  local Podman  4       8             checking…                          │                           │
 │                           │   podman  local Podman  —       —             checking…                          │                           │
 │                           │                                                                                  │                           │
 │                           │ Host totals unavailable; resource limits cannot be checked.                      │                           │
@@ -933,8 +933,8 @@ Machine nas has no runtime: it did not answer. `ssh dev@nas.example.test true` f
 │                           ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
 │                           │   TARGET  KIND          CPU     MEM (GiB)     STATUS                             │                           │
-│                           │   podman  local Podman  8       32                                               │                           │
-│                           │                                                                                  │                           │
+│                           │   podman  local Podman  4       8                                                │                           │
+│                           │ ☐ Save as default sizing                                                         │                           │
 │                           │ Host totals unavailable; resource limits cannot be checked.                      │                           │
 │                           │ ctrl+b shift+r recheck availability                                              │                           │
 │                           │                                                                                  │                           │
@@ -1351,8 +1351,8 @@ selection: podman (the next visible row; docker is hidden)
 │                                     │                                                                                  │                                     │
 │                                     │   TARGET     KIND           CPU     MEM (GiB)     STATUS                         │                                     │
 │                                     │   localhost  raw localhost  —       —                                            │                                     │
-│                                     │   podman     local Podman   8       32                                           │                                     │
-│                                     │                                                                                  │                                     │
+│                                     │   podman     local Podman   4       8                                            │                                     │
+│                                     │ ☐ Save as default sizing                                                         │                                     │
 │                                     │ Host totals unavailable; resource limits cannot be checked.                      │                                     │
 │                                     │ ctrl+b shift+r recheck availability                                              │                                     │
 │                                     │                                                                                  │                                     │
@@ -1458,8 +1458,8 @@ action: None
 │                           ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
 │                           │   TARGET  KIND          CPU     MEM (GiB)     STATUS                             │                           │
-│                           │   podman  local Podman  8       32                                               │                           │
-│                           │                                                                                  │                           │
+│                           │   podman  local Podman  4       8                                                │                           │
+│                           │ ☐ Save as default sizing                                                         │                           │
 │                           │ Host totals unavailable; resource limits cannot be checked.                      │                           │
 │                           │ ctrl+b shift+r recheck availability                                              │                           │
 │                           │                                                                                  │                           │
@@ -1500,8 +1500,8 @@ cell style: CPU and MEM (GiB) inputs are underlined before focus
 │                           ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
 │                           │   TARGET  KIND          CPU     MEM (GiB)     STATUS                             │                           │
-│                           │   podman  local Podman  8       12.5                                             │                           │
-│                           │                                                                                  │                           │
+│                           │   podman  local Podman  4       12.5                                             │                           │
+│                           │ ☐ Save as default sizing                                                         │                           │
 │                           │ Host totals unavailable; resource limits cannot be checked.                      │                           │
 │                           │ ctrl+b shift+r recheck availability                                              │                           │
 │                           │                                                                                  │                           │
@@ -1535,8 +1535,8 @@ cell style: CPU and MEM (GiB) inputs are underlined before focus
   ╭ × New session · 2/4 target ──────────────────────────────────────────────╮
   │                                                                          │
   │   TARGET  KIND          CPU     MEM (GiB)     STATUS                     │
-  │   podman  local Podman  8       32                                       │
-  │                                                                          │
+  │   podman  local Podman  4       8                                        │
+  │ ☐ Save as default sizing                                                 │
   │ Host totals unavailable; resource limits cannot be checked.              │
   │ ctrl+b shift+r recheck availability                                      │
   │                                                                          │
@@ -1561,8 +1561,8 @@ cell style: CPU and MEM (GiB) inputs are underlined before focus
   ╭ × New session · 2/4 target ──────────────────────────────────────────────╮
   │                                                                          │
   │   TARGET  KIND          CPU     MEM (GiB)     STATUS                     │
-  │   podman  local Podman  8       12.5                                     │
-  │                                                                          │
+  │   podman  local Podman  4       12.5                                     │
+  │ ☐ Save as default sizing                                                 │
   │ Host totals unavailable; resource limits cannot be checked.              │
   │ ctrl+b shift+r recheck availability                                      │
   │                                                                          │
@@ -1586,8 +1586,8 @@ cell style: CPU and MEM (GiB) inputs are underlined before focus
   ╭ × New session · 2/4 target ──────────────────────────╮
   │                                                      │
   │   TARGET  KIND        CPU     MEM (GiB)     STATUS   │
-  │   podman  local Pod…  8       32                     │
-  │                                                      │
+  │   podman  local Pod…  4       8                      │
+  │ ☐ Save as default sizing                             │
   │ Host totals unavailable; resource limits cannot be   │
   │ checked.                                             │
   │ ctrl+b shift+r recheck availability                  │
@@ -1608,8 +1608,8 @@ cell style: CPU and MEM (GiB) inputs are underlined before focus
   ╭ × New session · 2/4 target ──────────────────────────╮
   │                                                      │
   │   TARGET  KIND        CPU     MEM (GiB)     STATUS   │
-  │   podman  local Pod…  8       12.5                   │
-  │                                                      │
+  │   podman  local Pod…  4       12.5                   │
+  │ ☐ Save as default sizing                             │
   │ Host totals unavailable; resource limits cannot be   │
   │ checked.                                             │
   │ ctrl+b shift+r recheck availability                  │

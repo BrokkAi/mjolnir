@@ -1510,6 +1510,7 @@ pub(crate) fn spawn_dashboard_create_session(
     tokio::task::spawn_blocking(move || {
         let retry_launch = action.clone();
         let DashboardAction::CreateSession {
+            remember_container_size,
             create_managed_worktree,
             subagents,
             review,
@@ -1570,6 +1571,7 @@ pub(crate) fn spawn_dashboard_create_session(
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
                         remember_launch_choices: true,
+                        remember_container_size,
                         review,
                         no_project_memory: false,
                         no_github_events: false,

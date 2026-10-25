@@ -286,6 +286,8 @@ impl DashboardContext {
         self.dashboard
             .set_container_upgrade_sessions(update.container_upgrade_sessions);
         self.dashboard.set_target_storage(update.storage);
+        self.dashboard
+            .set_container_capacities(update.container_capacities);
         self.select_workspace(next_workspace);
         self.apply_runtime_records(
             update.records,

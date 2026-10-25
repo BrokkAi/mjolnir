@@ -6,7 +6,10 @@ const GIB: u64 = 1 << 30;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResourcePicker<'a> {
-    Container(&'a ResourceEditor),
+    Container {
+        editor: &'a ResourceEditor,
+        save_as_default: Option<bool>,
+    },
     Ec2 {
         editor: &'a ResourceEditor,
         options: &'a [SessionResourceAllocation],
@@ -29,7 +32,10 @@ pub(crate) fn target_resources<'a, W: WizardDraft>(
     }
     let target = &dashboard.config.targets[&id];
     if mj_core::config::is_container_target(target) {
-        Some(ResourcePicker::Container(wizard.resource_editor()))
+        Some(ResourcePicker::Container {
+            editor: wizard.resource_editor(),
+            save_as_default: wizard.remember_container_size(),
+        })
     } else if matches!(target, TargetTemplate::AwsEc2 { .. }) {
         let options = wizard.aws_options().get(&id).map_or(&[][..], Vec::as_slice);
         let selected = options
@@ -53,9 +59,18 @@ pub(crate) fn declare_resource_controls(
     resources: Option<ResourcePicker<'_>>,
 ) {
     match resources {
-        Some(ResourcePicker::Container(_)) => {
+        Some(ResourcePicker::Container {
+            save_as_default, ..
+        }) => {
             form.declare_with_enabled(WizardControl::ResourceCpu, ControlKind::TextField, true);
             form.declare_with_enabled(WizardControl::ResourceMemory, ControlKind::TextField, true);
+            if save_as_default.is_some() {
+                form.declare_with_enabled(
+                    WizardControl::RememberContainerSize,
+                    ControlKind::Checkbox,
+                    true,
+                );
+            }
         }
         Some(ResourcePicker::Ec2 {
             editor,
@@ -117,6 +132,7 @@ impl ResourceEditor {
     pub(crate) fn allocation(
         &self,
         limits: Option<(u64, u64)>,
+        require_new_minimum: bool,
     ) -> Result<SessionResourceAllocation, String> {
         let cpu = self.cpu.trim();
         let cpus = cpu
@@ -124,18 +140,27 @@ impl ResourceEditor {
             .ok()
             .filter(|cpus| *cpus > 0 && cpu.bytes().all(|byte| byte.is_ascii_digit()))
             .ok_or_else(|| "CPU must be a positive whole number.".to_owned())?;
+        if require_new_minimum && cpus < mj_core::state::MINIMUM_CONTAINER_CPUS {
+            return Err(format!(
+                "CPU must be at least {}.",
+                mj_core::state::MINIMUM_CONTAINER_CPUS
+            ));
+        }
         let memory_bytes = parse_memory_gib(self.memory.trim())
             .filter(|bytes| *bytes > 0)
             .ok_or_else(|| {
                 "MEM must be a positive number of GiB (up to 30 decimal places).".to_owned()
             })?;
+        if require_new_minimum && memory_bytes < mj_core::state::MINIMUM_CONTAINER_MEMORY_BYTES {
+            return Err("RAM must be at least 4 GiB.".to_owned());
+        }
         if let Some((max_cpus, max_memory)) = limits {
             if cpus > max_cpus {
                 return Err(format!("CPU exceeds this host's {max_cpus} CPUs."));
             }
             if memory_bytes > max_memory {
                 return Err(format!(
-                    "MEM exceeds this host's {} GiB.",
+                    "RAM exceeds this host's {} GiB.",
                     host_limit_gib_text(max_memory)
                 ));
             }
@@ -147,8 +172,7 @@ impl ResourceEditor {
 /// A host limit for a message: rounded down to one decimal, so the number
 /// shown is itself accepted when typed back.
 fn host_limit_gib_text(bytes: u64) -> String {
-    let tenths = (u128::from(bytes) * 10 / u128::from(GIB)) as u64;
-    format!("{}.{}", tenths / 10, tenths % 10)
+    mj_core::state::floor_gib_tenths(bytes)
 }
 
 /// Exact decimal GiB: even a host limit ending in a partial GiB round-trips.
@@ -164,6 +188,12 @@ pub(crate) fn memory_gib_text(bytes: u64) -> String {
         }
     }
     text
+}
+
+/// A capacity total is descriptive rather than an editable value, so show one
+/// decimal place and avoid the long repeating fraction of an exact byte count.
+pub(crate) fn capacity_gib_text(bytes: u64) -> String {
+    mj_core::state::floor_gib_tenths(bytes)
 }
 
 fn parse_memory_gib(text: &str) -> Option<u64> {
@@ -210,12 +240,33 @@ mod tests {
     #[test]
     fn host_memory_limit_message_is_readable() {
         let editor = ResourceEditor {
-            cpu: "1".into(),
+            cpu: "4".into(),
             memory: "999".into(),
             ..ResourceEditor::default()
         };
         let limit = 98 * GIB + GIB / 5 + 12345;
-        let message = editor.allocation(Some((8, limit))).unwrap_err();
-        assert_eq!(message, "MEM exceeds this host's 98.2 GiB.");
+        let message = editor.allocation(Some((8, limit)), true).unwrap_err();
+        assert_eq!(message, "RAM exceeds this host's 98.2 GiB.");
+    }
+
+    #[test]
+    fn existing_sessions_can_keep_a_size_below_the_new_session_minimum() {
+        let editor = ResourceEditor {
+            cpu: "1".into(),
+            memory: "2".into(),
+            ..ResourceEditor::default()
+        };
+
+        assert_eq!(
+            editor.allocation(None, false),
+            Ok(SessionResourceAllocation::Container {
+                cpus: 1,
+                memory_bytes: 2 * GIB,
+            })
+        );
+        assert_eq!(
+            editor.allocation(None, true),
+            Err("CPU must be at least 2.".into())
+        );
     }
 }

@@ -443,7 +443,11 @@ impl DashboardState {
             }
             DashboardAction::None
         } else {
-            self.prepare_wizard_target(wizard)
+            let action = self.prepare_wizard_target(wizard);
+            if mj_core::config::is_container_target(&self.config.targets[&target_id]) {
+                self.validate_wizard_resources(wizard);
+            }
+            action
         }
     }
 
@@ -536,11 +540,54 @@ impl DashboardState {
             .map(|usage| (usage.logical_cores, usage.memory_total_bytes))
     }
 
+    pub(crate) fn host_container_capacity(
+        &self,
+        target_id: &str,
+    ) -> Option<mj_core::state::HostContainerCapacity> {
+        self.container_capacities
+            .values()
+            .find(|capacity| capacity.target_ids.iter().any(|id| id == target_id))
+            .map(|capacity| capacity.capacity)
+    }
+
+    pub fn set_container_capacities(
+        &mut self,
+        capacities: BTreeMap<String, mj_client::runtime_feed::RuntimeContainerCapacity>,
+    ) {
+        let mut affected = std::collections::BTreeSet::new();
+        for (target_id, capacity) in &self.container_capacities {
+            if capacities.get(target_id) != Some(capacity) {
+                affected.extend(capacity.target_ids.iter().cloned());
+            }
+        }
+        for (target_id, capacity) in &capacities {
+            if self.container_capacities.get(target_id) != Some(capacity) {
+                affected.extend(capacity.target_ids.iter().cloned());
+            }
+        }
+        self.container_capacities = capacities;
+        self.refresh_wizard_resource_limits(&affected.into_iter().collect::<Vec<_>>());
+    }
+
     pub(super) fn validate_wizard_resources<W: WizardDraft>(&self, wizard: &mut W) {
         let target_id = nth_key(&self.config.targets, wizard.target());
-        let result = wizard
-            .resource_editor()
-            .allocation(self.host_limits(&target_id));
+        let uses_remaining = wizard.remember_container_size().is_some();
+        let capacity = self.host_container_capacity(&target_id);
+        if uses_remaining && capacity.is_some_and(|capacity| !capacity.complete) {
+            let (_, allocation, error) = wizard.sizing_mut();
+            *allocation = None;
+            *error = Some(
+                "A live container has no recorded sizing, so RAM left cannot be calculated safely."
+                    .into(),
+            );
+            return;
+        }
+        let limits = if uses_remaining {
+            capacity.map(|capacity| (capacity.remaining.cpus, capacity.remaining.memory_bytes))
+        } else {
+            self.host_limits(&target_id)
+        };
+        let result = wizard.resource_editor().allocation(limits, uses_remaining);
         let (_, allocation, error) = wizard.sizing_mut();
         match result {
             Ok(value) => {

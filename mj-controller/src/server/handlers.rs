@@ -608,6 +608,7 @@ pub(super) async fn preflight_new(
     let project_validation = request.project_directory.is_some();
     let action = ControllerAction::New {
         remember_launch_choices: false,
+        remember_container_size: false,
         subagents: None,
         review: None,
         no_project_memory: false,

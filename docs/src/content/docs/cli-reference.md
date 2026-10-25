@@ -397,7 +397,9 @@ mj new --workspace eval --bundle product --target builder \
   effect. `[github.watch] enabled` and `[jev] enabled` control GitHub event production.
 - On a container target, `mj new` gives the session the same CPU and memory
   limit that the dashboard and the web viewer select: the size last chosen for
-  that host, else 8 CPUs and 32 GiB, capped at the host's totals.
+  that host, else 4 CPUs and 8 GiB. New containers need at least 2 CPUs and
+  4 GiB, and the host's live container commitments must leave enough CPU and
+  RAM for the chosen size.
   `--cpus <count>` and `--memory-gib <GiB>` override either one. Other targets
   refuse both options.
 - `--return-on-input` makes `mj prompt` and `mj wait` return as soon as

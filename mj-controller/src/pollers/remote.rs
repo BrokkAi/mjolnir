@@ -80,6 +80,7 @@ pub fn spawn_remote_dashboard_worker_poller(
                                 recent_launch: metadata.recent_launch,
                                 container_upgrade_sessions: metadata.container_upgrade_sessions,
                                 storage: metadata.storage,
+                                container_capacities: metadata.container_capacities,
                             });
                             send_if_changed(&reviews_tx, metadata.reviews);
                             send_if_changed(&capabilities_tx, metadata.profile_capabilities);

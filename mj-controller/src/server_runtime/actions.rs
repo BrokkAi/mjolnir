@@ -130,6 +130,7 @@ pub(super) async fn apply_phone_action(
     match action {
         ControllerAction::New {
             remember_launch_choices,
+            remember_container_size,
             workspace_id,
             profile_id,
             bundle_id,
@@ -186,6 +187,7 @@ pub(super) async fn apply_phone_action(
                 .start_create_session_controlled(
                     CreateSessionRequest {
                         remember_launch_choices,
+                        remember_container_size,
                         create_managed_worktree,
                         at,
                         branch,

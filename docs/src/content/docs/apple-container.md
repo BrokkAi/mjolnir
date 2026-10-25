@@ -57,10 +57,18 @@ Apple container does not accept Podman's `workspace_storage` override. Each
 session gets an isolated workspace managed by the runtime.
 
 The TUI new-session wizard does not use `cpus` and `memory` as its initial
-selection. It starts with the allocation remembered for the local container
-host, or the 8-CPU/32-GiB baseline when none has been remembered. The selected
-per-session allocation takes precedence over these target-level backend
-fallbacks.
+selection. It starts with the allocation remembered for the Mac, or the
+4-CPU/8-GiB baseline when none has been remembered. Selecting **Save as default
+sizing** stores the chosen per-host default. The selected per-session
+allocation takes precedence over these target-level backend fallbacks.
+
+Mjolnir budgets Apple containers against the Mac's physical CPU and RAM, not
+against each VM independently. It reserves one fifth of physical RAM for macOS
+and sums every owning container's configured limits. The UI reports the hard
+RAM left: memory compression and reclaimable pages do not count as additional
+capacity. A launch that would exceed either the logical CPU count or that RAM
+budget is refused, including a resume or a move onto that Mac. Mjolnir never
+stops a session automatically to make room.
 
 Apple container takes part in the daemon's background image download like
 Podman and Docker: a configured image the host does not have is downloaded a
