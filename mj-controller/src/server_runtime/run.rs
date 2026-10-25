@@ -95,6 +95,7 @@ pub(crate) async fn run_server(
         &capacity_targets_rx.borrow_and_update(),
         &mut capacity_state,
     );
+    let container_capacities = daemon_runtime.container_capacity_projection(&controller.state);
     let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(publication.snapshot(
         &controller,
         &workspace_updates.borrow().clone(),
@@ -111,7 +112,7 @@ pub(crate) async fn run_server(
             project_sources: &project_sources,
             operations: &operations,
             move_recoveries: &move_recoveries,
-            capacity: &viewer_capacity(&capacity_state),
+            capacity: &viewer_capacity(&capacity_state, &container_capacities),
             launch_failures: &launch_failures,
             reviews: &review_views(&daemon_runtime),
         },
@@ -337,6 +338,8 @@ pub(crate) async fn run_server(
                 operations = runtime.metadata.lifecycles.iter()
                     .map(|view| (view.session_id.clone(), viewer_operation(view)))
                     .collect();
+                let container_capacities =
+                    daemon_runtime.container_capacity_projection(&controller.state);
                 let snapshot = publication.snapshot(
                     &controller,
                     &workspace_updates.borrow().clone(),
@@ -353,7 +356,7 @@ pub(crate) async fn run_server(
                         project_sources: &project_sources,
                         operations: &operations,
                         move_recoveries: &move_recoveries,
-                        capacity: &viewer_capacity(&capacity_state),
+                        capacity: &viewer_capacity(&capacity_state, &container_capacities),
                         launch_failures: &launch_failures,
                         reviews: &review_views(&daemon_runtime),
                     },
@@ -1240,7 +1243,7 @@ pub(crate) async fn run_server(
                         }
                     };
                     if let ControllerAction::Move { request: move_request } = &request.action
-                        && let Err(error) = daemon_runtime.start_move_session((**move_request).clone()) {
+                        && let Err(error) = daemon_runtime.start_move_session((**move_request).clone()).await {
                         if let Some(id) = &session_id { active_actions.remove(id); }
                         let _ = request.reply.send(ActionOutcome::Refused(Refusal::unusable(error.to_string())));
                         continue;

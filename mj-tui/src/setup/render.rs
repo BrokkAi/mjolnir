@@ -95,6 +95,10 @@ pub(crate) fn render_setup(
         horizontal: 2,
         vertical: 1,
     });
+    if dialog.managed_setup.is_some() {
+        render_managed_setup(frame, popup, inner, dialog);
+        return;
+    }
     if dialog.search.is_some() {
         render_search(frame, popup, inner, dialog);
         return;
@@ -507,6 +511,7 @@ fn render_controls(
                 }
             }
 
+            SettingKind::ManagedHarness(_) => unreachable!("managed chooser renders separately"),
             SettingKind::ReadOnly => {
                 frame.render_widget(Line::styled(label, theme::muted()), label_area);
                 let summary = dialog
@@ -614,4 +619,86 @@ fn split_page(
         };
     }
     form.split_actions(area, actions)
+}
+
+fn managed_harness_description(kind: mj_core::config::HarnessKind) -> &'static str {
+    use mj_core::config::HarnessKind;
+
+    match kind {
+        HarnessKind::Codex => "ChatGPT subscription or an OpenAI-compatible provider",
+        HarnessKind::Claude => "Claude Pro, Max, Team, or an Anthropic API key",
+        HarnessKind::Kimi => "Kimi Code subscription",
+        HarnessKind::Grok => "Grok Build subscription",
+        HarnessKind::Muse => "Muse account; container use is supported",
+        HarnessKind::OpenCode => "OpenCode provider login or an API key",
+        HarnessKind::Mimo => "MiMo Code account",
+        HarnessKind::Dsh => "DeepSeek API key",
+    }
+}
+
+fn render_managed_setup(frame: &mut Frame, popup: Rect, inner: Rect, dialog: &SetupDialog) {
+    let mut form = dialog.form.borrow_mut();
+    form.begin_frame();
+    let title = dismissible_modal_title(
+        &mut form,
+        popup,
+        " Set up a managed agent ",
+        theme::title(true),
+        !dialog.saving,
+    );
+    frame.render_widget(theme::modal().title(title), popup);
+    let intro = Paragraph::new(
+        "Choose an agent. Mjolnir will install its exact pinned version and open its sign-in flow.",
+    )
+    .wrap(Wrap { trim: false })
+    .style(theme::muted());
+    let intro_height = intro.line_count(inner.width) as u16;
+    frame.render_widget(
+        intro,
+        Rect::new(inner.x, inner.y, inner.width, intro_height),
+    );
+    let footer = mj_chat::components::DialogShell::layout(inner, 0).actions;
+    let guidance = Paragraph::new("Where it runs is chosen when you create a session. Use a local Podman, Docker, or Apple container when you want the agent isolated from your normal host account.").wrap(Wrap { trim: false }).style(theme::muted());
+    let guidance_height = guidance.line_count(inner.width) as u16;
+    let guidance_y = footer.y.saturating_sub(guidance_height + 1);
+    frame.render_widget(
+        guidance,
+        Rect::new(inner.x, guidance_y, inner.width, guidance_height),
+    );
+    let top = inner.y + intro_height + 1;
+    let body = Rect::new(inner.x, top, inner.width, guidance_y.saturating_sub(top));
+    let focused = dialog
+        .descriptors
+        .iter()
+        .position(|c| form.is_focused(c.id));
+    let viewport = form.viewport(
+        body,
+        dialog.descriptors.len() as u16 * 2,
+        focused.map(|i| i as u16 * 2..i as u16 * 2 + 2),
+    );
+    for (position, control) in dialog.descriptors.iter().enumerate() {
+        let SettingKind::ManagedHarness(index) = control.kind else {
+            continue;
+        };
+        let kind = MANAGED_SETUP_HARNESSES[index];
+        mj_chat::components::Button::render_aligned(
+            frame,
+            viewport.row(position as u16 * 2, 1),
+            kind.display_name(),
+            !dialog.saving,
+            &mut form,
+            control.id,
+            ratatui::layout::Alignment::Left,
+        );
+        frame.render_widget(
+            Line::styled(managed_harness_description(kind), theme::muted()),
+            viewport.row(position as u16 * 2 + 1, 1),
+        );
+    }
+    Dialog::render_actions(frame, footer, &dialog.actions(), &mut form);
+    let initial = dialog
+        .descriptors
+        .first()
+        .map_or(SetupControl::Back, |c| c.id);
+    form.end_frame(initial);
 }

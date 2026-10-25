@@ -78,6 +78,8 @@ pub(crate) enum SetupControl {
     Apply,
     DetectProfiles,
     DetectRuntimes,
+    ManagedSetup,
+    ManagedContinue,
     SignIn,
     InstallMbx,
     Save,
@@ -134,6 +136,7 @@ enum SettingKind {
     Choices(Vec<Value>),
     Field,
     ReadOnly,
+    ManagedHarness(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +209,16 @@ struct SetupSize {
     height: u16,
 }
 
+const MANAGED_SETUP_HARNESSES: [mj_core::config::HarnessKind; 7] = [
+    mj_core::config::HarnessKind::Codex,
+    mj_core::config::HarnessKind::Claude,
+    mj_core::config::HarnessKind::Kimi,
+    mj_core::config::HarnessKind::Grok,
+    mj_core::config::HarnessKind::Muse,
+    mj_core::config::HarnessKind::OpenCode,
+    mj_core::config::HarnessKind::Mimo,
+];
+
 /// A profile whose authentication obviously needs no interactive login,
 /// using only configuration already in memory. Codex custom providers are
 /// decided by the background status read because their provider file is I/O.
@@ -231,6 +244,8 @@ pub(crate) struct SetupDialog {
     pending_save: PendingSave,
     editor: Option<Editor>,
     search: Option<SearchState>,
+    managed_setup: Option<usize>,
+    pending_login: Option<String>,
     pub(crate) review_editor: Option<Box<ReviewSettingsDialog>>,
     review_validation: Option<ReviewSettingsValidation>,
     pub(crate) form: RefCell<Dialog<SetupControl>>,
@@ -322,7 +337,6 @@ impl SetupDialog {
         let original = draft.to_string();
         ensure_local_machine(&mut draft);
         schema::expand(&mut draft, &mut Vec::new());
-        populate_subagent_profile_choices(&mut draft);
         let saved_profile_values = draft
             .get("profiles")
             .and_then(Value::as_object)
@@ -360,6 +374,8 @@ impl SetupDialog {
             pending_save: PendingSave::Idle,
             editor: None,
             search: None,
+            managed_setup: None,
+            pending_login: None,
             review_editor: None,
             review_validation: None,
             form: RefCell::new(Dialog::default()),

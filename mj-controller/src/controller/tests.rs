@@ -704,6 +704,7 @@ fn bundle_creation_skips_unreadable_configured_repositories() {
 fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {
     SessionLaunchOptions {
         remember_launch_choices: true,
+        remember_container_size: true,
         review: None,
         no_project_memory: false,
         no_github_events: false,
@@ -850,6 +851,66 @@ fn registration_rejects_a_start_commit_it_cannot_honour() {
         assert!(format!("{error:#}").contains(expected), "{case}: {error:#}");
         assert!(controller.state.sessions.is_empty());
     }
+}
+
+// Hard-won: d81795bc9: creation probed Git separately and forgot to record a
+// plain local project, leaving a session whose bundle ID described nothing.
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
+#[test]
+fn registration_records_a_plain_local_directory_as_its_project() {
+    const MARKER: &str = "MJ_TEST_PLAIN_PROJECT_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "registration_records_a_plain_local_directory_as_its_project",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = tempfile::tempdir().unwrap();
+    let expected = std::fs::canonicalize(workspace.path()).unwrap();
+    let mut config = registration_config();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    config.review.trigger = mj_core::config::ReviewTrigger::Turn;
+    config.review.profile = Some("codex".into());
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let mut options = launch_options(Vec::new());
+    options.project_directory = Some(workspace.path().to_owned());
+    let error = controller
+        .register_session_with_resources("codex", "project", "local", "plain", options)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("cannot be reviewed"),
+        "{error:#}"
+    );
+
+    let mut options = launch_options(Vec::new());
+    options.project_directory = Some(workspace.path().to_owned());
+    options.review = Some(mj_core::config::SessionReview::Off);
+    let id = controller
+        .register_session_with_resources("codex", "project", "local", "plain", options)
+        .unwrap();
+
+    let stored = &controller.state.sessions[&id];
+    assert_eq!(stored.project_directory.as_deref(), Some(workspace.path()));
+    assert!(stored.managed_worktree.is_none());
+    let project = stored.project.as_ref().expect("plain project was recorded");
+    assert!(project.primary_is_plain_directory());
+    assert_eq!(
+        project.bundle.repositories[0].local.as_deref(),
+        Some(expected.as_path())
+    );
+    project.key().unwrap();
 }
 
 #[test]

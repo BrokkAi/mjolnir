@@ -14,6 +14,12 @@ impl SetupDialog {
                 (Save, self.save_label(), !self.saving),
             ];
         }
+        if self.managed_setup.is_some() {
+            return vec![
+                (Back, "Back", true),
+                (ManagedContinue, "Set up and sign in", !self.saving),
+            ];
+        }
         if self.editor.is_some() {
             let mut actions = vec![(Back, "Back", true)];
             actions.push((Apply, "Apply", true));
@@ -58,6 +64,13 @@ impl SetupDialog {
             actions.push((
                 control,
                 label,
+                interactive && !self.discovering && !self.saving,
+            ));
+        }
+        if self.path == ["profiles"] {
+            actions.push((
+                ManagedSetup,
+                "Set up managed",
                 interactive && !self.discovering && !self.saving,
             ));
         }
@@ -187,7 +200,7 @@ impl SetupDialog {
         } else {
             for control in &self.descriptors {
                 let kind = match &control.kind {
-                    SettingKind::Page => ControlKind::Button,
+                    SettingKind::Page | SettingKind::ManagedHarness(_) => ControlKind::Button,
                     SettingKind::Checkbox => ControlKind::Checkbox,
                     SettingKind::Choices(values) => ControlKind::ComboBox {
                         len: values.len(),
@@ -301,6 +314,12 @@ impl ModalSurface for SetupDialog {
             .set_action_role(SetupControl::Back, mj_chat::components::ActionRole::Back);
         if let Some(review) = &mut self.review_editor {
             review.prepare_dialog_state();
+        } else if self.managed_setup.is_some() {
+            self.form.get_mut().set_dirty(false);
+            self.form.get_mut().set_dismiss_actions(&[]);
+            self.form
+                .get_mut()
+                .set_default_action(SetupControl::ManagedContinue);
         } else if self.editor.is_some() {
             self.form.get_mut().set_dirty(false);
             self.form.get_mut().set_dismiss_actions(&[]);
@@ -326,6 +345,30 @@ impl ModalSurface for SetupDialog {
 impl SetupDialog {
     fn reconcile_controls(&mut self) {
         let previous = std::mem::take(&mut self.descriptors);
+        if self.managed_setup.is_some() {
+            self.descriptors = MANAGED_SETUP_HARNESSES
+                .iter()
+                .enumerate()
+                .map(|(index, kind)| {
+                    let path = vec!["_managed".to_owned(), kind.id().to_owned()];
+                    let id = previous
+                        .iter()
+                        .find(|c| c.path == path)
+                        .map(|c| c.id)
+                        .unwrap_or_else(|| {
+                            let id = SetupControl::Row(self.next_control);
+                            self.next_control += 1;
+                            id
+                        });
+                    SettingControl {
+                        id,
+                        path,
+                        kind: SettingKind::ManagedHarness(index),
+                    }
+                })
+                .collect();
+            return;
+        }
         let open_value = self.combo.open_id().and_then(|id| {
             let control = previous.iter().find(|c| c.id == id)?;
             let SettingKind::Choices(values) = &control.kind else {

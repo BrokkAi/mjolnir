@@ -33,7 +33,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"archive_after_days":null})
         }
         "subagents" if path.len() == 1 => {
-            json!({"max_concurrent":6,"eligible_profiles":{},"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null}})
+            json!({"max_concurrent":6,"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null}})
         }
         "subagents" if path.len() == 2 && matches!(key, "straightforward" | "subtle") => {
             json!({"model":null,"effort":null})
@@ -249,7 +249,6 @@ pub(super) fn label(key: &str) -> String {
         "directory" => "Cache directory",
         "max_total_size" => "Total cache budget (GB)",
         "max_concurrent" => "Maximum concurrent children",
-        "eligible_profiles" => "Additional eligible profiles",
         "profiles" => "Agent Profiles",
         "machines" => "Machines",
         "targets" => "Runtimes",
@@ -863,9 +862,6 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "straightforward" => "Work with a clear method. Choose a model and its effort.",
         "subtle" => {
             "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward."
-        }
-        "eligible_profiles" => {
-            "Check profiles that Claude, Codex, and DSH parents may use in addition to their own profile."
         }
         "build_cache" => {
             "Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and Bazel."

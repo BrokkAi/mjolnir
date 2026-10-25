@@ -86,7 +86,7 @@ pub(crate) struct SubagentSelection {
     pub fast_mode: bool,
 }
 
-/// Resolve the session override or global task choice, preserving quota ranking.
+/// Resolve the session override or global task choice, drawing a profile by quota.
 pub(crate) async fn resolve_subagent_policy_selection(
     backend: &Arc<dyn SubagentBackend>,
     parent_profile: &str,
@@ -182,14 +182,7 @@ impl<'a> ModelProfileCandidateSource<'a> {
     fn profile_description(self) -> &'static str {
         match self {
             Self::Session { .. } => "configured",
-            Self::Subagents { .. } => "eligible",
-        }
-    }
-
-    fn ranking_anchor(self) -> Option<&'a str> {
-        match self {
-            Self::Session { ranking_anchor } => ranking_anchor,
-            Self::Subagents { parent_profile } => Some(parent_profile),
+            Self::Subagents { .. } => "enabled",
         }
     }
 }
@@ -241,18 +234,26 @@ async fn resolve_model_profile_selection_matching(
                     format!("profile {requested:?} is not available for a new session")
                 }
                 ModelProfileCandidateSource::Subagents { .. } => format!(
-                    "profile {requested:?} is not eligible for sub-agent use from this session"
+                    "profile {requested:?} is unavailable for sub-agent use from this session"
                 ),
             };
             return Err(ApiFailure::bad_request(message));
         }
     } else {
-        rank_candidates(&mut offered, source.ranking_anchor());
+        match source {
+            ModelProfileCandidateSource::Subagents { parent_profile } => {
+                draw_candidates(&mut offered, Some(parent_profile))?
+            }
+            ModelProfileCandidateSource::Session { ranking_anchor } => {
+                rank_candidates(&mut offered, ranking_anchor)
+            }
+        }
     }
     let all_offered = offered.clone();
     let mut matching_model = false;
     let mut offered_any_effort = false;
     let mut selection_errors = Vec::new();
+    let mut unhealthy = Vec::new();
     for candidate in offered {
         if !offers_model(&candidate, model) {
             continue;
@@ -283,7 +284,21 @@ async fn resolve_model_profile_selection_matching(
             }
             EffortRequirement::Any => unreachable!("handled above"),
         };
+        // A pinned profile runs even while marked: someone chose it.
+        if profile_id.is_none()
+            && let Some(note) = unhealthy_note(&candidate, model)
+        {
+            unhealthy.push(note);
+            continue;
+        }
         return Ok(selection(candidate.profile_id, model, effort));
+    }
+    if !unhealthy.is_empty() {
+        return Err(all_unhealthy(
+            model,
+            &unhealthy,
+            source.profile_description(),
+        ));
     }
     if !matching_model {
         return Err(ApiFailure::bad_request(no_profile_offers(
@@ -384,18 +399,7 @@ fn choose_model_profile(
                 return Ok(chosen);
             }
             rank_candidates(&mut offered, ranking_anchor);
-            match offered
-                .iter()
-                .position(|candidate| offers_model(candidate, model))
-            {
-                Some(index) => Ok(offered.swap_remove(index)),
-                None => Err(ApiFailure::bad_request(no_profile_offers(
-                    model,
-                    &offered,
-                    &unavailable,
-                    "configured",
-                ))),
-            }
+            take_healthy_offer(offered, &unavailable, model, "configured")
         }
     }
 }
@@ -447,7 +451,7 @@ fn child_effort(
 }
 
 /// The profile a child runs on. A pinned profile must be a candidate that
-/// offers the model; otherwise the best-ranked candidate that offers it wins.
+/// offers the model; otherwise the first drawn candidate that offers it wins.
 pub(crate) fn choose_subagent_profile(
     candidates: SubagentCandidates,
     requested_profile: Option<&str>,
@@ -469,25 +473,113 @@ pub(crate) fn choose_subagent_profile(
             .find(|candidate| candidate.profile_id == requested)
             .ok_or_else(|| {
                 ApiFailure::bad_request(format!(
-                    "profile {requested:?} is not eligible for sub-agent use from this session"
+                    "profile {requested:?} is unavailable for sub-agent use from this session"
                 ))
             })?;
         validate_selectors(&chosen.choices, Some(model), None)?;
         return Ok(chosen);
     }
-    rank_candidates(&mut offered, Some(parent_profile));
-    match offered
-        .iter()
-        .position(|candidate| offers_model(candidate, model))
-    {
-        Some(index) => Ok(offered.swap_remove(index)),
-        None => Err(ApiFailure::bad_request(no_profile_offers(
-            model,
-            &offered,
-            &unavailable,
-            "eligible",
-        ))),
+    draw_candidates(&mut offered, Some(parent_profile))?;
+    take_healthy_offer(offered, &unavailable, model, "enabled")
+}
+
+/// The first candidate that offers `model` and is not marked unhealthy for
+/// it. When every offer is marked, the refusal says until when.
+fn take_healthy_offer(
+    mut offered: Vec<SubagentCandidate>,
+    unavailable: &[(String, String)],
+    model: &str,
+    profile_description: &str,
+) -> Result<SubagentCandidate, ApiFailure> {
+    let mut unhealthy = Vec::new();
+    for index in 0..offered.len() {
+        let candidate = &offered[index];
+        if !offers_model(candidate, model) {
+            continue;
+        }
+        match unhealthy_note(candidate, model) {
+            Some(note) => unhealthy.push(note),
+            None => return Ok(offered.swap_remove(index)),
+        }
     }
+    if !unhealthy.is_empty() {
+        return Err(all_unhealthy(model, &unhealthy, profile_description));
+    }
+    Err(ApiFailure::bad_request(no_profile_offers(
+        model,
+        &offered,
+        unavailable,
+        profile_description,
+    )))
+}
+
+/// "profile codex2 is rate-limited until 14:05:00 UTC (...)" when the
+/// candidate's sessions just failed running `model`.
+fn unhealthy_note(candidate: &SubagentCandidate, model: &str) -> Option<String> {
+    candidate
+        .unhealthy
+        .get(model)
+        .map(|mark| format!("profile {} is {}", candidate.profile_id, mark.describe()))
+}
+
+/// The refusal when every profile that could run `model` is marked. It is a
+/// conflict, not a bad request: the same spawn succeeds once a mark ends.
+fn all_unhealthy(model: &str, notes: &[String], profile_description: &str) -> ApiFailure {
+    ApiFailure::conflict(format!(
+        "every {profile_description} profile that can run model {model:?} failed at the \
+         provider just now: {}. Try again after that time.",
+        notes.join("; ")
+    ))
+}
+
+/// Order candidates for a spawn so that simultaneous spawns spread out
+/// instead of all taking the profile with the most quota left. Profiles with
+/// quota left come first in a weighted random order: each comes first with
+/// probability remaining / sum(remaining), and the first one that offers a
+/// model is chosen with that probability among the profiles offering it.
+/// Profiles with no quota left, then unknown quota, follow in ranked order.
+fn draw_candidates(
+    candidates: &mut Vec<SubagentCandidate>,
+    ranking_anchor: Option<&str>,
+) -> Result<(), ApiFailure> {
+    let mut units = Vec::with_capacity(candidates.len());
+    for _ in 0..candidates.len() {
+        let bits = getrandom::u64().map_err(|error| {
+            ApiFailure::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("draw a profile: {error}"),
+            )
+        })?;
+        // 53 random bits as a float in (0, 1], so its logarithm is finite.
+        units.push(((bits >> 11) + 1) as f64 / (1u64 << 53) as f64);
+    }
+    order_by_draw(candidates, ranking_anchor, &units);
+    Ok(())
+}
+
+/// The ordering `draw_candidates` describes, with one uniform (0, 1] number
+/// per candidate in ranked order. Sorting by ln(u) / weight is the
+/// Efraimidis–Spirakis weighted sample without replacement.
+fn order_by_draw(
+    candidates: &mut Vec<SubagentCandidate>,
+    ranking_anchor: Option<&str>,
+    units: &[f64],
+) {
+    rank_candidates(candidates, ranking_anchor);
+    let mut keyed = candidates
+        .drain(..)
+        .zip(units)
+        .map(|(candidate, unit)| {
+            let key = match candidate.remaining_percent {
+                Some(remaining) if remaining > 0 => unit.ln() / f64::from(remaining),
+                _ => f64::NEG_INFINITY,
+            };
+            (key, candidate)
+        })
+        .collect::<Vec<_>>();
+    // A stable sort keeps the ranked order among the undrawn candidates.
+    keyed.sort_by(|left, right| right.0.total_cmp(&left.0));
+    candidates.extend(keyed.into_iter().map(|(_, candidate)| candidate));
 }
 
 /// Order candidates best first: the most quota left, with unknown quota last;
@@ -847,6 +939,7 @@ mod tests {
                 observed_at: 1,
             },
             remaining_percent: remaining,
+            unhealthy: Default::default(),
         }
     }
 
@@ -876,6 +969,40 @@ mod tests {
     }
 
     #[test]
+    fn drawing_picks_in_proportion_to_quota_and_never_before_empty_or_unknown() {
+        let profiles = || {
+            vec![
+                candidate("unknown", None, &["luna"]),
+                candidate("empty", Some(0), &["luna"]),
+                candidate("sixty", Some(60), &["luna"]),
+                candidate("thirty-a", Some(30), &["luna"]),
+                candidate("thirty-b", Some(30), &["luna"]),
+            ]
+        };
+        // A fixed linear congruential stream keeps the test deterministic.
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut unit = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 11) + 1) as f64 / (1u64 << 53) as f64
+        };
+        let draws = 40_000;
+        let mut first = std::collections::BTreeMap::<String, u32>::new();
+        for _ in 0..draws {
+            let mut candidates = profiles();
+            let units = (0..candidates.len()).map(|_| unit()).collect::<Vec<_>>();
+            order_by_draw(&mut candidates, Some("thirty-b"), &units);
+            assert_eq!(ids(&candidates)[3..], ["empty", "unknown"]);
+            *first.entry(candidates[0].profile_id.clone()).or_default() += 1;
+        }
+        let share = |id: &str| f64::from(first[id]) / f64::from(draws);
+        assert!((share("sixty") - 0.5).abs() < 0.01, "{first:?}");
+        assert!((share("thirty-a") - 0.25).abs() < 0.01, "{first:?}");
+        assert!((share("thirty-b") - 0.25).abs() < 0.01, "{first:?}");
+    }
+
+    #[test]
     fn a_pinned_profile_must_be_eligible_and_offer_the_model() {
         let candidates = || SubagentCandidates {
             offered: vec![candidate("codex", Some(5), &["luna"])],
@@ -894,12 +1021,12 @@ mod tests {
             "{}",
             not_offered.message
         );
-        let ineligible =
+        let unavailable =
             choose_subagent_profile(candidates(), Some("kimi"), "codex", "luna").unwrap_err();
         assert!(
-            ineligible.message.contains("not eligible"),
+            unavailable.message.contains("unavailable"),
             "{}",
-            ineligible.message
+            unavailable.message
         );
         let broken =
             choose_subagent_profile(candidates(), Some("glm"), "codex", "luna").unwrap_err();
@@ -1153,12 +1280,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_type_spawn_uses_global_choices_and_quota_ranked_eligible_profiles() {
+    async fn task_type_spawn_uses_global_choices_and_quota_ranked_enabled_profiles() {
         use mj_core::config::{SubagentChoice, SubagentConfig};
         use mj_core::subagent::{SubagentPolicy, SubagentTaskType};
         let candidates = SubagentCandidates {
             offered: vec![
-                candidate("parent", Some(2), &["fixed", "no-effort"]),
+                // No quota left, so the weighted draw never puts it first.
+                candidate("parent", Some(0), &["fixed", "no-effort"]),
                 candidate("best", Some(70), &["fixed", "no-effort"]),
                 candidate("full-but-wrong-effort", Some(100), &["fixed"]),
             ],
@@ -1177,7 +1305,7 @@ mod tests {
         };
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             discovery_fails: false,
-            config,
+            config: config.clone(),
             candidates: candidates.clone(),
         });
         for (task_type, model, effort) in [
@@ -1204,6 +1332,59 @@ mod tests {
                 ("best", model, effort)
             );
         }
+
+        // A profile whose sessions just failed at the provider is skipped for
+        // that model despite its quota; with none left, the refusal says until
+        // when (#1361).
+        let marked = |profiles: &[&str]| -> Arc<dyn SubagentBackend> {
+            let mut candidates = candidates.clone();
+            for candidate in &mut candidates.offered {
+                if profiles.contains(&candidate.profile_id.as_str()) {
+                    candidate.unhealthy.insert(
+                        "fixed".into(),
+                        crate::profile_health::Unhealthy {
+                            fault: crate::profile_health::ProfileFault::RateLimited,
+                            until: std::time::SystemTime::UNIX_EPOCH
+                                + std::time::Duration::from_secs(1_792_937_100),
+                            message: "exceeded retry limit, last status: 429".into(),
+                        },
+                    );
+                }
+            }
+            Arc::new(FakeSelectionBackend {
+                discovery_fails: false,
+                config: config.clone(),
+                candidates,
+            })
+        };
+        let any_policy = SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        };
+        let selected = resolve_subagent_policy_selection(
+            &marked(&["best"]),
+            "parent",
+            &any_policy,
+            SubagentTaskType::Subtle,
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.profile_id, "parent");
+        let refused = resolve_subagent_policy_selection(
+            &marked(&["best", "parent"]),
+            "parent",
+            &any_policy,
+            SubagentTaskType::Subtle,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            refused.message.contains(
+                "profile best is rate-limited until 14:05:00 UTC (exceeded retry limit, last status: 429)"
+            ),
+            "{}",
+            refused.message
+        );
         let unconfigured: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             discovery_fails: false,
             config: Default::default(),

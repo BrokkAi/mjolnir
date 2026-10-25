@@ -440,13 +440,11 @@ fn golden_setup_origin_discovery() {
             repository: repository.as_ref().map(GithubRepository::source),
         }
         .summary();
-        if summary.is_empty() {
-            writeln!(out, "repository prompt: <none>").unwrap();
-            writeln!(out, "setup summary: <no project line>").unwrap();
-        } else {
-            writeln!(out, "repository prompt: {}", repository.unwrap().source()).unwrap();
-            writeln!(out, "setup summary: {}", summary.join(" ")).unwrap();
-        }
+        let repository = repository
+            .map(|repository| repository.source())
+            .unwrap_or_else(|| "<none>".into());
+        writeln!(out, "repository prompt: {repository}").unwrap();
+        writeln!(out, "setup summary: {}", summary.join(" ")).unwrap();
     }
 
     let mut out = String::new();

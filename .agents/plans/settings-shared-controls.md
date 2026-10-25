@@ -104,3 +104,24 @@ Revision note (2026-10-25, live shortcut finding): identify focused editors from
 Revision note (2026-10-25, live search finding): use shared SingleClick activation without changing geometry. All 82 Settings tests and the full TUI suite (552 passed, two ignored) pass. Both-crate clippy with warnings denied, formatting and diff checks pass.
 
 Revision note (2026-10-25, archive notice): field validation now has a single inline owner, and the build-cache snapshot preserves background resolution status instead of replacing it with duplicate validation text. Full TUI validation passes (553 passed, two ignored), as do both-crate clippy with warnings denied, formatting and diff checks.
+
+
+## Upstream merge follow-up (2026-10-25)
+
+The requested merge brings origin/master into the three local Settings commits. Leave MERGE_HEAD present and all resolutions staged; the parent owns the merge commit and no push is authorized.
+
+### Progress
+
+- [x] Fetch origin/master and inspect both overlapping Settings commits and wizard diffs.
+- [x] Port managed onboarding into the split modules with descriptor-driven real buttons and Form::viewport; retain save-before-login and collision-free managed homes.
+- [x] Remove eligible-profile allowlist UI, draft expansion, summary and capability overrides in agreement with upstream schema/config changes.
+- [x] Validate the ported input regressions, regenerate the three affected goldens and review each diff.
+- [x] Run both crate suites, clippy and formatting; stage resolutions without committing.
+
+### Decisions and discoveries
+
+The managed chooser uses one button per harness, preserving upstream's Enter-to-create behavior through real controls. The footer also retains Set up and sign in, using the last focused harness. Login intent stays in the dialog until a successful Save action is emitted, so pending inline-field validation or asynchronous path resolution cannot lose the onboarding handoff. Wizard auto-merges preserve both upstream sizing/SSH Apple container behavior and the local viewport adoption.
+
+### Validation and outcome
+
+Final validation passes: cargo fmt -p brokk-mj-chat -p brokk-mj-tui; TUI 560 passed, two ignored; chat 407 passed, two ignored; cargo clippy -p brokk-mj-chat -p brokk-mj-tui --all-targets -- -D warnings; and git diff --check. The initial full TUI run had only the three expected golden mismatches, resolved by regenerating settings-root, global-subagents and support-pane-title-menu and reviewing their diffs. The existing settings-root golden now includes the managed button chooser. A second onboarding regression proves a pending invalid inline field blocks Save without losing the eventual save-and-login handoff. Evidence is under .mj/agents/3589ce04a33060b0ceb0d5f37b829d46/. No CLI, daemon or installation commands were run. The staged merge retains MERGE_HEAD; no commit or push was made.

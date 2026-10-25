@@ -17,26 +17,6 @@ pub(super) fn pointer(path: &[String]) -> String {
         .collect()
 }
 
-pub(super) fn populate_subagent_profile_choices(draft: &mut Value) {
-    let selected = draft["subagents"]["eligible_profiles"]
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-    let profiles = draft["profiles"]
-        .as_object()
-        .map(|profiles| profiles.keys().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-    let choices = draft["subagents"]["eligible_profiles"]
-        .as_object_mut()
-        .expect("expanded sub-agent profile choices are an object");
-    for profile_id in profiles {
-        choices.entry(profile_id).or_insert(Value::Bool(false));
-    }
-    for (profile_id, value) in selected {
-        choices.insert(profile_id, value);
-    }
-}
-
 pub(super) fn only_unset_fields(value: &Value) -> bool {
     match value {
         Value::Null => true,
@@ -54,9 +34,6 @@ pub(super) fn config_from_draft(mut draft: Value) -> Result<Config, serde_json::
         {
             draft["subagents"].as_object_mut().unwrap().remove(task);
         }
-    }
-    if let Some(choices) = draft["subagents"]["eligible_profiles"].as_object_mut() {
-        choices.retain(|_, eligible| eligible.as_bool().unwrap_or(false));
     }
     // The Machines page always shows this machine. Until it carries a setting
     // of its own it is the implied machine, not an entry, so it does not turn
@@ -147,7 +124,6 @@ impl SetupDialog {
         let mut saved = serde_json::to_value(config).expect("configuration serializes");
         ensure_local_machine(&mut saved);
         schema::expand(&mut saved, &mut Vec::new());
-        populate_subagent_profile_choices(&mut saved);
         self.saved_profile_values = saved
             .get("profiles")
             .and_then(Value::as_object)
@@ -569,10 +545,19 @@ impl SetupDialog {
             Ok(config) => {
                 self.saving = true;
                 self.notice = Some("Saving settings…".into());
-                DashboardAction::SaveSetup {
-                    generation: self.generation,
-                    original: self.original.clone(),
-                    updated: serde_json::to_string(&config).expect("config serializes"),
+                let updated = serde_json::to_string(&config).expect("config serializes");
+                match self.pending_login.take() {
+                    Some(profile_id) => DashboardAction::SaveSetupAndLogin {
+                        generation: self.generation,
+                        original: self.original.clone(),
+                        updated,
+                        profile_id,
+                    },
+                    None => DashboardAction::SaveSetup {
+                        generation: self.generation,
+                        original: self.original.clone(),
+                        updated,
+                    },
                 }
             }
             Err(error) => {
@@ -653,5 +638,72 @@ impl SetupDialog {
         if invalidated {
             self.review_validation = None;
         }
+    }
+}
+
+impl SetupDialog {
+    pub(super) fn begin_managed_setup(&mut self) {
+        self.editor = None;
+        self.search = None;
+        self.path = vec!["profiles".to_owned()];
+        self.combo = ComboBoxState::default();
+        self.managed_setup = Some(0);
+        self.notice = None;
+        self.form = RefCell::new(Dialog::default());
+        self.prepare();
+    }
+
+    pub(super) fn leave_managed_setup(&mut self) {
+        self.managed_setup = None;
+        self.form = RefCell::new(Dialog::default());
+        self.prepare();
+    }
+
+    pub(super) fn create_managed_profile_and_login(
+        &mut self,
+        capabilities: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    ) -> DashboardAction {
+        let Some(state) = &self.managed_setup else {
+            return DashboardAction::None;
+        };
+        let Some(kind) = MANAGED_SETUP_HARNESSES.get(*state).copied() else {
+            self.notice = Some("Choose an agent to set up.".into());
+            return DashboardAction::None;
+        };
+        let profile_id = self.available_profile_id(kind.id());
+        let home = kind.managed_profile_home(&profile_id);
+        let profile = json!({
+            "enabled": true,
+            "kind": kind,
+            "home": home,
+            "environment": {},
+            "context_window_bytes": null,
+            "guardian_review_model": null,
+            "codex_profile": null,
+        });
+        self.draft["profiles"]
+            .as_object_mut()
+            .expect("profiles is an object")
+            .insert(profile_id.clone(), profile);
+        self.managed_setup = None;
+        self.notice = Some(format!(
+            "Created {}. Next, Mjolnir will install it and open sign-in.",
+            kind.display_name()
+        ));
+        self.pending_login = Some(profile_id);
+        self.save(capabilities)
+    }
+
+    pub(super) fn available_profile_id(&self, base: &str) -> String {
+        let profiles = self.draft["profiles"]
+            .as_object()
+            .expect("profiles is an object");
+        if !profiles.contains_key(base) {
+            return base.to_owned();
+        }
+        (2..)
+            .map(|suffix| format!("{base}-{suffix}"))
+            .find(|candidate| !profiles.contains_key(candidate))
+            .expect("an unused profile id always exists")
     }
 }

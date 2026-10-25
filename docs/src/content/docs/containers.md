@@ -172,9 +172,10 @@ resource defaults, or environment, or to add an SSH or EC2 connection. The
 optional CLI setup command remains available.
 
 A plain image such as `ubuntu:24.04` still works if you enter it here: Mjolnir
-auto-installs Git, GitHub CLI, and Node the first time a session needs them.
-But that installation runs inside every new container, which slows down the
-start of each session. The default agent-dev image avoids that cost.
+installs Git and GitHub CLI through the image package manager and downloads
+Node and harness artifacts itself the first time a session needs them. That
+work runs inside each new container, which slows down the start of the session.
+The default agent-dev image avoids most of that cost.
 
 Container targets default to `pull_policy = "auto"`. Podman and Docker launches
 do not wait on a registry under that default: they start from the image the host
@@ -182,9 +183,10 @@ already has and pull only when the host has no copy at all.
 
 A few seconds after the Mjolnir daemon starts, it downloads every configured
 container image the host does not have, so your first session does not wait on
-the registry. Local Podman, local Docker, SSH Podman, SSH Docker, and Apple
-container all take part. The dashboard shows "Downloading image ..." while a
-download runs and "Image ... is ready" when it finishes. If you create a
+the registry. Local Podman, local Docker, SSH Podman, SSH Docker, Apple
+container, and Apple container on an SSH machine all take part. The dashboard
+shows "Downloading image ..." while a download runs and "Image ... is ready"
+when it finishes. If you create a
 session while its image is still downloading, the session shows a "Pull image"
 stage and waits for that download instead of starting a second one.
 
@@ -203,12 +205,13 @@ in place.
 
 ## Git clone cache
 
-Local Podman, local Docker, SSH Podman, SSH Docker, and Apple container targets cache GitHub repository
-objects under the container host user's `~/.cache/mjolnir/git`. Before launch, Mjolnir
-refreshes a bare mirror and creates an isolated session snapshot whose
-immutable objects are shared with ordinary filesystem hardlinks. The snapshot
-is mounted read-only and the normal in-container clone borrows its objects, so
-branch selection, checkout filters, and image-specific Git behavior remain
+Local Podman, local Docker, SSH Podman, SSH Docker, Apple container, and Apple
+container on an SSH machine all cache GitHub repository objects under the
+container host user's `~/.cache/mjolnir/git`. Before launch, Mjolnir refreshes a
+bare mirror and creates an isolated session snapshot whose immutable objects
+are shared with ordinary filesystem hardlinks. The snapshot is mounted
+read-only and the normal in-container clone borrows its objects, so branch
+selection, checkout filters, and image-specific Git behavior remain
 unchanged.
 
 This is an optimization rather than a prerequisite. If host Git, credentials,
@@ -260,7 +263,10 @@ It walks you through picking a profile, a target, and a bundle.
 
 Before launch, you can size the container's CPU and memory allocation. The
 wizard starts with the allocation remembered for that physical host, or with
-8 CPUs and 32 GiB when no allocation has been remembered:
+4 CPUs and 8 GiB when no allocation has been remembered. The smallest accepted
+allocation is 2 CPUs and 4 GiB. Check **Save as default sizing** to remember the
+selected size for that physical host; leave it unchecked to keep the previous
+default:
 
 | Key | Effect |
 | --- | --- |
@@ -268,11 +274,19 @@ wizard starts with the allocation remembered for that physical host, or with
 | `-` | Halves the current allocation |
 | `c` | Adds 8 CPUs |
 | `m` | Adds 50% memory |
-| `r` | Resets to the 8-CPU/32-GiB baseline |
+| `r` | Resets to the 4-CPU/8-GiB baseline |
 
 The wizard ends on a review screen where you can add, edit, or remove
 attached directories before launch. Each attached directory has an access
 mode:
+
+Mjolnir also shows how much CPU and RAM remains after accounting for every
+live container on the physical host and a reserve for the host operating
+system. A new container is refused if either requested amount would overcommit
+that host. Resuming a stopped container and moving a session onto a container
+target use the same admission check. The refusal names the remaining capacity
+and offers the explicit Suspend or Destroy actions; Mjolnir does not stop
+sessions automatically.
 
 | Mode | Effect |
 | --- | --- |

@@ -32,7 +32,132 @@ pub(super) fn load_controller_for_resume(request: &ResumeSessionRequest) -> Resu
     Ok(controller)
 }
 
+fn validate_prepared_move_environment(prepared: bool, durable: bool) -> Result<()> {
+    ensure!(
+        prepared == durable,
+        "the Move's environment decision changed after preparation; prepare and confirm the Move again"
+    );
+    Ok(())
+}
+
 impl RuntimeState {
+    async fn reserve_container_capacity_for_move(
+        self: &Arc<Self>,
+        request: &MoveSessionRequest,
+    ) -> Result<Option<capacity::ContainerCapacityLease>> {
+        let selection = &request.preparation.selection;
+        let (target_id, allocation, container_target, source, in_place) = {
+            let owner = self.owner();
+            let controller = owner.controller();
+            let source = controller
+                .state
+                .sessions
+                .get(&selection.session_id)
+                .with_context(|| format!("unknown session {:?}", selection.session_id))?;
+            let target_id = selection
+                .target_template_id
+                .as_deref()
+                .unwrap_or(&source.target_template_id)
+                .to_owned();
+            let template = controller
+                .config
+                .targets
+                .get(&target_id)
+                .with_context(|| format!("unknown target {target_id:?}"))?;
+            let container_target = mj_core::config::is_container_target(template);
+            let previous = owner
+                .committed()
+                .and_then(|committed| committed.moves.get(&source.id));
+            let in_place = crate::controller::move_session::move_in_place_for_record(
+                source,
+                selection,
+                &controller.config.targets,
+                controller.state.subagents.contains_key(&source.id),
+                previous,
+            );
+            let allocation = if selection.clear_resource_allocation {
+                None
+            } else {
+                selection
+                    .resource_allocation
+                    .clone()
+                    .or_else(|| source.resource_allocation.clone())
+            };
+            let source_commitment = if container_target
+                && mj_core::state::session_owns_container(source)
+            {
+                self.capacity_feed()
+                    .and_then(|feed| feed.target_for(&source.target_template_id))
+                    .filter(|target| target.kind == crate::targets::DeploymentCapacityKind::Host)
+                    .map(|target| capacity::ContainerCapacityCommitment {
+                        target_ids: target.target_ids,
+                        allocation: source.resource_allocation.clone(),
+                    })
+            } else {
+                None
+            };
+            (
+                target_id,
+                allocation,
+                container_target,
+                source_commitment,
+                in_place,
+            )
+        };
+        validate_prepared_move_environment(request.preparation.in_place, in_place)
+            .map_err(|error| anyhow::Error::new(Refusal::precondition(error.to_string())))?;
+        // An in-place Move replaces only the harness in the existing
+        // environment, so it creates no additional container commitment.
+        if in_place {
+            return Ok(None);
+        }
+        if !container_target || self.capacity_feed().is_none() {
+            return Ok(None);
+        }
+        let admission = self.container_admission.lock().await;
+        if self
+            .container_capacity_reservations()
+            .contains_key(&selection.session_id)
+        {
+            let lease = self.joined_container_capacity_lease(&selection.session_id);
+            drop(admission);
+            return Ok(Some(lease));
+        }
+        let Some(input) = self.cached_container_capacity_input(&target_id) else {
+            return Err(anyhow::Error::new(
+                Refusal::precondition(
+                    "this target's host capacity is not ready yet; refresh the target and retry",
+                )
+                .with_code("container-capacity-unavailable"),
+            ));
+        };
+        let Some(allocation) = allocation else {
+            return Err(anyhow::Error::new(
+                Refusal::unusable(
+                    "this container session has no recorded CPU and RAM allocation; choose a size before moving",
+                )
+                .with_code("container-size-required"),
+            ));
+        };
+        let capacity = {
+            let owner = self.owner();
+            let replaced = BTreeSet::from([selection.session_id.clone()]);
+            capacity::capacity_with_reservations_after(
+                &input,
+                owner.controller().state.sessions.values(),
+                &self.container_capacity_reservations(),
+                &replaced,
+            )
+        };
+        if !capacity.fits(&allocation) {
+            return Err(super::create::capacity_refusal(capacity, &allocation));
+        }
+        let lease =
+            self.reserve_move_capacity_lease(&selection.session_id, &input, allocation, source);
+        drop(admission);
+        Ok(Some(lease))
+    }
+
     pub async fn prepare_move_session(
         self: &Arc<Self>,
         selection: MoveSelection,
@@ -98,11 +223,19 @@ impl RuntimeState {
     }
 
     /// Reserve lifecycle ownership before a web request is acknowledged.
-    pub(crate) fn start_move_session(self: &Arc<Self>, request: MoveSessionRequest) -> Result<()> {
-        self.admit_move_session(request).map(|_| ())
+    pub(crate) async fn start_move_session(
+        self: &Arc<Self>,
+        request: MoveSessionRequest,
+    ) -> Result<()> {
+        let capacity = self.reserve_container_capacity_for_move(&request).await?;
+        self.admit_move_session(request, capacity).map(|_| ())
     }
 
-    fn admit_move_session(self: &Arc<Self>, request: MoveSessionRequest) -> Result<LifecycleWatch> {
+    fn admit_move_session(
+        self: &Arc<Self>,
+        request: MoveSessionRequest,
+        capacity_lease: Option<capacity::ContainerCapacityLease>,
+    ) -> Result<LifecycleWatch> {
         let selection = request.preparation.selection.clone();
         let operation_id = request.preparation.operation_id.clone();
         // Preparation resolves inherited settings. Compare those settings,
@@ -122,6 +255,7 @@ impl RuntimeState {
                 deferrable_admission: None,
             },
             move |state, session_id, cancelled| async move {
+                let _capacity_lease = capacity_lease;
                 let result = state
                     .clone()
                     .run_move_controller_work(
@@ -158,7 +292,8 @@ impl RuntimeState {
         let selection = request.preparation.selection.clone();
         let operation_id = request.preparation.operation_id.clone();
         let session_id = selection.session_id.clone();
-        let result = self.admit_move_session(request)?;
+        let capacity = self.reserve_container_capacity_for_move(&request).await?;
+        let result = self.admit_move_session(request, capacity)?;
         let channel = result.clone();
         let result = Self::wait_lifecycle_result(result).await;
         self.remove_completed_lifecycle(&channel);
@@ -444,6 +579,15 @@ mod admission_tests {
             error: None,
             recovery: None,
         }
+    }
+
+    // Hard-won: 03034132f: a client-controlled in-place flag could skip capacity admission.
+    #[test]
+    fn forged_move_environment_decision_is_refused() {
+        assert!(validate_prepared_move_environment(true, false).is_err());
+        assert!(validate_prepared_move_environment(false, true).is_err());
+        assert!(validate_prepared_move_environment(true, true).is_ok());
+        assert!(validate_prepared_move_environment(false, false).is_ok());
     }
 
     /// A command that records its process id and waits for `release`.

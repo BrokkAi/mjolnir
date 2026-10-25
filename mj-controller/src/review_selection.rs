@@ -560,10 +560,10 @@ mod tests {
             Arc::new(move |_| Box::pin(async move { Ok(offered("deepseek-v4-pro")) })),
             Arc::new(move |_, model| Box::pin(async move { Ok(offered(&model)) })),
         );
-        catalog.sync(&test_config(
-            &[("deepseek", mj_core::config::HarnessKind::Codex)],
-            &[],
-        ));
+        catalog.sync(&test_config(&[(
+            "deepseek",
+            mj_core::config::HarnessKind::Codex,
+        )]));
         catalog
     }
 

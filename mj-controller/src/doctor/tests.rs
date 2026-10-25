@@ -169,10 +169,6 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     let missing_ssh_check = ssh_podman_limits_check("missing-ssh", &ssh, &missing_ssh);
     let mut config = Config::default();
     config.subagents.max_concurrent = 3;
-    config
-        .subagents
-        .eligible_profiles
-        .insert("disabled-reviewer".to_owned(), true);
     config.profiles.insert(
         "disabled-reviewer".to_owned(),
         HarnessProfile {
@@ -186,7 +182,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
             codex_profile: None,
         },
     );
-    let subagent_checks = subagent_eligibility_checks(Ok(&config));
+    let subagent_checks = subagent_policy_checks(Ok(&config));
     let mut checks = vec![aws_check, docker_check, podman_check, missing_ssh_check];
     checks.extend(subagent_checks);
 
@@ -1375,7 +1371,7 @@ fn settings_fixes_name_the_bound_settings_key() {
 // Hard-won: 527f018a: installed users were sent to a repository docs path and the Podman fix was printed twice.
 #[cfg(unix)]
 #[test]
-fn session_environment_reports_node_paths_and_warns_when_they_are_missing() {
+fn session_environment_reports_node_paths_and_installs_missing_with_curl() {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join("tools");
     std::fs::create_dir_all(&bin).unwrap();
@@ -1410,7 +1406,12 @@ fn session_environment_reports_node_paths_and_warns_when_they_are_missing() {
         Duration::from_millis(1200),
     );
     assert_eq!(warning.status, CheckStatus::Warning, "{warning:?}");
-    assert!(warning.detail.contains("has no npm."), "{}", warning.detail);
+    assert!(warning.detail.contains("has no npm,"), "{}", warning.detail);
+    assert!(
+        warning.detail.contains("it has no curl"),
+        "{}",
+        warning.detail
+    );
     assert!(
         warning
             .remediation
@@ -1418,6 +1419,19 @@ fn session_environment_reports_node_paths_and_warns_when_they_are_missing() {
             .unwrap_or_default()
             .contains("Node.js 22"),
         "{warning:?}"
+    );
+
+    std::fs::write(bin.join("curl"), b"").unwrap();
+    let managed = session_environment_check_from(
+        Path::new("/bin/zsh"),
+        &environment,
+        Duration::from_millis(1200),
+    );
+    assert_eq!(managed.status, CheckStatus::Ready, "{managed:?}");
+    assert!(
+        managed.detail.contains("will install its pinned Node.js"),
+        "{}",
+        managed.detail
     );
 
     std::fs::remove_file(bin.join("npx")).unwrap();
@@ -1510,11 +1524,12 @@ fn setup_instructions_name_mjolnir_and_the_local_bare_prerequisites() {
         let instructions = setup_instructions(platform);
         assert!(!instructions.contains("Hel"), "{instructions}");
         assert!(instructions.contains("## Local bare runtime"));
-        assert!(instructions.contains("Node.js 22 or newer and npm"));
+        assert!(instructions.contains("installs its own pinned Node.js"));
         assert!(instructions.ends_with('\n'));
         assert!(!instructions.contains("](#"), "{instructions}");
         assert!(!instructions.contains("keep-id:uid=,"));
         assert!(!instructions.contains("Disposable EC2"));
+        assert!(instructions.contains("installs its own pinned Node.js"));
     }
     let macos = setup_instructions(InstructionsPlatform::Macos);
     assert!(macos.contains("podman machine"), "{macos}");
@@ -1837,4 +1852,66 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
         let file_check = secret_checks(Ok(&config), &config_path).remove(0);
         assert_eq!(file_check.status, CheckStatus::Ready, "{file_check:?}");
     }
+}
+
+/// The remote Apple container check runs every probe on the far side of SSH,
+/// and its failure names the one thing that is missing (a running daemon)
+/// rather than an unreachable host.
+#[test]
+fn remote_apple_container_check_reports_a_stopped_daemon_and_a_present_image() {
+    let ssh = RuntimeSshTarget {
+        destination: "dev@mac.example.test".to_owned(),
+        ssh_args: Vec::new(),
+    };
+    let ready = FakeExecutor::new([
+        Ok(output(b"")),
+        Ok(output(b"Darwin arm64\n")),
+        Ok(output(b"26.1\n")),
+        Ok(output(b"container 1.2.3\n")),
+        Ok(output(b"running\n")),
+        Ok(output(b"")),
+    ]);
+    let check = ssh_apple_container_check(
+        "mac-apple",
+        &ssh,
+        "example.invalid/agent:latest",
+        &ready,
+        false,
+    );
+    assert_eq!(check.status, CheckStatus::Ready);
+    assert_eq!(check.id, "runtime.ssh-apple-container.mac-apple");
+    assert!(check.detail.contains("1.2.3"), "{}", check.detail);
+    assert!(check.detail.contains("present"), "{}", check.detail);
+    assert!(
+        ready
+            .commands
+            .borrow()
+            .iter()
+            .all(|command| command.program == "ssh")
+    );
+
+    let stopped = FakeExecutor::new([
+        Ok(output(b"")),
+        Ok(output(b"Darwin arm64\n")),
+        Ok(output(b"26.1\n")),
+        Ok(output(b"container 1.2.3\n")),
+        Ok(failed(b"Error: container system service is not running\n")),
+    ]);
+    let check = ssh_apple_container_check(
+        "mac-apple",
+        &ssh,
+        "example.invalid/agent:latest",
+        &stopped,
+        false,
+    );
+    assert_eq!(check.status, CheckStatus::Fixable);
+    assert!(check.detail.contains("not running"), "{}", check.detail);
+    assert!(
+        check
+            .remediation
+            .as_deref()
+            .is_some_and(|fix| fix.contains("container system start") || fix.contains("container")),
+        "{:?}",
+        check.remediation
+    );
 }

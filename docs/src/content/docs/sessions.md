@@ -56,7 +56,7 @@ dashboard. The full wizard resolves four things:
 
 1. A [profile](/profiles/) selects Codex, Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, MiMo Code, or DSH and the credentials to use.
 2. A [target](/targets/) selects the local, container, SSH, or EC2 environment.
-3. A project source supplies the working directory: a [bundle](/workspaces-bundles/) for a managed target, or an existing Git directory for a bare target.
+3. A project source supplies the working directory: a [bundle](/workspaces-bundles/) for a managed target, or an existing directory for a bare target. A local bare directory need not be a Git checkout; an SSH bare directory does.
 4. A final launch review, with optional attached directories and per-session container sizing where the target supports them.
 
 When only one target is available and it has no size to set, the wizard

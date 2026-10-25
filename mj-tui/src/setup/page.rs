@@ -270,12 +270,6 @@ pub(super) fn value_summary(
     let mut child_path = path.to_vec();
     child_path.push(key.to_owned());
     let summary = match value {
-        // The eligible profiles are a page of checkboxes, one per profile, so
-        // the row counts the checked ones instead of counting settings.
-        Value::Object(entries) if child_path == ["subagents", "eligible_profiles"] => {
-            let selected = entries.values().filter(|value| **value == true).count();
-            format!("{selected} of {} selected  ›", entries.len())
-        }
         Value::Object(entries) => {
             format!("{}  ›", counted(entries.len(), "setting", "settings"))
         }

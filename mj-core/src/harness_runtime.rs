@@ -15,7 +15,13 @@ use crate::config::HarnessKind;
 pub const MANIFEST_FILE: &str = "mj-harness.json";
 pub const LEASE_FILE: &str = ".lease";
 pub const CODEX_CLI_ENTRYPOINT: &str = "node_modules/.bin/codex";
-const MANAGED_HARNESSES_DIR: &str = "mjolnir/harnesses";
+const MANAGED_RUNTIMES_DIR: &str = "mjolnir";
+const MANAGED_HARNESSES_DIR: &str = "harnesses";
+const MANAGED_NODE_DIR: &str = "node";
+
+/// The exact Node.js release Mjolnir installs when the target has no
+/// compatible runtime. Keep this in lockstep with `assets/node/runtime.json`.
+pub const NODE_VERSION: &str = "24.22.1";
 
 /// The install receipt written by the worker and checked by managed clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +54,18 @@ pub fn managed_harness_cache_root(
     xdg_cache_home: Option<&OsStr>,
     home: Option<&OsStr>,
 ) -> Result<PathBuf> {
+    Ok(managed_cache_base(xdg_cache_home, home)?.join(MANAGED_HARNESSES_DIR))
+}
+
+/// Resolve the cache directory that holds Mjolnir's pinned Node.js releases.
+pub fn managed_node_cache_root(
+    xdg_cache_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Result<PathBuf> {
+    Ok(managed_cache_base(xdg_cache_home, home)?.join(MANAGED_NODE_DIR))
+}
+
+fn managed_cache_base(xdg_cache_home: Option<&OsStr>, home: Option<&OsStr>) -> Result<PathBuf> {
     let base = match xdg_cache_home.filter(|path| !path.is_empty()) {
         Some(path) => PathBuf::from(path),
         None => PathBuf::from(
@@ -62,7 +80,7 @@ pub fn managed_harness_cache_root(
             base.display()
         );
     }
-    Ok(base.join(MANAGED_HARNESSES_DIR))
+    Ok(base.join(MANAGED_RUNTIMES_DIR))
 }
 
 /// Resolve the pinned install directory under a managed-harness cache root.
@@ -107,7 +125,7 @@ pub const MUSE_ACP_VERSION: &str = "0.16.0";
 pub const MUSE_VERSION: &str = "1.4.12-R6909.1";
 pub const OPENCODE_VERSION: &str = "2.1.2";
 pub const MIMO_CLI_VERSION: &str = "0.1.15";
-pub const DSH_ACP_VERSION: &str = "0.2.3";
+pub const DSH_ACP_VERSION: &str = "0.3.0";
 pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
 
 /// The shell commands that start OpenCode's ACP server with the executable
@@ -239,6 +257,76 @@ pub fn dsh_acp_launch_script() -> String {
     )
 }
 
+/// The shell launcher used by container targets when Mjolnir's worker has not
+/// replaced it with a managed installation. Workers also use this value to
+/// distinguish the built-in fallback from a custom launch command.
+pub fn fallback_launch(
+    harness: HarnessKind,
+    policy: crate::config::ExecutionPolicy,
+) -> (String, Vec<String>) {
+    match harness {
+        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Muse => {
+            let bridge = npm_bridge(harness).expect("npm harness has a bridge");
+            (
+                "sh".into(),
+                vec!["-c".into(), bridge.bootstrap_script()],
+            )
+        }
+        HarnessKind::Kimi => (
+            "sh".into(),
+            vec![
+                "-c".into(),
+                "if command -v kimi >/dev/null 2>&1; then exec kimi acp; elif [ -x \"$HOME/.kimi-code/bin/kimi\" ]; then exec \"$HOME/.kimi-code/bin/kimi\" acp; else echo 'Mjolnir needs compatible Kimi Code on PATH or a Mjolnir-managed installation' >&2; exit 127; fi".into(),
+            ],
+        ),
+        HarnessKind::Grok => {
+            let acp = harness.bridge_args(policy).join(" ");
+            (
+                "sh".into(),
+                vec![
+                    "-c".into(),
+                    format!(
+                        "if command -v grok >/dev/null 2>&1; then exec grok {acp}; elif [ -x \"$GROK_HOME/bin/grok\" ]; then exec \"$GROK_HOME/bin/grok\" {acp}; elif [ -x \"$HOME/.grok/bin/grok\" ]; then exec \"$HOME/.grok/bin/grok\" {acp}; else echo 'Mjolnir needs compatible Grok Build on PATH or a Mjolnir-managed installation' >&2; exit 127; fi"
+                    ),
+                ],
+            )
+        }
+        HarnessKind::OpenCode => (
+            "sh".into(),
+            vec![
+                "-c".into(),
+                format!(
+                    "if command -v opencode >/dev/null 2>&1; then opencode=opencode; elif [ -x \"$HOME/.opencode/bin/opencode\" ]; then opencode=\"$HOME/.opencode/bin/opencode\"; else echo 'Mjolnir needs compatible OpenCode on PATH or a Mjolnir-managed installation' >&2; exit 127; fi; {}",
+                    opencode_acp_script()
+                ),
+            ],
+        ),
+        HarnessKind::Mimo => (
+            "sh".into(),
+            vec![
+                "-c".into(),
+                "if command -v mimo >/dev/null 2>&1; then exec mimo acp; else echo 'Mjolnir needs compatible MiMo Code on PATH or a Mjolnir-managed installation' >&2; exit 127; fi".into(),
+            ],
+        ),
+        HarnessKind::Dsh => (
+            "sh".into(),
+            vec!["-c".into(), dsh_acp_launch_script()],
+        ),
+    }
+}
+
+/// Whether a persisted launch description is the one Mjolnir generated for
+/// this harness, rather than a command supplied by a caller.
+pub fn is_fallback_launch(
+    harness: HarnessKind,
+    policy: crate::config::ExecutionPolicy,
+    command: &Path,
+    args: &[String],
+) -> bool {
+    let (expected_command, expected_args) = fallback_launch(harness, policy);
+    command == Path::new(&expected_command) && args == expected_args
+}
+
 /// The built-in npm launcher, selected on the worker before ACP startup.
 #[derive(Clone, Copy)]
 pub struct NpmBridge {
@@ -268,6 +356,22 @@ pub const fn npm_bridge(kind: HarnessKind) -> Option<NpmBridge> {
         }),
         _ => None,
     }
+}
+
+/// Whether preparing this harness may need Node.js, npm, and npx.
+///
+/// Kimi, Grok, and OpenCode install and launch native executables. Codex,
+/// Claude, Muse, and MiMo install npm packages or adapters. DSH itself is not
+/// managed, but its fallback fetches the pinned package through npx.
+pub const fn harness_uses_node_runtime(kind: HarnessKind) -> bool {
+    matches!(
+        kind,
+        HarnessKind::Codex
+            | HarnessKind::Claude
+            | HarnessKind::Muse
+            | HarnessKind::Mimo
+            | HarnessKind::Dsh
+    )
 }
 
 impl NpmBridge {
@@ -329,6 +433,7 @@ pub struct HarnessPin {
     pub install_id: &'static str,
     pub display_version: &'static str,
     pub entrypoint: &'static str,
+    pub cli_entrypoint: &'static str,
 }
 
 pub const fn pin(kind: HarnessKind) -> HarnessPin {
@@ -337,11 +442,13 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             install_id: "muse-acp-0.16.0_muse-1.4.12-R6909.1",
             display_version: "muse-acp 0.16.0 + Muse Code 1.4.12-R6909.1",
             entrypoint: "bin/muse",
+            cli_entrypoint: "bin/muse",
         },
         HarnessKind::Codex => HarnessPin {
             install_id: "brokkai-codex-acp-1.13.7_codex-0.160.1",
             display_version: "@brokkai/codex-acp 1.13.7 + codex 0.160.1",
             entrypoint: "node_modules/.bin/codex-acp",
+            cli_entrypoint: CODEX_CLI_ENTRYPOINT,
         },
         HarnessKind::Claude => HarnessPin {
             // pkg2: the asset lists @anthropic-ai/claude-code in allowScripts.
@@ -350,31 +457,37 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             install_id: "claude-agent-acp-0.94.0_claude-2.1.306_pkg2",
             display_version: "claude-agent-acp 0.94.0 + Claude Code 2.1.306",
             entrypoint: "node_modules/.bin/claude-agent-acp",
+            cli_entrypoint: "node_modules/.bin/claude",
         },
         HarnessKind::Kimi => HarnessPin {
             install_id: "kimi-2.3.1",
             display_version: "Kimi Code 2.3.1",
             entrypoint: "bin/kimi",
+            cli_entrypoint: "bin/kimi",
         },
         HarnessKind::Grok => HarnessPin {
             install_id: "grok-1.0.40",
             display_version: "Grok 1.0.40",
             entrypoint: "bin/grok",
+            cli_entrypoint: "bin/grok",
         },
         HarnessKind::OpenCode => HarnessPin {
             install_id: "opencode-2.1.2",
             display_version: "OpenCode 2.1.2",
             entrypoint: "opencode",
+            cli_entrypoint: "opencode",
         },
         HarnessKind::Mimo => HarnessPin {
             install_id: "mimo-cli-0.1.15",
             display_version: "MiMo Code 0.1.15",
             entrypoint: "node_modules/.bin/mimo",
+            cli_entrypoint: "node_modules/.bin/mimo",
         },
         HarnessKind::Dsh => HarnessPin {
-            install_id: "dsh-acp-0.2.3",
-            display_version: "dsh-acp 0.2.3",
+            install_id: "dsh-acp-0.3.0",
+            display_version: "dsh-acp 0.3.0",
             entrypoint: "dsh-acp",
+            cli_entrypoint: "dsh-acp",
         },
     }
 }
@@ -426,11 +539,25 @@ mod tests {
         let home = std::env::temp_dir().join("mj-home");
         let xdg_root = managed_harness_cache_root(Some(xdg.as_os_str()), Some(home.as_os_str()))
             .expect("absolute XDG cache root");
-        assert_eq!(xdg_root, xdg.join(MANAGED_HARNESSES_DIR));
+        assert_eq!(
+            xdg_root,
+            xdg.join(MANAGED_RUNTIMES_DIR).join(MANAGED_HARNESSES_DIR)
+        );
 
         let home_root = managed_harness_cache_root(Some(OsStr::new("")), Some(home.as_os_str()))
             .expect("HOME fallback");
-        assert_eq!(home_root, home.join(".cache").join(MANAGED_HARNESSES_DIR));
+        assert_eq!(
+            home_root,
+            home.join(".cache")
+                .join(MANAGED_RUNTIMES_DIR)
+                .join(MANAGED_HARNESSES_DIR)
+        );
+        let node_root = managed_node_cache_root(Some(xdg.as_os_str()), Some(home.as_os_str()))
+            .expect("managed Node cache root");
+        assert_eq!(
+            node_root,
+            xdg.join(MANAGED_RUNTIMES_DIR).join(MANAGED_NODE_DIR)
+        );
 
         assert!(
             managed_harness_cache_root(Some(OsStr::new("relative-cache")), Some(home.as_os_str()))

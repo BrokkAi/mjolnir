@@ -215,6 +215,55 @@ fn every_launch_adds_newly_installed_agents_and_keeps_disabled_profiles_off() {
     );
 }
 
+// Hard-won: e473d344a: a detected DSH profile ignored a key kept in secrets.toml and reported itself unauthenticated.
+#[test]
+fn a_detected_dsh_profile_takes_its_key_from_secrets_toml_when_it_is_there() {
+    for with_secret in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        if with_secret {
+            std::fs::write(
+                directory.path().join("secrets.toml"),
+                "DEEPSEEK_API_KEY = \"sk-test\"\n",
+            )
+            .unwrap();
+        }
+        // The first run and every later launch build profiles the same way.
+        run_setup_with_discovery(
+            &path,
+            directory.path(),
+            false,
+            &|| false,
+            || {},
+            || Ok((homes(directory.path(), &[HarnessKind::Dsh]), None)),
+        )
+        .unwrap()
+        .unwrap();
+        let later = homes(directory.path(), &[HarnessKind::Dsh, HarnessKind::Codex]);
+        let mut later_dsh = later[0].clone();
+        later_dsh.path = directory.path().join("another-dsh");
+        add_profiles_for(&path, &[later[1].clone(), later_dsh], &|| false).unwrap();
+
+        let written: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        let profiles = written["profiles"].as_table().unwrap();
+        let reference = |id: &str| {
+            profiles[id]
+                .get("environment")
+                .and_then(|environment| environment.get("DEEPSEEK_API_KEY"))
+                .and_then(|value| value.get("from_secret"))
+                .and_then(toml::Value::as_str)
+                .map(str::to_owned)
+        };
+        let expected = with_secret.then(|| "DEEPSEEK_API_KEY".to_owned());
+        assert_eq!(reference("dsh"), expected, "first run");
+        assert_eq!(reference("dsh-2"), expected, "later launch");
+        assert!(
+            profiles["codex"].get("environment").is_none(),
+            "a harness with a login of its own gets no key entry"
+        );
+    }
+}
+
 #[test]
 fn setup_without_an_agent_or_repository_still_completes_once() {
     let directory = tempfile::tempdir().unwrap();
@@ -229,7 +278,12 @@ fn setup_without_an_agent_or_repository_still_completes_once() {
     )
     .unwrap()
     .unwrap();
-    assert!(report.summary().is_empty());
+    assert_eq!(
+        report.summary(),
+        vec![
+            "No installed coding agent was found. Mjolnir can install and sign in to one for you."
+        ]
+    );
     assert!(Config::load_from(&path).unwrap().profiles.is_empty());
     assert!(directory.path().join("setup-state").exists());
 }

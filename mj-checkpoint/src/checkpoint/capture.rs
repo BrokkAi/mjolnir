@@ -769,6 +769,15 @@ pub(super) fn collect_checkpoint_repositories(
             let path = workspace_root.join(&repository.relative_destination);
             ensure!(path.is_dir(), "repository {} is missing", path.display());
             let (history, remote_base) = match &repository.capture {
+                CheckpointRepositoryCapture::PlainDirectory => {
+                    return collect_plain_directory_snapshot(&GitCollectionSpec {
+                        id: repository.id.clone(),
+                        relative_destination: repository.relative_destination.clone(),
+                        history: GitHistoryMode::NoBundle,
+                        origin_override: None,
+                    })
+                    .with_context(|| format!("repository '{}'", repository.id));
+                }
                 CheckpointRepositoryCapture::MetadataOnly => {
                     return collect_git_metadata_snapshot(
                         git,

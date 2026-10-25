@@ -256,6 +256,112 @@ fn sample_state() -> State {
     }
 }
 
+#[test]
+fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children() {
+    let state = sample_state();
+    let mut parent = state.sessions["0123456789abcdef"].clone();
+    parent.resource_allocation = Some(SessionResourceAllocation::Container {
+        cpus: 4,
+        memory_bytes: 8 << 30,
+    });
+
+    let mut child = parent.clone();
+    child.id = "fedcba9876543210".into();
+    child.target = Some(TargetLocator::LocalPodman {
+        borrowed_from: Some(parent.id.clone()),
+        container_id: "afb67d".into(),
+        workspace_storage: Default::default(),
+    });
+
+    let mut provisioning = parent.clone();
+    provisioning.id = "0011223344556677".into();
+    provisioning.state = SessionState::Provisioning;
+    provisioning.target = None;
+    provisioning.resource_allocation = Some(SessionResourceAllocation::Container {
+        cpus: 2,
+        memory_bytes: 4 << 30,
+    });
+
+    let capacity = host_container_capacity(
+        HostContainerSize {
+            cpus: 10,
+            memory_bytes: 20 << 30,
+        },
+        &["podman".into()],
+        [&parent, &child, &provisioning],
+    );
+
+    assert_eq!(
+        capacity.committed,
+        HostContainerSize {
+            cpus: 6,
+            memory_bytes: 12 << 30,
+        }
+    );
+    assert_eq!(
+        capacity.reserved,
+        HostContainerSize {
+            cpus: 0,
+            memory_bytes: 4 << 30,
+        }
+    );
+    assert_eq!(
+        capacity.remaining,
+        HostContainerSize {
+            cpus: 4,
+            memory_bytes: 4 << 30,
+        }
+    );
+    assert!(capacity.complete);
+}
+
+#[test]
+fn an_unrecorded_owner_allocation_makes_remaining_capacity_unknown() {
+    let state = sample_state();
+    let capacity = host_container_capacity(
+        HostContainerSize {
+            cpus: 10,
+            memory_bytes: 20 << 30,
+        },
+        &["podman".into()],
+        state.sessions.values(),
+    );
+
+    assert!(!capacity.complete);
+    assert_eq!(capacity.remaining.cpus, 0);
+    assert_eq!(capacity.remaining.memory_bytes, 0);
+}
+
+#[test]
+fn aws_default_stays_at_eight_vcpus_when_container_default_is_smaller() {
+    let options = [
+        SessionResourceAllocation::AwsEc2 {
+            instance_type: "small".into(),
+            vcpus: 2,
+            memory_bytes: 4 << 30,
+        },
+        SessionResourceAllocation::AwsEc2 {
+            instance_type: "default".into(),
+            vcpus: 8,
+            memory_bytes: 32 << 30,
+        },
+    ];
+
+    let selected = preferred_aws_allocation(&options, None).expect("an AWS option");
+
+    assert!(matches!(
+        selected,
+        SessionResourceAllocation::AwsEc2 { instance_type, .. }
+            if instance_type == "default"
+    ));
+}
+
+#[test]
+fn capacity_gib_text_never_rounds_a_limit_up() {
+    assert_eq!(floor_gib_tenths((8 << 30) - 1), "7.9");
+    assert_eq!(floor_gib_tenths(64 << 30), "64");
+}
+
 fn sample_config() -> Config {
     Config {
         jev: Default::default(),
@@ -553,6 +659,7 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
         )]),
         bundle,
         network_sources: Default::default(),
+        plain_directories: Default::default(),
     });
     state.sessions.insert(
         saved_project_workspace.id.clone(),

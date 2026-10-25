@@ -266,7 +266,7 @@ Profiles Settings… action: None
 │  Idle  podman  cod  │                                                                                              │                     │
 │  │ No messages yet  │   claude-1                        7 settings  ›                            Add               │                     │
 │  │                  │   codex-1                         7 settings  ›                            Detect profiles   │                     │
-│                     │   codex-2                         7 settings  ›                                              │                     │
+│                     │   codex-2                         7 settings  ›                            Set up managed    │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -645,7 +645,7 @@ Profiles number 2 action: None
 │  Idle  podman  cod  │                                                                                              │                     │
 │  │ No messages yet  │   claude-1                        7 settings  ›                            Add               │                     │
 │  │                  │   codex-1                         7 settings  ›                            Detect profiles   │                     │
-│                     │   codex-2                         7 settings  ›                                              │                     │
+│                     │   codex-2                         7 settings  ›                            Set up managed    │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -814,7 +814,7 @@ Profiles Enter setup action: None
 │  Idle  podman  cod  │                                                                                              │                     │
 │  │ No messages yet  │   claude-1                        7 settings  ›                            Add               │                     │
 │  │                  │   codex-1                         7 settings  ›                            Detect profiles   │                     │
-│                     │   codex-2                         7 settings  ›                                              │                     │
+│                     │   codex-2                         7 settings  ›                            Set up managed    │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │

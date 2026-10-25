@@ -526,19 +526,34 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
     assert!(subagent_tools_enabled(&codex, false));
 }
 
-/// On a host with neither Codex nor Node.js, the launch failed with "Codex
-/// launch preflight failed on local host; Node.js 22+ and npm must be
-/// available on the target PATH: Node.js is missing from PATH", which never
-/// says Codex is missing (launch finding R13-1). The failure now starts by
-/// saying so, with the install command `mj login` gives.
 #[cfg(unix)]
-// Hard-won: f8b8002: missing Codex was reported only as an incidental Node failure
 #[test]
-fn node_preflight_says_the_agent_is_not_installed_before_it_mentions_node() {
+fn node_preflight_accepts_a_managed_runtime_when_node_is_missing() {
     let directory = tempfile::tempdir().unwrap();
-    let profile = |kind| HarnessProfile {
+    let system = if cfg!(target_os = "macos") {
+        "Darwin"
+    } else {
+        "Linux"
+    };
+    let machine = match std::env::consts::ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" => {
+            if cfg!(target_os = "macos") {
+                "arm64"
+            } else {
+                "aarch64"
+            }
+        }
+        architecture => panic!("test has no uname mapping for {architecture}"),
+    };
+    mj_core::test_hooks::install_fake_command(
+        directory.path(),
+        "uname",
+        &format!("#!/bin/sh\ncase \"$1\" in -s) echo {system} ;; -m) echo {machine} ;; esac\n"),
+    );
+    let profile = HarnessProfile {
         enabled: true,
-        kind,
+        kind: HarnessKind::Codex,
         home: directory.path().into(),
         environment: std::collections::BTreeMap::from([(
             "PATH".into(),
@@ -550,48 +565,77 @@ fn node_preflight_says_the_agent_is_not_installed_before_it_mentions_node() {
         guardian_review_model: None,
         codex_profile: None,
     };
-    let failure = |kind| {
-        format!(
-            "{:#}",
-            preflight_harness(
-                &mj_core::config::TargetTemplate::LocalBare,
-                &profile(kind),
-                &ProcessExecutor,
-            )
-            .unwrap_err()
+    preflight_harness(
+        &mj_core::config::TargetTemplate::LocalBare,
+        &profile,
+        &ProcessExecutor,
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn node_preflight_explains_when_the_target_has_no_managed_runtime() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Codex,
+        home: directory.path().into(),
+        environment: std::collections::BTreeMap::from([(
+            "PATH".into(),
+            directory.path().to_string_lossy().into_owned(),
+        )])
+        .into(),
+        context_window_bytes: None,
+        legacy_subagents: Default::default(),
+        guardian_review_model: None,
+        codex_profile: None,
+    };
+    let error = format!(
+        "{:#}",
+        preflight_harness(
+            &mj_core::config::TargetTemplate::LocalBare,
+            &profile,
+            &ProcessExecutor,
         )
+        .unwrap_err()
+    );
+    assert!(
+        error.starts_with(
+            "Codex launch preflight failed on local host; provide Node.js 22+ with npm and npx \
+             on the target PATH"
+        ),
+        "{error}"
+    );
+    assert!(error.contains("managed Node.js has no artifact"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn dsh_preflight_accepts_its_native_binary_without_node_or_curl() {
+    let directory = tempfile::tempdir().unwrap();
+    mj_core::test_hooks::install_fake_command(directory.path(), "dsh-acp", "#!/bin/sh\nexit 0\n");
+    let profile = HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Dsh,
+        home: directory.path().into(),
+        environment: std::collections::BTreeMap::from([(
+            "PATH".into(),
+            directory.path().to_string_lossy().into_owned(),
+        )])
+        .into(),
+        context_window_bytes: None,
+        legacy_subagents: Default::default(),
+        guardian_review_model: None,
+        codex_profile: None,
     };
 
-    let codex = failure(HarnessKind::Codex);
-    assert!(
-        codex.starts_with(
-            "Codex is not installed on local host: `codex` is not on PATH. Install it with \
-             `npm install -g @openai/codex` (Node.js 22 or newer), sign in to it, then retry \
-             the launch: Node.js is missing from PATH"
-        ),
-        "{codex}"
-    );
-    let claude = failure(HarnessKind::Claude);
-    assert!(
-        claude.starts_with(
-            "Claude Code is not installed on local host: `claude` is not on PATH. Install it \
-             with `npm install -g @anthropic-ai/claude-code`, sign in to it, then retry the \
-             launch: Node.js is missing from PATH"
-        ),
-        "{claude}"
-    );
-
-    // With the agent's own command installed, only Node.js is missing, and
-    // the failure says that as before.
-    mj_core::test_hooks::install_fake_command(directory.path(), "codex", "#!/bin/sh\nexit 0\n");
-    let codex = failure(HarnessKind::Codex);
-    assert!(
-        codex.starts_with(
-            "Codex launch preflight failed on local host; Node.js 22+ and npm must be available \
-             on the target PATH: Node.js is missing from PATH"
-        ),
-        "{codex}"
-    );
+    preflight_harness(
+        &mj_core::config::TargetTemplate::LocalBare,
+        &profile,
+        &ProcessExecutor,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -605,7 +649,11 @@ fn a_stored_setup_token_reaches_only_claude_workers_that_do_not_set_their_own() 
     write_claude_oauth_token(&token_path, b"sk-ant-oat01-stored").unwrap();
 
     let mut claude = BTreeMap::new();
-    apply_claude_setup_token(&mut claude, HarnessKind::Claude, &token_path);
+    assert!(apply_claude_setup_token(
+        &mut claude,
+        HarnessKind::Claude,
+        &token_path
+    ));
     assert_eq!(
         claude.get(CLAUDE_OAUTH_TOKEN_ENV).map(String::as_str),
         Some("sk-ant-oat01-stored")
@@ -617,7 +665,11 @@ fn a_stored_setup_token_reaches_only_claude_workers_that_do_not_set_their_own() 
         .filter(|kind| *kind != HarnessKind::Claude)
     {
         let mut environment = BTreeMap::new();
-        apply_claude_setup_token(&mut environment, kind, &token_path);
+        assert!(!apply_claude_setup_token(
+            &mut environment,
+            kind,
+            &token_path
+        ));
         assert!(environment.is_empty(), "{kind:?} must not read the token");
     }
 
@@ -626,7 +678,11 @@ fn a_stored_setup_token_reaches_only_claude_workers_that_do_not_set_their_own() 
         CLAUDE_OAUTH_TOKEN_ENV.to_owned(),
         "profile-token".to_owned(),
     )]);
-    apply_claude_setup_token(&mut overridden, HarnessKind::Claude, &token_path);
+    assert!(apply_claude_setup_token(
+        &mut overridden,
+        HarnessKind::Claude,
+        &token_path
+    ));
     assert_eq!(
         overridden.get(CLAUDE_OAUTH_TOKEN_ENV).map(String::as_str),
         Some("profile-token")
@@ -634,8 +690,146 @@ fn a_stored_setup_token_reaches_only_claude_workers_that_do_not_set_their_own() 
 
     // A profile with no stored token launches exactly as before.
     let mut without = BTreeMap::new();
-    apply_claude_setup_token(&mut without, HarnessKind::Claude, &missing);
+    assert!(!apply_claude_setup_token(
+        &mut without,
+        HarnessKind::Claude,
+        &missing
+    ));
     assert!(without.is_empty());
+
+    // A blank profile value is not a login and must not hide the stored token.
+    let mut blank = BTreeMap::from([(CLAUDE_OAUTH_TOKEN_ENV.to_owned(), "  ".to_owned())]);
+    assert!(apply_claude_setup_token(
+        &mut blank,
+        HarnessKind::Claude,
+        &token_path
+    ));
+    assert_eq!(
+        blank.get(CLAUDE_OAUTH_TOKEN_ENV).map(String::as_str),
+        Some("sk-ant-oat01-stored")
+    );
+}
+
+#[test]
+fn blank_claude_auth_environment_values_do_not_count_as_logins() {
+    use mj_core::credentials::CLAUDE_OAUTH_TOKEN_ENV;
+
+    let mut profile = mj_core::config::HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Claude,
+        home: std::path::PathBuf::from("claude"),
+        environment: Default::default(),
+        context_window_bytes: None,
+        legacy_subagents: Default::default(),
+        guardian_review_model: None,
+        codex_profile: None,
+    };
+    let mut environment = BTreeMap::from([
+        (CLAUDE_OAUTH_TOKEN_ENV.to_owned(), " \n ".to_owned()),
+        ("ANTHROPIC_API_KEY".to_owned(), " ".to_owned()),
+        ("ANTHROPIC_AUTH_TOKEN".to_owned(), "\t".to_owned()),
+    ]);
+    assert!(!claude_environment_login_present(&profile, &environment));
+
+    // Container target values are merged into the final launch environment
+    // after the profile, so each must be recognized there as well.
+    for name in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] {
+        let mut target_environment = environment.clone();
+        target_environment.insert(name.into(), "target-key".into());
+        assert!(claude_environment_login_present(
+            &profile,
+            &target_environment
+        ));
+    }
+
+    environment.insert("ANTHROPIC_API_KEY".into(), "key".into());
+    assert!(claude_environment_login_present(&profile, &environment));
+
+    environment.insert("ANTHROPIC_API_KEY".into(), " ".into());
+    environment.insert(CLAUDE_OAUTH_TOKEN_ENV.into(), "token".into());
+    assert!(claude_environment_login_present(&profile, &environment));
+
+    profile.kind = HarnessKind::Codex;
+    assert!(!claude_environment_login_present(&profile, &environment));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_apple_container_takes_macs_claude_keychain_login_unless_a_setup_token_does() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const KEYCHAIN_LOGIN: &[u8] =
+        br#"{"claudeAiOauth":{"accessToken":"keychain","refreshToken":"keychain-refresh","expiresAt":100}}"#;
+    const PREVIOUS_ACCOUNT_LOGIN: &[u8] =
+        br#"{"claudeAiOauth":{"accessToken":"previous","refreshToken":"previous","expiresAt":200}}"#;
+
+    struct KeychainExecutor {
+        calls: AtomicUsize,
+    }
+
+    impl CommandExecutor for KeychainExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert_eq!(command.program, "security");
+            assert_eq!(
+                command.args,
+                [
+                    "find-generic-password",
+                    "-s",
+                    "Claude Code-credentials",
+                    "-w"
+                ]
+            );
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(CommandOutput {
+                status: 0,
+                stdout: KEYCHAIN_LOGIN.to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let staged = directory.path().join("profile");
+    std::fs::create_dir(&staged).unwrap();
+    let profile = mj_core::config::HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Claude,
+        home: directory.path().join("claude"),
+        environment: Default::default(),
+        context_window_bytes: None,
+        legacy_subagents: Default::default(),
+        guardian_review_model: None,
+        codex_profile: None,
+    };
+    let backend = targets::TargetLocator::AppleContainer {
+        borrowed_from: None,
+        container_id: "hel-session".into(),
+    };
+    let executor = KeychainExecutor {
+        calls: AtomicUsize::new(0),
+    };
+
+    stage_claude_keychain_login(&profile, &staged, &backend, true, &executor).unwrap();
+    assert_eq!(executor.calls.load(Ordering::Relaxed), 0);
+    assert!(!staged.join(".credentials.json").exists());
+
+    stage_claude_keychain_login(&profile, &staged, &backend, false, &executor).unwrap();
+    assert_eq!(executor.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        std::fs::read(staged.join(".credentials.json")).unwrap(),
+        KEYCHAIN_LOGIN
+    );
+
+    // Freshness cannot distinguish a refreshed grant from another account.
+    // The current Keychain login stays authoritative even when an earlier
+    // staged copy has a later expiry.
+    std::fs::write(staged.join(".credentials.json"), PREVIOUS_ACCOUNT_LOGIN).unwrap();
+    stage_claude_keychain_login(&profile, &staged, &backend, false, &executor).unwrap();
+    assert_eq!(executor.calls.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        std::fs::read(staged.join(".credentials.json")).unwrap(),
+        KEYCHAIN_LOGIN
+    );
 }
 
 #[test]
@@ -2064,25 +2258,22 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     );
 }
 
-/// Runs a default bridge script with no harness installed, a fake `curl`
-/// that serves `installer`, and nothing else from the host's harnesses on
-/// PATH. Returns the script's stdout and stderr.
+/// Runs a default bridge script with `launcher` in the target's home and no
+/// harness on PATH. Returns the script's stdout and stderr.
 #[cfg(unix)]
-fn run_default_bridge_install(
+fn run_default_bridge(
     harness: mj_core::config::HarnessKind,
-    installer: &str,
+    launcher: &str,
+    script: &str,
 ) -> (String, String) {
     use std::os::unix::fs::PermissionsExt;
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join("fake-bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let curl = bin.join("curl");
-    std::fs::write(
-        &curl,
-        format!("#!/bin/sh\ncat <<'INSTALLER'\n{installer}\nINSTALLER\n"),
-    )
-    .unwrap();
-    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let executable = home.path().join(launcher);
+    std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    std::fs::write(&executable, script).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     let (command, arguments) = bridge_launch(harness, ExecutionPolicy::ConfiguredApprovals);
     let mut process = std::process::Command::new(command);
     process
@@ -2313,52 +2504,31 @@ fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
 }
 
 /// A Kimi launcher's installer lines on stdout reached the ACP transport and
-/// broke initialize (#1136). The installer's output goes to stderr, which the
-/// worker keeps, and the ACP server starts with a clean stdout.
+/// broke initialize (#1136). The managed path installs the pinned artifact
+/// before launch, so the default bridge starts the ACP server directly.
 #[cfg(unix)]
 // Hard-won: 2fe3b29: Kimi installer output contaminated ACP stdout
 #[test]
-fn kimi_default_bridge_sends_installer_output_to_stderr() {
-    let (stdout, stderr) = run_default_bridge_install(
+fn kimi_default_bridge_starts_installed_acp_with_clean_stdout() {
+    let (stdout, stderr) = run_default_bridge(
         mj_core::config::HarnessKind::Kimi,
-        r#"echo "==> Detected target: linux-x64"
-echo "==> Installing $KIMI_VERSION"
-mkdir -p "$HOME/.kimi-code/bin"
-printf '#!/bin/sh\necho "{\\"jsonrpc\\":\\"2.0\\",\\"args\\":\\"$*\\"}"\n' > "$HOME/.kimi-code/bin/kimi"
-chmod +x "$HOME/.kimi-code/bin/kimi""#,
+        ".kimi-code/bin/kimi",
+        "#!/bin/sh\nprintf '{\"jsonrpc\":\"2.0\",\"args\":\"%s\"}\\n' \"$*\"\n",
     );
     assert_eq!(stdout, "{\"jsonrpc\":\"2.0\",\"args\":\"acp\"}\n");
-    assert!(
-        stderr.contains("==> Detected target: linux-x64"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains(&format!(
-            "==> Installing {}",
-            mj_core::harness_runtime::KIMI_VERSION
-        )),
-        "{stderr}"
-    );
+    assert!(stderr.is_empty(), "{stderr}");
 }
 
 #[cfg(unix)]
 #[test]
-fn grok_default_bridge_sends_installer_output_to_stderr() {
-    let (stdout, stderr) = run_default_bridge_install(
+fn grok_default_bridge_starts_installed_acp_with_clean_stdout() {
+    let (stdout, stderr) = run_default_bridge(
         mj_core::config::HarnessKind::Grok,
-        r#"echo "==> Installing $1"
-mkdir -p "$HOME/.grok/bin"
-printf '#!/bin/sh\necho "{\\"jsonrpc\\":\\"2.0\\",\\"args\\":\\"$*\\"}"\n' > "$HOME/.grok/bin/grok"
-chmod +x "$HOME/.grok/bin/grok""#,
+        ".grok/bin/grok",
+        "#!/bin/sh\nprintf '{\"jsonrpc\":\"2.0\",\"args\":\"%s\"}\\n' \"$*\"\n",
     );
     assert_eq!(stdout, "{\"jsonrpc\":\"2.0\",\"args\":\"agent stdio\"}\n");
-    assert!(
-        stderr.contains(&format!(
-            "==> Installing {}",
-            mj_core::harness_runtime::GROK_VERSION
-        )),
-        "{stderr}"
-    );
+    assert!(stderr.is_empty(), "{stderr}");
 }
 
 #[test]
@@ -5567,10 +5737,20 @@ mod container_runtime {
             .1;
         assert_eq!(launch.harness_runtime, HarnessRuntimePolicy::Ambient);
         launch.cwd = root.to_path_buf();
-        launch.environment.insert(
-            "PATH".into(),
-            root.join("node_modules/.bin").display().to_string(),
+        let bin = root.join("node_modules/.bin");
+        executable(
+            &bin.join("node"),
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.22.1; fi\n",
         );
+        for command in ["npm", "npx"] {
+            executable(
+                &bin.join(command),
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 11.6.2; fi\n",
+            );
+        }
+        launch
+            .environment
+            .insert("PATH".into(), bin.display().to_string());
         launch.environment.insert(
             "XDG_CACHE_HOME".into(),
             root.join("cache").display().to_string(),

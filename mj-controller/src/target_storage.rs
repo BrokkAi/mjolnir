@@ -241,7 +241,8 @@ pub fn storage_host(locator: &TargetLocator) -> String {
         TargetLocator::AwsEc2 { ssh, .. }
         | TargetLocator::SshBare { ssh, .. }
         | TargetLocator::SshPodman { ssh, .. }
-        | TargetLocator::SshDocker { ssh, .. } => {
+        | TargetLocator::SshDocker { ssh, .. }
+        | TargetLocator::SshAppleContainer { ssh, .. } => {
             storage_host_of_destination(Some(&ssh.destination))
         }
     }
@@ -260,7 +261,9 @@ fn host_path(locator: &TargetLocator, path: &str) -> Option<String> {
         TargetLocator::LocalDocker { .. } | TargetLocator::SshDocker { .. } => {
             Some(ContainerStorage::Docker.path().to_owned())
         }
-        TargetLocator::AppleContainer { .. } => None,
+        // Apple's runtime keeps its storage in a VM disk image on whichever
+        // host runs it, which this board does not measure.
+        TargetLocator::AppleContainer { .. } | TargetLocator::SshAppleContainer { .. } => None,
     }
 }
 

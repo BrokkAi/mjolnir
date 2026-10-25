@@ -76,6 +76,9 @@ pub fn target_recovery_plan(
     if is_borrowed(locator) {
         return Ok(None);
     }
+    // Apple container keeps a stopped container, unlike a Podman or Docker one
+    // whose daemon restarts it, so it has no recovery plan; a remote Docker
+    // host recovers exactly as a local one does.
     if let TargetLocator::SshDocker {
         ssh, container_id, ..
     } = locator
@@ -105,6 +108,7 @@ pub fn target_recovery_plan(
                 .purpose("start stopped Mjolnir session container"),
         ),
         TargetLocator::SshDocker { .. } => unreachable!("handled above"),
+        TargetLocator::SshAppleContainer { .. } => return Ok(None),
         TargetLocator::LocalDocker { container_id, .. } => (
             CommandSpec::new(
                 "sh",

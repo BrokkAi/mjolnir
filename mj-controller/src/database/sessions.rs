@@ -14,6 +14,7 @@ pub fn save_new_session(
     session: &SessionRecord,
     container_size: Option<(String, HostContainerSize)>,
     remember_launch_choices: bool,
+    remember_container_size: bool,
 ) -> Result<()> {
     let session = session.clone();
     submit_database_write("save_new_session", move |_| {
@@ -22,6 +23,7 @@ pub fn save_new_session(
             &session,
             container_size,
             remember_launch_choices,
+            remember_container_size,
         )
     })
 }
@@ -31,12 +33,13 @@ pub(super) fn save_new_session_to(
     session: &SessionRecord,
     container_size: Option<(String, HostContainerSize)>,
     remember_launch_choices: bool,
+    remember_container_size: bool,
 ) -> Result<()> {
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     validate_session_record(session)?;
     insert_session(&tx, session)?;
-    if let Some((host, size)) = container_size.filter(|_| remember_launch_choices) {
+    if let Some((host, size)) = container_size.filter(|_| remember_container_size) {
         write_host_container_size(&tx, &host, size)?;
     }
     let policy = session.subagents.clone().unwrap_or_default();

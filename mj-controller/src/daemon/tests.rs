@@ -187,6 +187,33 @@ async fn restart_target_probe_only_allows_fallback_for_a_proven_missing_target()
             .unwrap();
     assert_eq!(availability, restart::RestartTargetAvailability::Reachable);
     assert!(!restart::fallback_is_safe(availability));
+
+    let mut apple = runtime_test_session("apple-session", "workspace", SessionState::Closing);
+    apple.target_template_id = "mac-apple".into();
+    apple.target = Some(mj_core::state::TargetLocator::SshAppleContainer {
+        borrowed_from: None,
+        host: "mac.test".into(),
+        container_id: mj_core::targets::resource_name("apple-session").unwrap(),
+    });
+    controller.config.targets.insert(
+        "mac-apple".into(),
+        serde_json::from_value(serde_json::json!({
+            "kind": "ssh-apple-container",
+            "host": "mac.test",
+            "image": "example.invalid/agent:latest"
+        }))
+        .unwrap(),
+    );
+    controller.state.sessions.insert(apple.id.clone(), apple);
+    // Hard-won: f6b68bcc9: SSH failure during Apple Restart was not classified as unreachable.
+    let unreachable =
+        restart::restart_target_availability(&controller, "apple-session", &StatusExecutor(255))
+            .unwrap();
+    assert_eq!(
+        unreachable,
+        restart::RestartTargetAvailability::Unreachable,
+        "a lost SSH connection must preserve the retained Apple container"
+    );
 }
 
 // Hard-won: 7b694803: Alt-X cancelled target teardown after its verified-checkpoint gate.
@@ -1767,6 +1794,15 @@ fn released_protocol_transcripts() -> Vec<ProtocolTranscript> {
             responses: [
                 r#"{"protocol_version":61,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-10-23T00:00:00Z","build_version":"2.55.0","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
                 r#"{"protocol_version":61,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
+            ],
+        },
+        ProtocolTranscript {
+            protocol_version: 62,
+            daemon_build: "2.55.0",
+            expected_requests: requests(62),
+            responses: [
+                r#"{"protocol_version":62,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-10-25T00:00:00Z","build_version":"2.55.0","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
+                r#"{"protocol_version":62,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
             ],
         },
     ]
@@ -4887,6 +4923,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
     let create = |title: &str| {
         DaemonAction::StartCreateSession(mj_client::daemon::CreateSessionRequest {
             remember_launch_choices: true,
+            remember_container_size: true,
             review: None,
             no_project_memory: false,
             no_github_events: false,

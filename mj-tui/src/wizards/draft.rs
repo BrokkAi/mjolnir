@@ -74,6 +74,10 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
     fn sizing_error(&self) -> Option<&str>;
     fn resource_editor(&self) -> &ResourceEditor;
     fn resource_editor_mut(&mut self) -> &mut ResourceEditor;
+    /// The explicit save-as-default checkbox only exists on new sessions.
+    fn remember_container_size(&self) -> Option<bool> {
+        None
+    }
     fn aws_options(&self) -> &BTreeMap<String, Vec<SessionResourceAllocation>>;
     /// The three sizing fields at once, so a caller can read the cached AWS
     /// sizes while writing the chosen allocation and the sizing error.
@@ -261,6 +265,9 @@ impl WizardDraft for NewWizard {
     fn resource_editor_mut(&mut self) -> &mut ResourceEditor {
         &mut self.resource_editor
     }
+    fn remember_container_size(&self) -> Option<bool> {
+        Some(self.remember_container_size)
+    }
     fn aws_options(&self) -> &BTreeMap<String, Vec<SessionResourceAllocation>> {
         &self.aws_options
     }
@@ -344,6 +351,10 @@ impl WizardDraft for NewWizard {
         }
         if self.step == WizardStep::NewBundle {
             return Ok(dashboard.activate_new_bundle_control(self, id));
+        }
+        if self.step == WizardStep::Target && id == WizardControl::RememberContainerSize {
+            self.remember_container_size = !self.remember_container_size;
+            return Ok(dashboard.keep(self));
         }
         if self.step == WizardStep::Bundle && id == WizardControl::Add {
             dashboard.invalidate_new_remote_preflight(&mut self);
@@ -454,6 +465,16 @@ impl WizardDraft for NewWizard {
         dashboard: &mut DashboardState,
         interaction: &Interaction<WizardControl>,
     ) {
+        if self.step == WizardStep::Target
+            && matches!(
+                interaction,
+                Interaction::Toggle(WizardControl::RememberContainerSize)
+            )
+        {
+            self.remember_container_size = !self.remember_container_size;
+            dashboard.record_event_handled();
+            return;
+        }
         if self.step == WizardStep::Review && self.subagents.apply(interaction).is_some() {
             dashboard.record_event_handled();
             return;

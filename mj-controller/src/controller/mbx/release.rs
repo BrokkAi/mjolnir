@@ -462,7 +462,8 @@ fn workspace_root(
         targets::TargetLocator::LocalPodman { .. }
         | targets::TargetLocator::LocalDocker { .. }
         | targets::TargetLocator::SshPodman { .. }
-        | targets::TargetLocator::SshDocker { .. } => {
+        | targets::TargetLocator::SshDocker { .. }
+        | targets::TargetLocator::SshAppleContainer { .. } => {
             let workspace = session.container_workspace.clone()?;
             (workspace == targets::new_container_workspace(&session.id).ok()?).then_some(())?;
             Some((host_for_locator(backend)?, workspace))

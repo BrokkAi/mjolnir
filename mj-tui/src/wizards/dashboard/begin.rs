@@ -90,6 +90,7 @@ impl DashboardState {
             project_history: Vec::new(),
             project_history_index: 0,
             resource_allocation: None,
+            remember_container_size: false,
             aws_options: BTreeMap::new(),
             sizing_error: None,
             resource_editor: ResourceEditor::default(),

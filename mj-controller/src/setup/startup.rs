@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use super::{
     DiscoveredHome, GithubRepository, add_machine_runtimes, build_config,
-    discover_github_repository, discover_profiles, probe_machines,
+    discover_github_repository, discover_profiles, probe_machines, reference_secret_api_keys,
 };
 use crate::doctor::{
     CheckStatus, DoctorCheck, DoctorOptions, current_apple_platform, probe_executor,
@@ -36,6 +36,11 @@ impl SetupReport {
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
+        } else {
+            lines.push(
+                "No installed coding agent was found. Mjolnir can install and sign in to one for you."
+                    .into(),
+            );
         }
         if let Some(repository) = &self.repository {
             lines.push(format!("Project: {repository}."));
@@ -103,7 +108,8 @@ fn run_setup_with_discovery(
     atomic_write(&marker, b"pending\n")?;
     let (homes, repository) = discover()?;
     ensure!(!cancelled(), "setup cancelled");
-    let discovered = build_config(&homes, repository.as_ref());
+    let mut discovered = build_config(&homes, repository.as_ref());
+    reference_secret_api_keys(&mut discovered, config_path);
     Config::update_to(config_path, |latest| {
         // Choose identifiers against the latest file under its transaction lock.
         // This preserves simultaneous Settings edits and makes reruns additive.
@@ -145,7 +151,8 @@ fn add_profiles_for(
     homes: &[DiscoveredHome],
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<String>> {
-    let discovered = super::profiles_config(homes);
+    let mut discovered = super::profiles_config(homes);
+    reference_secret_api_keys(&mut discovered, config_path);
     ensure!(!cancelled(), "profile detection cancelled");
     // Leave the file untouched on the common launch that finds nothing new.
     if Config::load_from(config_path)?

@@ -84,10 +84,10 @@ pub trait SubagentBackend: Send + Sync {
             profile, model, refresh,
         ))
     }
-    /// The profiles a parent running on `parent_profile` may start a sub-agent
-    /// on, each with its discovered choices and remaining quota. It waits for
-    /// a discovery the daemon has not finished; a profile whose discovery
-    /// fails is reported as unavailable rather than failing the whole answer.
+    /// Every enabled profile a parent running on `parent_profile` may use for
+    /// a sub-agent, with its discovered choices and remaining quota. It waits
+    /// for pending discovery; a profile whose discovery fails is reported as
+    /// unavailable rather than failing the whole answer.
     fn subagent_candidates(
         &self,
         _parent_profile: String,
@@ -96,7 +96,7 @@ pub trait SubagentBackend: Send + Sync {
     }
     /// Every enabled profile usable for a user-created session, with its
     /// discovered choices and remaining quota. This is independent of the
-    /// profile set allowed for sub-agent use.
+    /// enabled profile set available for sub-agent use.
     fn session_profile_candidates(&self) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
         Box::pin(async { anyhow::bail!("session profile selection is unavailable") })
     }

@@ -444,7 +444,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │                                                                                              │
   │   claude-1                        7 settings  ›                            Add               │
   │   codex-1                         7 settings  ›                            Detect profiles   │
-  │   codex-2                         7 settings  ›                                              │
+  │   codex-2                         7 settings  ›                            Set up managed    │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -840,3 +840,36 @@ saved theme: Terminal Dark
 Terminal Dark after save acknowledgement: rendered colors: text fg=Reset bg=Reset; accent fg=Indexed(6)
 saved theme: Terminal Light
 Terminal Light after save acknowledgement: rendered colors: text fg=Reset bg=Reset; accent fg=Indexed(4)
+
+=== managed agent buttons (100x30) ===
+
+
+  ╭ ×  Set up a managed agent  ──────────────────────────────────────────────────────────────────╮
+  │ Choose an agent. Mjolnir will install its exact pinned version and open its sign-in flow.    │
+  │                                                                                              │
+  │   Codex                                                                                      │
+  │ ChatGPT subscription or an OpenAI-compatible provider                                        │
+  │   Claude Code                                                                                │
+  │ Claude Pro, Max, Team, or an Anthropic API key                                               │
+  │   Kimi Code                                                                                  │
+  │ Kimi Code subscription                                                                       │
+  │   Grok Build                                                                                 │
+  │ Grok Build subscription                                                                      │
+  │   Muse Code                                                                                  │
+  │ Muse account; container use is supported                                                     │
+  │   OpenCode                                                                                   │
+  │ OpenCode provider login or an API key                                                        │
+  │   MiMo Code                                                                                  │
+  │ MiMo Code account                                                                            │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │ Where it runs is chosen when you create a session. Use a local Podman, Docker, or Apple      │
+  │ container when you want the agent isolated from your normal host account.                    │
+  │                                                                                              │
+  │   Back     Set up and sign in                                                                │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+managed chooser Back returns to Agent Profiles

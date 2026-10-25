@@ -49,7 +49,8 @@ matter, but only `fixable` means the doctor loop has not converged.
 If `config.toml` does not exist, run `mj` and open **prefix+s Settings** to add or detect
 an agent profile. Local target choices are supplied automatically.
 Managed container and EC2 sessions also need a bundle; a bare session selects
-an existing Git project directory instead.
+an existing directory instead. Only an SSH bare directory must be a committed
+Git project.
 
 For a TOML error, fix the exact path and type named by `mj doctor`. Mjolnir's
 schema rejects unknown fields rather than silently ignoring a misspelling. See
@@ -140,7 +141,8 @@ session. See [Workspaces and bundles](/workspaces-bundles/).
 Mjolnir starts the account's shell once per worker to learn the environment a
 session should have, and it starts it the way a terminal does: as an interactive
 login shell. The startup files a terminal reads — `~/.zprofile` and `~/.zshrc`
-for zsh, `~/.bash_profile` and `~/.bashrc` for bash — are read too, so a tool
+for zsh; `~/.bash_profile` and `~/.bashrc` for bash; or `~/.tcshrc`/`~/.cshrc`
+and `~/.login` for tcsh/csh — are read too, so a tool
 that a version manager such as nvm, pyenv, asdf or mise puts on `PATH` is
 visible to sessions.
 
@@ -165,13 +167,13 @@ After changing a profile's environment, restart the worker or stop and resume
 the session; an already running worker does not continuously reread shell
 startup files. Bare sessions on this machine, SSH, and EC2 do not launch an
 ambient harness from this path: they use the exact Mjolnir-managed version,
-while `PATH` supplies its installer prerequisites. These targets require
-Node.js 22 and npm for Codex, Claude, and MiMo Code, curl and Bash for Kimi and
-Grok, or curl and tar for Muse and OpenCode. DSH is the exception: it has no
+Node-based harnesses reuse Node.js 22 or newer with npm and npx when present;
+otherwise Mjolnir downloads its pinned Node.js itself. Kimi, Grok, Muse, and
+OpenCode likewise download and verify their pinned artifacts without requiring
+`curl`, `tar`, or a vendor shell installer. DSH is the exception: it has no
 managed version and is never installed, and its launch needs `dsh-acp` on
-`PATH` or Node.js 22 with npm and npx to fetch the pinned npm package. Install
-prerequisites on the host yourself; Mjolnir never invokes sudo for harness
-setup.
+`PATH` or the compatible/managed Node runtime for npm and npx. Mjolnir never
+invokes sudo for harness setup.
 
 Container images must expose required tools on their ordinary image `PATH`.
 Agent-requested `!` shell commands use `bash -lc`, so their environment can
@@ -232,8 +234,14 @@ Then follow the target-specific result:
   working OverlayFS support on the daemon's filesystem host. Run `docker info`
   and follow [Docker for Mjolnir](/docker/).
 - **Apple container:** the controller must be Apple silicon on macOS 26 or
-  newer. If doctor reports a stopped service, run `container system start`.
-  See [Apple container](/apple-container/).
+  newer. The daemon starts an installed service automatically; if doctor still
+  reports it stopped, run `container system start` and review its output. See
+  [Apple container](/apple-container/).
+- **Apple container over SSH:** run `ssh <destination> container --version`
+  and `ssh <destination> container system status` as the configured user.
+  Install the signed package, start the service, use macOS 26 or newer on Apple
+  silicon, and make sure noninteractive SSH can find `container` on `PATH`. See
+  [Apple container](/apple-container/).
 - **SSH Podman:** run the Podman prerequisite and image checks on the remote
   host as the same user selected by SSH. See [SSH and SSH Podman](/ssh/).
 - **EC2:** verify the configured AWS profile, region, launch template, SSH

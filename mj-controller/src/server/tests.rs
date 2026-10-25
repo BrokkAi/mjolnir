@@ -1826,7 +1826,7 @@ async fn a_bare_preflight_validation_failure_is_actionable_without_its_details()
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
         serde_json::json!({
-            "error": "project validation failed; check that the directory exists, is accessible, and contains a Git repository with a valid HEAD"
+            "error": "project validation failed; check that the directory exists and is accessible, and that Git can inspect it if it is a Git project"
         })
     );
     assert!(!String::from_utf8_lossy(&body).contains("/private/project"));
@@ -2687,6 +2687,7 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
         remember_launch_choices: true,
+        remember_container_size: true,
         review: None,
         no_project_memory: false,
         no_github_events: false,
@@ -2739,20 +2740,40 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
 fn new_action_validates_allocation_kind_and_reported_container_limits() {
     let (config, state) = sample_config_state();
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
-    snapshot
+    let podman = snapshot
         .targets
         .iter_mut()
         .find(|target| target.id == "podman")
-        .unwrap()
-        .container_host_limits = Some(mj_core::state::HostContainerSize {
+        .unwrap();
+    podman.container_host_limits = Some(mj_core::state::HostContainerSize {
         cpus: 8,
         memory_bytes: 32 * 1024 * 1024 * 1024,
+    });
+    podman.container_capacity = Some(mj_core::state::HostContainerCapacity {
+        total: mj_core::state::HostContainerSize {
+            cpus: 8,
+            memory_bytes: 32 * 1024 * 1024 * 1024,
+        },
+        reserved: mj_core::state::HostContainerSize {
+            cpus: 0,
+            memory_bytes: 0,
+        },
+        committed: mj_core::state::HostContainerSize {
+            cpus: 4,
+            memory_bytes: 12 * 1024 * 1024 * 1024,
+        },
+        remaining: mj_core::state::HostContainerSize {
+            cpus: 4,
+            memory_bytes: 20 * 1024 * 1024 * 1024,
+        },
+        complete: true,
     });
     let action =
         |target_id: &str,
          resource_allocation: Option<mj_core::state::SessionResourceAllocation>| {
             ControllerAction::New {
                 remember_launch_choices: true,
+                remember_container_size: true,
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
@@ -2801,6 +2822,19 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
                 Some(mj_core::state::SessionResourceAllocation::Container {
                     cpus: 9,
                     memory_bytes: 16 * 1024 * 1024 * 1024,
+                }),
+            ),
+            &snapshot,
+        )
+        .is_err()
+    );
+    assert!(
+        validate_action(
+            &action(
+                "podman",
+                Some(mj_core::state::SessionResourceAllocation::Container {
+                    cpus: 5,
+                    memory_bytes: 8 * 1024 * 1024 * 1024,
                 }),
             ),
             &snapshot,

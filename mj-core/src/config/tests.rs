@@ -1665,9 +1665,6 @@ fn a_legacy_subagents_enabled_key_still_loads_and_is_dropped_on_save() {
 
     let mut config = Config::load_from(&path).unwrap();
     assert_eq!(config.subagents.max_concurrent, 6);
-    assert!(config.subagents.eligible_profiles.is_empty());
-    // profile_is_eligible no longer consults the deprecated flag at all.
-    assert!(config.subagents.profile_is_eligible("work", "work"));
 
     config.save_to(&path).unwrap();
     let saved = fs::read_to_string(&path).unwrap();
@@ -1708,9 +1705,6 @@ fn version_eight_enables_parent_only_subagents_by_default() {
 
     assert_eq!(config.version, CONFIG_VERSION);
     assert_eq!(config.subagents.max_concurrent, 6);
-    assert!(config.subagents.eligible_profiles.is_empty());
-    assert!(config.subagents.profile_is_eligible("work", "work"));
-    assert!(!config.subagents.profile_is_eligible("work", "other"));
 }
 
 #[test]
@@ -1934,13 +1928,25 @@ fn legacy_build_budgets_are_ignored_without_changing_host_placement() {
     );
 }
 
+#[test]
+fn legacy_subagent_profile_allowlist_loads_and_is_dropped_on_save() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!("version = {CONFIG_VERSION}\n[subagents.eligible_profiles]\nmissing = true\n"),
+    )
+    .unwrap();
+    let config = Config::load_from(&path).unwrap();
+    config.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(!saved.contains("eligible_profiles"), "{saved}");
+}
+
 // Hard-won: dcc60664: a disabled eligible profile stopped every mj command
 #[test]
-fn a_disabled_eligible_subagent_profile_loads_instead_of_failing() {
-    // A profile that is both disabled and listed for sub-agent use must not
-    // stop the daemon from starting. `mj doctor` warns about it, and the
-    // consumers that offer profiles for delegation exclude it because it is
-    // disabled (they filter on `enabled`).
+fn a_disabled_profile_loads_instead_of_failing() {
+    // Disabled profiles do not stop the daemon from starting.
     let config = toml::from_str::<Config>(&format!(
         "version = {CONFIG_VERSION}\n\
          [subagents.eligible_profiles]\nwork = true\n\
@@ -2480,6 +2486,80 @@ fn a_version_ten_config_becomes_machines_and_runtimes_on_the_next_save() {
     assert_eq!(saved.matches("build_cache").count(), 1, "{saved}");
     // A second load of the rewritten file is the same configuration.
     assert_eq!(Config::load_from(&path).unwrap(), config);
+}
+
+#[test]
+fn an_apple_container_runtime_names_an_ssh_machine_and_survives_a_round_trip() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let source = format!(
+        r#"version = {CONFIG_VERSION}
+[machines.mac]
+kind = "ssh"
+host = "mac.example.com"
+[targets.mac-apple]
+kind = "apple-container"
+machine = "mac"
+image = "example.invalid/agent:latest"
+"#
+    );
+    fs::write(&path, &source).unwrap();
+    let config = Config::load_from(&path).unwrap();
+    let TargetTemplate::SshAppleContainer { ssh, container } = &config.targets["mac-apple"] else {
+        panic!("apple-container on an ssh machine must fuse into the remote kind");
+    };
+    assert_eq!(ssh.host, "mac.example.com");
+    assert_eq!(container.image, "example.invalid/agent:latest");
+    // The runtime half is still `apple-container`, so a saved file never
+    // mentions the fused kind.
+    assert_eq!(
+        runtime_kind_name(&config.targets["mac-apple"]),
+        "apple-container"
+    );
+    config.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("kind = \"apple-container\""), "{saved}");
+    assert!(saved.contains("machine = \"mac\""), "{saved}");
+    assert!(!saved.contains("ssh-apple-container"), "{saved}");
+    assert_eq!(Config::load_from(&path).unwrap().targets, config.targets);
+}
+
+/// The engine is the same whether it runs here or over SSH, so the remote
+/// runtime accepts and refuses exactly what the local one does.
+#[test]
+fn a_remote_apple_container_target_validates_like_the_local_one() {
+    let parse = |kind: &str, extra: &str| -> Result<TargetTemplate> {
+        Ok(toml::from_str(&format!(
+            r#"kind = "{kind}"
+host = "mac.example.com"
+image = "example.invalid/agent:latest"
+{extra}"#
+        ))?)
+    };
+    for (kind, id) in [
+        ("ssh-apple-container", "mac-apple"),
+        ("apple-container", "apple"),
+    ] {
+        let target = parse(kind, "").unwrap();
+        target.validate(id).unwrap();
+        assert!(target.container().is_some(), "{kind}");
+        // Apple's runtime keeps its workspace inside its VM disk image, so
+        // Podman's workspace-storage override is refused on both.
+        let error = parse(kind, "workspace_storage = { kind = \"container-layer\" }")
+            .unwrap()
+            .validate(id)
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("only supported by Podman"),
+            "{kind}: {error:#}"
+        );
+        // Both accept `platform`, which only reaches the engine as
+        // `--platform`.
+        parse(kind, "platform = \"linux/arm64\"")
+            .unwrap()
+            .validate(id)
+            .unwrap_or_else(|error| panic!("{kind}: {error:#}"));
+    }
 }
 
 #[test]

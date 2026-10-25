@@ -16,13 +16,13 @@ use crate::setup::{
     DiscoveredHome, discover_harness_homes_with_executor, harness_is_authenticated_with_executor,
 };
 use crate::targets::{
-    BoundedProcessExecutor, CommandExecutor, CommandSpec, CommandTimedOut,
-    ContainerTemplate as RuntimeContainerTemplate, DockerUnavailable, PODMAN_DOCUMENTATION_URL,
-    PodmanPostcondition, ProcessExecutor, SshTarget as RuntimeSshTarget,
+    APPLE_CONTAINER_MINIMUM_MACOS, BoundedProcessExecutor, CommandExecutor, CommandSpec,
+    CommandTimedOut, ContainerTemplate as RuntimeContainerTemplate, DockerUnavailable,
+    PODMAN_DOCUMENTATION_URL, PodmanPostcondition, ProcessExecutor, SshTarget as RuntimeSshTarget,
     TargetTemplate as RuntimeTargetTemplate, failed_podman_postcondition, local_docker_vm_share,
     podman_probe_observation, run_setup_smoke_test, ssh_command, ssh_connectivity_probe,
-    ssh_validation_command, verify_local_docker, verify_local_podman, verify_ssh_docker,
-    verify_ssh_podman,
+    ssh_validation_command, verify_local_docker, verify_local_podman, verify_ssh_apple_container,
+    verify_ssh_docker, verify_ssh_podman,
 };
 use mj_core::config::{
     Config, ContainerTemplate, HarnessKind, HarnessProfile, TargetTemplate, config_path,
@@ -35,7 +35,9 @@ use mj_core::credentials::login_command;
 // container, and pulling the multi-gigabyte agent-dev image to do that would be
 // a poor trade.
 const DEFAULT_CONTAINER_IMAGE: &str = "ubuntu:24.04";
-const APPLE_CONTAINER_INSTALL_URL: &str = "https://github.com/apple/container#initial-install";
+/// The official signed package Apple publishes for its container runtime.
+pub(crate) const APPLE_CONTAINER_INSTALL_URL: &str =
+    "https://github.com/apple/container#initial-install";
 
 /// How long a single prerequisite probe may take before doctor reports it as a
 /// fixable check instead of waiting for it.
@@ -198,7 +200,7 @@ pub fn run_with_config_path(
         checks.push(check);
     }
     checks.extend(harness_checks(config, executor));
-    checks.extend(subagent_eligibility_checks(config));
+    checks.extend(subagent_policy_checks(config));
     checks.extend(secret_checks(config, config_path));
     let podman = podman_checks(config, executor, options.smoke, &apple_platform);
     let docker = docker_checks(config, executor, options.smoke);
@@ -220,6 +222,7 @@ pub fn run_with_config_path(
     checks.extend(ssh_bare_checks(config, executor));
     checks.extend(ssh_podman_checks(config, executor, options.smoke));
     checks.extend(ssh_docker_checks(config, executor, options.smoke));
+    checks.extend(ssh_apple_container_checks(config, executor, options.smoke));
     checks.extend(machine_runtime_checks(config, executor));
     checks.extend(storage_checks(config, executor));
     checks.extend(build_cache_checks(offered, executor));
@@ -325,12 +328,10 @@ fn build_cache_release_check(
 
 /// Report the environment a session worker on this machine starts from.
 ///
-/// The profile checks cover harness homes and authentication, so doctor used to
-/// call a Node-based profile ready while every launch failed: the account's
-/// shell never put Node on the `PATH` the worker receives. Show the shell, how
-/// long its startup took, and the Node tools a session will find. This stays a
-/// warning rather than a fixable failure when they are missing, because Muse,
-/// OpenCode, Kimi and Grok sessions do not need Node.
+/// Show the shell, how long its startup took, and the Node tools a session will
+/// find. A missing Node runtime is not fatal: the worker installs its pinned
+/// Node distribution with curl before a Node-based harness starts. Doctor only
+/// warns when neither a complete system runtime nor the downloader is present.
 #[cfg(unix)]
 fn session_environment_check() -> Option<DoctorCheck> {
     let started = std::time::Instant::now();
@@ -379,6 +380,7 @@ fn session_environment_check_from(
     let node = resolve_on_path(path, "node");
     let npm = resolve_on_path(path, "npm");
     let npx = resolve_on_path(path, "npx");
+    let curl = resolve_on_path(path, "curl");
     let found = [("node", &node), ("npm", &npm), ("npx", &npx)];
     let missing = found
         .iter()
@@ -398,17 +400,30 @@ fn session_environment_check_from(
             ),
         );
     }
+    if curl.is_some() {
+        return DoctorCheck::ready(
+            "session.environment",
+            "Session environment",
+            format!(
+                "Sessions start {shell_name} as an interactive login shell ({milliseconds} ms); \
+                 their PATH ({entries} entries) has no {}. Mjolnir will install its pinned \
+                 Node.js, npm, and npx with curl before a Node-based harness starts.",
+                join_english(&missing),
+            ),
+        );
+    }
     DoctorCheck::warning(
         "session.environment",
         "Session environment",
         format!(
             "Sessions start {shell_name} as an interactive login shell ({milliseconds} ms), but \
-             their PATH ({entries} entries) has no {}. Codex, Claude and MiMo Code sessions \
-             install a managed harness with Node.js and will fail until it is there.",
+             their PATH ({entries} entries) has no {}, and it has no curl for Mjolnir to install \
+             its pinned Node.js.",
             join_english(&missing),
         ),
-        "Install Node.js 22 or newer where your shell startup files set PATH (~/.zprofile or \
-         ~/.zshrc for zsh, ~/.bash_profile or ~/.bashrc for bash), or set an explicit \
+        "Install curl or Node.js 22 or newer with npm and npx where your shell startup files set \
+         PATH (~/.zprofile or ~/.zshrc for zsh; ~/.bash_profile or ~/.bashrc for bash; \
+         ~/.tcshrc or ~/.cshrc and ~/.login for tcsh/csh), or set an explicit \
          [profiles.<id>.environment] PATH, then restart the worker or resume the session.",
     )
 }
@@ -553,9 +568,9 @@ the latest `mj doctor --json` output.\n\n\
 A local bare runtime runs the agent directly on this machine. It needs the\n\
 native `mj-worker` installed beside `mj`; the release installer and the npm\n\
 package include it. The worker installs the pinned harness version itself.\n\
-Codex and Claude need Node.js 22 or newer and npm on `PATH`. Kimi and Grok\n\
-need curl and Bash. Muse needs curl and tar. Mjolnir does not install these\n\
-prerequisites.\n\n\
+Node-based harnesses reuse Node.js 22 or newer with npm and npx when present;\n\
+otherwise Mjolnir installs its own pinned Node.js and needs curl. Kimi and Grok\n\
+need curl and Bash. Mjolnir does not install those shell prerequisites.\n\n\
 ## Linux container-runtime postconditions\n\n{}\n\n{}",
             crate::targets::PODMAN_DOCUMENTATION,
             crate::targets::DOCKER_DOCUMENTATION
@@ -586,9 +601,10 @@ the latest `mj doctor --json` output.\n\n\
 A local bare runtime runs the agent directly on this machine. It needs the\n\
 native `mj-worker` installed beside `mj`; the release installer, npm package,\n\
 and Homebrew formula include it (Homebrew keeps both binaries in libexec).\n\
-The worker installs the pinned harness version itself. Codex and Claude need\n\
-Node.js 22 or newer and npm on `PATH`. Kimi and Grok need curl and Bash.\n\
-Muse needs curl and tar. Mjolnir does not install these prerequisites.\n\n\
+The worker installs the pinned harness version itself. Node-based harnesses\n\
+reuse Node.js 22 or newer with npm and npx when present; otherwise Mjolnir\n\
+installs its own pinned Node.js and needs curl. Kimi and Grok need curl and\n\
+Bash. Mjolnir does not install those shell prerequisites.\n\n\
 ## Podman\n\n\
 A local Podman target on macOS uses a rootless `podman machine`. Install\n\
 Podman and create the machine:\n\n\
@@ -814,7 +830,7 @@ fn harness_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
         .iter()
         .map(|(id, profile)| {
             let mut check = harness_profile_check(id, profile, executor);
-            check.detail = format!("{} {}", profile_summary(config, id, profile), check.detail);
+            check.detail = format!("{} {}", profile_summary(profile), check.detail);
             check
         })
         .collect()
@@ -955,20 +971,14 @@ fn aws_harness_authentication_check(
 }
 
 /// One sentence saying what a profile is: its harness, where its quota comes
-/// from, and whether other sessions' sub-agents may use it. Quota ranking and
+/// from, and whether sub-agents may use it. Quota ranking and
 /// delegation both depend on these, and none of them shows in the profile's
 /// own table in config.toml.
-fn profile_summary(config: &Config, id: &str, profile: &HarnessProfile) -> String {
-    let delegation = if config
-        .subagents
-        .eligible_profiles
-        .get(id)
-        .copied()
-        .unwrap_or(false)
-    {
-        "any session's sub-agents may use it"
+fn profile_summary(profile: &HarnessProfile) -> String {
+    let delegation = if profile.enabled {
+        "sub-agents may use it"
     } else {
-        "only its own sessions' sub-agents may use it"
+        "disabled, so sub-agents do not use it"
     };
     format!(
         "{}; {}; {delegation}.",
@@ -1107,41 +1117,12 @@ fn plain_text_credential_check(
     ))
 }
 
-/// The sub-agent policy in one line, then a warning for each profile that is
-/// both listed for sub-agent use and disabled.
-///
-/// The daemon keeps running with such a profile and simply does not offer it
-/// to a parent, because the delegation candidates and the spawn gate both
-/// require an enabled profile. This surfaces the contradiction so the eligible
-/// list and the profile's `enabled` flag can be reconciled. An eligible id
-/// that names no profile never reaches here: the configuration fails to load,
-/// and the configuration check reports it.
-fn subagent_eligibility_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
+/// Report the shared sub-agent limit and enabled-profile behavior.
+fn subagent_policy_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
     let Ok(config) = config else {
         return Vec::new();
     };
-    let mut checks = vec![subagent_policy_check(config)];
-    checks.extend(
-        config
-            .subagents
-            .eligible_profiles
-            .iter()
-            .filter(|(_, eligible)| **eligible)
-            .filter_map(|(id, _)| match config.profiles.get(id) {
-                Some(profile) if !profile.enabled => Some(DoctorCheck::warning(
-                    format!("subagents.{id}"),
-                    format!("Sub-agent profile {id}"),
-                    format!(
-                        "Profile {id:?} is listed in [subagents.eligible_profiles] but is disabled, so it is not offered for sub-agent use."
-                    ),
-                    format!(
-                        "Re-enable profile {id:?}, or remove it from [subagents.eligible_profiles]."
-                    ),
-                )),
-                _ => None,
-            }),
-    );
-    checks
+    vec![subagent_policy_check(config)]
 }
 
 /// How many sub-agents a session may start, and on which profiles. Whether a
@@ -1149,19 +1130,8 @@ fn subagent_eligibility_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
 /// a global policy, so this check only describes the shared limits.
 fn subagent_policy_check(config: &Config) -> DoctorCheck {
     let subagents = &config.subagents;
-    let eligible = subagents
-        .eligible_profiles
-        .iter()
-        .filter(|(_, eligible)| **eligible)
-        .map(|(id, _)| id.as_str())
-        .collect::<Vec<_>>();
-    let others = if eligible.is_empty() {
-        "no other profile".to_owned()
-    } else {
-        eligible.join(", ")
-    };
     let detail = format!(
-        "Claude, Codex, and DSH sessions may opt in, up to {} sub-agents at once per session. A session's sub-agents may use its own profile and: {others}.",
+        "Claude, Codex, and DSH sessions may opt in, up to {} sub-agents at once per session. Sub-agents may use any enabled profile that offers the configured model and effort.",
         subagents.max_concurrent
     );
     DoctorCheck::ready("subagents.policy", "Sub-agent policy", detail)
@@ -2502,6 +2472,143 @@ fn ssh_docker_check(
     }
 }
 
+/// One check per `ssh-apple-container` target: the same platform and daemon
+/// probes the local runtime runs, executed on the SSH host, then the target's
+/// image and the disposable smoke test.
+fn ssh_apple_container_checks(
+    config: ConfigStatus<'_>,
+    executor: &impl CommandExecutor,
+    smoke: bool,
+) -> Vec<DoctorCheck> {
+    let Ok(config) = config else {
+        return Vec::new();
+    };
+    config
+        .targets
+        .iter()
+        .filter_map(|(id, target)| match target {
+            TargetTemplate::SshAppleContainer { ssh, container } => {
+                Some(ssh_apple_container_check(
+                    id,
+                    &RuntimeSshTarget::from(ssh),
+                    &container.image,
+                    executor,
+                    smoke,
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn ssh_apple_container_check(
+    id: &str,
+    ssh: &RuntimeSshTarget,
+    image: &str,
+    executor: &impl CommandExecutor,
+    smoke: bool,
+) -> DoctorCheck {
+    let check_id = format!("runtime.ssh-apple-container.{id}");
+    let title = format!("Remote Apple container for target {id}");
+    let destination = &ssh.destination;
+    if let SshConnectivity::Failed {
+        detail,
+        remediation,
+    } = ssh_connectivity(ssh, executor)
+    {
+        return DoctorCheck::fixable(check_id, title, detail, remediation);
+    }
+
+    let preflight = match verify_ssh_apple_container(ssh, executor) {
+        Ok(preflight) => preflight,
+        Err(error) => {
+            return DoctorCheck::fixable(
+                check_id,
+                title,
+                format!("{error:#}"),
+                format!(
+                    "Verify `ssh {destination}` succeeds noninteractively from this host, that the remote Mac is Apple silicon running macOS {APPLE_CONTAINER_MINIMUM_MACOS} or newer, and that `container system status` succeeds there. Install the runtime from {APPLE_CONTAINER_INSTALL_URL}."
+                ),
+            );
+        }
+    };
+
+    let container = RuntimeContainerTemplate {
+        build_cache: None,
+        image: image.to_owned(),
+        pull_policy: Default::default(),
+        extra_run_args: vec![],
+        workspace_storage: Default::default(),
+    };
+    if smoke {
+        let target = RuntimeTargetTemplate::SshAppleContainer {
+            ssh: ssh.clone(),
+            container,
+        };
+        return match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
+            Ok(()) => DoctorCheck::ready(
+                check_id,
+                title,
+                format!(
+                    "Apple container {} is available via {destination} on macOS {}; disposable run/exec/remove smoke test passed for image {image}.",
+                    preflight.version, preflight.macos_version
+                ),
+            ),
+            Err(error) => DoctorCheck::fixable(
+                check_id,
+                title,
+                format!(
+                    "Disposable run/exec/remove smoke test failed for image {image} on {destination}: {error:#}"
+                ),
+                format!(
+                    "Fix the configured image or Apple container runtime on {destination}, then run `mj doctor --json --smoke` again."
+                ),
+            ),
+        };
+    }
+
+    // Apple's `container` CLI has no `--format` on `image inspect`, so the
+    // exit status is what says the image is present.
+    let image_command = ssh_command(
+        ssh,
+        ["container", "image", "inspect", image]
+            .map(str::to_owned)
+            .to_vec(),
+    )
+    .purpose("check remote Apple container image presence");
+    match executor.execute(&image_command) {
+        Ok(output) if output.status == 0 => DoctorCheck::ready(
+            check_id,
+            title,
+            format!(
+                "Apple container {} is available via {destination} on macOS {}; image {image} is present. Run `mj doctor --json --smoke` to verify a disposable run.",
+                preflight.version, preflight.macos_version
+            ),
+        ),
+        Ok(output) => DoctorCheck::fixable(
+            check_id,
+            title,
+            format!(
+                "Image {image} is not present in Apple container storage on {destination}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            format!(
+                "Pull it on {destination} with `ssh {destination} container image pull {image}`, or run `mj doctor --json --smoke`."
+            ),
+        ),
+        Err(error) => DoctorCheck::fixable(
+            check_id,
+            title,
+            format!(
+                "Could not inspect remote Apple container image {image} on {destination}: {error}"
+            ),
+            format!(
+                "Verify `ssh {destination} container system status` succeeds, then pull {image} on that host."
+            ),
+        ),
+    }
+}
+
 /// Shared disposable-container identity for every doctor smoke test.
 fn doctor_smoke_id() -> String {
     format!(
@@ -2948,18 +3055,25 @@ fn worker_binary_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
             )];
         }
     };
+    // `remote_kind` names the kinds whose architecture is unknown until the
+    // host is asked; `known_arch` is an architecture the kind fixes itself.
     let containers = config
         .targets
         .iter()
         .filter_map(|(id, target)| match target {
             TargetTemplate::LocalPodman { container }
             | TargetTemplate::LocalDocker { container }
-            | TargetTemplate::AppleContainer { container } => Some((id, container, None)),
+            | TargetTemplate::AppleContainer { container } => Some((id, container, None, None)),
             TargetTemplate::SshPodman { container, .. } => {
-                Some((id, container, Some("ssh-podman")))
+                Some((id, container, Some("ssh-podman"), None))
             }
             TargetTemplate::SshDocker { container, .. } => {
-                Some((id, container, Some("ssh-docker")))
+                Some((id, container, Some("ssh-docker"), None))
+            }
+            // Apple container runs only native images, so this remote target
+            // is Apple silicon whatever the controller's own machine is.
+            TargetTemplate::SshAppleContainer { container, .. } => {
+                Some((id, container, None, Some("aarch64")))
             }
             _ => None,
         })
@@ -2973,7 +3087,7 @@ fn worker_binary_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
     }
     containers
         .into_iter()
-        .map(|(id, container, remote_kind)| {
+        .map(|(id, container, remote_kind, known_arch)| {
             if let Some(remote_kind) = remote_kind
                 && container.platform.is_none()
             {
@@ -2987,7 +3101,7 @@ fn worker_binary_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
                     ),
                 );
             }
-            worker_binary_check(id, container)
+            worker_binary_check_on(id, container, known_arch)
         })
         .collect()
 }
@@ -3023,7 +3137,14 @@ fn ssh_bare_worker_checks(
         .collect()
 }
 
-fn worker_binary_check(id: &str, container: &ContainerTemplate) -> DoctorCheck {
+/// One worker-binary check. `known_arch` is the architecture the target kind
+/// itself fixes, such as Apple container's Apple-silicon-only images; `None`
+/// takes it from the container's `platform`, else this machine's.
+fn worker_binary_check_on(
+    id: &str,
+    container: &ContainerTemplate,
+    known_arch: Option<&'static str>,
+) -> DoctorCheck {
     let title = format!("Container worker binary for target {id}");
     let image = container.image.as_str();
     let default_image = image == mj_core::config::DEFAULT_CONTAINER_IMAGE;
@@ -3036,7 +3157,9 @@ fn worker_binary_check(id: &str, container: &ContainerTemplate) -> DoctorCheck {
             ),
         );
     }
-    let arch = match container_architecture(container.platform.as_deref()) {
+    let arch = match known_arch
+        .map_or_else(|| container_architecture(container.platform.as_deref()), Ok)
+    {
         Ok(arch) => arch,
         Err(reason) => {
             return DoctorCheck::unsupported(format!("worker.{id}"), title, reason);
@@ -3116,7 +3239,10 @@ fn apple_container_image(config: ConfigStatus<'_>) -> String {
         .ok()
         .and_then(|config| {
             config.targets.values().find_map(|target| match target {
-                TargetTemplate::AppleContainer { container } => Some(container.image.clone()),
+                TargetTemplate::AppleContainer { container }
+                | TargetTemplate::SshAppleContainer { container, .. } => {
+                    Some(container.image.clone())
+                }
                 _ => None,
             })
         })

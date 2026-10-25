@@ -562,6 +562,12 @@ pub enum TargetTemplate {
         #[serde(flatten)]
         container: ContainerTemplate,
     },
+    SshAppleContainer {
+        #[serde(flatten)]
+        ssh: SshConnection,
+        #[serde(flatten)]
+        container: ContainerTemplate,
+    },
 }
 
 impl TargetTemplate {
@@ -586,7 +592,8 @@ impl TargetTemplate {
             | Self::LocalDocker { container }
             | Self::AppleContainer { container }
             | Self::SshPodman { container, .. }
-            | Self::SshDocker { container, .. } => Some(container),
+            | Self::SshDocker { container, .. }
+            | Self::SshAppleContainer { container, .. } => Some(container),
             _ => None,
         }
     }
@@ -598,7 +605,8 @@ impl TargetTemplate {
             | Self::LocalDocker { container }
             | Self::AppleContainer { container }
             | Self::SshPodman { container, .. }
-            | Self::SshDocker { container, .. } => Some(container),
+            | Self::SshDocker { container, .. }
+            | Self::SshAppleContainer { container, .. } => Some(container),
             _ => None,
         }
     }
@@ -614,6 +622,7 @@ impl TargetTemplate {
             Self::SshBare { .. } => "ssh-bare",
             Self::SshPodman { .. } => "ssh-podman",
             Self::SshDocker { .. } => "ssh-docker",
+            Self::SshAppleContainer { .. } => "ssh-apple-container",
         }
     }
 
@@ -632,7 +641,8 @@ impl TargetTemplate {
             | Self::LocalDocker { container }
             | Self::AppleContainer { container }
             | Self::SshPodman { container, .. }
-            | Self::SshDocker { container, .. } => container.build_cache = None,
+            | Self::SshDocker { container, .. }
+            | Self::SshAppleContainer { container, .. } => container.build_cache = None,
             Self::LocalBare | Self::AwsEc2 { .. } | Self::SshBare { .. } => {}
         }
         stripped
@@ -714,6 +724,16 @@ impl TargetTemplate {
                 container.validate(id)?;
                 container.workspace_storage.validate(id)
             }
+            // A remote Apple container runtime accepts exactly what the local
+            // one does: the engine is the same, only its host differs.
+            Self::SshAppleContainer { ssh, container } => {
+                ssh.validate(id)?;
+                container.validate(id)?;
+                if !container.workspace_storage.is_default() {
+                    bail!("target template {id:?} workspace storage is only supported by Podman");
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -725,7 +745,8 @@ impl From<&TargetTemplate> for crate::state::ResourceAllocationKind {
             | TargetTemplate::LocalDocker { .. }
             | TargetTemplate::AppleContainer { .. }
             | TargetTemplate::SshPodman { .. }
-            | TargetTemplate::SshDocker { .. } => Self::Container,
+            | TargetTemplate::SshDocker { .. }
+            | TargetTemplate::SshAppleContainer { .. } => Self::Container,
             TargetTemplate::AwsEc2 { .. } => Self::AwsEc2,
             TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => Self::Fixed,
         }
@@ -752,6 +773,7 @@ pub fn is_container_target(template: &TargetTemplate) -> bool {
             | TargetTemplate::AppleContainer { .. }
             | TargetTemplate::SshPodman { .. }
             | TargetTemplate::SshDocker { .. }
+            | TargetTemplate::SshAppleContainer { .. }
     )
 }
 
@@ -763,9 +785,9 @@ pub fn mount_history_host(template: &TargetTemplate) -> Option<&str> {
         | TargetTemplate::LocalDocker { .. }
         | TargetTemplate::AppleContainer { .. }
         | TargetTemplate::AwsEc2 { .. } => Some("local"),
-        TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
-            Some(&ssh.host)
-        }
+        TargetTemplate::SshPodman { ssh, .. }
+        | TargetTemplate::SshDocker { ssh, .. }
+        | TargetTemplate::SshAppleContainer { ssh, .. } => Some(&ssh.host),
         TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => None,
     }
 }
@@ -782,7 +804,8 @@ pub fn project_history_host(template: &TargetTemplate) -> Option<&str> {
         | TargetTemplate::AppleContainer { .. }
         | TargetTemplate::AwsEc2 { .. }
         | TargetTemplate::SshPodman { .. }
-        | TargetTemplate::SshDocker { .. } => None,
+        | TargetTemplate::SshDocker { .. }
+        | TargetTemplate::SshAppleContainer { .. } => None,
     }
 }
 
@@ -792,9 +815,9 @@ pub fn container_size_host(template: &TargetTemplate) -> Option<&str> {
         TargetTemplate::LocalPodman { .. }
         | TargetTemplate::LocalDocker { .. }
         | TargetTemplate::AppleContainer { .. } => Some("local"),
-        TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
-            Some(&ssh.host)
-        }
+        TargetTemplate::SshPodman { ssh, .. }
+        | TargetTemplate::SshDocker { ssh, .. }
+        | TargetTemplate::SshAppleContainer { ssh, .. } => Some(&ssh.host),
         TargetTemplate::LocalBare
         | TargetTemplate::SshBare { .. }
         | TargetTemplate::AwsEc2 { .. } => None,

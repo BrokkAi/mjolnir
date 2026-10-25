@@ -198,14 +198,11 @@ async fn selection_backend_refusing(
 ) -> (Arc<ApiBackend>, Arc<RecordingExports>) {
     let catalog = ProfileCatalog::with_probe(models_probe(offers));
     catalog
-        .sync_now(&test_config(
-            &[
-                ("parent", HarnessKind::Codex),
-                ("codex-high", HarnessKind::Codex),
-                ("deepseek", HarnessKind::Codex),
-            ],
-            &["codex-high", "deepseek"],
-        ))
+        .sync_now(&test_config(&[
+            ("parent", HarnessKind::Codex),
+            ("codex-high", HarnessKind::Codex),
+            ("deepseek", HarnessKind::Codex),
+        ]))
         .await;
     let quotas = BTreeMap::from([
         (
@@ -263,7 +260,7 @@ fn spawn_with() -> mj_core::subagent::SubagentToolRequest {
     }
 }
 
-// Hard-won: 435b4ed9: model selection sent a child to a nearly exhausted profile despite an eligible profile with quota.
+// Hard-won: 435b4ed9: model selection sent a child to a nearly exhausted profile despite an enabled profile with quota.
 #[tokio::test]
 async fn spawn_runs_the_child_on_the_profile_with_the_most_quota_that_offers_the_model() {
     let (backend, exports) = selection_backend(SAME_MODELS, None).await;
@@ -792,11 +789,11 @@ fn spawn_backend(catalog: Arc<ProfileCatalog>) -> Arc<ApiBackend> {
 }
 
 #[tokio::test]
-async fn spawn_refuses_a_model_no_eligible_profile_offers() {
+async fn spawn_refuses_a_model_no_enabled_profile_offers() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
     catalog
-        .sync_now(&test_config(&[("parent", HarnessKind::Codex)], &[]))
+        .sync_now(&test_config(&[("parent", HarnessKind::Codex)]))
         .await;
     let warmed = calls.load(std::sync::atomic::Ordering::SeqCst);
 
@@ -808,7 +805,7 @@ async fn spawn_refuses_a_model_no_eligible_profile_offers() {
     assert!(
         result
             .message
-            .contains("no eligible profile offers model \"luna\""),
+            .contains("no enabled profile offers model \"luna\""),
         "{}",
         result.message
     );
@@ -831,14 +828,14 @@ async fn spawn_refuses_a_model_no_eligible_profile_offers() {
 async fn spawn_over_a_cold_catalogue_waits_for_the_background_discovery() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
-    catalog.sync(&test_config(&[("parent", HarnessKind::Codex)], &[]));
+    catalog.sync(&test_config(&[("parent", HarnessKind::Codex)]));
 
     let result = spawn_backend(catalog)
         .execute_subagent_tool("parent-1".into(), spawn_with())
         .await;
 
     assert!(
-        result.message.contains("no eligible profile offers"),
+        result.message.contains("no enabled profile offers"),
         "the spawn should have checked the model once discovered: {}",
         result.message
     );
@@ -1694,6 +1691,7 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
                 answered_ordinal: answered,
                 failed_turn: failed.map(|(state, reason)| (state, reason.to_owned())),
                 login_failure: None,
+                provider_failure: None,
                 report_dir: None,
             }
         };
@@ -1767,6 +1765,7 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
             "Your access token could not be refreshed. Please log out and sign in again.".into(),
         )),
         login_failure: Some("codex4".into()),
+        provider_failure: None,
         report_dir: None,
     };
     let expected = "profile codex4: the login is no longer valid; run `mj login --profile codex4` and spawn again";
@@ -4320,5 +4319,71 @@ async fn reviewer_children_are_private_to_the_review_host() {
             .unwrap()
             .is_empty(),
         "reviewers never notify their parent through SubagentFinished"
+    );
+}
+
+#[tokio::test]
+async fn provider_failed_child_report_names_its_turn_profile_and_backoff() {
+    if !isolated_parked_test("provider_failed_child_report_names_its_turn_profile_and_backoff") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let diagnostic = mj_core::diagnostic::TurnDiagnostic {
+        message: "exceeded retry limit, last status: 429 Too Many Requests".into(),
+        code: Some("limit".into()),
+        http_status: None,
+        reset_at: None,
+    };
+    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+    conversation.applied_event_ordinal = 9;
+    conversation.applied_event_digest = format!("{:064x}", 9);
+    let mut turn = finished_turn("task");
+    turn.outcome = mj_core::state::TurnOutcomeKind::Rejected {
+        message: diagnostic.message.clone(),
+        reason: None,
+    };
+    turn.diagnostic = Some(diagnostic.clone());
+    conversation.last_turn_outcome = Some(turn);
+    crate::database::save_materialized_session(&conversation).unwrap();
+    // The session and relation now name helper; the failed turn ran on this
+    // test's unique profile, avoiding shared health state across parallel tests.
+    let test_profile = "provider_failed_child_report_names_its_turn_profile_and_backoff";
+    rusqlite::Connection::open(crate::database::database_path()).unwrap()
+        .execute(
+            "INSERT INTO session_turn_selections(session_id,command_id,profile,model) VALUES ('child-1','task',?1,'sol')",
+            [test_profile],
+        )
+        .unwrap();
+    let (backend, _) = report_backend(active_parent_view("working"));
+    let now = std::time::SystemTime::now();
+    crate::profile_health::shared().lock().unwrap().record(
+        test_profile,
+        "sol",
+        crate::profile_health::ProfileFault::RateLimited,
+        &diagnostic,
+        now,
+    );
+    let description = crate::profile_health::shared()
+        .lock()
+        .unwrap()
+        .unhealthy(test_profile, "sol", now)
+        .unwrap()
+        .describe();
+    let expected = format!(
+        "profile {test_profile} is {description}. A new spawn will choose another eligible profile; send_message would run this child on {test_profile} again."
+    );
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    let events = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(events.len(), 1);
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&events[0].event_json).unwrap();
+    let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = &event.body else {
+        panic!("wrong event: {event:?}");
+    };
+    assert_eq!(report.output.as_deref(), Some(expected.as_str()));
+    assert_eq!(report.failure.as_ref().unwrap()["summary"], expected);
+    assert!(
+        mj_core::mailbox::render_mailbox_event(&event).contains(&format!("Failure: {expected}"))
     );
 }

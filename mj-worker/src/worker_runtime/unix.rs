@@ -80,6 +80,10 @@ struct RunningHarness {
     subagents: Option<super::subagents::SubagentEndpoint>,
     harness_gc: Option<tokio::task::JoinHandle<()>>,
     shell_cleanup: tokio_util::task::TaskTracker,
+    /// Runtime leases stay in long-lived ACP state so they cover supervisor
+    /// replacement gaps as well as the lifetime of any individual supervisor.
+    _managed_harness: Option<super::harness::ManagedHarness>,
+    _managed_node: Option<super::harness::ManagedNodeRuntime>,
 }
 
 struct HarnessPreparationCompletion {
@@ -196,6 +200,8 @@ impl StartedBridgeTasks {
                 .shell_cleanup
                 .take()
                 .expect("shell tracker was prepared"),
+            _managed_harness: None,
+            _managed_node: None,
         }
     }
 }
@@ -1073,6 +1079,8 @@ pub async fn run_daemon_owned(
         subagent_socket_guard,
         harness_gc,
         shell_cleanup,
+        _managed_harness,
+        _managed_node,
         ..
     } = running_harness;
 
@@ -1749,7 +1757,8 @@ async fn prepare_and_start_harness(
         .managed
         .as_ref()
         .map(|managed| managed.cache_root.clone());
-    let _managed_harness_lease = prepared_harness.managed;
+    let managed_harness = prepared_harness.managed;
+    let managed_node = prepared_harness.managed_node;
 
     let acp_budget = preparation_step(
         root,
@@ -1812,7 +1821,9 @@ async fn prepare_and_start_harness(
         )
     })
     .await?;
-    let running = started.into_running();
+    let mut running = started.into_running();
+    running._managed_harness = managed_harness;
+    running._managed_node = managed_node;
     status.send_replace(PreparationSnapshot {
         state: Some(mj_core::relay::HarnessPreparation::Started),
         services: Some(Arc::new(PreparedConnectionServices {

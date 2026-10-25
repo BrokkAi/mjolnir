@@ -121,6 +121,25 @@ fn selection_for(connection: &Connection, session: &str, command: &str) -> Resul
         params![session, command], |row| Ok(UsageSelection { model: row.get(0)?, effort: row.get(1)? })).optional()?.unwrap_or_default())
 }
 
+/// The profile and model selected when a turn started, if its selection row
+/// has committed. A same-page failure can precede that row's projection
+/// commit, so the profile falls back to the session while the model stays absent.
+pub fn load_session_turn_profile_model(
+    session: &str,
+    command: &str,
+) -> Result<Option<(String, Option<String>)>> {
+    let connection = open_reader(&database_path())?;
+    Ok(connection
+        .query_row(
+            "SELECT COALESCE(t.profile, s.last_profile), t.model FROM sessions s
+             LEFT JOIN session_turn_selections t ON t.session_id=s.session_id AND t.command_id=?2
+             WHERE s.session_id=?1",
+            params![session, command],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?)
+}
+
 fn counters(usage: &TokenUsage) -> BTreeMap<String, u64> {
     let mut values = BTreeMap::from([
         ("total_tokens".into(), usage.total_tokens),

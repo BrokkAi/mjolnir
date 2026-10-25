@@ -255,6 +255,13 @@ pub(crate) fn render_picker(
     } else {
         0
     };
+    let container_option_rows = matches!(
+        navigation.resources,
+        Some(ResourcePicker::Container {
+            save_as_default: Some(_),
+            ..
+        })
+    ) as u16;
     let side_width = if navigation.side_actions.is_empty() {
         0
     } else {
@@ -275,6 +282,7 @@ pub(crate) fn render_picker(
         .min(
             body.height
                 .saturating_sub(help.len() as u16 + u16::from(!help.is_empty()) + instance_rows)
+                .saturating_sub(container_option_rows)
                 .max(1)
                 .min(body.height),
         );
@@ -339,7 +347,10 @@ pub(crate) fn render_picker(
     }
     declare_resource_controls(form, navigation.resources);
     match navigation.resources {
-        Some(ResourcePicker::Container(editor)) => {
+        Some(ResourcePicker::Container {
+            editor,
+            save_as_default,
+        }) => {
             let selected_display_row = row_map
                 .iter()
                 .position(|row| *row == Some(navigation.selected));
@@ -365,6 +376,17 @@ pub(crate) fn render_picker(
                     }
                     x = x.saturating_add((*width + COLUMN_GAP) as u16);
                 }
+            }
+            if let Some(checked) = save_as_default {
+                Checkbox::render(
+                    frame,
+                    Rect::new(body.x, list_area.bottom(), body.width, 1).intersection(body),
+                    "Save as default sizing",
+                    checked,
+                    true,
+                    form,
+                    WizardControl::RememberContainerSize,
+                );
             }
         }
         Some(ResourcePicker::Ec2 {

@@ -977,6 +977,16 @@ pub(crate) async fn run_dashboard_for_workspace(
                     context.dashboard_io_tx.clone(),
                 );
             }
+            if let Some((generation, profile_id)) = context.dashboard.take_setup_login() {
+                actions::apply_dashboard_action(
+                    &mut context,
+                    DashboardAction::SetupLogin {
+                        generation,
+                        profile_id,
+                    },
+                )
+                .await?;
+            }
             // The Sessions pane is a list of conversations, not a list of
             // things to go and open, so the transcript follows its selection.
             context.reconcile_conversation_attachments();
@@ -1628,6 +1638,7 @@ impl DashboardContext {
         let runtime_state_rx = remote_worker.state;
         dashboard.set_move_snapshot(runtime_state_rx.borrow().moves.clone());
         dashboard.set_recent_launch(runtime_state_rx.borrow().recent_launch.clone());
+        dashboard.set_container_capacities(runtime_state_rx.borrow().container_capacities.clone());
         let runtime_reviews_rx = remote_worker.reviews;
         let runtime_review_views: BTreeMap<String, mj_controller::review_host::RuntimeReviewView> =
             runtime_reviews_rx

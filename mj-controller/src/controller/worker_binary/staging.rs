@@ -10,27 +10,96 @@ pub(in crate::controller) fn apply_claude_setup_token(
     environment: &mut std::collections::BTreeMap<String, String>,
     kind: mj_core::config::HarnessKind,
     token_path: &Path,
-) {
+) -> bool {
     use mj_core::credentials::CLAUDE_OAUTH_TOKEN_ENV;
 
-    if kind != mj_core::config::HarnessKind::Claude
-        || environment.contains_key(CLAUDE_OAUTH_TOKEN_ENV)
-    {
-        return;
+    if kind != mj_core::config::HarnessKind::Claude {
+        return false;
     }
+    if environment
+        .get(CLAUDE_OAUTH_TOKEN_ENV)
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return true;
+    }
+    environment.remove(CLAUDE_OAUTH_TOKEN_ENV);
     match mj_core::credentials::read_claude_oauth_token(token_path) {
         Ok(Some(token)) => {
             environment.insert(CLAUDE_OAUTH_TOKEN_ENV.to_owned(), token);
+            true
         }
-        Ok(None) => {}
+        Ok(None) => false,
         // A stored token Hel cannot read is worth reporting, but the session
         // still starts on the synced credentials file.
-        Err(error) => tracing::warn!(
-            path = %token_path.display(),
-            %error,
-            "ignoring an unreadable Claude setup token"
-        ),
+        Err(error) => {
+            tracing::warn!(
+                path = %token_path.display(),
+                %error,
+                "ignoring an unreadable Claude setup token"
+            );
+            false
+        }
     }
+}
+
+/// Whether Claude is authenticated by a non-blank launch variable. A blank
+/// value is absent, matching how the profile model interprets API keys.
+pub(super) fn claude_environment_login_present(
+    profile: &mj_core::config::HarnessProfile,
+    environment: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    profile.kind == mj_core::config::HarnessKind::Claude
+        && [
+            mj_core::credentials::CLAUDE_OAUTH_TOKEN_ENV,
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+        ]
+        .into_iter()
+        .any(|name| {
+            environment
+                .get(name)
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+}
+
+/// Carry the host's native Claude login into a target whose process cannot
+/// reach the controller's macOS Keychain. The setup token takes precedence:
+/// when that environment variable is present, Claude never reads this file.
+pub(super) fn stage_claude_keychain_login(
+    profile: &mj_core::config::HarnessProfile,
+    destination: &Path,
+    backend: &targets::TargetLocator,
+    environment_login_present: bool,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        if profile.kind != mj_core::config::HarnessKind::Claude
+            || !profile.auth_scheme().uses_native_login_file()
+            || environment_login_present
+            || matches!(backend, targets::TargetLocator::LocalBare { .. })
+        {
+            return Ok(());
+        }
+        if let Some(credentials) = crate::setup::claude_keychain_credentials(executor)? {
+            let path = destination.join(profile.kind.credential_file_name());
+            mj_core::credentials::write_credential_file(profile.kind, &path, &credentials)
+                .with_context(|| {
+                    format!("stage Claude's macOS Keychain login at {}", path.display())
+                })?;
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (
+            profile,
+            destination,
+            backend,
+            environment_login_present,
+            executor,
+        );
+    }
+    Ok(())
 }
 
 /// Kimi's runtime-aware engine cannot infer a runtime identity from an ACP

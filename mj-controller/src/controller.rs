@@ -82,7 +82,7 @@ pub(crate) use backend::backend_locator;
 pub(crate) use backend::controller_github_token;
 pub use backend::image_refresh_plan;
 pub(crate) use backend::validate_resource_allocation;
-pub(crate) use backend::{LocalEngineReadiness, local_engine_readiness};
+pub(crate) use backend::{LocalEngineReadiness, is_missing_command, local_engine_readiness};
 pub use github_app::GithubBundleSelectionError;
 pub(crate) use github_app::{
     GithubAppTokenProvider, github_app_token_for_session, github_token_for_session,
@@ -574,6 +574,8 @@ fn unique_id(base: &str, mut is_used: impl FnMut(&str) -> bool) -> String {
 pub struct SessionLaunchOptions {
     /// Allow this interactive launch to seed later new-session forms.
     pub remember_launch_choices: bool,
+    /// Save the selected container size for this physical host.
+    pub remember_container_size: bool,
     pub create_managed_worktree: Option<bool>,
     /// Full commit ID to start the bundle's primary repository at.
     pub at: Option<String>,
@@ -766,7 +768,9 @@ impl Controller {
                     }
                 })
                 .with_context(|| format!("inspect resource source {}", source.display()))?,
-            TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
+            TargetTemplate::SshPodman { ssh, .. }
+            | TargetTemplate::SshDocker { ssh, .. }
+            | TargetTemplate::SshAppleContainer { ssh, .. } => {
                 targets::ssh_directory_exists(&SshTarget::from(ssh), source, executor)?
             }
             TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
@@ -877,6 +881,7 @@ impl Controller {
     ) -> Result<String> {
         let SessionLaunchOptions {
             remember_launch_choices,
+            remember_container_size,
             create_managed_worktree,
             at,
             branch,
@@ -1004,40 +1009,30 @@ impl Controller {
             let canonical = crate::database::store_catalog_project(bundle_id, &project, true)?;
             (canonical, Some(project))
         } else if let Some(directory) = project_directory.as_deref() {
-            let git = match template {
-                TargetTemplate::LocalBare => {
-                    executor
-                        .execute(
-                            &targets::CommandSpec::new(
-                                "git",
-                                [
-                                    "-C",
-                                    &directory.to_string_lossy(),
-                                    "rev-parse",
-                                    "--is-inside-work-tree",
-                                ],
-                            )
-                            .purpose("inspect raw project repository"),
-                        )?
-                        .status
-                        == 0
-                }
-                _ => true,
-            };
-            if git {
-                let (id, project) =
-                    crate::project_catalog::accept_directory(template, directory, executor)?;
-                (id, Some(project))
-            } else {
-                (bundle_id.to_owned(), None)
-            }
+            // A bare local session may run in any directory, including one
+            // without a committed Git checkout; such a project is identified
+            // by its path.
+            // A remote bare session must still be a repository, and its
+            // validation has already refused anything else.
+            let (host, resolved) =
+                crate::project_catalog::resolve_directory(template, directory, executor)?;
+            let review_requested = self.config.review.for_session(review.as_ref()).trigger
+                != mj_core::config::ReviewTrigger::Off
+                && mj_core::review::settings::can_review(&self.config, review.as_ref());
+            ensure!(
+                !resolved.plain_directory || !review_requested,
+                "a directory without a committed Git checkout cannot be reviewed; select a committed Git project or turn review off for this session"
+            );
+            let (id, project) =
+                crate::project_catalog::accept_resolved_directory(host, directory, resolved)?;
+            (id, Some(project))
         } else {
             (bundle_id.to_owned(), None)
         };
         validate_resource_allocation(template, resource_allocation.as_ref())?;
         let selected_container_size =
             selected_host_container_size(template, resource_allocation.as_ref())
-                .filter(|_| remember_launch_choices);
+                .filter(|_| remember_container_size);
         if !additional_mounts.is_empty() && mount_history_host(template).is_none() {
             bail!("attached resources are unsupported for this target");
         }
@@ -1098,6 +1093,7 @@ impl Controller {
             &record,
             selected_container_size.clone(),
             remember_launch_choices,
+            remember_container_size,
         )?;
         let policy = record.subagents.clone().unwrap_or_default();
         if remember_launch_choices && policy.updates_remembered_choice(record.harness_kind) {
@@ -1556,7 +1552,8 @@ pub(super) fn removable_profile_root(
         | targets::TargetLocator::LocalDocker { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshPodman { .. }
-        | targets::TargetLocator::SshDocker { .. } => {
+        | targets::TargetLocator::SshDocker { .. }
+        | targets::TargetLocator::SshAppleContainer { .. } => {
             format!("/var/lib/hel/profiles/{session_id}")
         }
         targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. } => {

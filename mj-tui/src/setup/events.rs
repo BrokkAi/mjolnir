@@ -1,6 +1,13 @@
 use super::*;
 
 impl DashboardState {
+    pub fn begin_managed_setup(&mut self) {
+        self.begin_settings_section("profiles", None);
+        if let Some(dialog) = setup_dialog_mut(&mut self.mode) {
+            dialog.begin_managed_setup();
+        }
+    }
+
     pub(crate) fn begin_settings_section(&mut self, section: &str, entry: Option<&str>) {
         self.profile_login_refresh = true;
         let mut dialog = SetupDialog::new(&self.config);
@@ -182,22 +189,12 @@ impl DashboardState {
         let Mode::Setup(dialog) = &mut self.mode else {
             return None;
         };
-        let mut config = config_from_draft(dialog.draft.clone()).ok()?;
-        // A global picker sees every enabled installation, rather than one parent's eligibility.
-        config.subagents.eligible_profiles = config
-            .enabled_profiles()
-            .map(|(id, _)| (id.to_owned(), true))
-            .collect();
-        let parent = config
-            .enabled_profiles()
-            .next()
-            .map(|(id, _)| id.to_owned())
-            .unwrap_or_default();
+        let config = config_from_draft(dialog.draft.clone()).ok()?;
         for task in ["straightforward", "subtle"] {
             let model = dialog.draft["subagents"][task]["model"].as_str();
-            let mut options = self.profile_capabilities.options(&config, &parent, None);
+            let mut options = self.profile_capabilities.options(&config, None);
             if let Some(options) = &mut options
-                && let Some(efforts) = self.profile_capabilities.options(&config, &parent, model)
+                && let Some(efforts) = self.profile_capabilities.options(&config, model)
             {
                 options.efforts = efforts.efforts;
                 options.unavailable = efforts.unavailable;
@@ -301,7 +298,11 @@ impl DashboardState {
             {
                 match key.code {
                     KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        Some(Interaction::Activate(Save))
+                        Some(Interaction::Activate(if dialog.managed_setup.is_some() {
+                            ManagedContinue
+                        } else {
+                            Save
+                        }))
                     }
                     // Every shortcut below is a bare key, so none of them may
                     // fire while the search query has the keyboard.
@@ -372,6 +373,17 @@ impl DashboardState {
         if let Some(result) = &form_result {
             self.last_event_consumed.set(result.consumed);
         }
+        if dialog.managed_setup.is_some()
+            && let Some(SettingControl {
+                kind: SettingKind::ManagedHarness(index),
+                ..
+            }) = dialog
+                .descriptors
+                .iter()
+                .find(|c| dialog.form.borrow().is_focused(c.id))
+        {
+            dialog.managed_setup = Some(*index);
+        }
         let interaction = shortcut.or_else(|| form_result.and_then(|result| result.action));
         let interaction = dialog.combo.route(interaction);
         let interaction =
@@ -385,7 +397,7 @@ impl DashboardState {
             };
         let mut action = DashboardAction::None;
         match interaction {
-            Some(Interaction::Activate(OpenSearch)) => {
+            Some(Interaction::Activate(OpenSearch)) if dialog.managed_setup.is_none() => {
                 dialog.open_search();
             }
             Some(Interaction::Cancel) | Some(Interaction::Activate(Back))
@@ -429,6 +441,11 @@ impl DashboardState {
             Some(Interaction::Cancel) if dialog.editor.is_some() => {
                 dialog.back();
             }
+            Some(Interaction::Cancel | Interaction::Activate(Back))
+                if dialog.managed_setup.is_some() =>
+            {
+                dialog.leave_managed_setup();
+            }
             Some(Interaction::Cancel) | Some(Interaction::Activate(Cancel)) => {
                 return self.dismiss_setup(dialog);
             }
@@ -468,6 +485,11 @@ impl DashboardState {
                                 dialog.form.get_mut().reveal_focused();
                             }
                         },
+                        SettingKind::ManagedHarness(index) => {
+                            dialog.managed_setup = Some(index);
+                            action =
+                                dialog.create_managed_profile_and_login(&self.profile_capabilities);
+                        }
                         SettingKind::ReadOnly => {}
                     }
                 }
@@ -506,7 +528,11 @@ impl DashboardState {
             Some(Interaction::Activate(Field | Apply)) => {
                 dialog.notice = dialog.apply_editor().err();
             }
-            Some(Interaction::Activate(Add)) => {
+            Some(Interaction::Activate(ManagedSetup)) => dialog.begin_managed_setup(),
+            Some(Interaction::Activate(ManagedContinue)) if dialog.managed_setup.is_some() => {
+                action = dialog.create_managed_profile_and_login(&self.profile_capabilities);
+            }
+            Some(Interaction::Activate(Add)) if dialog.managed_setup.is_none() => {
                 dialog.add();
             }
             Some(Interaction::Activate(Remove)) => {

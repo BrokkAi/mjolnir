@@ -102,6 +102,14 @@ pub(super) async fn prepare_scoped(
     if child {
         return Err(StartRefusal(SUBAGENT_REFUSAL.to_owned()));
     }
+    let review_refusal = {
+        let environment = environment.clone();
+        let session = session_id.to_owned();
+        tokio::task::spawn_blocking(move || environment.review_refusal(&session))
+            .await
+            .map_err(|error| StartRefusal(format!("preparing review: {error}")))?
+    };
+    review_refusal.map_err(StartRefusal)?;
     let handle = control
         .session(session_id.to_owned())
         .await

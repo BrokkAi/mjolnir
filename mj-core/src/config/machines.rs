@@ -375,7 +375,13 @@ pub fn resolve_target(
             Machine::Local { .. } => Ok(TargetTemplate::AppleContainer {
                 container: with_cache(container),
             }),
-            _ => bail!("target {id:?}: Apple container runs only on this machine"),
+            Machine::Ssh { ssh, .. } => Ok(TargetTemplate::SshAppleContainer {
+                ssh: ssh.clone(),
+                container: with_cache(container),
+            }),
+            Machine::AwsEc2 { .. } => {
+                bail!("target {id:?}: an EC2 machine runs a bare harness only")
+            }
         },
     }
 }
@@ -528,6 +534,10 @@ pub fn stored_target(
             machine: ssh_machine_id(machines, ssh, None, container.build_cache.as_ref(), id),
             container: without_cache(container),
         },
+        TargetTemplate::SshAppleContainer { ssh, container } => StoredTarget::AppleContainer {
+            machine: ssh_machine_id(machines, ssh, None, container.build_cache.as_ref(), id),
+            container: without_cache(container),
+        },
         TargetTemplate::AwsEc2 { .. } => StoredTarget::Bare {
             machine: machine_id_for(
                 machines,
@@ -594,7 +604,8 @@ pub fn target_machine_id<'a>(
         | TargetTemplate::AppleContainer { .. } => Some(LOCAL_MACHINE_ID),
         TargetTemplate::SshBare { ssh, .. }
         | TargetTemplate::SshPodman { ssh, .. }
-        | TargetTemplate::SshDocker { ssh, .. } => find_ssh_machine(machines, ssh),
+        | TargetTemplate::SshDocker { ssh, .. }
+        | TargetTemplate::SshAppleContainer { ssh, .. } => find_ssh_machine(machines, ssh),
         TargetTemplate::AwsEc2 { .. } => {
             let wanted = aws_machine(target)?;
             machines
@@ -615,7 +626,9 @@ pub const fn runtime_kind_name(target: &TargetTemplate) -> &'static str {
         | TargetTemplate::AwsEc2 { .. } => "bare",
         TargetTemplate::LocalPodman { .. } | TargetTemplate::SshPodman { .. } => "podman",
         TargetTemplate::LocalDocker { .. } | TargetTemplate::SshDocker { .. } => "docker",
-        TargetTemplate::AppleContainer { .. } => "apple-container",
+        TargetTemplate::AppleContainer { .. } | TargetTemplate::SshAppleContainer { .. } => {
+            "apple-container"
+        }
     }
 }
 

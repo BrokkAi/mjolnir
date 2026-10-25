@@ -450,11 +450,25 @@ impl ApiBackend {
             .quota_reports
             .lock()
             .map_err(|_| anyhow!("profile quota reports lock poisoned"))?;
+        let profile_health = crate::profile_health::shared()
+            .lock()
+            .map_err(|_| anyhow!("profile health lock poisoned"))?;
+        let now = std::time::SystemTime::now();
         for ((profile_id, harness), discovery) in ids.into_iter().zip(discoveries) {
             match discovery.map(|mut choices| choices.pop()) {
                 Ok(Some(choices)) => {
                     let remaining_percent =
                         profile_remaining_percent(quota_reports.get(&profile_id));
+                    let unhealthy = choices
+                        .models
+                        .iter()
+                        .filter_map(|model| {
+                            profile_health
+                                .unhealthy(&profile_id, &model.value, now)
+                                .cloned()
+                                .map(|mark| (model.value.clone(), mark))
+                        })
+                        .collect();
                     candidates
                         .offered
                         .push(crate::server::api::SubagentCandidate {
@@ -462,6 +476,7 @@ impl ApiBackend {
                             harness,
                             choices,
                             remaining_percent,
+                            unhealthy,
                         });
                 }
                 Ok(None) => candidates
@@ -920,6 +935,7 @@ impl ApiBackend {
                             answered_ordinal: None,
                             failed_turn: None,
                             login_failure: None,
+                            provider_failure: None,
                             report_dir: None,
                         };
                         let (summary, progress) = summaries
@@ -1237,10 +1253,12 @@ impl ApiBackend {
                     Ok((id, summary, progress))
                 })
                 .collect::<Result<Vec<_>>>()?;
+            let mut summaries = summaries;
+            self.describe_child_profile_failures(&mut summaries).await?;
             return Ok((summaries, starts));
         }
         // An offline backend has no writer publication to observe.
-        let summaries = tokio::task::spawn_blocking(move || {
+        let mut summaries = tokio::task::spawn_blocking(move || {
             ids.into_iter()
                 .map(|id| {
                     let summary = crate::database::load_materialized_session_summary(&id)?;
@@ -1256,7 +1274,65 @@ impl ApiBackend {
                 starts.insert(id.clone(), status);
             }
         }
+        self.describe_child_profile_failures(&mut summaries).await?;
         Ok((summaries, starts))
+    }
+
+    async fn describe_child_profile_failures(
+        &self,
+        children: &mut [(
+            String,
+            Option<mj_core::state::MaterializedSessionSummary>,
+            ChildProgress,
+        )],
+    ) -> Result<()> {
+        for (id, _, progress) in children {
+            let Some((command, diagnostic)) = progress.provider_failure.clone() else {
+                continue;
+            };
+            let id = id.clone();
+            let selection = blocking("load failed child turn profile", move || {
+                let selection = crate::database::load_session_turn_profile_model(&id, &command)?;
+                // Older turns may predate stored selections. Prefer the
+                // session's current profile, with the child model as fallback.
+                let child = crate::database::load_subagent(&id)?;
+                Ok(match selection {
+                    Some((profile, model @ Some(_))) => Some((profile, model)),
+                    Some((profile, None)) => child.map(|child| (profile, child.model)),
+                    None => child.map(|child| (child.profile_id, child.model)),
+                })
+            })
+            .await?;
+            let Some((profile, model)) = selection else {
+                continue;
+            };
+            let health = crate::profile_health::shared()
+                .lock()
+                .map_err(|_| anyhow!("profile health lock poisoned"))?;
+            let description = model
+                .as_deref()
+                .and_then(|model| health.unhealthy(&profile, model, std::time::SystemTime::now()))
+                .map(|mark| format!("profile {profile} is {}", mark.describe()))
+                .unwrap_or_else(|| {
+                    let fault = match crate::profile_health::ProfileFault::of(&diagnostic) {
+                        Some(crate::profile_health::ProfileFault::RateLimited) => {
+                            "was rate-limited"
+                        }
+                        Some(crate::profile_health::ProfileFault::QuotaExhausted) => {
+                            "ran out of quota"
+                        }
+                        _ => "failed at the provider",
+                    };
+                    format!("profile {profile} {fault}: {}", diagnostic.message)
+                });
+            if let Some((_, message)) = &mut progress.failed_turn {
+                *message = format!(
+                    "{}. A new spawn will choose another eligible profile; send_message would run this child on {profile} again.",
+                    description.trim_end_matches('.')
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Resolve every child and the existing finished predicate from one
@@ -1723,6 +1799,8 @@ pub(crate) struct ChildProgress {
     /// The child's profile, when that turn failed because the provider
     /// refused the profile's login.
     pub login_failure: Option<String>,
+    /// The failed turn's identity and diagnostic, retained across async lookups.
+    provider_failure: Option<(String, mj_core::diagnostic::TurnDiagnostic)>,
     /// The directory on the parent's target where the child writes the
     /// details its report points to.
     pub report_dir: Option<String>,
@@ -1741,6 +1819,7 @@ impl ChildProgress {
             answered_ordinal: None,
             failed_turn: None,
             login_failure: None,
+            provider_failure: None,
             report_dir: None,
         }
     }
@@ -1794,8 +1873,18 @@ fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -
         login_failure: last
             .filter(|turn| mj_core::subagent::turn_failed_on_login(turn))
             .and_then(|_| subagent.map(|record| record.profile_id.clone())),
+        provider_failure: last.and_then(provider_failure),
         report_dir: recorded.report_dir.clone(),
     }
+}
+
+fn provider_failure(
+    turn: &mj_core::state::MaterializedTurnOutcome,
+) -> Option<(String, mj_core::diagnostic::TurnDiagnostic)> {
+    let (state, _) = mj_core::subagent::failed_turn(turn, None)?;
+    let diagnostic = turn.diagnostic.as_ref()?;
+    (state == "failed" && crate::profile_health::ProfileFault::of(diagnostic).is_some())
+        .then(|| (turn.command_id.clone(), diagnostic.clone()))
 }
 
 /// Read a child's progress from the store. Report notifications and
@@ -1845,6 +1934,7 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         answered_ordinal: last.as_ref().and_then(mj_core::subagent::answered_ordinal),
         failed_turn,
         login_failure,
+        provider_failure: last.as_ref().and_then(provider_failure),
         report_dir: recorded.report_dir,
     })
 }
@@ -1878,6 +1968,12 @@ fn wait_agent_entry(
             "kind": "login_invalid",
             "profile_id": profile_id,
         });
+    }
+    if state == "failed"
+        && progress.provider_failure.is_some()
+        && let Some((_, summary)) = &progress.failed_turn
+    {
+        agent["failure"] = serde_json::json!({"kind": "provider_failure", "summary": summary});
     }
     agent
 }
@@ -2499,10 +2595,10 @@ impl SubagentBackend for ApiBackend {
 
     fn subagent_candidates(
         &self,
-        parent_profile: String,
+        _parent_profile: String,
     ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
         Box::pin(async move {
-            let ids = self.profile_catalog.candidates(&parent_profile)?;
+            let ids = self.profile_catalog.candidates()?;
             self.discover_profile_candidates(ids, "sub-agent").await
         })
     }

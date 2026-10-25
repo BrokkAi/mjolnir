@@ -139,6 +139,10 @@ impl TargetTemplate {
                 targets::ImageHost::SshDocker(targets::SshTarget::from(ssh)),
                 container,
             )),
+            Self::SshAppleContainer { ssh, container } => Some((
+                targets::ImageHost::SshAppleContainer(targets::SshTarget::from(ssh)),
+                container,
+            )),
             Self::LocalBare | Self::AwsEc2 { .. } | Self::SshBare { .. } => None,
         }
     }
@@ -318,6 +322,15 @@ impl TryFrom<RecordedTarget<'_>> for targets::TargetLocator {
                 container_id: container_id.clone(),
                 borrowed_from: borrowed_from.clone(),
             },
+            TargetLocator::SshAppleContainer {
+                host,
+                container_id,
+                borrowed_from,
+            } => Self::SshAppleContainer {
+                ssh: ssh(host)?,
+                container_id: container_id.clone(),
+                borrowed_from: borrowed_from.clone(),
+            },
             TargetLocator::AwsEc2 {
                 instance_id,
                 address,
@@ -362,6 +375,7 @@ const fn locator_kind_name(locator: &TargetLocator) -> &'static str {
         TargetLocator::SshBare { .. } => "ssh-bare",
         TargetLocator::SshPodman { .. } => "ssh-podman",
         TargetLocator::SshDocker { .. } => "ssh-docker",
+        TargetLocator::SshAppleContainer { .. } => "ssh-apple-container",
     }
 }
 
@@ -372,6 +386,7 @@ pub fn locator_needs_connection(locator: &TargetLocator) -> bool {
         TargetLocator::SshBare { .. }
             | TargetLocator::SshPodman { .. }
             | TargetLocator::SshDocker { .. }
+            | TargetLocator::SshAppleContainer { .. }
             | TargetLocator::AwsEc2 { .. }
     )
 }
@@ -405,6 +420,11 @@ mod tests {
                 container_id: "docker-id".into(),
                 borrowed_from: None,
             },
+            TargetLocator::SshAppleContainer {
+                host: connection.host.clone(),
+                container_id: "apple-id".into(),
+                borrowed_from: None,
+            },
         ];
         for locator in locators {
             let mut runtime = TargetRuntimeSettings::from(&TargetTemplate::LocalBare);
@@ -421,7 +441,8 @@ mod tests {
             let ssh = match backend {
                 targets::TargetLocator::SshBare { ssh, .. }
                 | targets::TargetLocator::SshPodman { ssh, .. }
-                | targets::TargetLocator::SshDocker { ssh, .. } => ssh,
+                | targets::TargetLocator::SshDocker { ssh, .. }
+                | targets::TargetLocator::SshAppleContainer { ssh, .. } => ssh,
                 _ => unreachable!(),
             };
             assert_eq!(ssh.destination, "builder@original.test");

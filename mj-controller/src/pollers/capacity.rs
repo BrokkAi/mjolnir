@@ -5,19 +5,25 @@ pub fn spawn_dashboard_capacity_poller() -> (
     tokio::sync::mpsc::Sender<()>,
     tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
 ) {
-    spawn_capacity_poller_with(|target| async move {
-        if let Some(error) = &target.probe_error {
-            bail!("capacity probe is unavailable: {error}");
-        }
-        if target.local {
-            let mut usage = collect_local_capacity_with(collect_local_capacity).await?;
-            usage.storage = collect_local_storage(&target).await;
-            return Ok(Some(usage));
-        }
-        tokio::time::timeout(RESOURCE_POLL_TIMEOUT, collect_capacity(&target))
-            .await
-            .context("capacity probe timed out")?
-    })
+    spawn_capacity_poller_with(sample_capacity_target)
+}
+
+/// Sample one deployment host now. The periodic poller and launch admission
+/// share this path so both apply the same timeout and local/remote rules.
+pub(crate) async fn sample_capacity_target(
+    target: DeploymentCapacityTarget,
+) -> Result<Option<DeploymentCapacityUsage>> {
+    if let Some(error) = &target.probe_error {
+        bail!("capacity probe is unavailable: {error}");
+    }
+    if target.local {
+        let mut usage = collect_local_capacity_with(collect_local_capacity).await?;
+        usage.storage = collect_local_storage(&target).await;
+        return Ok(Some(usage));
+    }
+    tokio::time::timeout(RESOURCE_POLL_TIMEOUT, collect_capacity(&target))
+        .await
+        .context("capacity probe timed out")?
 }
 
 pub(super) fn spawn_capacity_poller_with<F, Fut>(
@@ -156,7 +162,7 @@ impl CapacitySamples {
     }
 }
 
-pub(super) async fn collect_capacity(
+pub(crate) async fn collect_capacity(
     target: &DeploymentCapacityTarget,
 ) -> Result<Option<DeploymentCapacityUsage>> {
     if let Some(error) = &target.probe_error {
@@ -294,7 +300,7 @@ async fn collect_local_storage(
     }
 }
 
-pub(super) async fn collect_local_capacity_with(
+pub(crate) async fn collect_local_capacity_with(
     collect: impl FnOnce() -> Result<DeploymentCapacityUsage> + Send + 'static,
 ) -> Result<DeploymentCapacityUsage> {
     // A blocking sample cannot be cancelled. Keep its slot occupied

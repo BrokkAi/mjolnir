@@ -7,7 +7,7 @@ A runtime is a named execution template under `[targets.<id>]`, and it names
 the machine it runs on under `[machines.<id>]`. A session combines one
 [profile](/profiles/), one target, and either a configured
 [bundle](/workspaces-bundles/#bundles-define-managed-projects) or an existing
-Git project directory. The target decides where work runs, what isolation
+project directory. The target decides where work runs, what isolation
 contains unrestricted agent actions, how the workspace is created, and what is
 removed after a verified stop.
 
@@ -36,6 +36,7 @@ command exercises container creation and removal.
 | `podman` | an `ssh` machine | rootless container | Bundle | remote-host copy-on-write or read-only mounts | CPU and memory | Remote container and workspace storage are removed after verified stop. |
 | `docker` | `local` with a Linux Docker daemon (including a VM on macOS), or an `ssh` machine | Docker container | Bundle | copy-on-write or read-only OverlayFS views | CPU and memory | Container and managed workspace volume are removed after verified stop. |
 | `apple-container` | `local` (Apple-silicon macOS 26+) | Apple container VM | Bundle | read-only mounts | CPU and memory | Container is removed after verified stop. |
+| `apple-container` | an `ssh` machine (Apple-silicon macOS 26+) | Apple container VM on the remote Mac | Bundle | remote-host read-only mounts | CPU and memory | Remote container is removed after verified stop. |
 
 “Verified stop” means Mjolnir has created a recovery archive and checked its
 SHA-256 on the controller before tearing the resource down. See
@@ -91,9 +92,24 @@ before choosing a raw or `yolo` target.
 
 ## Bare runtimes
 
-A bare runtime selects an existing absolute Git project directory rather than a
-bundle. They do not accept supplemental directory attachments or container
-resource sizing.
+A bare runtime selects an existing absolute project directory rather than a
+bundle. A local bare runtime accepts a plain folder; an SSH bare runtime
+requires a Git project. Bare runtimes do not accept supplemental directory
+attachments or container resource sizing.
+
+On `local`, that directory need not be a Git checkout, Git need not be
+installed, and a new repository does not need its first commit. Such a folder
+is a project in its own right, identified by its path, and the whole session
+works in it. Nothing about it is captured in a checkpoint and no restore touches
+its files, because the folder belongs to you and not to a managed checkout. A
+committed Git checkout is still required wherever Mjolnir has to clone or move
+the project into a bundle workspace, and on SSH and EC2 targets, which address a
+project by the repository it shares with its sessions.
+
+Review captures changes from Git history, so a local directory without a
+committed checkout must be created with `--review off`. A review-enabled launch
+is refused with that remedy, and `/review` reports that it has no Git changes to
+capture.
 
 ### Bare on this machine
 
@@ -152,11 +168,13 @@ path, not the selected project or its linked-worktree location.
 The host does not need a preinstalled harness bridge, except DSH. Its worker
 installs and reuses the exact harness version pinned by Mjolnir in the remote
 user's cache; DSH instead runs the host's own `dsh-acp` or the pinned npm
-package. It does require Node.js 22 and npm for Codex, Claude, and MiMo Code,
-or curl and Bash for Kimi and Grok, or curl and tar for Muse and OpenCode.
-DSH needs `dsh-acp` on `PATH`, or Node.js 22 with npm and npx. Mjolnir never
-uses sudo to add these prerequisites and does not fall back to another harness
-executable from the remote `PATH`.
+package. Node-based harnesses reuse Node.js 22 or newer with npm and npx when
+already on the host; otherwise the worker downloads a checksum-verified pinned
+Node.js into the user cache. Kimi, Grok, Muse, and OpenCode also install from
+checksum-verified artifacts downloaded by Mjolnir; they do not require `curl`,
+`tar`, or a shell-based vendor installer. DSH needs its own `dsh-acp` on `PATH`
+or the managed Node fallback. Mjolnir never uses sudo to add these prerequisites
+and does not fall back to another harness executable from the remote `PATH`.
 
 `permissions` accepts `guardian` or `yolo` and defaults to `guardian`. The
 machine's SSH connection fields include `identity_file` and `extra_args`. See
@@ -175,8 +193,9 @@ release names the immutable image published for its own version, such as
 host has no copy.
 
 It carries the supported bridges and common development tools. A plain image
-can work, but every new session may need to install Git, GitHub CLI, Node, or a
-harness bridge. See [Container targets](/containers/) and
+can work, but every new session may need to install Git, GitHub CLI, or a
+harness bridge; a missing Node.js is installed into the session user's cache
+when a Node-based harness needs it. See [Container targets](/containers/) and
 [Custom images](/custom-images/).
 
 ### Podman
@@ -216,6 +235,24 @@ Apple's `container` CLI requires Apple silicon and macOS 26 or newer.
 Supplemental directories are mounted read-only; writable OverlayFS views and
 Podman workspace-storage overrides are unavailable. See
 [Apple container](/apple-container/).
+
+An `apple-container` runtime on an `ssh` machine runs on that Mac. This lets a
+Linux controller, or an Intel Mac, reach the Apple-silicon Mac beside it:
+
+```toml
+[machines.mac]
+kind = "ssh"
+host = "mac.example.com"
+user = "dev"
+
+[targets.mac-apple]
+kind = "apple-container"
+machine = "mac"
+```
+
+Settings › Runtimes offers that runtime when the probe finds Apple-silicon
+macOS 26 or newer with a running Apple container daemon; `mj doctor` checks it
+the way it checks a local one.
 
 ### Podman on an SSH machine
 
@@ -265,12 +302,13 @@ permissions, launch-template contract, and connectivity.
 
 ## Bundles, clones, and workspace roots
 
-Managed targets—Podman, Docker, Apple Container, SSH Podman, and EC2—clone a
-configured bundle into a new session workspace. `primary_repo` is the agent's
-working directory and every other repository is an additional ACP workspace
-root. Every repository clones its network fetch remote's default branch. A
-controller-side `local` path supplies only its configured network fetch and
-push destinations; no Git connection back to that checkout is created.
+Managed targets—Podman, Docker, Apple Container, SSH Podman, SSH Docker, Apple
+Container over SSH, and EC2—clone a configured bundle into a new session
+workspace. `primary_repo` is the agent's working directory and every other
+repository is an additional ACP workspace root. Every repository clones its
+network fetch remote's default branch. A controller-side `local` path supplies
+only its configured network fetch and push destinations; no Git connection
+back to this checkout is created.
 
 Local and SSH bare sessions instead choose an existing project directory.
 A single-repository isolated session can move into a raw local worktree when
@@ -284,7 +322,8 @@ commits, staged, unstaged, and untracked files are restored over the clone. A
 checkout with no network remote stays bare-only: add a remote (`git remote add
 origin <url>`) or keep resuming on a bare target. A subdirectory of a checkout,
 an SSH-hosted checkout, and a multi-repository bundle cannot become one
-checkout either way.
+checkout either way. A plain local folder has no repository to clone from, so
+it also stays bare-only.
 
 Muse Code supports one ACP workspace root, so it requires a single-repository
 bundle or one existing bare project directory, with no supplemental directories.
@@ -322,15 +361,24 @@ command palette (**prefix+:**) → **Container settings** where supported. See [
 Container target `cpus` and `memory` values are backend fallbacks for launch
 requests that do not supply a per-session allocation. The terminal wizard does
 not seed from them: it starts with the remembered size for that physical host
-or a baseline of 8 CPUs and 32 GiB, then clamps choices to known host limits.
-Its per-session choice overrides the fallback. Later **Container settings**
-overrides win when that session's container is next created.
+or a baseline of 4 CPUs and 8 GiB. Checking **Save as default sizing** on a new
+session makes that session's choice the remembered size for the host. The
+minimum accepted size is 2 CPUs and 4 GiB. The per-session choice overrides the
+fallback. Later **Container settings** overrides win when that session's
+container is next created.
 
 EC2 uses an instance type rather than independent CPU and memory strings. Bare
 targets use the host directly and have no Mjolnir resource limit.
 
-These choices are capacity controls, not scheduling constraints. Mjolnir shows
-host and fleet usage but does not prevent overcommit.
+These choices are capacity controls. Mjolnir sums the CPU and memory limits of
+live containers that share a physical host and refuses a new container when
+the committed total would exceed the host's logical CPUs or usable RAM. The
+same check covers resuming a stopped container and moving a session onto a
+container target. RAM is treated as a hard commitment, with one fifth of
+physical RAM reserved for the host operating system and other processes.
+Compression, swap, and reclaimable memory do not increase the RAM available to
+another session. Mjolnir reports the RAM left rather than stopping or
+suspending sessions automatically.
 
 ## Image pull policy
 

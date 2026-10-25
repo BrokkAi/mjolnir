@@ -290,6 +290,7 @@ pub(crate) enum DashboardIoUpdate {
     SetupSaved {
         generation: u64,
         result: std::result::Result<Config, String>,
+        login_profile: Option<String>,
     },
     SetupDiscovered {
         generation: u64,
@@ -1362,7 +1363,9 @@ impl DashboardContext {
                 .apply_machine_runtime_check(generation, result),
             DashboardIoUpdate::FirstRunStarted => self.dashboard.begin_welcome(),
             DashboardIoUpdate::FirstRunConfigured(report) => {
-                self.dashboard.welcome_configured(report.summary())
+                let no_agents = report.agents.is_empty();
+                self.dashboard.welcome_configured(report.summary());
+                self.dashboard.welcome_managed_setup_available(no_agents);
             }
             DashboardIoUpdate::StartupProfilesDetected(result) => match result {
                 Ok(added) if added.is_empty() => {}
@@ -1380,12 +1383,20 @@ impl DashboardContext {
                     "Setup could not finish: {error}. Run `mj setup` to retry."
                 )]),
             },
-            DashboardIoUpdate::SetupSaved { generation, result } => {
+            DashboardIoUpdate::SetupSaved {
+                generation,
+                result,
+                login_profile,
+            } => {
+                let saved = result.is_ok();
                 let result = result.map(Config::with_local_targets);
                 // The acknowledgement closes the editor; only the runtime feed
                 // installs configuration, including edits from other clients.
                 let result = result.map(|_| self.controller.config.clone());
                 self.dashboard.setup_saved(generation, result);
+                if saved && let Some(profile_id) = login_profile {
+                    self.dashboard.queue_setup_login(generation, profile_id);
+                }
             }
             DashboardIoUpdate::ReviewSettingsChoices {
                 generation,

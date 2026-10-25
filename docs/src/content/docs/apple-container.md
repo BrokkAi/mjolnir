@@ -14,12 +14,20 @@ Install Apple's official signed package by following the
 [container project installation instructions](https://github.com/apple/container#initial-install).
 Mjolnir does not download or install it for you.
 
-Start the service before running setup:
+After installing the package, start the service once. This is also where Apple
+prompts for its recommended default kernel:
 
 ```console
 container system start
 container system status
 ```
+
+Once installed, Mjolnir starts the container service automatically when its
+daemon starts and at least one Apple container target is configured. It first
+runs `container system status`; if the service is stopped, it runs
+`container system start --disable-kernel-install` in the background. The flag
+keeps unattended startup from prompting for a kernel download. If the manual
+start above was skipped, run it once to install the recommended kernel.
 
 On an Intel Mac or an older macOS release, use a [remote SSH target](/ssh/) or
 an [EC2 target](/aws/) instead.
@@ -49,10 +57,18 @@ Apple container does not accept Podman's `workspace_storage` override. Each
 session gets an isolated workspace managed by the runtime.
 
 The TUI new-session wizard does not use `cpus` and `memory` as its initial
-selection. It starts with the allocation remembered for the local container
-host, or the 8-CPU/32-GiB baseline when none has been remembered. The selected
-per-session allocation takes precedence over these target-level backend
-fallbacks.
+selection. It starts with the allocation remembered for the Mac, or the
+4-CPU/8-GiB baseline when none has been remembered. Selecting **Save as default
+sizing** stores the chosen per-host default. The selected per-session
+allocation takes precedence over these target-level backend fallbacks.
+
+Mjolnir budgets Apple containers against the Mac's physical CPU and RAM, not
+against each VM independently. It reserves one fifth of physical RAM for macOS
+and sums every owning container's configured limits. The UI reports the hard
+RAM left: memory compression and reclaimable pages do not count as additional
+capacity. A launch that would exceed either the logical CPU count or that RAM
+budget is refused, including a resume or a move onto that Mac. Mjolnir never
+stops a session automatically to make room.
 
 Apple container takes part in the daemon's background image download like
 Podman and Docker: a configured image the host does not have is downloaded a
@@ -60,6 +76,42 @@ few seconds after the daemon starts, and an eligible moving tag is refreshed
 hourly, with `container image inspect` and `container image pull`. It also
 evaluates `pull_policy` while provisioning each session, so an eligible image
 refresh still happens as part of launch.
+
+## Run it on another Mac
+
+The runtime can live on an SSH machine, which lets a Linux controller — or an
+Intel Mac — use the Apple-silicon Mac beside it:
+
+```toml
+[machines.mac]
+kind = "ssh"
+host = "mac.example.com"
+user = "dev"
+
+[targets.mac-apple]
+kind = "apple-container"
+machine = "mac"
+```
+
+Install the runtime on the remote Mac by following the [installation
+instructions](https://github.com/apple/container#initial-install), then start
+its service there. The remote Mac needs the same runtime and macOS release as a
+local one. The SSH account must find `container` on the noninteractive `PATH`
+used by `ssh <destination> <command>`. For zsh, add it in `.zshenv`; `.zprofile`
+is not read by these command sessions. Check the setup before adding the
+machine:
+
+```console
+ssh mac.example.com container --version
+ssh mac.example.com container system status
+```
+
+When you save that machine, Mjolnir probes it over SSH — `uname -sm`,
+`sw_vers -productVersion`, `container --version`, and `container system status`
+— and offers the runtime in **Settings → Runtimes** when all four answer.
+`mj doctor` checks it the same way. Every command for the session runs on that
+Mac; the controller needs `ssh` but no local container runtime. The Mac and its
+container service stay running when sessions stop.
 
 ## Verify it end to end
 

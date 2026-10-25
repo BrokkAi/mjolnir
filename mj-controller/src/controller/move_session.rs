@@ -1260,16 +1260,13 @@ impl Controller {
             })
             .map(|operation| operation.operation_id.clone())
             .unwrap_or(new_command_id("move")?);
-        let in_place = previous
-            .as_ref()
-            .is_some_and(|op| retry && op.in_place && op.selection == selection)
-            || in_place_move_eligible(
-                source,
-                &selection,
-                &self.config.targets,
-                self.state.subagents.contains_key(&source.id),
-                retry,
-            );
+        let in_place = move_in_place_for_record(
+            source,
+            &selection,
+            &self.config.targets,
+            self.state.subagents.contains_key(&source.id),
+            previous.as_ref(),
+        );
         let destination_has_parent_role =
             parent_tools_enabled(&move_subagent_policy(source, &selection), profile.kind);
         if in_place
@@ -2373,7 +2370,7 @@ impl Controller {
                 "cannot prove the same ready destination; refusing to replay potentially executed work"
             );
             let spec = self.reconnect_command(id)?;
-            let relay = StandaloneSession::connect_command(&spec, id).await?;
+            let relay = Box::pin(StandaloneSession::connect_command(&spec, id)).await?;
             let store_id = relay.snapshot().operational.store_id.context("destination worker does not expose its durable store identity; upgrade the worker before admitting queued work")?;
             if let Some(expected) = &operation.destination_store_id {
                 ensure!(
@@ -2670,7 +2667,23 @@ fn subagent_mutations_pending(
 /// template (or another one that names the same bare machine), the same
 /// attached mounts, and the same resource allocation. A retry takes its retention decision from the durable Move intent instead;
 /// a sub-agent never owns its own target.
-pub(super) fn in_place_move_eligible(
+pub(crate) fn move_in_place_for_record(
+    source: &mj_core::state::SessionRecord,
+    selection: &MoveSelection,
+    targets: &std::collections::BTreeMap<String, mj_core::config::TargetTemplate>,
+    is_subagent: bool,
+    previous: Option<&MoveOperation>,
+) -> bool {
+    let retry = previous.is_some_and(|operation| {
+        !matches!(operation.phase, MovePhase::Completed)
+            && (operation.restore_artifact().is_some() || source.checkpoint.is_some())
+    });
+    previous
+        .is_some_and(|operation| retry && operation.in_place && operation.selection == *selection)
+        || in_place_move_eligible(source, selection, targets, is_subagent, retry)
+}
+
+pub(crate) fn in_place_move_eligible(
     source: &mj_core::state::SessionRecord,
     selection: &MoveSelection,
     targets: &std::collections::BTreeMap<String, mj_core::config::TargetTemplate>,

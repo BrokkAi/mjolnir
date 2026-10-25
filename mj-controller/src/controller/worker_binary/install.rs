@@ -12,7 +12,8 @@ pub(super) fn append_hel_target_environment(
         | targets::TargetLocator::LocalDocker { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshPodman { .. }
-        | targets::TargetLocator::SshDocker { .. } => MJ_CONTAINER_ENVIRONMENT.to_owned(),
+        | targets::TargetLocator::SshDocker { .. }
+        | targets::TargetLocator::SshAppleContainer { .. } => MJ_CONTAINER_ENVIRONMENT.to_owned(),
         targets::TargetLocator::AwsEc2 { workspace, .. } => format!(
             "## Mjolnir disposable environment\n\nThis session runs on a disposable Mjolnir EC2 instance. When the session closes, Mjolnir checkpoints everything in project workspace directories under `$HOME/{workspace}`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then terminates the instance.\n\nEverything outside `$HOME/{workspace}`, including installed packages, the rest of `$HOME`, and `/tmp`, is ephemeral and will be lost. Keep durable results in the workspace or push them to a remote.\n\nNew workspaces start on their own session branch from the default network fetch remote’s default branch. Local unpublished commits and uncommitted files are not copied. Use normal git push to publish the current branch to the configured network push destination. Closing saves a checkpoint; it does not publish commits or update the original local checkout. Resumed sessions restore their saved work.\n"
         ),
@@ -439,6 +440,7 @@ pub(super) fn install_mbx_shims(
         } => ("docker", container_id, Some(ssh)),
         targets::TargetLocator::LocalBare { .. }
         | targets::TargetLocator::AppleContainer { .. }
+        | targets::TargetLocator::SshAppleContainer { .. }
         | targets::TargetLocator::AwsEc2 { .. }
         | targets::TargetLocator::SshBare { .. } => {
             bail!("the build cache is only installed into Podman and Docker containers")
@@ -487,6 +489,7 @@ pub(super) fn remove_generated_mbx_shims(
         } => ("docker", container_id, Some(ssh)),
         targets::TargetLocator::LocalBare { .. }
         | targets::TargetLocator::AppleContainer { .. }
+        | targets::TargetLocator::SshAppleContainer { .. }
         | targets::TargetLocator::AwsEc2 { .. }
         | targets::TargetLocator::SshBare { .. } => {
             bail!("the build cache is only installed into Podman and Docker containers")
@@ -534,6 +537,7 @@ pub(super) fn verify_mbx_binary(
         } => ("docker", container_id, Some(ssh)),
         targets::TargetLocator::LocalBare { .. }
         | targets::TargetLocator::AppleContainer { .. }
+        | targets::TargetLocator::SshAppleContainer { .. }
         | targets::TargetLocator::AwsEc2 { .. }
         | targets::TargetLocator::SshBare { .. } => {
             bail!("the build cache is only installed into Podman and Docker containers")
@@ -594,6 +598,7 @@ pub(super) fn link_mbx_configuration(
         } => ("docker", container_id, Some(ssh)),
         targets::TargetLocator::LocalBare { .. }
         | targets::TargetLocator::AppleContainer { .. }
+        | targets::TargetLocator::SshAppleContainer { .. }
         | targets::TargetLocator::AwsEc2 { .. }
         | targets::TargetLocator::SshBare { .. } => {
             bail!("the build cache is only installed into Podman and Docker containers")
@@ -647,6 +652,7 @@ pub(super) fn link_legacy_mbx_configuration(
         } => ("docker", container_id, Some(ssh)),
         targets::TargetLocator::LocalBare { .. }
         | targets::TargetLocator::AppleContainer { .. }
+        | targets::TargetLocator::SshAppleContainer { .. }
         | targets::TargetLocator::AwsEc2 { .. }
         | targets::TargetLocator::SshBare { .. } => {
             bail!("the build cache is only installed into Podman and Docker containers")
@@ -925,12 +931,13 @@ pub(super) fn install_worker_files(
         }
         | targets::TargetLocator::SshDocker {
             ssh, container_id, ..
+        }
+        | targets::TargetLocator::SshAppleContainer {
+            ssh, container_id, ..
         } => {
-            let engine = match locator {
-                targets::TargetLocator::SshPodman { .. } => "podman",
-                targets::TargetLocator::SshDocker { .. } => "docker",
-                _ => unreachable!("matched remote container target"),
-            };
+            let engine = locator
+                .container_engine()
+                .expect("matched a remote container target");
             let install_worker = match worker {
                 WorkerInstall::Host(worker_binary) => vec![
                     engine.into(),

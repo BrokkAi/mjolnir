@@ -82,7 +82,8 @@ pub(crate) fn workspace_root(
         | targets::TargetLocator::LocalDocker { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshPodman { .. }
-        | targets::TargetLocator::SshDocker { .. } => {
+        | targets::TargetLocator::SshDocker { .. }
+        | targets::TargetLocator::SshAppleContainer { .. } => {
             targets::container_workspace_root(container_workspace)
         }
         targets::TargetLocator::AwsEc2 { workspace, .. }
@@ -1496,6 +1497,7 @@ mod tests {
                 },
             )]
             .into(),
+            plain_directories: Default::default(),
         });
         let mut selection = mj_core::remote_git::ExactCheckout {
             repository_id: "project".into(),

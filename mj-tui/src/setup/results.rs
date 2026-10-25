@@ -407,7 +407,6 @@ impl DashboardState {
                     }
                 }
                 schema::expand(&mut dialog.draft, &mut Vec::new());
-                populate_subagent_profile_choices(&mut dialog.draft);
                 let found_any = match scope {
                     DetectScope::Profiles => !config.profiles.is_empty(),
                     DetectScope::Runtimes => !config.targets.is_empty() || found_on_machines,
@@ -519,5 +518,14 @@ pub(super) fn setup_dialog_mut(mode: &mut Mode) -> Option<&mut SetupDialog> {
         Mode::Setup(dialog) => Some(dialog),
         Mode::Help(overlay) => setup_dialog_mut(&mut overlay.return_to),
         _ => None,
+    }
+}
+
+impl DashboardState {
+    pub fn queue_setup_login(&mut self, generation: u64, profile_id: String) {
+        self.pending_setup_login = Some((generation, profile_id));
+    }
+    pub fn take_setup_login(&mut self) -> Option<(u64, String)> {
+        self.pending_setup_login.take()
     }
 }

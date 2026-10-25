@@ -322,12 +322,14 @@ Container size
 CPU cores
 Memory (GiB)
 
-This host allows up to 24 CPU cores and 64 GiB of memory.
+Host: 24 CPUs and 64 GiB RAM · RAM left: 51.2 GiB · CPU left: 24. RAM left is a hard commitment; compressed or reclaimable memory does not increase it.
+
+Save as default sizing
 
 Back
 Next
 Cancel
-controls: [{"tag":"input","id":null,"label":"choice-1","value":"container","checked":true,"disabled":false,"pressed":null},{"tag":"input","id":"new-resource-cpus","label":null,"value":"8","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-resource-memory","label":null,"value":"32","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":null,"label":"choice-1","value":"container","checked":true,"disabled":false,"pressed":null},{"tag":"input","id":"new-resource-cpus","label":null,"value":"4","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-resource-memory","label":null,"value":"8","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-save-default-size","label":null,"value":"on","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 0
 project creation requests: 0
 === single sized target keeps Where to run: Step 3 of 4 · Project (390x844) ===
@@ -363,7 +365,7 @@ a
 Where to run
 container
 Container size
-8 CPU · 32 GiB memory
+4 CPU · 8 GiB memory
 Project
 existing
 Local changes

@@ -243,6 +243,11 @@ where
         .as_deref()
         .map(crate::worker_runtime::harness::acquire_supervisor_lease)
         .transpose()?;
+    let _node_lease = spec
+        .node_lease
+        .as_deref()
+        .map(crate::worker_runtime::harness::acquire_supervisor_lease)
+        .transpose()?;
     let mut environment = mj_core::login_environment::with_overrides(&spec.environment).await?;
     // Removed after the merge, so a value the target's login environment sets
     // is removed as well (#1160).

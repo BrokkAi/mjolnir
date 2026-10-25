@@ -1,0 +1,9 @@
+{
+  "version": "2.3.1",
+  "platforms": {
+    "linux-x86_64": {"filename":"kimi-code-linux-x64","sha256":"781ec1c24e5e79a01aaaa31ad859e8818ae11ffe792e93645cdc0c068a264ba0"},
+    "linux-aarch64": {"filename":"kimi-code-linux-arm64","sha256":"9572c66402643ea16e97db239d739096a31454e74daa5ec12af04519e9916d68"},
+    "macos-x86_64": {"filename":"kimi-code-darwin-x64","sha256":"c88f0d8ffa7d7a330199e63e0b9a4b8857e900c3b8f58fd5e90411d3e3ad1a87"},
+    "macos-aarch64": {"filename":"kimi-code-darwin-arm64","sha256":"f06ba6a3bb7ed2fc1f82590f7c22570736d9ee7344059fa92404ca75dc2d5b45"}
+  }
+}

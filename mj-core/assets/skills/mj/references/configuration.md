@@ -514,16 +514,11 @@ effort = "high"
 [subagents.subtle]
 model = "your-claude-model"
 effort = "high"
-
-[subagents.eligible_profiles]
-codex = true
-claude = true
 ```
 
 Each choice requires a non-empty model. Effort is optional and must be offered
 by that model when specified; omitted effort uses the harness default. Adaptive
-effort is no longer supported. Each configured choice must be available to the
-parent's eligible profiles before Mjolnir can be selected. Legacy per-profile subagent
+effort is no longer supported. Each configured choice must be offered by an enabled profile before Mjolnir can be selected. Legacy per-profile subagent
 settings are ignored and dropped on save, with no migration to global choices.
 
 With both types configured, `spawn` takes `task_type`: `straightforward` for
@@ -533,14 +528,14 @@ design choices, or risk of subtle bugs. A subtle task gets a smarter, more
 expensive agent. Judge difficulty, not brief length. With only straightforward
 configured, `spawn` has no `task_type` and every child uses the straightforward
 choice. The parent is told to delegate straightforward work and to do work
-that needs judgment itself. Mjolnir chooses the eligible profile offering that task type's
+that needs judgment itself. Mjolnir chooses the enabled profile offering that task type's
 model and effort with the most quota. The agent cannot override the selection.
 Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to
 Native, or to None for DSH, which refuses `native`; `mj move --subagents native|mjolnir|none` retains the recorded policy when
 omitted, including any session override. `--subagent-straightforward M` and `--subagent-subtle M` independently override
 their matching task type and imply Mjolnir. An unspecified type uses its global
 choice, so one override can be combined with one global choice. Each model and
-optional effort must be offered by an eligible profile. Each effort flag requires
+optional effort must be offered by an enabled profile. Each effort flag requires
 its matching model flag; `adaptive` and combining an override with `native` or
 `none` are rejected. Omitted effort uses the harness default. The retired
 `--subagent-model` and `--subagent-effort` flags fail with guidance to use the
@@ -550,17 +545,16 @@ delegation tools.
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
 | `max_concurrent` | integer | no | `6` | Most live sub-agents one session may have at once; between `1` and `64`. A sub-agent counts while it holds processes on the target, including while it is idle. A parked sub-agent, one whose turn ended and whose worker Mjolnir stopped, does not count (see [Parked sub-agents](/sessions/#parked-sub-agents)). |
-| `eligible_profiles` | table of booleans | no | empty | Profiles, by id, that any session's sub-agents may use. A session's sub-agents may always use the session's own profile, listed or not. A disabled profile is ignored, and `mj doctor` warns about it. An id that names no profile stops the configuration from loading. |
 
 A configuration file written before the per-session choice existed may still
 have an `enabled` key here. It is read and ignored, and a save drops it.
 
-Mjolnir runs each child with the configured model and effort on the eligible
+Mjolnir runs each child with the configured model and effort on an enabled
 profile that supports that selection and has the most quota left, meaning
 the lower of its 5-hour and weekly remaining percentages. A pay-per-use
 profile counts as 100% left, and a profile with no quota report comes last. On
 a tie, the parent's own profile wins. `mj doctor` shows, for each profile,
-where its quota comes from and whether other sessions' sub-agents may use it.
+where its quota comes from and that sub-agents may use it.
 
 A sub-agent ends its task by handing its report back to the session that
 started it. Suspending that session stops its sub-agents and removes them,
@@ -749,9 +743,11 @@ from an isolated clone. Repository destinations may not be equal, ancestors,
 or descendants of one another.
 
 Bundles are used by container and EC2 sessions. New bare sessions select an
-existing Git project directory instead. `git_ref` is no longer accepted; remove
-it and use the source remote's default branch. See [Workspaces and bundles](/workspaces-bundles/)
-for network remotes, isolated clones, and project memory.
+existing directory instead: a local bare directory may be a plain folder, while
+an SSH bare directory must be a committed Git project. `git_ref` is no longer
+accepted; remove it and use the source remote's default branch. See
+[Workspaces and bundles](/workspaces-bundles/) for network remotes, isolated
+clones, and project memory.
 
 ## Machines `[machines.<id>]`
 
@@ -958,15 +954,20 @@ permissions = "guardian"
 | --- | --- | --- | --- | --- |
 | `permissions` | string enum | only on an SSH machine | `"guardian"` | `guardian` preserves harness approvals; `yolo` disables sandbox checks (and approval checks, except Muse keeps its auto-review on). It has no meaning on `local`, where the harness keeps its configured approvals, or on an EC2 machine. |
 
-The new-session wizard asks for an existing absolute Git project directory on
-the runtime's machine. On `local` supported harnesses retain configured
-approvals because there is no container or instance boundary; Muse's guardian
-is muse-acp's auto-review, see [Harness limitations](/profiles/#harness-limitations). On an SSH machine
-the wizard separately asks for an existing absolute remote Git directory; when
-**Create isolated checkout** is checked on the final review, the new checkout is
-created below the repository's own `.mj/clones/` tree. A bare runtime on an
-EC2 machine launches one instance per session. See
+The new-session wizard asks for an existing absolute project directory on the
+runtime's machine. A local bare directory may be a plain folder and does not
+require Git. On `local` supported harnesses retain configured approvals because
+there is no container or instance boundary; Muse's guardian is muse-acp's
+auto-review, see [Harness limitations](/profiles/#harness-limitations). On an
+SSH machine the wizard separately asks for an existing absolute remote Git
+directory; when **Create isolated checkout** is checked on the final review,
+the new checkout is created below the repository's own `.mj/clones/` tree. A
+bare runtime on an EC2 machine launches one instance per session. See
 [SSH and SSH Podman](/ssh/) and [AWS EC2](/aws/).
+
+Review needs a committed Git checkout to capture changes. Create a local
+directory session with `mj new --review off`; automatic review for a plain
+directory is refused, and `/review` explains that it cannot capture changes.
 
 ### Common container fields
 
@@ -1079,8 +1080,10 @@ memory = "32g"
 EXAMPLE = "value"
 ```
 
-All common fields except a non-default `workspace_storage` are supported. Apple
-`container` runs only on this machine. See [Apple container](/apple-container/).
+All common fields except a non-default `workspace_storage` are supported. With
+`machine = "local"` the container runs on this Mac; with an `ssh` machine it
+runs on that remote Apple-silicon Mac, which must run macOS 26 or newer. See
+[Apple container](/apple-container/).
 
 ### Files written before version 12
 

@@ -8,7 +8,14 @@ const defaultContainerTarget = {
   id: 'container', kind: 'podman', requires_project_directory: false, recent_project_directories: [],
   resource_allocation_kind: 'container', remembered_container_size: null,
   container_host_limits: { cpus: 24, memory_bytes: 68719476736 },
-  default_resource_allocation: { kind: 'container', cpus: 8, memory_bytes: 34359738368 },
+  container_capacity: {
+    total: { cpus: 24, memory_bytes: 68719476736 },
+    reserved: { cpus: 0, memory_bytes: 13743895347 },
+    committed: { cpus: 0, memory_bytes: 0 },
+    remaining: { cpus: 24, memory_bytes: 54975581389 },
+    complete: true,
+  },
+  default_resource_allocation: { kind: 'container', cpus: 4, memory_bytes: 8589934592 },
 };
 
 async function mount(page, {
@@ -239,9 +246,14 @@ test('golden_viewer_new_session', async ({ context }) => {
 
   await withNewSessionPage(context, {}, output, 'container resource allocation and launch', async (page, state) => {
     await page.locator('#new-next').click();
+    await expect(page.locator('#new-resource-cpus')).toHaveValue('4');
+    await expect(page.locator('#new-resource-memory')).toHaveValue('8');
+    await expect(page.locator('#new-save-default-size')).not.toBeChecked();
+    await expect(page.locator('#new-step')).toContainText('RAM left: 51.2 GiB');
     await captureNewSessionState(output, page, 'shared container defaults', state);
     await page.locator('#new-resource-cpus').fill('6');
     await page.locator('#new-resource-memory').fill('12.5');
+    await page.locator('#new-save-default-size').check();
     await page.locator('#new-next').click();
     await page.getByRole('button', { name: 'existing', exact: true }).click();
     await expect(page.locator('#new-step')).not.toContainText('Checking project');
@@ -352,6 +364,7 @@ test('golden_viewer_new_session', async ({ context }) => {
     state.upgradePreview = { session_id: 'mounted', source_container_id: 'old-container', current_image: 'agent-dev:2.51.0', current_image_id: 'sha256:previous', target_image: 'agent-dev:2.52.0', target_image_id: 'sha256:selected', available: true, retained_mounts: ['/workspace', '/cache', '/tmp'], warning: 'Writable-layer state, including manually installed packages, may be lost. A checkpoint does not preserve the whole environment.' };
     await refresh(page, state);
     await page.locator('.session-menu-trigger').click();
+    await expect(page.getByRole('menuitem', { name: 'Upgrade container and restart…', exact: true })).toBeVisible();
     await page.getByRole('menuitem', { name: 'Restart agent', exact: true }).click();
     const warning = page.getByRole('dialog', { name: 'Upgrade container and restart', exact: true });
     await expect(warning).toBeVisible();
@@ -634,14 +647,115 @@ test('golden_web_new_session_wizard_steps', async ({ context }) => {
 test('container remembered size is clamped to the reported host limits', async ({ page }) => {
   const containerTarget = {
     ...defaultContainerTarget,
-    remembered_container_size: { cpus: 14, memory_bytes: 51539607552 },
-    container_host_limits: { cpus: 10, memory_bytes: 25769803776 },
+    remembered_container_size: { cpus: 14, memory_bytes: 25769803776 },
+    container_host_limits: { cpus: 10, memory_bytes: 34359738368 },
+    container_capacity: {
+      total: { cpus: 10, memory_bytes: 34359738368 },
+      reserved: { cpus: 0, memory_bytes: 6871947673 },
+      committed: { cpus: 0, memory_bytes: 0 },
+      remaining: { cpus: 10, memory_bytes: 27487790695 },
+      complete: true,
+    },
     default_resource_allocation: { kind: 'container', cpus: 10, memory_bytes: 25769803776 },
   };
   await mount(page, { containerTarget });
   await page.locator('#new-next').click();
   await expect(page.locator('#new-resource-cpus')).toHaveValue('10');
   await expect(page.locator('#new-resource-memory')).toHaveValue('24');
+});
+
+test('container sizing enforces the useful minimum and hard remaining RAM', async ({ page }) => {
+  const containerTarget = {
+    ...defaultContainerTarget,
+    container_capacity: {
+      total: { cpus: 8, memory_bytes: 32 * 1024 ** 3 },
+      reserved: { cpus: 0, memory_bytes: 6 * 1024 ** 3 },
+      committed: { cpus: 4, memory_bytes: 18 * 1024 ** 3 },
+      remaining: { cpus: 4, memory_bytes: 8 * 1024 ** 3 - 1 },
+      complete: true,
+    },
+  };
+  await mount(page, { containerTarget });
+  await page.locator('#new-next').click();
+  await page.locator('#new-resource-cpus').fill('1');
+  await expect(page.locator('#new-resource-error')).toContainText('at least 2');
+  await expect(page.locator('#new-next')).toBeDisabled();
+  await page.locator('#new-resource-cpus').fill('4');
+  await page.locator('#new-resource-memory').fill('9');
+  await expect(page.locator('#new-resource-error')).toContainText('7.9 GiB left');
+  await expect(page.locator('#new-next')).toBeDisabled();
+  await page.locator('#new-resource-memory').fill('7.9');
+  await expect(page.locator('#new-resource-error')).toHaveText('');
+  await expect(page.locator('#new-next')).toBeEnabled();
+});
+
+test('unknown live-container sizing is never rendered as zero capacity', async ({ page }) => {
+  const containerTarget = {
+    ...defaultContainerTarget,
+    container_capacity: {
+      total: { cpus: 8, memory_bytes: 32 * 1024 ** 3 },
+      reserved: { cpus: 0, memory_bytes: 6 * 1024 ** 3 },
+      committed: { cpus: 8, memory_bytes: 26 * 1024 ** 3 },
+      remaining: { cpus: 0, memory_bytes: 0 },
+      complete: false,
+    },
+  };
+  const state = await mount(page, { containerTarget });
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-step')).toContainText('no recorded sizing');
+  await expect(page.locator('#new-step')).not.toContainText('RAM left: 0');
+  await expect(page.locator('#new-step')).not.toContainText('CPU left: 0');
+  await expect(page.locator('#new-resource-error')).toContainText('no recorded sizing');
+  await expect(page.locator('#new-next')).toBeDisabled();
+  state.snapshot.capacity = [{
+    id: 'local',
+    label: 'local',
+    target_ids: ['container'],
+    cpu_percent: 40,
+    memory_used_bytes: 32 * 1024 ** 3,
+    memory_total_bytes: 64 * 1024 ** 3,
+    logical_cores: 24,
+    container_capacity: containerTarget.container_capacity,
+    refreshing: false,
+    stale: false,
+    has_error: false,
+    storage: [],
+  }];
+  await refresh(page, state);
+  await page.locator('#menu-button').click();
+  await page.getByRole('menuitem', { name: 'Targets', exact: true }).click();
+  await expect(page.locator('#targets')).toContainText('unavailable (live container sizing unknown)');
+  await expect(page.locator('#targets')).not.toContainText('0 of 8');
+});
+
+test('target capacity shows hard RAM left for a host with container sessions', async ({ page }) => {
+  const state = await mount(page);
+  state.snapshot.capacity = [{
+    id: 'local',
+    label: 'local',
+    target_ids: ['container'],
+    cpu_percent: 40,
+    memory_used_bytes: 32 * 1024 ** 3,
+    memory_total_bytes: 64 * 1024 ** 3,
+    logical_cores: 24,
+    container_capacity: {
+      total: { cpus: 24, memory_bytes: 64 * 1024 ** 3 },
+      reserved: { cpus: 0, memory_bytes: 13743895348 },
+      committed: { cpus: 8, memory_bytes: 24 * 1024 ** 3 },
+      remaining: { cpus: 16, memory_bytes: 29205777612 },
+      complete: true,
+    },
+    refreshing: false,
+    stale: false,
+    has_error: false,
+    storage: [],
+  }];
+  await refresh(page, state);
+  await page.locator('#menu-button').click();
+  await page.getByRole('menuitem', { name: 'Targets', exact: true }).click();
+  await expect(page.locator('#targets')).toContainText('RAM left');
+  await expect(page.locator('#targets')).toContainText('27.1 GiB of 64 GiB');
+  await expect(page.locator('#targets')).toContainText('16 of 24');
 });
 
 test('whole-row taps and in-progress gestures survive unrelated live updates', async ({ page }) => {
