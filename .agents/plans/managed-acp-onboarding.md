@@ -22,7 +22,7 @@ After this work, the default local workflow should have one user-facing bootstra
 - [x] (2026-10-25 10:12Z) Use Mjolnir's bounded HTTPS client for verified Node, Muse, and OpenCode artifact downloads.
 - [x] (2026-10-25 10:32Z) Replace Kimi and Grok vendor shell installers with direct pinned artifacts.
 - [x] (2026-10-25 10:12Z) Replace the external OpenCode `tar` call with the Rust archive reader already used for Node.
-- [ ] Run Claude login and setup-token through the pinned Claude CLI.
+- [x] (2026-10-25 10:51Z) Run managed-harness CLI fallback, Claude login, and Claude setup-token through the pinned CLI installation.
 - [ ] Add a managed-agent onboarding action that creates a non-own profile home, saves it, and hands off to sign-in.
 - [ ] Offer existing installed profiles first and keep manual/advanced profile creation available.
 - [ ] Make onboarding explain target choice and recommend an available container for harnesses the user does not want on the host.

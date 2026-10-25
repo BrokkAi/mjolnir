@@ -40,6 +40,23 @@ pub(crate) enum Outcome {
     NoLogin(String),
 }
 
+/// A pinned harness CLI and the environment prepared for it. The managed
+/// harness keeps the installation lease alive while the child command runs.
+pub(crate) struct PinnedCli {
+    pub command: PathBuf,
+    pub environment: BTreeMap<String, String>,
+    _managed: mj_core::harness_install::ManagedHarness,
+}
+
+fn uses_ambient_cli(profile: &HarnessProfile) -> bool {
+    let own_nested = profile.kind.nested_home() && profile.kind.is_own_nested_home(&profile.home);
+    let own_data = !profile
+        .kind
+        .data_source(&profile.home)
+        .starts_with(&profile.home);
+    own_nested || own_data
+}
+
 /// Sign in `profile` through the pinned harness's ACP methods.
 pub(crate) async fn login(
     profile: &HarnessProfile,
@@ -53,17 +70,61 @@ pub(crate) async fn login(
     // (OpenCode/Muse), or its data outside a conventional profile home
     // (MiMo's stock XDG data). Pointing the pinned harness at either could
     // migrate a database Mjolnir does not own. Use their CLI for that case.
-    let own_nested = profile.kind.nested_home() && profile.kind.is_own_nested_home(&profile.home);
-    let own_data = !profile
-        .kind
-        .data_source(&profile.home)
-        .starts_with(&profile.home);
-    if own_nested || own_data {
+    if uses_ambient_cli(profile) {
         return Ok(Outcome::Unavailable(format!(
             "this profile uses your own {} installation; Mjolnir signs in through that harness's installed CLI",
             profile.kind.display_name()
         )));
     }
+    let (managed, launch_environment) = match managed_login(profile).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return Ok(Outcome::Unavailable(format!(
+                "the pinned {} could not be prepared: {error:#}",
+                profile.kind.display_name()
+            )));
+        }
+    };
+    println!(
+        "Using the pinned {} at {}.",
+        profile.kind.display_name(),
+        managed.entrypoint.display()
+    );
+    sign_in(
+        profile.kind,
+        &profile.home,
+        &managed.command,
+        &managed.args,
+        &managed.entrypoint,
+        &launch_environment,
+        requested_method,
+    )
+    .await
+}
+
+/// Resolve the same managed installation used for sessions and return its CLI
+/// with the environment that makes its shebangs and child tools use the
+/// managed Node version.
+pub(crate) async fn pinned_cli(profile: &HarnessProfile) -> Result<PinnedCli> {
+    anyhow::ensure!(
+        !uses_ambient_cli(profile),
+        "this profile uses your own {} installation; Mjolnir signs in through that harness's installed CLI",
+        profile.kind.display_name()
+    );
+    let (managed, environment) = managed_login(profile).await?;
+    Ok(PinnedCli {
+        command: managed.cli_entrypoint.clone(),
+        environment,
+        _managed: managed,
+    })
+}
+
+async fn managed_login(
+    profile: &HarnessProfile,
+) -> Result<(
+    mj_core::harness_install::ManagedHarness,
+    BTreeMap<String, String>,
+)> {
     let created_home = !profile.home.exists();
     std::fs::create_dir_all(&profile.home).with_context(|| {
         format!(
@@ -105,37 +166,14 @@ pub(crate) async fn login(
         }
     }
     launch_environment.extend(environment.clone());
-    let managed = match mj_core::harness_install::resolve_with_environment(
+    let managed = mj_core::harness_install::resolve_with_environment(
         profile.kind,
         mj_core::config::ExecutionPolicy::ConfiguredApprovals,
         &launch_environment,
     )
-    .await
-    {
-        Ok(managed) => managed,
-        Err(error) => {
-            return Ok(Outcome::Unavailable(format!(
-                "the pinned {} could not be prepared: {error:#}",
-                profile.kind.display_name()
-            )));
-        }
-    };
+    .await?;
     launch_environment.extend(managed.environment.clone());
-    println!(
-        "Using the pinned {} at {}.",
-        profile.kind.display_name(),
-        managed.entrypoint.display()
-    );
-    sign_in(
-        profile.kind,
-        &profile.home,
-        &managed.command,
-        &managed.args,
-        &managed.entrypoint,
-        &launch_environment,
-        requested_method,
-    )
-    .await
+    Ok((managed, launch_environment))
 }
 
 /// The core of ACP sign-in. Tests drive this directly with a scripted bridge.
@@ -795,6 +833,76 @@ mod tests {
             ("PATH".into(), std::env::var("PATH").unwrap_or_default()),
             ("DISPLAY".into(), ":0".into()),
         ])
+    }
+
+    #[tokio::test]
+    async fn pinned_cli_comes_from_the_same_managed_install_as_the_bridge() {
+        let _guard = TEST_LOCK.lock().await;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let tools = root.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        for name in ["node", "npm", "npx"] {
+            write_script(
+                &tools,
+                name,
+                if name == "node" {
+                    "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.22.1; fi\n"
+                } else {
+                    "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 11.6.2; fi\n"
+                },
+            );
+        }
+        let xdg_cache = root.join("cache");
+        let cache_root = mj_core::harness_runtime::managed_harness_cache_root(
+            Some(xdg_cache.as_os_str()),
+            Some(root.as_os_str()),
+        )
+        .unwrap();
+        let install =
+            mj_core::harness_runtime::managed_harness_install_dir(&cache_root, HarnessKind::Claude);
+        std::fs::create_dir_all(install.join("node_modules/.bin")).unwrap();
+        let bridge = write_script(
+            &install.join("node_modules/.bin"),
+            "claude-agent-acp",
+            "#!/bin/sh\nexit 0\n",
+        );
+        let cli = write_script(
+            &install.join("node_modules/.bin"),
+            "claude",
+            "#!/bin/sh\necho pinned-claude\n",
+        );
+        let manifest =
+            mj_core::harness_runtime::ManagedHarnessManifest::for_harness(HarnessKind::Claude);
+        mj_core::config::atomic_write(
+            &install.join(mj_core::harness_runtime::MANIFEST_FILE),
+            &serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let mut environment = home(root);
+        environment.insert("PATH".into(), format!("{}:/usr/bin:/bin", tools.display()));
+        environment.insert("XDG_CACHE_HOME".into(), xdg_cache.display().to_string());
+        let profile = HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Claude,
+            home: root.join("claude-profile"),
+            environment: environment.into(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+            codex_profile: None,
+            legacy_subagents: Default::default(),
+        };
+        std::fs::create_dir_all(&profile.home).unwrap();
+
+        let pinned = pinned_cli(&profile).await.unwrap();
+
+        assert_eq!(pinned.command, cli);
+        assert!(
+            pinned.environment["PATH"]
+                .split(':')
+                .any(|entry| Path::new(entry) == tools)
+        );
+        assert!(bridge.exists());
     }
 
     /// A bridge that answers initialize with `methods` and records every later

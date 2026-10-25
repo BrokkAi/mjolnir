@@ -1889,6 +1889,7 @@ async fn login(args: LoginArgs) -> Result<()> {
     let stored = profile.auth_scheme() == mj_core::config::AuthScheme::NativeLoginStore;
     let before = profile_credential_fingerprint(profile)?;
 
+    let mut pinned_fallback = None;
     #[cfg(unix)]
     if !args.cli {
         match crate::acp_login::login(profile, args.method.as_deref()).await {
@@ -1906,6 +1907,15 @@ async fn login(args: LoginArgs) -> Result<()> {
                     "ACP sign-in is unavailable for {} ({reason}); using its command-line login.",
                     profile.kind.display_name()
                 );
+                match crate::acp_login::pinned_cli(profile).await {
+                    Ok(pinned) => pinned_fallback = Some(pinned),
+                    Err(error) => {
+                        eprintln!(
+                            "The pinned {} CLI is also unavailable ({error:#}); using the command on PATH.",
+                            profile.kind.display_name()
+                        );
+                    }
+                }
             }
             Err(error) => return Err(error),
         }
@@ -1919,19 +1929,29 @@ async fn login(args: LoginArgs) -> Result<()> {
     #[cfg(unix)]
     crate::acp_login::restore_default_sigint();
 
-    let (program, arguments) = mj_core::credentials::login_command(profile)
+    let (configured_program, arguments) = mj_core::credentials::login_command(profile)
         .with_context(|| format!("profile {profile_id:?}"))?;
+    let program = pinned_fallback
+        .as_ref()
+        .map(|pinned| pinned.command.clone())
+        .unwrap_or_else(|| std::path::PathBuf::from(configured_program));
     println!(
-        "Running `{program} {}` against {}.",
+        "Running `{} {}` against {}.",
+        program.display(),
         arguments.join(" "),
         profile.home.display()
     );
-    let mut environment = profile.environment.resolved().clone();
-    profile.kind.configure_profile_home_environment(
-        &profile.home,
-        mj_core::config::HarnessHost::current(),
-        &mut environment,
-    );
+    let environment = if let Some(pinned) = &pinned_fallback {
+        pinned.environment.clone()
+    } else {
+        let mut environment = profile.environment.resolved().clone();
+        profile.kind.configure_profile_home_environment(
+            &profile.home,
+            mj_core::config::HarnessHost::current(),
+            &mut environment,
+        );
+        environment
+    };
     let status = tokio::process::Command::new(&program)
         .args(&arguments)
         .envs(&environment)
@@ -1940,7 +1960,8 @@ async fn login(args: LoginArgs) -> Result<()> {
         .map_err(|error| login_spawn_error(error, &program, profile.kind, &profile_id))
         .with_context(|| {
             format!(
-                "run `{program} {}` for profile {profile_id}",
+                "run `{} {}` for profile {profile_id}",
+                program.display(),
                 arguments.join(" ")
             )
         })?;
@@ -1992,7 +2013,7 @@ fn report_login_change(
 /// "No such file or directory" the operating system reports.
 fn login_spawn_error(
     error: io::Error,
-    program: &str,
+    program: &std::path::Path,
     kind: mj_core::config::HarnessKind,
     profile_id: &str,
 ) -> anyhow::Error {
@@ -2000,7 +2021,8 @@ fn login_spawn_error(
         return error.into();
     }
     anyhow::anyhow!(
-        "`{program}` is not installed or is not on PATH, so the {} login cannot run. {}, then run `mj login --profile {profile_id}` again.",
+        "`{}` is not installed or is not on PATH, so the {} login cannot run. {}, then run `mj login --profile {profile_id}` again.",
+        program.display(),
         kind.display_name(),
         kind.install_advice()
     )
@@ -2033,16 +2055,35 @@ async fn store_claude_setup_token(
         "Running `claude setup-token` against {}.",
         profile.home.display()
     );
-    let mut environment = profile.environment.resolved().clone();
-    profile.kind.configure_profile_home_environment(
-        &profile.home,
-        mj_core::config::HarnessHost::current(),
-        &mut environment,
-    );
+    let pinned = match crate::acp_login::pinned_cli(profile).await {
+        Ok(pinned) => Some(pinned),
+        Err(error) => {
+            eprintln!(
+                "Could not prepare the pinned Claude CLI ({error:#}); using `claude` from PATH."
+            );
+            None
+        }
+    };
+    let program = pinned
+        .as_ref()
+        .map(|pinned| pinned.command.clone())
+        .unwrap_or_else(|| std::path::PathBuf::from("claude"));
+    let environment = if let Some(pinned) = &pinned {
+        pinned.environment.clone()
+    } else {
+        let mut environment = profile.environment.resolved().clone();
+        profile.kind.configure_profile_home_environment(
+            &profile.home,
+            mj_core::config::HarnessHost::current(),
+            &mut environment,
+        );
+        environment
+    };
     let output = tokio::task::spawn_blocking({
         let environment = environment.clone();
+        let program = program.clone();
         move || {
-            let mut command = std::process::Command::new("claude");
+            let mut command = std::process::Command::new(&program);
             command.arg("setup-token").envs(&environment);
             mj_core::subprocess::run_capturing_stdout(&mut command)
         }
@@ -2057,7 +2098,7 @@ async fn store_claude_setup_token(
         }) {
             login_spawn_error(
                 io::Error::from(io::ErrorKind::NotFound),
-                "claude",
+                &program,
                 mj_core::config::HarnessKind::Claude,
                 profile_id,
             )
@@ -2080,8 +2121,9 @@ async fn store_claude_setup_token(
     mj_core::credentials::write_claude_oauth_token(&token_path, token.as_bytes())?;
 
     let verify_token = token.clone();
+    let verify_program = program.clone();
     let verified = tokio::task::spawn_blocking(move || {
-        let mut command = std::process::Command::new("claude");
+        let mut command = std::process::Command::new(verify_program);
         command
             .args(["auth", "status"])
             .envs(&environment)
@@ -2732,7 +2774,7 @@ mod tests {
     fn a_missing_login_program_is_named_with_how_to_install_it() {
         let error = login_spawn_error(
             io::Error::from(io::ErrorKind::NotFound),
-            "codex",
+            std::path::Path::new("codex"),
             mj_core::config::HarnessKind::Codex,
             "codex",
         );
@@ -2746,7 +2788,7 @@ mod tests {
 
         let other = login_spawn_error(
             io::Error::from(io::ErrorKind::PermissionDenied),
-            "codex",
+            std::path::Path::new("codex"),
             mj_core::config::HarnessKind::Codex,
             "codex",
         );

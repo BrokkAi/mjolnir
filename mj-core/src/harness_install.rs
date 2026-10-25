@@ -44,6 +44,8 @@ pub struct ManagedHarness {
     /// through a shell bootstrap, this is the native harness or ACP binary the
     /// bootstrap would exec; login fallbacks use it directly.
     pub entrypoint: PathBuf,
+    /// The harness command-line program installed beside an ACP adapter.
+    pub cli_entrypoint: PathBuf,
     pub lease_path: PathBuf,
     pub cache_root: PathBuf,
     _lease: File,
@@ -336,6 +338,7 @@ async fn resolve_at_async(
         args,
         environment: launch_environment,
         entrypoint: install.join(selected.entrypoint),
+        cli_entrypoint: install.join(selected.cli_entrypoint),
         lease_path,
         cache_root: root.to_path_buf(),
         _lease: lease,
