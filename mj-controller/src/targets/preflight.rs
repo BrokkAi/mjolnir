@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ManagedResourceKind {
@@ -110,6 +111,95 @@ pub struct DockerPreflight {
 /// this fast probe runs before every launch and never pulls an image.
 pub fn verify_local_docker(executor: &impl CommandExecutor) -> Result<DockerPreflight> {
     verify_docker(None, executor)
+}
+
+static APPLE_CONTAINER_ENSURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The single gate shared by startup, launch readiness, and image refresh.
+#[cfg(test)]
+pub(super) fn apple_container_runtime_gate() -> &'static std::sync::Mutex<()> {
+    &APPLE_CONTAINER_ENSURE
+}
+
+/// What ensuring Apple's local runtime did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppleContainerRuntime {
+    /// The service was already answering health checks.
+    Running,
+    /// The service was stopped, and Mjolnir started it.
+    Started,
+}
+
+/// Ensure Apple's local container service is running.
+///
+/// Several launch surfaces can ask at once. One process-wide gate makes the
+/// check and start one decision, so two callers cannot both try to register
+/// the same launchd service. `--disable-kernel-install` keeps this unattended
+/// path from prompting for, or silently downloading, Apple's default kernel;
+/// the manual command documented for first-time setup remains interactive.
+pub fn ensure_apple_container_runtime(
+    executor: &impl CommandExecutor,
+) -> Result<AppleContainerRuntime> {
+    // A launch can own this gate through the unbounded ProcessExecutor used by
+    // the options API. Daemon shutdown joins the cancellable startup and image
+    // refresh callers, so they must be able to leave while waiting for it.
+    let mut backoff = Duration::from_millis(1);
+    let _ensuring = loop {
+        ensure!(
+            !executor.cancellation_requested(),
+            "operation cancelled while waiting to check Apple container runtime"
+        );
+        match APPLE_CONTAINER_ENSURE.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_millis(50));
+            }
+        }
+    };
+    ensure!(
+        !executor.cancellation_requested(),
+        "operation cancelled while checking Apple container runtime"
+    );
+
+    let status = CommandSpec::new("container", ["system", "status"])
+        .purpose("check Apple container runtime")
+        .stage(ProvisionStage::Provisioning);
+    if executor.execute(&status)?.status == 0 {
+        return Ok(AppleContainerRuntime::Running);
+    }
+
+    let start = CommandSpec::new("container", ["system", "start", "--disable-kernel-install"])
+        .purpose("start Apple container runtime")
+        .stage(ProvisionStage::Provisioning);
+    let output = executor.execute(&start)?;
+    ensure!(
+        output.status == 0,
+        "container system start failed with status {}: {}",
+        output.status,
+        apple_container_output(&output)
+    );
+
+    let output = executor.execute(&status)?;
+    ensure!(
+        output.status == 0,
+        "container system status still failed after start with status {}: {}",
+        output.status,
+        apple_container_output(&output)
+    );
+    Ok(AppleContainerRuntime::Started)
+}
+
+fn apple_container_output(output: &CommandOutput) -> String {
+    [
+        String::from_utf8_lossy(&output.stdout).trim(),
+        String::from_utf8_lossy(&output.stderr).trim(),
+    ]
+    .into_iter()
+    .filter(|message| !message.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 
 pub fn verify_ssh_docker(

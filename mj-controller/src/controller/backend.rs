@@ -560,18 +560,7 @@ pub(crate) fn local_engine_readiness(
     let result = match kind {
         "local-podman" => targets::verify_local_podman(executor).map(|_| ()),
         "local-docker" => targets::verify_local_docker(executor).map(|_| ()),
-        // The same command `verify_target` runs, without its sentence, which
-        // flattens the cause this needs to tell a missing command apart.
-        "apple-container" => executor
-            .execute(
-                &CommandSpec::new("container", ["system", "status"])
-                    .purpose("preflight Apple container runtime")
-                    .stage(ProvisionStage::Provisioning),
-            )
-            .and_then(|output| {
-                ensure!(output.status == 0, "container system status failed");
-                Ok(())
-            }),
+        "apple-container" => targets::ensure_apple_container_runtime(executor).map(|_| ()),
         _ => return None,
     };
     Some(match result {
@@ -582,7 +571,7 @@ pub(crate) fn local_engine_readiness(
 }
 
 /// Whether a command failed because its program is not installed.
-fn is_missing_command(error: &anyhow::Error) -> bool {
+pub(crate) fn is_missing_command(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
             .downcast_ref::<std::io::Error>()
@@ -651,29 +640,13 @@ pub(super) fn verify_target(
                 })
         }
         TargetTemplate::AppleContainer { .. } => {
-            let command = CommandSpec::new("container", ["system", "status"])
-                .purpose("preflight Apple container runtime")
-                .stage(ProvisionStage::Provisioning);
-            let output = executor.execute(&command).map_err(|error| {
-                anyhow::anyhow!(
-                    "Apple container is not ready. Fix the problem below{then_retry}: {error}"
-                )
-            })?;
-            if output.status != 0 {
-                bail!(
-                    "Apple container is not ready. Start the runtime with `container system start`{then_retry}: container system status exited {}: {}",
-                    output.status,
-                    [
-                        String::from_utf8_lossy(&output.stdout).trim(),
-                        String::from_utf8_lossy(&output.stderr).trim(),
-                    ]
-                    .into_iter()
-                    .filter(|message| !message.is_empty())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-                );
-            }
-            Ok(())
+            targets::ensure_apple_container_runtime(executor)
+                .map(|_| ())
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "Apple container is not ready{then_retry}. Fix the problem below: {error:#}"
+                    )
+                })
         }
         TargetTemplate::SshBare { ssh, .. } => {
             verify_ssh_connectivity(&SshTarget::from(ssh), executor)
