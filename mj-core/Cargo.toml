@@ -63,6 +63,8 @@ jsonc-parser = { version = "0.34", features = ["serde"] }
 libc.workspace = true
 memchr.workspace = true
 regex = "1"
+reqwest.workspace = true
+rustls.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 sha2.workspace = true
@@ -89,4 +91,5 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tiny_http = "0.12"
 tokio = { workspace = true, features = ["test-util"] }
