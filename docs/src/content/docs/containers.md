@@ -172,9 +172,10 @@ resource defaults, or environment, or to add an SSH or EC2 connection. The
 optional CLI setup command remains available.
 
 A plain image such as `ubuntu:24.04` still works if you enter it here: Mjolnir
-auto-installs Git, GitHub CLI, and Node the first time a session needs them.
-But that installation runs inside every new container, which slows down the
-start of each session. The default agent-dev image avoids that cost.
+installs Git and GitHub CLI through the image package manager and downloads
+Node and harness artifacts itself the first time a session needs them. That
+work runs inside each new container, which slows down the start of the session.
+The default agent-dev image avoids most of that cost.
 
 Container targets default to `pull_policy = "auto"`. Podman and Docker launches
 do not wait on a registry under that default: they start from the image the host
