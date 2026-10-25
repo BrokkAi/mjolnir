@@ -589,8 +589,23 @@ mod tests {
 
         // A remote project is addressed by the repository it shares with its
         // sessions, so a plain folder is refused there.
-        let remote =
-            resolve_directory(directory.path(), Some("example.test"), &executor).unwrap_err();
+        struct PlainRemoteFolder;
+        impl CommandExecutor for PlainRemoteFolder {
+            fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+                Ok(CommandOutput {
+                    status: 128,
+                    stdout: Vec::new(),
+                    stderr: b"fatal: not a git repository (or any of the parent directories): .git"
+                        .to_vec(),
+                })
+            }
+        }
+        let remote = resolve_directory(
+            Path::new("/projects/plain"),
+            Some("example.test"),
+            &PlainRemoteFolder,
+        )
+        .unwrap_err();
         assert!(matches!(
             remote.downcast_ref::<RepositoryUnavailable>(),
             Some(RepositoryUnavailable::NotRepository(_))
