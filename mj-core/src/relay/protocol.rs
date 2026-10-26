@@ -41,6 +41,48 @@ impl RelayVersionRange {
     }
 }
 
+/// Connection-only memory tree. Plain trees retain the pre-44 wire shape.
+/// Compression and expansion must run on a blocking thread; expansion has no
+/// size cap because both endpoints are trusted mj processes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum ProjectMemoryWireTree {
+    Plain(ProjectMemorySnapshot),
+    Gzip { gzip: String },
+}
+
+impl ProjectMemoryWireTree {
+    pub fn encode(tree: ProjectMemorySnapshot, protocol: u32) -> Result<Self> {
+        if protocol < super::RELAY_COMPRESSED_PROJECT_MEMORY_PROTOCOL {
+            return Ok(Self::Plain(tree));
+        }
+        use base64::Engine;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        serde_json::to_writer(&mut encoder, &tree.files)
+            .context("compress project memory files")?;
+        let bytes = encoder.finish().context("finish project memory gzip")?;
+        Ok(Self::Gzip {
+            gzip: base64::engine::general_purpose::STANDARD.encode(bytes),
+        })
+    }
+
+    pub fn decode(self) -> Result<ProjectMemorySnapshot> {
+        match self {
+            Self::Plain(tree) => Ok(tree),
+            Self::Gzip { gzip } => {
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(gzip)
+                    .context("decode project memory base64")?;
+                let decoder = flate2::read::GzDecoder::new(bytes.as_slice());
+                let files =
+                    serde_json::from_reader(decoder).context("decompress project memory files")?;
+                Ok(ProjectMemorySnapshot { files })
+            }
+        }
+    }
+}
+
 /// A request on the new controller-to-relay boundary. ACP payloads remain ACP
 /// payloads; only durability and queue-control operations are Hel-specific.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -103,13 +145,13 @@ pub enum RelayRequest {
     /// Install a controller-reconciled tree into both the replica and its
     /// baseline for the next three-way synchronization.
     InstallProjectMemorySnapshot {
-        snapshot: ProjectMemorySnapshot,
+        snapshot: ProjectMemoryWireTree,
     },
     /// Replace the complete session replica and baseline only if the replica
     /// still matches the tree the controller read.
     ReplaceProjectMemoryTree {
         expected_replica: TreeVersion,
-        tree: ProjectMemorySnapshot,
+        tree: ProjectMemoryWireTree,
     },
     /// Connection-only CPU measurement; never journaled.
     CpuUsage,
@@ -540,8 +582,8 @@ pub enum RelayResponsePayload {
     },
     PromptContextInstalled,
     ProjectMemorySnapshot {
-        baseline: ProjectMemorySnapshot,
-        replica: ProjectMemorySnapshot,
+        baseline: ProjectMemoryWireTree,
+        replica: ProjectMemoryWireTree,
     },
     ProjectMemorySnapshotInstalled,
     ProjectMemoryTreeReplaced {
@@ -748,5 +790,41 @@ pub fn read_bounded_line(
         if newline.is_some() {
             return Ok((consumed_total, true));
         }
+    }
+}
+
+#[cfg(test)]
+mod project_memory_wire_tests {
+    use super::*;
+
+    #[test]
+    fn memory_wire_preserves_legacy_bytes_and_rejects_corrupt_compression() {
+        let legacy = r#"{"files":{"/MEMORY.md":"notes\n"}}"#;
+        let plain: ProjectMemoryWireTree = serde_json::from_str(legacy).unwrap();
+        assert_eq!(serde_json::to_string(&plain).unwrap(), legacy);
+        let tree = plain.decode().unwrap();
+        let compressed = ProjectMemoryWireTree::encode(tree.clone(), 44).unwrap();
+        let encoded = serde_json::to_vec(&compressed).unwrap();
+        let decoded: ProjectMemoryWireTree = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.decode().unwrap(), tree);
+        assert!(
+            ProjectMemoryWireTree::Gzip {
+                gzip: "invalid base64".into()
+            }
+            .decode()
+            .is_err()
+        );
+        assert!(
+            ProjectMemoryWireTree::Gzip {
+                gzip: "e30=".into()
+            }
+            .decode()
+            .is_err()
+        );
+        let ProjectMemoryWireTree::Gzip { mut gzip } = compressed else {
+            panic!("expected gzip")
+        };
+        gzip.truncate(gzip.len() / 2);
+        assert!(ProjectMemoryWireTree::Gzip { gzip }.decode().is_err());
     }
 }

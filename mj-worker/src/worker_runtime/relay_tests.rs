@@ -6391,7 +6391,7 @@ fn acp_workspace_roots_add_the_memory_replica_outside_controller_attachments() {
 #[test]
 fn project_memory_connection_requests_round_trip_replica_and_baseline() {
     let directory = tempfile::tempdir().unwrap();
-    let large_memory = "hourly CI check\n".repeat(16_384);
+    let large_memory = "hourly CI check\n".repeat(220_000);
     let memory = ProjectMemoryLaunchConfig {
         history_socket: None,
         project_key: "project".into(),
@@ -6428,15 +6428,31 @@ fn project_memory_connection_requests_round_trip_replica_and_baseline() {
     else {
         panic!("unexpected project-memory payload")
     };
-    assert_eq!(captured_baseline.files["/MEMORY.md"], "base");
-    assert_eq!(captured_replica.files["/MEMORY.md"], large_memory);
+    assert!(matches!(
+        &captured_baseline,
+        mj_core::relay::ProjectMemoryWireTree::Gzip { .. }
+    ));
+    assert!(matches!(
+        &captured_replica,
+        mj_core::relay::ProjectMemoryWireTree::Gzip { .. }
+    ));
+    assert_eq!(
+        captured_baseline.decode().unwrap().files["/MEMORY.md"],
+        "base"
+    );
+    assert_eq!(
+        captured_replica.decode().unwrap().files["/MEMORY.md"],
+        large_memory
+    );
 
     unix::apply_project_memory_request(
         &memory,
         &RelayRequest::InstallProjectMemorySnapshot {
-            snapshot: mj_core::project_memory::ProjectMemorySnapshot {
-                files: BTreeMap::from([("/MEMORY.md".into(), large_memory.clone())]),
-            },
+            snapshot: mj_core::relay::ProjectMemoryWireTree::Plain(
+                mj_core::project_memory::ProjectMemorySnapshot {
+                    files: BTreeMap::from([("/MEMORY.md".into(), large_memory.clone())]),
+                },
+            ),
         },
     )
     .unwrap();
@@ -6483,14 +6499,18 @@ fn project_memory_replace_deletes_files_omitted_from_tree_in_replica_and_baselin
         .unwrap();
     let expected_replica = replica.snapshot().unwrap().version();
     let tree = mj_core::project_memory::ProjectMemorySnapshot {
-        files: BTreeMap::from([("/MEMORY.md".into(), "reconciled\n".repeat(24_576))]),
+        files: BTreeMap::from([("/MEMORY.md".into(), "reconciled\n".repeat(320_000))]),
     };
 
     let payload = unix::apply_project_memory_request(
         &memory,
         &RelayRequest::ReplaceProjectMemoryTree {
             expected_replica,
-            tree: tree.clone(),
+            tree: mj_core::relay::ProjectMemoryWireTree::encode(
+                tree.clone(),
+                mj_core::relay::RELAY_PROTOCOL_VERSION,
+            )
+            .unwrap(),
         },
     )
     .unwrap();
@@ -6544,7 +6564,7 @@ fn project_memory_replace_refuses_a_changed_replica_without_writing_either_tree(
         &memory,
         &RelayRequest::ReplaceProjectMemoryTree {
             expected_replica,
-            tree,
+            tree: mj_core::relay::ProjectMemoryWireTree::Plain(tree),
         },
     )
     .unwrap();

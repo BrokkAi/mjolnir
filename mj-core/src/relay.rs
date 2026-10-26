@@ -85,7 +85,9 @@ pub const RELAY_SUBAGENT_FINISHED_PROTOCOL: u32 = 41;
 pub const RELAY_REVIEW_ATTRIBUTION_PROTOCOL: u32 = 42;
 /// 43 adds push-scoped review capture, reviewed-tree recording and verdict mailboxes.
 pub const RELAY_PUSH_REVIEW_PROTOCOL: u32 = 43;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_PUSH_REVIEW_PROTOCOL;
+/// 44 compresses project-memory trees with gzip, retaining plain-tree decoding.
+pub const RELAY_COMPRESSED_PROJECT_MEMORY_PROTOCOL: u32 = 44;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_COMPRESSED_PROJECT_MEMORY_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

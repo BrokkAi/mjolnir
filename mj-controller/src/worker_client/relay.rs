@@ -284,7 +284,9 @@ impl RelayClient {
         let request = RelayRequest::ProjectMemorySnapshot;
         match self.call(request).await? {
             RelayResponsePayload::ProjectMemorySnapshot { baseline, replica } => {
-                Ok((baseline, replica))
+                tokio::task::spawn_blocking(move || Ok((baseline.decode()?, replica.decode()?)))
+                    .await
+                    .context("decode project memory task failed")?
             }
             _ => bail!("relay returned an unexpected project-memory response"),
         }
@@ -294,6 +296,12 @@ impl RelayClient {
         &mut self,
         snapshot: mj_core::project_memory::ProjectMemorySnapshot,
     ) -> Result<()> {
+        let protocol = self.protocol_version;
+        let snapshot = tokio::task::spawn_blocking(move || {
+            mj_core::relay::ProjectMemoryWireTree::encode(snapshot, protocol)
+        })
+        .await
+        .context("encode project memory task failed")??;
         let request = RelayRequest::InstallProjectMemorySnapshot { snapshot };
         match self.call(request).await? {
             RelayResponsePayload::ProjectMemorySnapshotInstalled => Ok(()),
@@ -314,6 +322,12 @@ impl RelayClient {
         expected_replica: mj_core::project_memory::TreeVersion,
         tree: mj_core::project_memory::ProjectMemorySnapshot,
     ) -> Result<mj_core::project_memory::ReplicaReplaceOutcome> {
+        let protocol = self.protocol_version;
+        let tree = tokio::task::spawn_blocking(move || {
+            mj_core::relay::ProjectMemoryWireTree::encode(tree, protocol)
+        })
+        .await
+        .context("encode project memory task failed")??;
         let request = RelayRequest::ReplaceProjectMemoryTree {
             expected_replica,
             tree,

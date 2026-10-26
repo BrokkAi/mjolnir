@@ -321,8 +321,8 @@ workspace root.
 
 Project-memory files are synchronized at checkpoints and have these limits:
 
-- 100 KiB per file;
-- 1 MiB per synchronized snapshot;
+- no project-memory snapshot size limit; relay protocol 44 and later gzip-compress
+  trees for transfer, within the relay’s 8 MiB frame limit;
 - 1024 bytes per path.
 
 Empty files, unsafe path components, hidden or reserved path segments, and

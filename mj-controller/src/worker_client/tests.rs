@@ -1475,3 +1475,77 @@ for line in sys.stdin:
         }
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn project_memory_wire_format_tracks_worker_protocol_and_decodes_both_forms() {
+    use mj_core::project_memory::{ProjectMemorySnapshot, ReplicaReplaceOutcome, TreeVersion};
+    let tree = ProjectMemorySnapshot {
+        files: BTreeMap::from([("/MEMORY.md".into(), "memory notes\n".repeat(250_000))]),
+    };
+    // An independent Python peer checks both request variants and supplies
+    // each response encoding, even when it differs from the negotiated one.
+    let script = r#"
+import base64, gzip, json, sys
+protocol, session, response_compressed = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+tree = {"files": {"/MEMORY.md": "memory notes\n" * 250000}}
+def decode(wire):
+    if protocol < 44:
+        assert wire == tree
+        assert list(wire) == ["files"]
+        return wire
+    assert list(wire) == ["gzip"]
+    return {"files": json.loads(gzip.decompress(base64.b64decode(wire["gzip"])))}
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req["request"]["method"]
+    if method == "hello":
+        payload = {"type": "hello", "data": {"negotiated": protocol, "relay_version": "memory-fixture", "session_id": session}}
+    elif method == "install_project_memory_snapshot":
+        assert decode(req["request"]["params"]["snapshot"]) == tree
+        payload = {"type": "project_memory_snapshot_installed"}
+    elif method == "replace_project_memory_tree":
+        assert decode(req["request"]["params"]["tree"]) == tree
+        payload = {"type": "project_memory_tree_replaced", "data": {"outcome": "replaced"}}
+    elif method == "project_memory_snapshot":
+        wire = {"gzip": base64.b64encode(gzip.compress(json.dumps(tree["files"]).encode())).decode()} if response_compressed else tree
+        payload = {"type": "project_memory_snapshot", "data": {"baseline": wire, "replica": wire}}
+    else:
+        raise AssertionError(method)
+    print(json.dumps({"request_id": req["request_id"], "protocol_version": protocol, "result": "ok", "payload": payload}), flush=True)
+"#;
+    for protocol in [43, 44] {
+        for response_compressed in [0, 1] {
+            let spec = CommandSpec::new(
+                "python3",
+                [
+                    "-c".to_owned(),
+                    script.to_owned(),
+                    protocol.to_string(),
+                    SESSION_ID.to_owned(),
+                    response_compressed.to_string(),
+                ],
+            )
+            .purpose("project memory protocol compatibility fixture");
+            let mut client =
+                RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10))
+                    .await
+                    .unwrap();
+            client
+                .install_project_memory_snapshot(tree.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                client
+                    .replace_project_memory_tree(TreeVersion("expected".into()), tree.clone())
+                    .await
+                    .unwrap(),
+                ReplicaReplaceOutcome::Replaced
+            );
+            assert_eq!(
+                client.project_memory_snapshot().await.unwrap(),
+                (tree.clone(), tree.clone())
+            );
+        }
+    }
+}

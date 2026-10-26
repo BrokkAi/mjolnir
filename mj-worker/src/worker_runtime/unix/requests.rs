@@ -362,12 +362,19 @@ pub(crate) fn apply_project_memory_request(
     let baseline = mj_core::project_memory::ProjectMemoryStore::new(&memory.baseline_root);
     match request {
         RelayRequest::ProjectMemorySnapshot => Ok(RelayResponsePayload::ProjectMemorySnapshot {
-            baseline: baseline.snapshot()?,
-            replica: replica.snapshot()?,
+            baseline: mj_core::relay::ProjectMemoryWireTree::encode(
+                baseline.snapshot()?,
+                mj_core::relay::RELAY_PROTOCOL_VERSION,
+            )?,
+            replica: mj_core::relay::ProjectMemoryWireTree::encode(
+                replica.snapshot()?,
+                mj_core::relay::RELAY_PROTOCOL_VERSION,
+            )?,
         }),
         RelayRequest::InstallProjectMemorySnapshot { snapshot } => {
-            replica.install_snapshot(snapshot)?;
-            baseline.install_snapshot(snapshot)?;
+            let snapshot = snapshot.clone().decode()?;
+            replica.install_snapshot(&snapshot)?;
+            baseline.install_snapshot(&snapshot)?;
             Ok(RelayResponsePayload::ProjectMemorySnapshotInstalled)
         }
         RelayRequest::ReplaceProjectMemoryTree {
@@ -380,8 +387,9 @@ pub(crate) fn apply_project_memory_request(
                     outcome: mj_core::project_memory::ReplicaReplaceOutcome::ReplicaChanged,
                 });
             }
-            replica.replace_tree(tree)?;
-            baseline.replace_tree(tree)?;
+            let tree = tree.clone().decode()?;
+            replica.replace_tree(&tree)?;
+            baseline.replace_tree(&tree)?;
             Ok(RelayResponsePayload::ProjectMemoryTreeReplaced {
                 outcome: mj_core::project_memory::ReplicaReplaceOutcome::Replaced,
             })
