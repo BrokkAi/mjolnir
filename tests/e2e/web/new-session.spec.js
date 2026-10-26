@@ -25,6 +25,8 @@ async function mount(page, {
   containerTarget = defaultContainerTarget,
   extraTargets = [],
   resourceOptions = {},
+  gitIdentity = { name: 'Fixture Author', email: 'fixture@example.test', per_directory: false },
+  gitIdentityError = null,
 } = {}) {
   const state = {
     snapshot: {
@@ -54,6 +56,7 @@ async function mount(page, {
     holdCreate: null, holdLaunch: null, launchResponses: 0,
     holdPreflight: null, preflightError: null, remoteRepairs: [], resolvedDirectory: null,
     worktreeOptions: { available: true, default_create: true },
+    gitIdentity, gitIdentitySaves: [],
   };
   const webRoot = path.resolve(__dirname, '../../../mj-controller/src/web');
   await page.addInitScript(() => {
@@ -110,6 +113,18 @@ async function mount(page, {
       const body = route.request().postDataJSON();
       state.completions.push(body);
       return json(await state.complete(body));
+    }
+    if (pathname === '/api/git-identity') {
+      if (gitIdentityError)
+        return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: gitIdentityError }) });
+      if (route.request().method() === 'POST') {
+        const body = route.request().postDataJSON();
+        state.gitIdentitySaves.push(body);
+        if (!body.email.includes('@'))
+          return route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ error: `Git email "${body.email}" needs an @` }) });
+        state.gitIdentity = { ...body, per_directory: false };
+      }
+      return json(state.gitIdentity);
     }
     if (pathname === '/api/projects') {
       if (state.holdCatalog) await state.holdCatalog;
@@ -642,6 +657,39 @@ test('golden_web_new_session_wizard_steps', async ({ context }) => {
     await skippedPage.close();
   }
   assertGolden('web_new_session_wizard_steps', output.join('\n'));
+});
+
+test('the new-session form asks for a missing Git author and keeps typed values on a refused save', async ({ page }) => {
+  const state = await mount(page, { gitIdentity: { name: 'Ada Lovelace', email: null, per_directory: false } });
+  const dialog = page.getByRole('dialog', { name: 'Set up Git identity' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel('Name')).toHaveValue('Ada Lovelace');
+  await dialog.getByLabel('Email').fill('ada.example.com');
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('Git email "ada.example.com" needs an @');
+  await expect(dialog.getByLabel('Email')).toHaveValue('ada.example.com');
+  await dialog.getByLabel('Email').fill('ada@example.com');
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(dialog).toBeHidden();
+  expect(state.gitIdentitySaves).toEqual([
+    { name: 'Ada Lovelace', email: 'ada.example.com' },
+    { name: 'Ada Lovelace', email: 'ada@example.com' },
+  ]);
+  await expect(page.locator('#new-page')).toBeVisible();
+});
+
+test('a per-directory Git author is left alone and a failed read is shown', async ({ page }) => {
+  await mount(page, { gitIdentity: { name: null, email: null, per_directory: true } });
+  await expect(page.locator('#new-page')).toBeVisible();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+
+  const failing = await page.context().newPage();
+  await mount(failing, { gitIdentityError: 'Git is not installed on this host, so sessions have no commit author' });
+  const notice = failing.getByRole('dialog', { name: 'Git identity unavailable' });
+  await expect(notice).toContainText('Git is not installed on this host');
+  await notice.getByRole('button', { name: 'OK' }).click();
+  await expect(notice).toBeHidden();
+  await expect(failing.locator('#new-page')).toBeVisible();
 });
 
 test('container remembered size is clamped to the reported host limits', async ({ page }) => {
