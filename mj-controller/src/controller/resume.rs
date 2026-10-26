@@ -1619,12 +1619,7 @@ impl Controller {
             .with_context(|| format!("unknown profile {profile_id:?}"))?
             .clone();
         ensure!(profile.enabled, "profile {profile_id:?} is disabled");
-        let target_template = self
-            .config
-            .targets
-            .get(target_id)
-            .with_context(|| format!("unknown target template {target_id:?}"))?
-            .clone();
+        let target_template = self.config.ensure_target_enabled(target_id)?.clone();
         // Decide the representation before the record changes, so an
         // incompatible target fails here instead of during provisioning.
         self.validate_muse_resume_destination(&previous, profile.kind, target_id)?;

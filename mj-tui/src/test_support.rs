@@ -240,6 +240,7 @@ pub(crate) fn config() -> Config {
         sessionwiki: Default::default(),
         legacy_startup: (),
         default_targets: Default::default(),
+        disabled_targets: Default::default(),
         machines: Default::default(),
         profiles: BTreeMap::from([
             (

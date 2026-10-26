@@ -85,6 +85,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         sessionwiki: Default::default(),
         legacy_startup: (),
         default_targets: Default::default(),
+        disabled_targets: Default::default(),
         machines: Default::default(),
         profiles: BTreeMap::from([(
             "codex-1".into(),

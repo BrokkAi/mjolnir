@@ -248,9 +248,10 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     assert_eq!(arguments, ["auth", "login"]);
     assert_eq!(profile_quota_source(&native), "Claude subscription quota");
 
-    // A machine no runtime runs on is asked what it could run: one runs a
-    // worker and Docker, one does not answer, one can run nothing Mjolnir
-    // supports, and an EC2 template needs no host to answer.
+    // A machine no runtime runs on is asked what it could run, each SSH
+    // host in one call: one runs a worker and Docker, one does not answer,
+    // one can run nothing Mjolnir supports, and an EC2 template is checked
+    // against AWS as a launch checks it.
     let mut machines = Config::default();
     for (id, host) in [
         ("builder", "builder.example.test"),
@@ -292,30 +293,43 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     )]);
     let probes = FakeExecutor::new([
         // builder
-        Ok(output(b"")),
-        Ok(output(b"Linux x86_64\n")),
-        Ok(output(&podman_missing)),
-        Ok(output(b"27.5.1 linux\n")),
+        Ok(output(&crate::setup::machine_probe_fixture(&[
+            ("platform", 0, b"Linux x86_64\n", ""),
+            ("podman", 0, &podman_missing, ""),
+            ("docker", 0, b"27.5.1 linux\n", ""),
+        ]))),
         // laptop
-        Ok(failed(b"Host key verification failed.")),
-        // pi
-        Ok(output(b"")),
-        Ok(output(b"Linux riscv64\n")),
-        Ok(output(&podman_missing)),
         Ok(CommandOutput {
-            status: 127,
+            status: 255,
             stdout: vec![],
-            stderr: b"bash: line 1: docker: command not found".to_vec(),
+            stderr: b"Host key verification failed.".to_vec(),
         }),
+        // pi
+        Ok(output(&crate::setup::machine_probe_fixture(&[
+            ("platform", 0, b"Linux riscv64\n", ""),
+            ("podman", 0, &podman_missing, ""),
+            (
+                "docker",
+                127,
+                b"",
+                "bash: line 1: docker: command not found",
+            ),
+        ]))),
+        // spot: AWS credentials, then the launch template
+        Ok(output(br#"{"Account":"123456789012"}"#)),
+        Ok(output(b"{}")),
     ]);
     checks.extend(machine_runtime_checks(Ok(&machines), &probes));
     assert!(probes.responses.borrow().is_empty());
-    assert!(
+    assert_eq!(
         probes
             .commands
             .borrow()
             .iter()
-            .all(|command| command.program == "ssh")
+            .map(|command| command.program.as_str())
+            .collect::<Vec<_>>(),
+        ["ssh", "ssh", "ssh", "aws", "aws"],
+        "one SSH call per host"
     );
 
     for check in &mut checks {

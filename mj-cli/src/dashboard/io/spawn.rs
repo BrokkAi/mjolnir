@@ -740,7 +740,8 @@ pub(crate) fn save_setup_at(
         // left as it was stays out of the file, as `Config::update` does, so
         // an unrelated save does not turn it into one the user configured.
         for (id, target) in implicit {
-            if next.targets.get(&id) == Some(&target) {
+            // A built-in runtime the edit switched off is written with it.
+            if next.targets.get(&id) == Some(&target) && !next.disabled_targets.contains(&id) {
                 next.targets.remove(&id);
             }
         }

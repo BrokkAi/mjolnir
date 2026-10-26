@@ -82,7 +82,9 @@ pub(crate) use backend::backend_locator;
 pub(crate) use backend::controller_github_token;
 pub use backend::image_refresh_plan;
 pub(crate) use backend::validate_resource_allocation;
-pub(crate) use backend::{LocalEngineReadiness, is_missing_command, local_engine_readiness};
+pub(crate) use backend::{
+    LocalEngineReadiness, is_missing_command, local_engine_readiness, verify_target_before_launch,
+};
 pub use github_app::GithubBundleSelectionError;
 pub(crate) use github_app::{
     GithubAppTokenProvider, github_app_token_for_session, github_token_for_session,
@@ -931,11 +933,7 @@ impl Controller {
             .get(profile_id)
             .with_context(|| format!("unknown profile {profile_id:?}"))?;
         ensure!(profile.enabled, "profile {profile_id:?} is disabled");
-        let template = self
-            .config
-            .targets
-            .get(target_id)
-            .with_context(|| format!("unknown target template {target_id:?}"))?;
+        let template = self.config.ensure_target_enabled(target_id)?;
         if create_managed_worktree == Some(true) && !is_bare_project_target(template) {
             bail!("managed worktree creation requires a bare Git project");
         }

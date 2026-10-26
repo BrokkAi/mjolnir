@@ -6,6 +6,7 @@
 //! here and add what it runs. `mj doctor` probes a machine the same way to
 //! say why it still has no runtime.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -13,6 +14,7 @@ use anyhow::{Context, Result, ensure};
 use mj_core::config::{
     Config, ContainerTemplate, Machine, PermissionMode, SshConnection, TargetTemplate,
 };
+use mj_core::targets::{CommandOutput, CommandSpec, join_remote_command, posix_quote};
 
 use super::{DEFAULT_IMAGE, RuntimeKind, RuntimeProbe};
 use crate::doctor::{
@@ -20,8 +22,11 @@ use crate::doctor::{
     ssh_docker_failure_remediation, ssh_podman_failure,
 };
 use crate::targets::{
-    APPLE_CONTAINER_MINIMUM_MACOS, CommandExecutor, SshTarget, TargetOs, TargetPlatform,
-    ssh_validation_command, verify_ssh_apple_container, verify_ssh_docker, verify_ssh_podman,
+    APPLE_CONTAINER_MACOS_PROBE, APPLE_CONTAINER_MINIMUM_MACOS, APPLE_CONTAINER_STATUS_PROBE,
+    APPLE_CONTAINER_VERSION_PROBE, CommandExecutor, DOCKER_SERVER_VERSION, PLATFORM_PROBE,
+    ProbeFrames, SSH_PODMAN_PREFLIGHT_SCRIPT, SshTarget, TargetOs, TargetPlatform,
+    parse_framed_probes, ssh_validation_command, verify_ssh_apple_container, verify_ssh_docker,
+    verify_ssh_podman,
 };
 
 /// What probing one machine found.
@@ -81,13 +86,32 @@ pub fn probe_machine(
     let outcome = match machine {
         Machine::Local { .. } => return None,
         // An instance is launched per session, so there is no host to ask
-        // until then, and an EC2 machine runs a bare harness only.
-        Machine::AwsEc2 { .. } => MachineProbeOutcome::Answered(vec![RuntimeProbe {
-            kind: RuntimeKind::Bare,
-            status: CheckStatus::Ready,
-            detail: "Each session launches its own instance from this template.".to_owned(),
-            remediation: None,
-        }]),
+        // until then, and an EC2 machine runs a bare harness only. What can
+        // be checked is what a launch checks first: the AWS credentials and
+        // the launch template.
+        Machine::AwsEc2 { .. } => {
+            let (_, template) = machine_runtime(machine_id, machine, RuntimeKind::Bare)
+                .expect("an EC2 machine has a bare runtime");
+            MachineProbeOutcome::Answered(vec![
+                match crate::controller::verify_target_before_launch(&template, executor) {
+                    Ok(()) => RuntimeProbe {
+                        kind: RuntimeKind::Bare,
+                        status: CheckStatus::Ready,
+                        detail: "Each session launches its own instance from this template."
+                            .to_owned(),
+                        remediation: None,
+                    },
+                    Err(error) => RuntimeProbe {
+                        kind: RuntimeKind::Bare,
+                        status: CheckStatus::Fixable,
+                        detail: format!("{error:#}"),
+                        remediation: Some(
+                            "Sign in to AWS for this profile (for example `aws sso login`) and check that the launch template exists in its region.".to_owned(),
+                        ),
+                    },
+                },
+            ])
+        }
         Machine::Ssh { ssh, .. } => probe_ssh_machine(ssh, executor),
     };
     Some(MachineProbe {
@@ -119,10 +143,185 @@ pub fn probe_machines(
     })
 }
 
+/// The markers the machine probe frames each result with. They differ from
+/// the Podman script's, which runs inside this one as a single probe.
+const MACHINE_PROBE_FRAMES: ProbeFrames = ProbeFrames {
+    begin: "__mj_machine_begin__",
+    end: "__mj_machine_end__",
+    status: "__mj_machine_status__",
+};
+
+/// Every remote command line the runtime checks send to an SSH host, built
+/// from the same constants the checks use, and whether it runs only on an
+/// Apple-silicon Mac. The machine probe runs them all in one SSH call and
+/// replays the answers to the checks.
+fn machine_probe_commands() -> Vec<(String, bool)> {
+    let line = |args: &[&str]| {
+        join_remote_command(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())
+    };
+    vec![
+        (line(&PLATFORM_PROBE), false),
+        (line(&["sh", "-c", SSH_PODMAN_PREFLIGHT_SCRIPT]), false),
+        (line(&DOCKER_SERVER_VERSION), false),
+        (line(&APPLE_CONTAINER_MACOS_PROBE), true),
+        (line(&APPLE_CONTAINER_VERSION_PROBE), true),
+        (line(&APPLE_CONTAINER_STATUS_PROBE), true),
+    ]
+}
+
+/// One shell script that runs each command as the remote login shell would
+/// and prints its stdout, stderr and status between markers. Each command
+/// reads no input, so a probe that waits on stdin cannot stall the rest. The
+/// Apple container commands run only where `uname -sm` reports an
+/// Apple-silicon Mac: another host has no `container` command to ask about.
+fn machine_probe_script(commands: &[(String, bool)]) -> String {
+    let ProbeFrames { begin, end, status } = MACHINE_PROBE_FRAMES;
+    let mut script = format!(
+        r#"exec 3>&1
+probe() {{
+    name=$1
+    shift
+    printf '{begin} %s.stderr\n' "$name"
+    out=$("$@" 2>&3 </dev/null)
+    status=$?
+    printf '\n{end}\n'
+    printf '{begin} %s.stdout\n%s\n{end}\n' "$name" "$out"
+    printf '{status} %s %s\n' "$name" "$status"
+}}
+apple=no
+[ "$(uname -sm 2>/dev/null)" = "Darwin arm64" ] && apple=yes
+"#
+    );
+    for (index, (command, apple_only)) in commands.iter().enumerate() {
+        let guard = if *apple_only {
+            "[ $apple = yes ] && "
+        } else {
+            ""
+        };
+        script.push_str(&format!(
+            "{guard}probe {index} sh -c {}\n",
+            posix_quote(command)
+        ));
+    }
+    script.push_str("exit 0\n");
+    script
+}
+
+/// What the machine probe's batch prints for the given results, named
+/// `platform`, `podman`, `docker`, `macos`, `container-version` and
+/// `container-status`. Tests across this crate stand in for a remote host,
+/// so they need the real framing rather than a second description of it.
+#[cfg(test)]
+pub(crate) fn machine_probe_fixture(results: &[(&str, i32, &[u8], &str)]) -> Vec<u8> {
+    const NAMES: [&str; 6] = [
+        "platform",
+        "podman",
+        "docker",
+        "macos",
+        "container-version",
+        "container-status",
+    ];
+    let ProbeFrames { begin, end, status } = MACHINE_PROBE_FRAMES;
+    let mut output = Vec::new();
+    for (name, code, stdout, stderr) in results {
+        let index = NAMES
+            .iter()
+            .position(|known| known == name)
+            .unwrap_or_else(|| panic!("no machine probe is named {name:?}"));
+        output.extend(format!("{begin} {index}.stderr\n{stderr}\n{end}\n").into_bytes());
+        output.extend(format!("{begin} {index}.stdout\n").into_bytes());
+        output.extend(stdout.strip_suffix(b"\n").unwrap_or(stdout));
+        output.extend(format!("\n{end}\n{status} {index} {code}\n").into_bytes());
+    }
+    output
+}
+
+/// Answers the runtime checks' SSH commands from one recorded batch. A
+/// command the batch did not record is an error, so a check that starts
+/// sending something new fails visibly instead of being judged on nothing.
+struct RecordedMachine {
+    answers: BTreeMap<String, CommandOutput>,
+    /// Why the batch itself did not run, handed to the connectivity check.
+    failure: RefCell<Option<anyhow::Error>>,
+}
+
+impl CommandExecutor for RecordedMachine {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        if let Some(error) = self.failure.borrow_mut().take() {
+            return Err(error);
+        }
+        ensure!(
+            command.program == "ssh",
+            "the machine probe cannot answer `{}`",
+            command.program
+        );
+        let remote = command
+            .args
+            .last()
+            .context("an SSH command names its remote command last")?;
+        self.answers
+            .get(remote)
+            .cloned()
+            .with_context(|| format!("the machine probe did not run `{remote}`"))
+    }
+}
+
+/// Run every runtime check against the host in one SSH call, then judge the
+/// answers with the checks a launch uses.
+fn record_machine(target: &SshTarget, executor: &impl CommandExecutor) -> RecordedMachine {
+    let commands = machine_probe_commands();
+    let batch = ssh_validation_command(
+        target,
+        vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            machine_probe_script(&commands),
+        ],
+        "check what the machine can run",
+    );
+    let connected = join_remote_command(&["true".to_owned()]);
+    match executor.execute(&batch) {
+        Err(error) => RecordedMachine {
+            answers: BTreeMap::new(),
+            failure: RefCell::new(Some(error)),
+        },
+        // The script always exits 0, so any other status is SSH's own: the
+        // connectivity check classifies it from what SSH printed.
+        Ok(output) if output.status != 0 => RecordedMachine {
+            answers: BTreeMap::from([(connected, output)]),
+            failure: RefCell::new(None),
+        },
+        Ok(output) => {
+            let mut found = parse_framed_probes(&output.stdout, MACHINE_PROBE_FRAMES);
+            let mut answers: BTreeMap<String, CommandOutput> = commands
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, (command, _))| {
+                    Some((command, found.remove(&index.to_string())?))
+                })
+                .collect();
+            answers.insert(
+                connected,
+                CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                },
+            );
+            RecordedMachine {
+                answers,
+                failure: RefCell::new(None),
+            }
+        }
+    }
+}
+
 /// Connectivity first: a runtime probe on a host that does not answer would
 /// report a runtime problem the user does not have.
 fn probe_ssh_machine(ssh: &SshConnection, executor: &impl CommandExecutor) -> MachineProbeOutcome {
     let target = SshTarget::from(ssh);
+    let recorded = record_machine(&target, executor);
+    let executor = &recorded;
     if let SshConnectivity::Failed {
         detail,
         remediation,
@@ -244,7 +443,7 @@ fn probe_ssh_machine(ssh: &SshConnection, executor: &impl CommandExecutor) -> Ma
 fn probe_platform(target: &SshTarget, executor: &impl CommandExecutor) -> Result<TargetPlatform> {
     let command = ssh_validation_command(
         target,
-        vec!["uname".to_owned(), "-sm".to_owned()],
+        PLATFORM_PROBE.map(str::to_owned).to_vec(),
         "detect machine platform",
     );
     let output = executor.execute(&command)?;
@@ -346,11 +545,12 @@ fn engine_runtime_id(machine_id: &str, engine: &str) -> String {
     format!("{prefix}{suffix}")
 }
 
-/// Add the runtimes `probes` found to every probed machine that still has
-/// none, under the configuration file's lock. A machine that gained a
-/// runtime, changed, or was removed while it was probed is left as it is
-/// now. Returns the runtimes added, by machine; the file is not touched when
-/// there are none.
+/// Add each runtime kind `probes` found that its machine does not run yet,
+/// under the configuration file's lock. A runtime switched off with
+/// `enabled = false` is still configured, so its kind is never added again.
+/// A machine that changed or was removed while it was probed is left as it
+/// is now. Returns the runtimes added, by machine; the file is not touched
+/// when there are none.
 pub fn add_machine_runtimes(
     config_path: &Path,
     probes: &[MachineProbe],
@@ -359,7 +559,6 @@ pub fn add_machine_runtimes(
     let additions = |config: &Config| {
         probes
             .iter()
-            .filter(|probe| config.machine_runtimes(&probe.machine_id).next().is_none())
             .map(|probe| {
                 let added = config.machine_runtime_additions(
                     &probe.machine_id,

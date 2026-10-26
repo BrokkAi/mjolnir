@@ -42,9 +42,9 @@ Machine nas has no r                                                            
 │ Create   Open   Fi  │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │                     │
 │hel ───────────────  │ run.                                                                                         │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   podman                          9 settings  ›                            Add               │                     │
-│  │ No messages yet  │   builder                         3 settings  ›                            Detect runtimes   │                     │
-│  │                  │   builder-docker                  9 settings  ›                                              │                     │
+│  Stopped  podman    │   podman                          10 settings  ›                           Add               │                     │
+│  │ No messages yet  │   builder                         4 settings  ›                            Detect runtimes   │                     │
+│  │                  │   builder-docker                  10 settings  ›                                             │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
