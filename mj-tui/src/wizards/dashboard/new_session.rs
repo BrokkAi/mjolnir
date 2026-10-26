@@ -48,7 +48,7 @@ impl DashboardState {
             }
             WizardStep::Target => {
                 let target_template_id = nth_key(&self.config.targets, wizard.target);
-                if let Some(reason) = self.target_readiness_rejection(&target_template_id) {
+                if let Some(reason) = self.target_unavailable(&target_template_id) {
                     self.notices.set(reason);
                     self.mode = Mode::New(wizard);
                     return DashboardAction::None;
@@ -267,23 +267,6 @@ impl DashboardState {
             };
             return (action != DashboardAction::None).then_some(action);
         }
-        // Checks start on the first step so they are usually done by the time
-        // the target step needs them.
-        let checks_targets = |step| matches!(step, WizardStep::Profile | WizardStep::Target);
-        if matches!(&self.mode, Mode::New(wizard) if checks_targets(wizard.step))
-            || matches!(&self.mode, Mode::Resume(wizard) if checks_targets(wizard.step))
-        {
-            let target_ids: Vec<_> = self
-                .config
-                .targets
-                .iter()
-                .filter(|(_, template)| !matches!(template, TargetTemplate::LocalBare))
-                .map(|(id, _)| id.clone())
-                .collect();
-            if let Some(check) = self.begin_target_readiness_checks(target_ids) {
-                return Some(check);
-            }
-        }
         // The project step marks configured projects whose directory is gone.
         // The checks start with the first step, like the target checks.
         if matches!(&self.mode, Mode::New(wizard)
@@ -350,7 +333,9 @@ impl DashboardState {
                         .is_some_and(|options| options.available),
             ),
             workspace_id: wizard.workspace_id.clone(),
-            profile_id: nth_enabled_profile(&self.config, wizard.profile),
+            // A profile that vanished after the launch was submitted is
+            // refused by name by the controller.
+            profile_id: self.nth_offered_profile(wizard.profile).unwrap_or_default(),
             bundle_id: if raw_project {
                 raw_project_context_id(&wizard.project_directory)
             } else {

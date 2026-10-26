@@ -823,6 +823,7 @@ fn sample_config() -> Config {
         jev: Default::default(),
         legacy_startup: (),
         default_targets: Default::default(),
+        disabled_targets: Default::default(),
         machines: BTreeMap::new(),
         profiles: BTreeMap::from([(
             "codex-1".into(),
@@ -1767,6 +1768,79 @@ fn version_seven_profiles_upgrade_enabled_and_disabled_round_trips_explicitly() 
     let disabled = fs::read_to_string(&path).unwrap();
     assert!(disabled.contains("enabled = false"), "{disabled}");
     assert!(!Config::load_from(&path).unwrap().profiles["work"].enabled);
+}
+
+/// A runtime switched off stays configured and off through every save, so
+/// detection, which adds only kinds a machine does not run yet, never adds
+/// it back. That includes a standard local runtime, which the file names
+/// only once the user switches it off.
+#[test]
+fn a_runtime_switched_off_stays_off_through_loads_saves_and_updates() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        "version = 18\n\
+         [machines.box]\nkind = \"ssh\"\nhost = \"box.example.test\"\n\
+         [targets.box]\nkind = \"bare\"\nmachine = \"box\"\nenabled = false\n\
+         [targets.box-docker]\nkind = \"docker\"\nmachine = \"box\"\nimage = \"a:1\"\nenabled = false\n\
+         [targets.box-podman]\nkind = \"podman\"\nmachine = \"box\"\nimage = \"a:1\"\nenabled = true\n",
+    )
+    .unwrap();
+
+    let config = Config::load_from(&path).unwrap();
+    assert_eq!(
+        config.disabled_targets,
+        BTreeSet::from(["box".to_owned(), "box-docker".to_owned()])
+    );
+    assert_eq!(
+        config
+            .enabled_targets()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        ["box-podman"]
+    );
+    let refusal = config.ensure_target_enabled("box-docker").unwrap_err();
+    assert!(refusal.to_string().contains("turned off"), "{refusal:#}");
+
+    // A fresh write names the switch only where it is off.
+    let fresh = directory.path().join("fresh.toml");
+    config.save_to(&fresh).unwrap();
+    let saved = fs::read_to_string(&fresh).unwrap();
+    assert!(
+        saved.starts_with(&format!("version = {CONFIG_VERSION}")),
+        "{saved}"
+    );
+    assert_eq!(saved.matches("enabled = false").count(), 2, "{saved}");
+    assert!(!saved.contains("enabled = true"), "{saved}");
+    assert_eq!(Config::load_from(&fresh).unwrap(), config);
+
+    let (_, ()) = Config::update_with_local_targets_at(&path, |config| {
+        config.disabled_targets.insert("docker".to_owned());
+        Ok(())
+    })
+    .unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("[targets.docker]"), "{saved}");
+    assert!(!saved.contains("[targets.podman]"), "{saved}");
+    assert!(
+        Config::load_from(&path)
+            .unwrap()
+            .with_local_targets()
+            .enabled_target("docker")
+            .is_none()
+    );
+
+    fs::write(
+        &path,
+        format!("version = {CONFIG_VERSION}\n[targets.x]\nkind = \"docker\"\nenabled = \"no\"\n"),
+    )
+    .unwrap();
+    let error = Config::load_from(&path).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("write true or false"),
+        "{error:#}"
+    );
 }
 
 /// The global `[subagents] enabled` switch was removed; whether a session

@@ -7,12 +7,12 @@
 │hel ───────────────  │ build cache settings.                                                                        │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │   nas                             No runtime  ›                                        Add   │                     │
-│  │ No messages yet  │ No runtime: it did not answer. `ssh dev@nas.example.test true` failed: ssh: connect          │                     │
-│  │                  │ to host nas.example.test port 22: Connection timed out. Check that nas.example.test          │                     │
-│                     │ is up and reachable from this machine.                                                       │                     │
+│  │ No messages yet  │ No runtime: it did not answer. `ssh nas true` failed: Connection timed out. Check            │                     │
+│  │                  │ that nas is up.                                                                              │                     │
 │                     │   local                           2 settings  ›                                              │                     │
 │                     │   builder                         No runtime  ›                                              │                     │
-│                     │ Save to find what it can run and add those runtimes.                                         │                     │
+│                     │ Save it; opening New session then finds what it can run and adds those runtimes.             │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -32,7 +32,7 @@
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Machine nas has no r                                                                                                    test port 22: Connec
+Enter open · / searc                                                                                                     : palette · ? keys
 
 === detection adds each machine's runtimes under it (140x34) ===
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
@@ -42,9 +42,9 @@ Machine nas has no r                                                            
 │ Create   Open   Fi  │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │                     │
 │hel ───────────────  │ run.                                                                                         │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   podman                          9 settings  ›                            Add               │                     │
-│  │ No messages yet  │   builder                         3 settings  ›                            Detect runtimes   │                     │
-│  │                  │   builder-docker                  9 settings  ›                                              │                     │
+│  Stopped  podman    │   podman                          10 settings  ›                           Add               │                     │
+│  │ No messages yet  │   builder                         4 settings  ›                            Detect runtimes   │                     │
+│  │                  │   builder-docker                  10 settings  ›                                             │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -68,7 +68,7 @@ Machine nas has no r                                                            
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Machine nas has no r                                                                                                    test port 22: Connec
+Enter open · / searc                                                                                                     : palette · ? keys
 
 === only the unreachable machine still lacks a runtime (140x34) ===
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
@@ -79,11 +79,11 @@ Machine nas has no r                                                            
 │hel ───────────────  │ build cache settings.                                                                        │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │   nas                             No runtime  ›                                        Add   │                     │
-│  │ No messages yet  │ No runtime: it did not answer. `ssh dev@nas.example.test true` failed: ssh: connect          │                     │
-│  │                  │ to host nas.example.test port 22: Connection timed out. Check that nas.example.test          │                     │
-│                     │ is up and reachable from this machine.                                                       │                     │
+│  │ No messages yet  │ No runtime: it did not answer. `ssh nas true` failed: Connection timed out. Check            │                     │
+│  │                  │ that nas is up.                                                                              │                     │
 │                     │   local                           2 settings  ›                                              │                     │
 │                     │   builder                         7 settings  ›                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -104,4 +104,4 @@ Machine nas has no r                                                            
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Machine nas has no r                                                                                                    test port 22: Connec
+Enter open · / searc                                                                                                     : palette · ? keys

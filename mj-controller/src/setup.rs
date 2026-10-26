@@ -16,7 +16,11 @@ use mj_core::config::{
     ProjectRepository, TargetTemplate, unique_config_id as unique_id,
 };
 
+mod availability;
+pub use availability::{AvailabilityReport, check_availability, profile_presence};
 mod machines;
+#[cfg(test)]
+pub(crate) use machines::machine_probe_fixture;
 pub use machines::{
     MachineProbe, MachineProbeOutcome, add_machine_runtimes, probe_machine, probe_machines,
 };
@@ -63,6 +67,17 @@ pub enum RuntimeKind {
 }
 
 impl RuntimeKind {
+    /// The kind as a runtime stores it, as `runtime_kind_name` answers for a
+    /// configured runtime.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bare => "bare",
+            Self::Podman => "podman",
+            Self::Docker => "docker",
+            Self::AppleContainer => "apple-container",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Bare => "Bare",
@@ -239,20 +254,36 @@ fn discover_installed_harnesses(
             });
             continue;
         }
-        let probe = CommandSpec::new(kind.cli_binary_name(), ["--version"])
-            .purpose("detect installed harness before first login");
-        match executor.execute(&probe) {
-            Ok(output) if output.status == 0 => homes.push(DiscoveredHome {
+        if harness_cli_installed(kind, executor) == Some(true) {
+            homes.push(DiscoveredHome {
                 kind,
                 path: home,
                 codex_profile: None,
                 authenticated: false,
-            }),
-            Ok(_) => {}
-            Err(error) => tracing::debug!(
+            });
+        }
+    }
+}
+
+/// Whether the harness's own command answers on this machine, or `None`
+/// when the probe could not run (cancelled, timed out). Discovery offers a
+/// profile for an installed command before its first login, and a
+/// configured profile without a home is still present while it does.
+pub(crate) fn harness_cli_installed(
+    kind: HarnessKind,
+    executor: &impl CommandExecutor,
+) -> Option<bool> {
+    let probe = CommandSpec::new(kind.cli_binary_name(), ["--version"])
+        .purpose("detect installed harness before first login");
+    match executor.execute(&probe) {
+        Ok(output) => Some(output.status == 0),
+        Err(error) if crate::controller::is_missing_command(&error) => Some(false),
+        Err(error) => {
+            tracing::debug!(
                 harness = kind.id(),
                 "installation probe unavailable: {error:#}"
-            ),
+            );
+            None
         }
     }
 }

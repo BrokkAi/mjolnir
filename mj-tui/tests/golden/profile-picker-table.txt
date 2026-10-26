@@ -85,3 +85,34 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 ╰───────────────                                                                                        ───────────────╯
 Enter open · / s                                                                                        palette · ? keys
+=== a_missing_profile_is_left_out_of_the_profile_step_and_named (120x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                              │
+╰───────────────                                                                                                       │
+╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
+│ Create   Open   │                                                                                  │                 │
+│No sessions yet  │   PROFILE   HARNESS      WEEKLY      5H                                          │                 │
+│Create new work  │   claude-1  Claude Code  refreshing                                              │                 │
+│                 │   codex-1   Codex        refreshing                                              │                 │
+│                 │   codex-2   Codex        refreshing                                              │                 │
+│                 │                                                                                  │                 │
+│                 │ kimi-1: Kimi Code is not installed here: /profiles/kimi does not exist and       │                 │
+│                 │ `kimi` is not on PATH. Install Kimi Code, or turn the profile off in Settings    │                 │
+│                 │ › Profiles.                                                                      │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
+│                                                                                                                      │
+╰───────────────                                                                                        ───────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys

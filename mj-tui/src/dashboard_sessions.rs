@@ -1210,7 +1210,7 @@ impl DashboardState {
         self.config
             .profiles
             .iter()
-            .filter(|(_, profile)| profile.enabled)
+            .filter(|(id, _)| self.profile_offered(id))
             .map(|(id, profile)| (id, profile.kind))
             .collect()
     }

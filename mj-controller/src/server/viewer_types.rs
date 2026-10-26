@@ -331,10 +331,9 @@ impl ViewerSnapshot {
             })
             .collect();
         let targets = config
-            .targets
-            .iter()
+            .enabled_targets()
             .map(|(id, target)| ViewerTarget {
-                id: id.clone(),
+                id: id.to_owned(),
                 kind: target.kind_name().into(),
                 resource_allocation_kind: target.into(),
                 requires_project_directory: matches!(

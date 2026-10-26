@@ -1225,6 +1225,7 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
             sessionwiki: Default::default(),
             legacy_startup: (),
             default_targets: Default::default(),
+            disabled_targets: Default::default(),
             machines: Default::default(),
             profiles: ids
                 .iter()

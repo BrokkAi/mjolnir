@@ -159,18 +159,24 @@ The SSH host is one `[machines.<id>]` entry, and every runtime on it names that
 machine. Sessions run on runtimes, so a machine with no runtime is not offered
 as a session target.
 
-You do not have to write the runtimes yourself. When you save a machine under
-Settings › Machines, Mjolnir probes it over SSH and adds every runtime it can
-run: a `bare` runtime named after the machine when the host is Linux or macOS
-on x86_64 or arm64, `<machine>-podman` and `<machine>-docker` for each engine
-that passes the same check a launch runs, and `<machine>-apple-container` when
-the machine is Apple-silicon macOS 26 or newer with a running Apple container
-service. A machine already in the file without a runtime gets the same
-treatment each time `mj` starts and when you run `mj setup`, and Settings ›
-Runtimes › Detect runtimes probes every machine. A machine that answers with
-nothing usable, or does not answer, keeps no runtime; Settings › Machines, the
-new-session picker and `mj doctor` say why, with the fix. Removing one runtime
-of a machine is kept; to stop using a host altogether, remove the machine.
+You do not have to write the runtimes yourself. Each time `mj` starts and each
+time you open the new-session or resume picker, Mjolnir asks every machine what
+it can run, with one SSH call per machine that runs every check and
+disconnects, and adds each runtime it newly runs: a `bare` runtime named after
+the machine when the host is Linux or macOS on x86_64 or arm64,
+`<machine>-podman` and `<machine>-docker` for each engine that passes the same
+check a launch runs, and `<machine>-apple-container` when the machine is
+Apple-silicon macOS 26 or newer with a running Apple container service. This
+covers machines that already have runtimes, so Docker installed later on a
+host you already use appears without any configuration. `mj setup` does the
+same, and Settings › Runtimes › Detect runtimes does it on demand. A runtime
+whose machine did not answer, or whose engine stopped working, is left out of
+the pickers and named under the list with the reason. A machine that answers
+with nothing usable, or does not answer, keeps no runtime; Settings ›
+Machines, the new-session picker and `mj doctor` say why, with the fix. To keep
+a runtime you do not want, set `enabled = false` on it (or clear Enabled in
+Settings › Runtimes): detection never adds a kind the machine already has
+configured. To stop using a host altogether, remove the machine.
 
 The machine's keys are:
 

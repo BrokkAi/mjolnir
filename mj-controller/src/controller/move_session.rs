@@ -1170,11 +1170,11 @@ impl Controller {
             )
             .await?;
         }
-        let target = self
-            .config
+        self.config
             .targets
             .get(target_id)
             .context("unknown destination target")?;
+        let target = self.config.ensure_target_enabled(target_id)?;
         self.validate_muse_resume_destination(source, profile.kind, target_id)?;
         let checkout = self.state.checkout(&source.id)?;
         super::worktree::resume_compatibility_with_checkout(

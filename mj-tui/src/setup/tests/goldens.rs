@@ -738,25 +738,9 @@ fn golden_machines_without_runtimes() {
         .machines
         .insert("nas".into(), machine("nas.example.test"));
     dashboard.set_config(config);
-    let Some(DashboardAction::CheckMachineRuntimes { generation, .. }) =
-        dashboard.take_machine_runtime_check()
-    else {
-        panic!("a machine without a runtime is checked");
-    };
-    dashboard.apply_machine_runtime_check(
-        generation,
-        Ok(crate::MachineRuntimesChecked {
-            probes: vec![crate::MachineRuntimeProbe {
-                machine_id: "nas".into(),
-                machine: machine("nas.example.test"),
-                finding: crate::MachineFinding::Unreachable {
-                    detail: "`ssh dev@nas.example.test true` failed: ssh: connect to host nas.example.test port 22: Connection timed out".into(),
-                    remediation: "Check that nas.example.test is up and reachable from this machine.".into(),
-                },
-            }],
-            added: std::collections::BTreeMap::new(),
-        }),
-    );
+    crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+        crate::test_support::availability_answer(dashboard, &[], &["nas"])
+    });
     dashboard.begin_setup();
     choose(&mut dashboard, "machines");
     dashboard.handle_key(key(KeyCode::Char('a')));
@@ -834,6 +818,7 @@ fn golden_machines_without_runtimes() {
                             ),
                         ],
                         rejected: vec![RejectedRuntime {
+                            kind: "podman".into(),
                             label: "Podman".into(),
                             detail: "Podman is not installed.".into(),
                             remediation: None,

@@ -367,8 +367,9 @@ impl DashboardState {
                         let crate::MachineFinding::Answered { runtimes, rejected } = &probe.finding
                         else {
                             rejected_runtimes.push(RejectedRuntime {
+                                kind: String::new(),
                                 label: probe.machine_id.clone(),
-                                detail: crate::machine_runtimes::finding_reason(&probe.finding),
+                                detail: crate::availability::finding_reason(&probe.finding),
                                 remediation: None,
                             });
                             continue;
@@ -449,14 +450,14 @@ pub(super) fn machine_without_runtime_note(
             .ok()
             .is_some_and(|machine| dashboard.config.machines.get(id) == Some(&machine));
     if !saved {
-        return Some("Save to find what it can run and add those runtimes.".to_owned());
+        return Some(
+            "Save it; opening New session then finds what it can run and adds those runtimes."
+                .to_owned(),
+        );
     }
     Some(match dashboard.machine_runtime_reason(id) {
         Some(reason) => format!("No runtime: {reason}"),
-        None if dashboard.config.machine_runtimes(id).next().is_some() => {
-            "Saving finds what it can run and adds those runtimes again.".to_owned()
-        }
-        None => "Mjolnir checks what it can run when Settings closes.".to_owned(),
+        None => "Opening New session finds what it can run; Detect runtimes checks now.".to_owned(),
     })
 }
 

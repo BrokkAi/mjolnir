@@ -390,6 +390,15 @@ A disabled profile is omitted from new, resume, move, review, login, import,
 Quota, and utility-model choices. Sessions already running under that profile
 continue to operate. Re-enable it before starting new work with it.
 
+The new-session and resume pickers also leave out a profile that is not there:
+one a harness cannot start from (for example, its API key is not set), or one
+whose agent is gone, meaning its home directory no longer exists and its
+command is not on `PATH`. The picker names it under the list with the reason
+and the fix. Mjolnir checks when the dashboard starts and each time a picker
+opens, and the profile returns as soon as a check finds it again. Each check
+also adds a profile for an agent installed since the configuration was
+written.
+
 Optional environment and compaction controls are useful for nonstandard target
 installs:
 

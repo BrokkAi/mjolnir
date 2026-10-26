@@ -588,6 +588,15 @@ pub(crate) fn is_missing_command(error: &anyhow::Error) -> bool {
     })
 }
 
+/// The check a target gets before anything is launched on it, as the
+/// machine probe runs it for an EC2 launch template.
+pub(crate) fn verify_target_before_launch(
+    template: &TargetTemplate,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    verify_target(template, executor, TargetCheck::BeforeLaunch)
+}
+
 /// Check that a target's host and runtime can run sessions.
 pub(super) fn verify_target(
     template: &TargetTemplate,
