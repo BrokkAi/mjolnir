@@ -16,10 +16,10 @@
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────── ●··········· ╮
 │> keep this draft                                                                                 │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) › ────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -359,7 +359,7 @@ Up/Ctrl-P edit last queued · Enter send/queue │ ctrl+b then : palette · ? ke
   ╰─────────────────────────────────────────────────────────────── Esc close ╯
 
 
-│> What would you like to build?                                               │
+│                                                                              │
 │                                                                              │
 ╰ Tasks (1) › ────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
