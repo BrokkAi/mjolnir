@@ -592,14 +592,15 @@ async fn detach_notice() -> String {
             "The Mjolnir daemon is not running. Sessions whose workers are still running \
              keep working; `{stop_all}` suspends them."
         ),
+        // Whether a daemon is running is not known here: it may be busy, or
+        // may have left its endpoint behind when it exited.
         Err(error) => {
             tracing::warn!(
                 error = format!("{error:#}"),
                 "could not count active sessions on detach"
             );
             format!(
-                "The Mjolnir daemon is still running, and its active sessions keep working; \
-                 Mjolnir reattaches to them on your next invocation.\n\
+                "Active sessions keep working; Mjolnir reattaches to them on your next invocation.\n\
                  `{stop_all}` suspends every session and stops the daemon."
             )
         }
@@ -614,54 +615,106 @@ fn mj_command(arguments: &str) -> String {
     }
 }
 
-/// One active top-level session, as a stop or detach message names it.
-struct ActiveSession {
-    id: String,
+/// A session as a stop or detach message names it.
+struct ListedSession {
     title: String,
     lifecycle: mj_controller::server::ViewerLifecycleCategory,
 }
 
-/// The top-level sessions the daemon still holds on its dashboard, in every
-/// workspace, read from the runtime feed the dashboard itself follows. They
-/// are what the web API lists as active: the same lifecycle category, and no
-/// sub-agents, since each one belongs to a parent listed here and suspending
-/// the parent stops it. The socket is used rather than the web API so this
-/// works with the web viewer disabled.
-async fn active_sessions(client: &mut daemon::DaemonClient) -> Result<Vec<ActiveSession>> {
+/// Every session that suspending stands for itself, in every workspace,
+/// read from the runtime feed the dashboard itself follows: each session but
+/// a sub-agent whose parent is active, since suspending the parent stops it.
+/// A sub-agent left behind by a parent that is not is its own root, as a
+/// workspace close counts it. The socket is used rather than the web API so
+/// this works with the web viewer disabled.
+async fn session_roots(
+    client: &mut daemon::DaemonClient,
+) -> Result<BTreeMap<String, ListedSession>> {
+    use mj_controller::server::ViewerLifecycleCategory;
     let mj_client::runtime_feed::RuntimeFrame::Snapshot { projection, .. } =
         client.runtime_changes(None, false).await?
     else {
         bail!("the daemon answered a request for its sessions without a snapshot");
     };
+    let active = |id: &str| {
+        projection
+            .records
+            .get(id)
+            .is_some_and(|record| ViewerLifecycleCategory::of(record.state).is_dashboard_visible())
+    };
     Ok(projection
         .records
         .values()
-        .filter(|record| !projection.subagents.contains_key(&record.id))
-        .map(|record| ActiveSession {
-            id: record.id.clone(),
-            title: record.listed_title().to_owned(),
-            lifecycle: mj_controller::server::ViewerLifecycleCategory::of(record.state),
+        .filter(|record| {
+            !projection
+                .subagents
+                .get(&record.id)
+                .is_some_and(|child| active(&child.parent_session_id))
         })
-        .filter(|session| session.lifecycle.is_dashboard_visible())
+        .map(|record| {
+            (
+                record.id.clone(),
+                ListedSession {
+                    title: record.listed_title().to_owned(),
+                    lifecycle: ViewerLifecycleCategory::of(record.state),
+                },
+            )
+        })
         .collect())
 }
 
-/// How many top-level sessions the running daemon is still running. It
-/// never starts a daemon.
+/// The roots the daemon still holds on its dashboard: the same lifecycle
+/// category the web API and the dashboard call active.
+async fn active_sessions(
+    client: &mut daemon::DaemonClient,
+) -> Result<BTreeMap<String, ListedSession>> {
+    let mut sessions = session_roots(client).await?;
+    sessions.retain(|_, session| session.lifecycle.is_dashboard_visible());
+    Ok(sessions)
+}
+
+/// How many sessions the running daemon is still running. It never starts a
+/// daemon.
 async fn active_session_count() -> Result<usize> {
     Ok(active_sessions(&mut daemon::connect_existing().await?)
         .await?
         .len())
 }
 
-/// Suspend every active top-level session, together, and return once each
-/// suspension has ended, as `mj daemon stop --suspend-sessions` does before
-/// it stops the daemon. Suspending a parent stops its sub-agents. A session
-/// already suspending or being destroyed is left to that operation, which
-/// the daemon's graceful stop waits for. Fails, naming each session, when
-/// any suspension fails; those that succeeded stay suspended, so running the
-/// command again picks up only what is left. Returns how many sessions were
-/// active.
+/// Wait for a session that is already suspending, or being destroyed, to
+/// leave the dashboard, and say how it ended. The daemon owns that operation
+/// and decides when it ends; this only reads its outcome.
+async fn await_stopping_session(session_id: &str) -> Result<&'static str> {
+    use mj_controller::server::ViewerLifecycleCategory;
+    let mut client = daemon::connect_existing().await?;
+    loop {
+        let lifecycle = session_roots(&mut client)
+            .await?
+            .remove(session_id)
+            .map(|session| session.lifecycle);
+        match lifecycle {
+            Some(lifecycle) if lifecycle.is_dashboard_visible() => {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            Some(ViewerLifecycleCategory::Suspended) => return Ok("Suspended"),
+            // Only a destroy removes a session's record.
+            None => return Ok("Destroyed"),
+            Some(_) => bail!(
+                "it failed to stop; `{}` says why",
+                mj_command(&format!("sessions --session {session_id}"))
+            ),
+        }
+    }
+}
+
+/// Suspend every active session, together, and return once each one has
+/// stopped, as `mj daemon stop --suspend-sessions` does before it stops the
+/// daemon. Suspending a parent stops its sub-agents. A session already
+/// suspending or being destroyed is waited for, not suspended again. Fails,
+/// naming each session, when any of them did not stop; those that did stay
+/// stopped, so running the command again picks up only what is left. The
+/// sessions are those active when it is asked: one another client starts
+/// meanwhile is not among them. Returns how many sessions it stopped.
 async fn suspend_all_sessions(acknowledge_unpublished_work: bool) -> Result<usize> {
     // Workers outlive a stopped daemon, so this starts one when none is
     // running: only a daemon can suspend them.
@@ -675,29 +728,32 @@ async fn suspend_all_sessions(acknowledge_unpublished_work: bool) -> Result<usiz
         if count == 1 { "" } else { "s" }
     );
     let mut jobs = tokio::task::JoinSet::new();
-    for session in sessions {
-        let name = format!("{} ({})", session.id, session.title);
-        if session.lifecycle == mj_controller::server::ViewerLifecycleCategory::Suspending {
-            println!("{name} is already stopping.");
-            continue;
-        }
+    for (id, session) in sessions {
+        let name = format!("{id} ({})", session.title);
         // A suspension answers when it has ended, which takes as long as its
         // recovery copy, so each one has its own connection.
         jobs.spawn(async move {
-            let result = async {
-                daemon::connect_existing()
-                    .await?
-                    .suspend_session_with_ack(session.id, acknowledge_unpublished_work)
-                    .await
-            }
-            .await;
+            let result = if session.lifecycle
+                == mj_controller::server::ViewerLifecycleCategory::Suspending
+            {
+                await_stopping_session(&id).await
+            } else {
+                async {
+                    daemon::connect_existing()
+                        .await?
+                        .suspend_session_with_ack(id, acknowledge_unpublished_work)
+                        .await
+                }
+                .await
+                .map(|()| "Suspended")
+            };
             (name, result)
         });
     }
     let mut failures = Vec::new();
     while let Some(joined) = jobs.join_next().await {
         match joined {
-            Ok((name, Ok(()))) => println!("Suspended {name}."),
+            Ok((name, Ok(outcome))) => println!("{outcome} {name}."),
             Ok((name, Err(error))) => failures.push(format!(
                 "{name}: {:#}",
                 api_commands::name_suspend_flags(error)
@@ -709,7 +765,7 @@ async fn suspend_all_sessions(acknowledge_unpublished_work: bool) -> Result<usiz
         return Ok(count);
     }
     bail!(
-        "{} session{} did not suspend:\n  {}",
+        "the Mjolnir daemon was left running; {} session{} did not stop:\n  {}",
         failures.len(),
         if failures.len() == 1 { "" } else { "s" },
         failures.join("\n  ")
@@ -2005,15 +2061,13 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 "stop the Mjolnir daemon",
             )?;
             if stop.suspend_sessions {
-                let suspended = suspend_all_sessions(stop.acknowledge_unpublished_work)
-                    .await
-                    .context("the Mjolnir daemon was left running")?;
+                let stopped = suspend_all_sessions(stop.acknowledge_unpublished_work).await?;
                 let daemon = daemon::connect_management().await?;
                 daemon.stop_and_wait().await?;
-                if suspended == 0 {
-                    println!("Mjolnir daemon stopped; no sessions were active.");
-                } else {
-                    println!("Mjolnir daemon stopped; every session is suspended.");
+                match stopped {
+                    0 => println!("Mjolnir daemon stopped; no sessions were active."),
+                    1 => println!("Mjolnir daemon stopped after stopping its active session."),
+                    n => println!("Mjolnir daemon stopped after stopping its {n} active sessions."),
                 }
                 return Ok(());
             }
