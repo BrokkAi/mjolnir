@@ -17,6 +17,7 @@
 //! * `secrets` -- environment entries that name a secret held elsewhere.
 
 mod document;
+mod dsh_credentials;
 mod github;
 mod harness;
 mod keys;

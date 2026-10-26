@@ -389,6 +389,126 @@ fn a_codex_profile_inherits_its_provider_key_from_the_environment_mjolnir_runs_i
     assert!(error.contains("from_secret"), "{error}");
 }
 
+/// A DSH profile authenticates with the key saved in DSH itself first, then
+/// the exported key, then the DSH home's `.env`, then Mjolnir's own secret.
+/// The store is read as DSH writes it: comments, grant records it does not
+/// interpret, and a file it refuses when others can read it.
+// Hard-won: b526c21ff: DSH sessions ignored the key saved in DSH and refused to start
+#[test]
+fn a_dsh_profile_takes_its_key_from_dsh_before_the_environment_and_secrets() {
+    let home = tempfile::tempdir().expect("temporary DSH home");
+    let credentials = home.path().join(".credentials.yaml");
+    let dotenv = home.path().join(".env");
+    let write_private = |path: &Path, text: &str| {
+        fs::write(path, text).expect("write DSH file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("chmod 600");
+        }
+    };
+    // The layout from dsh-credentials-local's README, as the Models settings
+    // write it.
+    write_private(
+        &credentials,
+        "version: 1\n\n\
+         refs:\n  \
+           # saved from the Models page\n  \
+           DEEPSEEK_API_KEY: sk-saved-in-dsh\n  \
+           OPENAI_API_KEY: sk-other\n\n\
+         records:\n  \
+           llm-pi-ai/openai-codex:\n    \
+             kind: grant\n    \
+             payload:\n      \
+               type: oauth\n      \
+               access: eyJhbGciOi\n",
+    );
+    fs::write(
+        &dotenv,
+        "export DEEPSEEK_API_KEY=\"sk-from-dotenv\" # home\n",
+    )
+    .expect("write .env");
+    let text = format!(
+        "version = {CONFIG_VERSION}\n\n[profiles.dsh]\nkind = \"dsh\"\nhome = {:?}\n\n\
+         [profiles.dsh.environment]\nDEEPSEEK_API_KEY = {{ from_secret = \"DEEPSEEK_API_KEY\" }}\n",
+        home.path().to_string_lossy()
+    );
+    let read = |process: &[(&str, &str)]| -> Config {
+        let process = process
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect();
+        let secrets = BTreeMap::from([(
+            "DEEPSEEK_API_KEY".to_owned(),
+            "sk-mjolnir-secret".to_owned(),
+        )]);
+        with_secret_resolver(SecretResolver::fixed(process, secrets), || {
+            toml::from_str(&text)
+        })
+        .expect("read the configuration")
+    };
+    let key = |config: &Config| config.profiles["dsh"].environment["DEEPSEEK_API_KEY"].clone();
+    let exported = [("DEEPSEEK_API_KEY", "sk-exported")];
+
+    let saved = read(&exported);
+    assert_eq!(key(&saved), "sk-saved-in-dsh");
+    saved.profiles["dsh"].ensure_ready("dsh").expect("ready");
+    let written = toml::to_string(&saved).expect("serialize");
+    assert!(!written.contains("sk-saved-in-dsh"), "{written}");
+    assert!(written.contains("from_secret"), "{written}");
+
+    fs::remove_file(&credentials).expect("remove DSH's store");
+    assert_eq!(key(&read(&exported)), "sk-exported");
+    assert_eq!(key(&read(&[])), "sk-from-dotenv");
+    fs::remove_file(&dotenv).expect("remove .env");
+    assert_eq!(key(&read(&[])), "sk-mjolnir-secret");
+
+    // A browser sign-in is no key dsh-acp can send; say so rather than
+    // reporting the key as simply missing.
+    write_private(
+        &credentials,
+        "version: 1\nrecords:\n  deepseek-account-platform/default:\n    kind: grant\n    payload:\n      version: 1\n      token: account-token\n      issuer: https://platform.deepseek.com\n",
+    );
+    let text_without_secret = text.replace(
+        "\n[profiles.dsh.environment]\nDEEPSEEK_API_KEY = { from_secret = \"DEEPSEEK_API_KEY\" }\n",
+        "",
+    );
+    let signed_in_config = |text: &str| -> Config {
+        with_secret_resolver(
+            SecretResolver::fixed(BTreeMap::new(), BTreeMap::new()),
+            || toml::from_str(text),
+        )
+        .expect("read the configuration")
+    };
+    let signed_in = signed_in_config(&text_without_secret);
+    let error = signed_in.profiles["dsh"]
+        .ensure_ready("dsh")
+        .expect_err("no API key")
+        .to_string();
+    assert!(error.contains("signed in to a DeepSeek account"), "{error}");
+    assert!(!error.contains("account-token"), "{error}");
+
+    // DSH refuses a store others can read, so its key is never used. A key
+    // from another source still works, because the session sends only the
+    // key; with none, the refusal says how to fix the file.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        write_private(
+            &credentials,
+            "version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-saved-in-dsh\n",
+        );
+        fs::set_permissions(&credentials, fs::Permissions::from_mode(0o644)).expect("chmod 644");
+        assert_eq!(key(&read(&exported)), "sk-exported");
+        let error = signed_in_config(&text_without_secret).profiles["dsh"]
+            .ensure_ready("dsh")
+            .expect_err("readable by others")
+            .to_string();
+        assert!(error.contains("chmod 600"), "{error}");
+        assert!(!error.contains("sk-saved-in-dsh"), "{error}");
+    }
+}
+
 /// OpenCode signs in to a provider from a key in its environment, with no
 /// stored login. An OpenCode profile inherits exactly the variables OpenCode
 /// reads: its catalog's provider keys, the `env` lists of providers in its

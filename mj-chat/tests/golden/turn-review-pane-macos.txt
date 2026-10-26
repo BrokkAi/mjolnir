@@ -5,10 +5,10 @@
 │                             ▐││retry                         │
 │                             ▐││                              │
 │                             ▐││                              │
-│                             ▐││                              │
 ╰──────────────────────────────╯╰──────────────────────────────╯
   ●··········· Reviewing
   Forward findings     Dismiss     Cancel      Enter to act · Ta
+
 
 
 
@@ -23,10 +23,10 @@ action: TurnReview(Resolve(Forwarded))
 │                             ▐││                              │
 │                             ▐││                              │
 │                             ▐││                              │
-│                             ▐││                              │
 ╰──────────────────────────────╯╰──────────────────────────────╯
   ●··········· Reviewing
   Forward findings     Dismiss     Cancel      Enter to act · Ta
+
 
 
 
@@ -58,10 +58,10 @@ action: TurnReview(Resolve(Dismissed))
 │                             ▐││retry                         │
 │                             ▐││                              │
 │                             ▐││                              │
-│                             ▐││                              │
 ╰──────────────────────────────╯╰──────────────────────────────╯
   ●··········· Reviewing
   Forward findings     Dismiss     Cancel      Enter to act · Ta
+
 
 
 

@@ -98,8 +98,9 @@ authentication:
 - resolve any executable or `PATH` failure before repeating login.
 
 A DSH profile has no login, and `mj login` refuses it. It authenticates with
-`DEEPSEEK_API_KEY`, taken from the environment Mjolnir started with unless the
-profile's `environment` sets it; `mj doctor` and the refused session say how to
+`DEEPSEEK_API_KEY`: the key saved in DSH's own `.credentials.yaml`, then the
+environment Mjolnir started with, then `.env` in the DSH home, then the
+profile's `environment`; `mj doctor` and the refused session say how to
 supply it. Export the key before running `mj`, or run `mj daemon restart` after
 exporting it in a new shell.
 

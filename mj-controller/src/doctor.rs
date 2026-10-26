@@ -854,7 +854,7 @@ fn harness_profile_check(
         // A harness without a login never creates its home itself.
         let remediation = if profile.kind.api_key_variable().is_some() {
             format!(
-                "Create {}. It needs no login; it holds the profile's optional {} and nothing else Mjolnir reads.",
+                "Create {}. It needs no login; it holds the profile's optional {} and, when DSH runs there, the key DSH saves.",
                 profile.home.display(),
                 profile.kind.agent_instructions_file()
             )
