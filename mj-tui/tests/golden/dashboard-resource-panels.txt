@@ -72,8 +72,8 @@ checked target ids: ["docker", "podman", "sandbox"]
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││  Host / fleet  Targets                CPU           RAM                      │
-│                                      ││  local         podman, mac-container  37% · 8 left  75% · 0B left            │
+│                                      ││  Host / fleet  Targets                CPU  RAM                               │
+│                                      ││  local         podman, mac-container  37%  75%                               │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
