@@ -172,7 +172,12 @@ fn every_harness_reports_expiry_only_where_hel_can_refresh_ahead_of_it() {
             Some(1_756_000_000_000),
             None,
         ),
-        (HarnessKind::Muse, b"{}".to_vec(), None, None),
+        (
+            HarnessKind::Muse,
+            br#"{"schema_version":1,"providers":{"meta":{"access_token":"a","refresh_token":"r","expires_at":1756000000,"mechanism":"oauth"}}}"#.to_vec(),
+            Some(1_756_000_000_000),
+            Some(1_756_000_000_000),
+        ),
         // DSH has no login; a file in its place orders nothing.
         (
             HarnessKind::Dsh,
