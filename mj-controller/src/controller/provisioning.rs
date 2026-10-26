@@ -1695,8 +1695,23 @@ fn inherited_git_setting_commands(
 }
 
 fn controller_git_settings() -> Result<BTreeMap<String, String>> {
-    let output = match Command::new("git")
-        .args(["config", "--global", "--includes", "--null", "--list"])
+    read_global_git_settings(Command::new("git"))
+}
+
+/// Reads the inherited keys from the global Git configuration. A user with
+/// no global configuration file at all is the same as one who set none of
+/// these keys: `--get-regexp` exits 1 for both, while `--list` fails on the
+/// missing file.
+fn read_global_git_settings(mut git: Command) -> Result<BTreeMap<String, String>> {
+    let output = match git
+        .args([
+            "config",
+            "--global",
+            "--includes",
+            "--null",
+            "--get-regexp",
+            ".",
+        ])
         .stdin(Stdio::null())
         .output()
     {
@@ -1704,14 +1719,15 @@ fn controller_git_settings() -> Result<BTreeMap<String, String>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
         Err(error) => return Err(error).context("read controller Git configuration"),
     };
-    if !output.status.success() {
-        bail!(
+    match output.status.code() {
+        Some(0) => parse_inherited_git_settings(&output.stdout),
+        Some(1) => Ok(BTreeMap::new()),
+        _ => bail!(
             "read controller Git configuration failed with status {}: {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
-        );
+        ),
     }
-    parse_inherited_git_settings(&output.stdout)
 }
 
 fn parse_inherited_git_settings(output: &[u8]) -> Result<BTreeMap<String, String>> {

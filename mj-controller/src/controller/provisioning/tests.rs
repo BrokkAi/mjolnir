@@ -1208,6 +1208,33 @@ fn inherited_git_settings_reject_malformed_or_non_utf8_output() {
     assert!(parse_inherited_git_settings(b"user.name\n\xff\0").is_err());
 }
 
+// Hard-won: dbe0e48f4: a controller with no ~/.gitconfig failed every container launch.
+#[test]
+fn global_git_settings_read_a_missing_global_file_as_no_settings() {
+    let home = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let mut command = Command::new("git");
+        command
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join("xdg"))
+            .args(args);
+        command
+    };
+
+    assert!(read_global_git_settings(git(&[])).unwrap().is_empty());
+
+    let status = git(&["config", "--global", "user.name", "Ada Lovelace"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        read_global_git_settings(git(&[])).unwrap(),
+        BTreeMap::from([("user.name".to_owned(), "Ada Lovelace".to_owned())])
+    );
+}
+
 #[test]
 fn podman_inherited_git_settings_use_global_scope_for_every_saved_user() {
     let ssh = SshTarget {
