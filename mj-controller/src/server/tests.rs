@@ -1706,6 +1706,7 @@ async fn new_session_mounts_cross_preflight_and_creation_boundaries() {
         .reply
         .send(ActionOutcome::Accepted {
             session_id: Some("created".into()),
+            notice: None,
         })
         .unwrap();
     assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);

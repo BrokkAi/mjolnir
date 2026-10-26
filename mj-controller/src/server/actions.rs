@@ -279,8 +279,13 @@ pub enum ActionOutcome {
     /// Admitted and now running; watch the snapshot for what happens next.
     ///
     /// A `new` action carries the published session id, which is the only way
-    /// its caller learns what it just created.
-    Accepted { session_id: Option<String> },
+    /// its caller learns what it just created. `notice` is something the
+    /// caller should tell the person about what was created, such as review
+    /// being turned off for it.
+    Accepted {
+        session_id: Option<String>,
+        notice: Option<String>,
+    },
     /// The controller already runs as many phone actions as it allows.
     /// `running` is the admission control's own count of in-flight actions and
     /// `limit` the most it admits, so the message never keeps a second copy.
@@ -301,13 +306,16 @@ pub enum ActionOutcome {
 impl ActionOutcome {
     /// Admitted, with no session id to report.
     pub const fn accepted() -> Self {
-        Self::Accepted { session_id: None }
+        Self::Accepted {
+            session_id: None,
+            notice: None,
+        }
     }
 
     /// The published session id, when this outcome carries one.
     pub fn session_id(&self) -> Option<&str> {
         match self {
-            Self::Accepted { session_id } => session_id.as_deref(),
+            Self::Accepted { session_id, .. } => session_id.as_deref(),
             _ => None,
         }
     }
@@ -535,6 +543,9 @@ pub struct PreflightNew {
     #[serde(default)]
     pub remote_repositories: Vec<PreflightRepository>,
     pub local_changes_excluded: bool,
+    /// Why creating this session turns its review off, when it will.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_notice: Option<String>,
 }
 
 /// What a phone asks about, or stores against, its own identity.

@@ -153,10 +153,7 @@ impl ReviewEnvironment for ControllerEnvironment {
             .sessions
             .get(session_id)
             .ok_or_else(|| format!("unknown session {session_id:?}"))?;
-        let recorded_plain = session
-            .project
-            .as_ref()
-            .is_some_and(mj_core::repository::ProjectBundleSnapshot::primary_is_plain_directory);
+        let recorded_plain = session.review_unavailable().is_some();
         // Sessions created before plain directories became an accepted project
         // shape have no snapshot to consult. Classify their current directory
         // when they still name a local bare target, so they cannot silently

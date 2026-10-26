@@ -248,6 +248,7 @@ pub(super) async fn start_session(
     }
     let ActionOutcome::Accepted {
         session_id: Some(session_id),
+        notice,
     } = outcome
     else {
         return Err(ApiFailure::new(
@@ -272,6 +273,7 @@ pub(super) async fn start_session(
         Json(StartSessionResponse {
             session_id,
             turn_id: None,
+            notice,
         }),
     ))
 }
@@ -658,6 +660,7 @@ pub(super) async fn wiki_restore(
         Json(StartSessionResponse {
             session_id,
             turn_id: None,
+            notice: None,
         }),
     ))
 }

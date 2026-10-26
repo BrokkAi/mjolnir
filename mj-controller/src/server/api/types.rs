@@ -376,6 +376,10 @@ pub struct StartSessionResponse {
     /// submitted. Creation answers before that, so it is usually absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<u64>,
+    /// Something to tell the person about the session as created, such as
+    /// review being turned off because its folder has no Git commits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

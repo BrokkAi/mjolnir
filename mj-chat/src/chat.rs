@@ -541,6 +541,9 @@ pub struct ChatState {
     review_config: mj_core::config::ReviewConfig,
     /// This session's own review choice, applied over `review_config`.
     session_review: Option<mj_core::config::SessionReview>,
+    /// Why review cannot run for this session, which `/review status` says
+    /// instead of describing `[review]`.
+    review_unavailable: Option<&'static str>,
     /// Whether the dialog on screen belongs to the reviewer rather than the
     /// primary, so its answer is routed to the harness that asked.
     elicitation_is_reviewers: bool,
@@ -730,6 +733,7 @@ impl ChatState {
             turn_review_action_areas: Vec::new(),
             review_config: mj_core::config::ReviewConfig::default(),
             session_review: None,
+            review_unavailable: None,
             elicitation_is_reviewers: false,
             elicitation_role: None,
             goal_state: mj_core::goal::GoalState::from_configuration(&snapshot.config)

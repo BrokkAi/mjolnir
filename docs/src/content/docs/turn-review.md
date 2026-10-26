@@ -61,9 +61,10 @@ An older configuration with `enabled = true` still loads as `trigger = "turn"`; 
 The choice is stored with the session and kept when it resumes. A session created without these flags follows `[review]`.
 
 Review needs a committed Git checkout to capture changes. A local bare session
-whose directory is not a committed checkout must use `--review off`; enabling
-automatic review for that session is refused, and `/review` reports that it
-cannot capture the directory's changes.
+whose directory is not a committed checkout is created with review off for that
+session. The New Session review page and `mj new` say so, `/review status`
+gives the reason, and `/review` reports that it cannot capture the directory's
+changes.
 
 ## What the reviewer reads
 

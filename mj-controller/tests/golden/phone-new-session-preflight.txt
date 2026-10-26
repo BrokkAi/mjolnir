@@ -10,6 +10,19 @@
   "remote_repositories": [],
   "local_changes_excluded": false
 }
+=== folder without Git commits accepted with review off (1 preflight review) ===
+{
+  "project_directory": "<folder>",
+  "managed_worktree": {
+    "available": false,
+    "default_create": false
+  },
+  "remote_repairs": [],
+  "dirty_repositories": [],
+  "remote_repositories": [],
+  "local_changes_excluded": false,
+  "review_notice": "Code review is off for this session: its folder has no Git commits, and review finds changes through Git history."
+}
 === isolated project rejected (1 preflight review) ===
 result: rejected
 reason: Project "hel": the directory <local repository> does not exist.
