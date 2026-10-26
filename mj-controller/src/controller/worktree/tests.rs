@@ -17,6 +17,7 @@ use mj_core::config::{Config, ProjectBundle, ProjectRepository, TargetTemplate};
 use mj_core::repository::{ProjectBundleSnapshot, RepositoryIdentity};
 use mj_core::state::{ManagedWorktree, ManagedWorktreeTarget, SessionState, State};
 
+use crate::targets::tests::unwrapped_remote_line;
 use crate::targets::{
     CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor,
 };
@@ -2281,8 +2282,8 @@ fn managed_worktree_ssh_commands_preserve_hostile_path_boundaries() {
     // the destination; the destination and quoted remote command stay last.
     assert_eq!(command.args[command.args.len() - 2], "builder");
     assert_eq!(
-        command.args[command.args.len() - 1],
-        "'git' '-C' '/srv/project with '\\'' quote' 'worktree' 'prune'"
+        command.args.last().map(|arg| unwrapped_remote_line(arg)),
+        Some("'git' '-C' '/srv/project with '\\'' quote' 'worktree' 'prune'")
     );
 }
 

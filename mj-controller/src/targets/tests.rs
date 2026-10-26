@@ -5229,7 +5229,7 @@ fn move_destination_generations_have_independent_container_and_volume_ownership(
 
 /// The command an SSH remote line runs, without the macOS system PATH prefix
 /// every remote line carries.
-fn unwrapped_remote_line(remote: &str) -> &str {
+pub(crate) fn unwrapped_remote_line(remote: &str) -> &str {
     let prefix = format!("{} ", mj_core::targets::remote_command_line(&[]));
     remote
         .strip_prefix(prefix.as_str())

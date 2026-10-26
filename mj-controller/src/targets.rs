@@ -61,4 +61,4 @@ mod process_limit;
 pub use process_limit::*;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
