@@ -356,6 +356,8 @@ fn profile_quota(
             QuotaWindow {
                 label: "Weekly".into(),
                 remaining_percent: Some(weekly_remaining),
+                duration_seconds: None,
+                model_scope: None,
                 used: None,
                 limit: None,
                 resets: Some("4d".into()),
@@ -364,6 +366,8 @@ fn profile_quota(
             QuotaWindow {
                 label: "5h".into(),
                 remaining_percent: Some(five_hour_remaining),
+                duration_seconds: None,
+                model_scope: None,
                 used: None,
                 limit: None,
                 resets: Some("2h 14m".into()),

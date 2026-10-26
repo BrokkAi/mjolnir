@@ -161,6 +161,7 @@ impl ProfileHealth {
                 self.quota_windows
                     .get(profile_id)
                     .map_or(&[], Vec::as_slice),
+                model,
                 explicit_reset,
                 now,
             )
@@ -224,14 +225,14 @@ impl ProfileHealth {
     pub fn observe_quota(&mut self, profile_id: &str, windows: &[QuotaWindow], now: SystemTime) {
         self.quota_windows
             .insert(profile_id.to_owned(), windows.to_vec());
-        for ((marked_profile, _), mark) in &mut self.marks {
+        for ((marked_profile, model), mark) in &mut self.marks {
             if marked_profile != profile_id
                 || mark.unhealthy.fault != ProfileFault::QuotaExhausted
                 || mark.unhealthy.until <= now
             {
                 continue;
             }
-            if let Some(reset) = quota_reset(windows, mark.explicit_reset, now) {
+            if let Some(reset) = quota_reset(windows, model, mark.explicit_reset, now) {
                 mark.unhealthy.until = mark.unhealthy.until.max(reset);
             }
         }
@@ -256,12 +257,14 @@ impl ProfileHealth {
 /// limit that failed, so its reset must not hold the mark.
 fn quota_reset(
     windows: &[QuotaWindow],
+    model: &str,
     explicit_reset: Option<i64>,
     now: SystemTime,
 ) -> Option<SystemTime> {
     let now_seconds = DateTime::<chrono::Utc>::from(now).timestamp();
     let exhausted = windows
         .iter()
+        .filter(|window| crate::quota::window_applies(window, model))
         .filter(|window| crate::quota::exhausted(window, now_seconds))
         .cloned()
         .collect::<Vec<_>>();
@@ -306,6 +309,8 @@ mod tests {
         QuotaWindow {
             label: label.into(),
             remaining_percent: Some(remaining),
+            duration_seconds: None,
+            model_scope: None,
             used: None,
             limit: None,
             resets: None,
@@ -517,6 +522,46 @@ mod tests {
         assert_eq!(
             health.unhealthy("codex2", "sol", now).unwrap().until,
             SystemTime::UNIX_EPOCH + Duration::from_secs(reset as u64)
+        );
+    }
+
+    #[test]
+    fn scoped_exhaustion_holds_only_the_matching_model_mark() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let reset = 1_002_000_i64;
+        let mut fable_window = quota_window("Week (Fable)", 0, Some(reset));
+        fable_window.model_scope = Some("fable".into());
+        let mut health = ProfileHealth::default();
+        health.observe_quota("claude", &[fable_window], now);
+        let failure = diagnostic("quota exhausted", Some("usageLimitExceeded"), None);
+        health.record(
+            "claude",
+            "claude-fable-5-1",
+            ProfileFault::QuotaExhausted,
+            &failure,
+            now,
+        );
+        health.record(
+            "claude",
+            "claude-opus-5",
+            ProfileFault::QuotaExhausted,
+            &failure,
+            now,
+        );
+
+        assert_eq!(
+            health
+                .unhealthy("claude", "claude-fable-5-1", now)
+                .unwrap()
+                .until,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(reset as u64)
+        );
+        assert_eq!(
+            health
+                .unhealthy("claude", "claude-opus-5", now)
+                .unwrap()
+                .until,
+            now + BASE_BACKOFF
         );
     }
 

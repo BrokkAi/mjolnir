@@ -355,8 +355,9 @@ mj new --workspace eval --bundle product --target builder \
   what the dashboard's next new-session form preselects. Only interactive
   launches (the dashboard, `mj go`, `mj simple`, and the web or phone form)
   do.
-- `mj new --model <name>` chooses the highest-quota enabled, usable profile
-  offering that exact model and starts the session on it. It conflicts with
+- `mj new --model <name>` chooses the enabled, usable profile offering that
+  exact model with the strongest quota headroom relative to its reset times,
+  then starts the session on it. It conflicts with
   `--profile`; the saved default profile breaks quota ties. If `--effort` is
   supplied, the selected profile must offer that exact effort for the model or
   the request fails.

@@ -1155,7 +1155,7 @@ impl SubagentBackend for FakeBackend {
                     profile_id: parent_profile,
                     harness: mj_core::config::HarnessKind::Codex,
                     choices,
-                    remaining_percent: None,
+                    quota: crate::server::api::CandidateQuota::Unknown,
                     unhealthy: Default::default(),
                 }],
                 unavailable: Vec::new(),
@@ -2046,7 +2046,16 @@ fn model_candidate_with_efforts(
                 .collect(),
             observed_at: 1,
         },
-        remaining_percent: Some(remaining_percent),
+        quota: crate::server::api::CandidateQuota::Windows(vec![crate::quota::QuotaWindow {
+            label: "Week".into(),
+            remaining_percent: Some(remaining_percent),
+            duration_seconds: None,
+            model_scope: None,
+            used: None,
+            limit: None,
+            resets: None,
+            resets_at_epoch_seconds: None,
+        }]),
         unhealthy: Default::default(),
     }
 }

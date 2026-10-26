@@ -528,8 +528,9 @@ design choices, or risk of subtle bugs. A subtle task gets a smarter, more
 expensive agent. Judge difficulty, not brief length. With only straightforward
 configured, `spawn` has no `task_type` and every child uses the straightforward
 choice. The parent is told to delegate straightforward work and to do work
-that needs judgment itself. Mjolnir chooses the enabled profile offering that task type's
-model and effort with the most quota. The agent cannot override the selection.
+that needs judgment itself. Mjolnir chooses the enabled profile offering that
+task type's model and effort with the strongest quota headroom paced against
+its reset times. The agent cannot override the selection.
 Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to
 Native, or to None for DSH, which refuses `native`; `mj move --subagents native|mjolnir|none` retains the recorded policy when
 omitted, including any session override. `--subagent-straightforward M` and `--subagent-subtle M` independently override
@@ -550,11 +551,16 @@ A configuration file written before the per-session choice existed may still
 have an `enabled` key here. It is read and ignored, and a save drops it.
 
 Mjolnir runs each child with the configured model and effort on an enabled
-profile that supports that selection and has the most quota left, meaning
-the lower of its 5-hour and weekly remaining percentages. A pay-per-use
-profile counts as 100% left, and a profile with no quota report comes last. On
-a tie, the parent's own profile wins. `mj doctor` shows, for each profile,
-where its quota comes from and that sub-agents may use it.
+profile that supports that selection. Profiles with quota to spare are more
+likely to be chosen. Each quota window (for example the 5-hour and weekly
+ones) is compared with an even spend over the window: 5% left three minutes
+before a 5-hour reset is plenty, while 5% left six days before a weekly reset
+is not. The window furthest behind decides. A limit for one model, such as a
+weekly Fable limit, counts only for that model. A pay-per-use profile counts as
+exactly on pace, so a subscription with quota to spare comes first. A profile
+with no quota left, then one with no quota report, comes last. On a tie, the
+parent's own profile wins. `mj doctor` shows, for each profile, where its quota
+comes from and that sub-agents may use it.
 
 A sub-agent ends its task by handing its report back to the session that
 started it. Suspending that session stops its sub-agents and removes them,

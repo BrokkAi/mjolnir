@@ -457,8 +457,7 @@ impl ApiBackend {
         for ((profile_id, harness), discovery) in ids.into_iter().zip(discoveries) {
             match discovery.map(|mut choices| choices.pop()) {
                 Ok(Some(choices)) => {
-                    let remaining_percent =
-                        profile_remaining_percent(quota_reports.get(&profile_id));
+                    let quota = profile_candidate_quota(quota_reports.get(&profile_id));
                     let unhealthy = choices
                         .models
                         .iter()
@@ -475,7 +474,7 @@ impl ApiBackend {
                             profile_id,
                             harness,
                             choices,
-                            remaining_percent,
+                            quota,
                             unhealthy,
                         });
                 }
@@ -1607,16 +1606,15 @@ impl ApiBackend {
     }
 }
 
-fn profile_remaining_percent(report: Option<&ProfileQuota>) -> Option<u8> {
-    let report = report.filter(|report| report.error.is_none())?;
-    if report.is_usage_priced() {
-        return Some(100);
+fn profile_candidate_quota(report: Option<&ProfileQuota>) -> crate::server::api::CandidateQuota {
+    use crate::server::api::CandidateQuota;
+    match report.filter(|report| report.error.is_none()) {
+        Some(report) if report.is_usage_priced() => CandidateQuota::UsagePriced,
+        Some(report) if !report.windows.is_empty() => {
+            CandidateQuota::Windows(report.windows.clone())
+        }
+        _ => CandidateQuota::Unknown,
     }
-    report
-        .windows
-        .iter()
-        .filter_map(|window| window.remaining_percent)
-        .min()
 }
 
 fn finish_identity(

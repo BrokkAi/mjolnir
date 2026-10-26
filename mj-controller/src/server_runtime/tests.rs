@@ -1908,6 +1908,8 @@ fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_sta
                     .map(|label| crate::quota::QuotaWindow {
                         label: label.into(),
                         remaining_percent: Some(70),
+                        duration_seconds: None,
+                        model_scope: None,
                         used: None,
                         limit: None,
                         resets: Some("legacy time".into()),

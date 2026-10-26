@@ -393,16 +393,24 @@ pub struct SpawnSubagentRequest {
     pub working_directory: Option<PathBuf>,
 }
 
-/// A candidate profile with its discovered choices and remaining quota.
+/// A candidate's last quota reading, scored for the requested model when
+/// candidates are ranked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CandidateQuota {
+    /// No report, a failed one, or one with no windows.
+    Unknown,
+    /// Billed per use, with no allowance to run out of.
+    UsagePriced,
+    Windows(Vec<crate::quota::QuotaWindow>),
+}
+
+/// A candidate profile with its discovered choices and last quota reading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentCandidate {
     pub profile_id: String,
     pub harness: mj_core::config::HarnessKind,
     pub choices: mj_core::worker_launch::ProfileConfig,
-    /// The lower of the profile's quota windows (the 5-hour and weekly ones
-    /// for Codex and Claude), 100 for a pay-per-use profile, and `None` when
-    /// no usable report exists.
-    pub remaining_percent: Option<u8>,
+    pub quota: CandidateQuota,
     /// The models this profile should not run now, by model id, from
     /// provider failures its sessions just had (#1361).
     pub unhealthy: std::collections::BTreeMap<String, crate::profile_health::Unhealthy>,

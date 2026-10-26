@@ -586,6 +586,7 @@ pub(super) fn viewer_snapshot_selected(
         let Some(quota) = quotas.get(&profile.id) else {
             continue;
         };
+        let quota = crate::quota::surface_quota_report(quota);
         profile.quota = Some(ViewerQuota {
             summary: quota.compact(),
             windows: quota

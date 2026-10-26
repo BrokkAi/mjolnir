@@ -57,6 +57,7 @@ pub struct CodexUsageReport {
 pub struct CodexUsageWindow {
     pub label: String,
     pub remaining_percent: u8,
+    pub duration_seconds: Option<i64>,
     pub resets_at: Option<i64>,
 }
 
@@ -761,6 +762,7 @@ fn parse_window(value: &Value) -> Option<CodexUsageWindow> {
     Some(CodexUsageWindow {
         label: window_label(duration),
         remaining_percent: (100 - used) as u8,
+        duration_seconds: duration.and_then(|minutes| minutes.checked_mul(60)),
         resets_at: value.get("resetsAt").and_then(Value::as_i64),
     })
 }

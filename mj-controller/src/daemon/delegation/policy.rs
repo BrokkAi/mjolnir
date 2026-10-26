@@ -173,7 +173,7 @@ impl Policy {
     fn publish_quotas(&self) {
         let reports = self.reports.lock().expect("quota reports poisoned").clone();
         self.state.publish_quotas(mj_client::quota::QuotaSnapshot {
-            reports,
+            reports: surface_quota_reports(&reports),
             probing: self.probing.clone(),
             cycles: self.cycles,
         });
@@ -254,5 +254,60 @@ impl Policy {
                 self.state.push_notice("", notice.text);
             }
         }
+    }
+}
+
+fn surface_quota_reports(
+    reports: &BTreeMap<String, ProfileQuota>,
+) -> BTreeMap<String, ProfileQuota> {
+    reports
+        .iter()
+        .map(|(id, report)| (id.clone(), crate::quota::surface_quota_report(report)))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn published_quota_snapshot_hides_scoped_windows_and_keeps_daemon_report() {
+        let report = ProfileQuota {
+            banked_resets: None,
+            profile_id: "claude".into(),
+            harness: mj_core::config::HarnessKind::Claude,
+            windows: vec![
+                crate::quota::QuotaWindow {
+                    label: "Week".into(),
+                    remaining_percent: Some(70),
+                    duration_seconds: Some(604_800),
+                    model_scope: None,
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: Some(2_000),
+                },
+                crate::quota::QuotaWindow {
+                    label: "Week (Fable)".into(),
+                    remaining_percent: Some(0),
+                    duration_seconds: Some(604_800),
+                    model_scope: Some("fable".into()),
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: Some(1_500),
+                },
+            ],
+            extra: None,
+            error: None,
+            refreshed_at_epoch_seconds: 1_000,
+            rate_limited_until_epoch_seconds: None,
+        };
+        let reports = BTreeMap::from([("claude".to_owned(), report.clone())]);
+        let published = surface_quota_reports(&reports);
+
+        assert_eq!(reports["claude"].windows.len(), 2);
+        assert_eq!(published["claude"].windows.len(), 1);
+        assert_eq!(published["claude"].windows[0].label, "Week");
     }
 }

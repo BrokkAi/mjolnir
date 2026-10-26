@@ -36,6 +36,7 @@ pub const RATE_LIMITED_PREFIX: &str = "rate limited";
 pub struct MuseUsageWindow {
     pub label: String,
     pub remaining_percent: u8,
+    pub duration_seconds: Option<i64>,
     pub resets_at: Option<i64>,
 }
 
@@ -327,6 +328,7 @@ fn parse(payload: &Value) -> Result<Vec<MuseUsageWindow>> {
         windows.push(MuseUsageWindow {
             label: "Week".to_owned(),
             remaining_percent,
+            duration_seconds: Some(7 * 24 * 60 * 60),
             resets_at: weekly.get("resets_at").and_then(Value::as_i64),
         });
     }
@@ -336,6 +338,7 @@ fn parse(payload: &Value) -> Result<Vec<MuseUsageWindow>> {
         windows.push(MuseUsageWindow {
             label: window_label(duration),
             remaining_percent,
+            duration_seconds: duration.checked_mul(60),
             resets_at: window.get("resets_at").and_then(Value::as_i64),
         });
     }

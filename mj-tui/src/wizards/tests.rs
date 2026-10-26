@@ -1809,6 +1809,8 @@ fn new_session_profile_step_shows_weekly_and_five_hour_percentages() {
                 QuotaWindow {
                     label: "Week".into(),
                     remaining_percent: Some(63),
+                    duration_seconds: None,
+                    model_scope: None,
                     used: None,
                     limit: None,
                     resets: Some("09:00 Aug 20".into()),
@@ -1817,6 +1819,8 @@ fn new_session_profile_step_shows_weekly_and_five_hour_percentages() {
                 QuotaWindow {
                     label: "5H".into(),
                     remaining_percent: Some(40),
+                    duration_seconds: None,
+                    model_scope: None,
                     used: None,
                     limit: None,
                     resets: Some("14:00 Aug 13".into()),

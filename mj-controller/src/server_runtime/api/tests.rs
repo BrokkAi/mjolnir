@@ -69,6 +69,8 @@ fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuo
             .map(|remaining_percent| crate::quota::QuotaWindow {
                 label: "window".into(),
                 remaining_percent: Some(*remaining_percent),
+                duration_seconds: None,
+                model_scope: None,
                 used: None,
                 limit: None,
                 resets: None,

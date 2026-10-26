@@ -413,6 +413,8 @@ fn stored_report(id: &str, age_seconds: u64) -> crate::quota::ProfileQuota {
         windows: vec![crate::quota::QuotaWindow {
             label: "Week".into(),
             remaining_percent: Some(42),
+            duration_seconds: None,
+            model_scope: None,
             used: None,
             limit: None,
             resets: None,

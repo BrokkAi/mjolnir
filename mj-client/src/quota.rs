@@ -18,6 +18,10 @@ pub const NOT_REPORTED_LABEL: &str = "n/a";
 pub struct QuotaWindow {
     pub label: String,
     pub remaining_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_scope: Option<String>,
     pub used: Option<i64>,
     pub limit: Option<i64>,
     pub resets: Option<String>,
@@ -412,11 +416,16 @@ mod tests {
     #[test]
     fn old_quota_reports_decode_without_a_banked_balance() {
         let quota: ProfileQuota = serde_json::from_value(serde_json::json!({
-            "profile_id": "claude", "harness": "claude", "windows": [],
+            "profile_id": "claude", "harness": "claude", "windows": [{
+                "label": "Week", "remaining_percent": 75, "used": null,
+                "limit": null, "resets": null, "resets_at_epoch_seconds": null
+            }],
             "extra": null, "error": null, "refreshed_at_epoch_seconds": 0
         }))
         .unwrap();
         assert_eq!(quota.banked_resets, None);
+        assert_eq!(quota.windows[0].duration_seconds, None);
+        assert_eq!(quota.windows[0].model_scope, None);
         assert!(
             serde_json::to_value(&quota)
                 .unwrap()

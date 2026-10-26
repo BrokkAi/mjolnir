@@ -1046,6 +1046,8 @@ mod tests {
         report.windows.push(crate::quota::QuotaWindow {
             label: "weekly".into(),
             remaining_percent: Some(0),
+            duration_seconds: None,
+            model_scope: None,
             used: None,
             limit: None,
             resets: None,

@@ -23,6 +23,17 @@ pub use mj_client::quota::{
     API_LABEL, NOT_REPORTED_LABEL, ProfileQuota, QuotaWindow, projects_exhaustion,
 };
 
+/// Clone a daemon report for a user-facing quota surface without exposing
+/// model-specific provider limits. Internal selection and health keep the
+/// complete report.
+pub(crate) fn surface_quota_report(report: &ProfileQuota) -> ProfileQuota {
+    let mut visible = report.clone();
+    visible
+        .windows
+        .retain(|window| window.model_scope.is_none());
+    visible
+}
+
 #[derive(Debug, Clone)]
 pub struct QuotaRefreshRequest {
     pub profile_id: String,
@@ -473,6 +484,8 @@ async fn refresh_profile_with_cache_root(
                             .map(|window| QuotaWindow {
                                 label: window.label,
                                 remaining_percent: Some(window.remaining_percent),
+                                duration_seconds: None,
+                                model_scope: None,
                                 used: window.used,
                                 limit: window.limit,
                                 resets: window.resets_at.and_then(format_reset_local_seconds),
@@ -548,6 +561,8 @@ async fn refresh_profile_with_cache_root(
                             .map(|window| QuotaWindow {
                                 label: window.label,
                                 remaining_percent: Some(window.remaining_percent),
+                                duration_seconds: window.duration_seconds,
+                                model_scope: None,
                                 used: None,
                                 limit: None,
                                 resets: window.resets_at.and_then(format_reset_local_seconds),
@@ -569,27 +584,68 @@ async fn refresh_profile_with_cache_root(
                 banked_resets: report.banked_resets,
                 profile_id: profile_id.clone(),
                 harness,
-                windows: [
-                    report.five_hour.map(|window| ("5H", window)),
-                    report.week.map(|window| ("Week", window)),
-                ]
-                .into_iter()
-                .flatten()
-                .map(|(label, window)| QuotaWindow {
-                    label: label.to_string(),
-                    remaining_percent: Some(window.remaining_percent),
-                    used: None,
-                    limit: None,
-                    resets: window
-                        .reset_context
-                        .as_deref()
-                        .and_then(normalize_reset_text),
-                    resets_at_epoch_seconds: window
-                        .reset_context
-                        .as_deref()
-                        .and_then(normalize_reset_epoch_seconds),
-                })
-                .collect(),
+                windows: {
+                    let mut windows = Vec::new();
+                    if let Some(window) = report.five_hour {
+                        windows.push(QuotaWindow {
+                            label: "5H".to_owned(),
+                            remaining_percent: Some(window.remaining_percent),
+                            duration_seconds: window.duration_seconds,
+                            model_scope: None,
+                            used: None,
+                            limit: None,
+                            resets: window
+                                .reset_context
+                                .as_deref()
+                                .and_then(normalize_reset_text),
+                            resets_at_epoch_seconds: window
+                                .reset_context
+                                .as_deref()
+                                .and_then(normalize_reset_epoch_seconds),
+                        });
+                    }
+                    if let Some(window) = report.week {
+                        windows.push(QuotaWindow {
+                            label: "Week".to_owned(),
+                            remaining_percent: Some(window.remaining_percent),
+                            duration_seconds: window.duration_seconds,
+                            model_scope: None,
+                            used: None,
+                            limit: None,
+                            resets: window
+                                .reset_context
+                                .as_deref()
+                                .and_then(normalize_reset_text),
+                            resets_at_epoch_seconds: window
+                                .reset_context
+                                .as_deref()
+                                .and_then(normalize_reset_epoch_seconds),
+                        });
+                    }
+                    for (scope, window) in report.scoped_weeks {
+                        let mut chars = scope.chars();
+                        let label_scope = chars.next().map_or_else(String::new, |first| {
+                            first.to_ascii_uppercase().to_string() + chars.as_str()
+                        });
+                        windows.push(QuotaWindow {
+                            label: format!("Week ({label_scope})"),
+                            remaining_percent: Some(window.remaining_percent),
+                            duration_seconds: window.duration_seconds,
+                            model_scope: Some(scope),
+                            used: None,
+                            limit: None,
+                            resets: window
+                                .reset_context
+                                .as_deref()
+                                .and_then(normalize_reset_text),
+                            resets_at_epoch_seconds: window
+                                .reset_context
+                                .as_deref()
+                                .and_then(normalize_reset_epoch_seconds),
+                        });
+                    }
+                    windows
+                },
                 extra: None,
                 error: None,
                 refreshed_at_epoch_seconds,
@@ -627,6 +683,8 @@ async fn refresh_profile_with_cache_root(
                     windows: vec![QuotaWindow {
                         label: report.period_label.clone(),
                         remaining_percent: Some(report.remaining_percent()),
+                        duration_seconds: None,
+                        model_scope: None,
                         // Grok Build reports a share of the allowance, not the
                         // credit amounts behind it.
                         used: None,
@@ -653,6 +711,8 @@ async fn refresh_profile_with_cache_root(
                     .map(|window| QuotaWindow {
                         label: window.label,
                         remaining_percent: Some(window.remaining_percent),
+                        duration_seconds: window.duration_seconds,
+                        model_scope: None,
                         used: None,
                         limit: None,
                         resets: window.resets_at.and_then(format_reset_local_seconds),
@@ -1271,6 +1331,8 @@ fn parse_kimi_window(value: &Value, fallback: &str) -> Option<QuotaWindow> {
     Some(QuotaWindow {
         label,
         remaining_percent,
+        duration_seconds: None,
+        model_scope: None,
         used,
         limit,
         resets,
@@ -1290,6 +1352,8 @@ fn parse_kimi_ratio_window(value: &Value, label: &str) -> Option<QuotaWindow> {
     Some(QuotaWindow {
         label: label.to_owned(),
         remaining_percent: Some(100 - used_percent),
+        duration_seconds: None,
+        model_scope: None,
         used: None,
         limit: None,
         resets: reset_value.and_then(normalize_kimi_reset),
@@ -1502,3 +1566,4 @@ mod tests;
 
 mod recovery;
 pub(crate) use recovery::{exhausted, merge_reset_windows, message_reset, recovery_reset};
+pub(crate) use recovery::{quota_score, window_applies};

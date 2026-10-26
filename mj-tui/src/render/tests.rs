@@ -951,6 +951,8 @@ fn weekly_quota(profile_id: &str, remaining: u8) -> ProfileQuota {
         windows: vec![QuotaWindow {
             label: "weekly".into(),
             remaining_percent: Some(remaining),
+            duration_seconds: None,
+            model_scope: None,
             used: None,
             limit: None,
             resets: None,
@@ -970,6 +972,8 @@ fn weekly_and_five_hour_quota(profile_id: &str, weekly: u8, five_hour: u8) -> Pr
     quota.windows.push(QuotaWindow {
         label: "5h".into(),
         remaining_percent: Some(five_hour),
+        duration_seconds: None,
+        model_scope: None,
         used: None,
         limit: None,
         resets: None,
@@ -2029,6 +2033,8 @@ fn quota_bars_show_fractional_remaining_capacity_and_blank_missing_windows() {
     let window = QuotaWindow {
         label: "Week".into(),
         remaining_percent: Some(73),
+        duration_seconds: None,
+        model_scope: None,
         used: None,
         limit: None,
         resets: None,
@@ -3295,6 +3301,8 @@ fn golden_dashboard_resource_panels() {
             QuotaWindow {
                 label: "Week".into(),
                 remaining_percent: Some(73),
+                duration_seconds: None,
+                model_scope: None,
                 used: None,
                 limit: None,
                 resets: Some("09:00 Aug 20".into()),
@@ -3303,6 +3311,8 @@ fn golden_dashboard_resource_panels() {
             QuotaWindow {
                 label: "5H".into(),
                 remaining_percent: Some(70),
+                duration_seconds: None,
+                model_scope: None,
                 used: None,
                 limit: None,
                 resets: Some("14:00 Aug 13".into()),
@@ -3335,6 +3345,8 @@ fn golden_dashboard_resource_panels() {
             QuotaWindow {
                 label: "Week".into(),
                 remaining_percent: Some(73),
+                duration_seconds: None,
+                model_scope: None,
                 used: None,
                 limit: None,
                 resets: None,
@@ -3343,6 +3355,8 @@ fn golden_dashboard_resource_panels() {
             QuotaWindow {
                 label: "5H".into(),
                 remaining_percent: Some(70),
+                duration_seconds: None,
+                model_scope: None,
                 used: None,
                 limit: None,
                 resets: None,

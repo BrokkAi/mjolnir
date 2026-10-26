@@ -29,11 +29,13 @@ pub struct ClaudeUsageReport {
     pub banked_resets: Option<u64>,
     pub five_hour: Option<ClaudeUsageWindow>,
     pub week: Option<ClaudeUsageWindow>,
+    pub scoped_weeks: Vec<(String, ClaudeUsageWindow)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeUsageWindow {
     pub remaining_percent: u8,
+    pub duration_seconds: Option<i64>,
     /// Text following `reset` in Claude Code output, without the word itself.
     pub reset_context: Option<String>,
 }
@@ -302,21 +304,31 @@ fn oauth_has_refresh_token(credentials: &Value) -> bool {
 
 fn parse_api_usage(payload: &Value) -> Option<ClaudeUsageReport> {
     let mut five_hour = None;
-    let mut weekly = Vec::new();
+    let mut week = None;
+    let mut scoped_weeks = Vec::new();
 
     if let Some(limits) = payload.get("limits").and_then(Value::as_array) {
         for limit in limits {
             let Some(kind) = limit.get("kind").and_then(Value::as_str) else {
                 continue;
             };
-            let Some(window) = api_window(limit, "percent") else {
+            let Some(mut window) = api_window(limit, "percent") else {
                 continue;
             };
             match kind {
-                "session" => five_hour = Some(window),
-                "weekly_all" => weekly.push(window),
-                "weekly_scoped" if api_scope_name(limit).is_some_and(|name| name == "fable") => {
-                    weekly.push(window);
+                "session" => {
+                    window.duration_seconds = Some(5 * 60 * 60);
+                    five_hour = Some(window);
+                }
+                "weekly_all" => {
+                    window.duration_seconds = Some(7 * 24 * 60 * 60);
+                    week = Some(window);
+                }
+                "weekly_scoped" => {
+                    if let Some(scope) = api_scope_name(limit) {
+                        window.duration_seconds = Some(7 * 24 * 60 * 60);
+                        scoped_weeks.push((scope, window));
+                    }
                 }
                 _ => {}
             }
@@ -326,24 +338,29 @@ fn parse_api_usage(payload: &Value) -> Option<ClaudeUsageReport> {
             .get("five_hour")
             .filter(|value| !value.is_null())
             .and_then(|value| api_window(value, "utilization"));
-        for key in ["seven_day", "seven_day_fable"] {
-            if let Some(window) = payload
-                .get(key)
-                .filter(|value| !value.is_null())
-                .and_then(|value| api_window(value, "utilization"))
-            {
-                weekly.push(window);
-            }
+        if let Some(mut window) = payload
+            .get("seven_day")
+            .filter(|value| !value.is_null())
+            .and_then(|value| api_window(value, "utilization"))
+        {
+            window.duration_seconds = Some(7 * 24 * 60 * 60);
+            week = Some(window);
+        }
+        if let Some(mut window) = payload
+            .get("seven_day_fable")
+            .filter(|value| !value.is_null())
+            .and_then(|value| api_window(value, "utilization"))
+        {
+            window.duration_seconds = Some(7 * 24 * 60 * 60);
+            scoped_weeks.push(("fable".to_owned(), window));
         }
     }
 
-    let week = weekly
-        .into_iter()
-        .min_by_key(|window| window.remaining_percent);
-    (five_hour.is_some() || week.is_some()).then(|| ClaudeUsageReport {
+    (five_hour.is_some() || week.is_some() || !scoped_weeks.is_empty()).then(|| ClaudeUsageReport {
         banked_resets: parse_banked_resets(payload, mj_core::clock::epoch_millis() / 1000),
         five_hour,
         week,
+        scoped_weeks,
     })
 }
 
@@ -388,6 +405,7 @@ fn api_window(value: &Value, percent_key: &str) -> Option<ClaudeUsageWindow> {
     let used = used.round().clamp(0.0, 100.0) as u8;
     Some(ClaudeUsageWindow {
         remaining_percent: 100 - used,
+        duration_seconds: None,
         reset_context: value
             .get("resets_at")
             .and_then(Value::as_str)
@@ -412,7 +430,8 @@ fn api_window(value: &Value, percent_key: &str) -> Option<ClaudeUsageWindow> {
 /// unparsed rather than reporting backwards.
 fn parse_cli_usage(output: &str) -> Option<ClaudeUsageReport> {
     let mut five_hour = None;
-    let mut weekly = Vec::new();
+    let mut week = None;
+    let mut scoped_weeks = Vec::new();
 
     for line in strip_ansi(output).lines() {
         let Some((label, rest)) = line.split_once(':') else {
@@ -422,27 +441,35 @@ fn parse_cli_usage(output: &str) -> Option<ClaudeUsageReport> {
         if label != "current session" && !label.starts_with("current week") {
             continue;
         }
-        let Some(window) = cli_window(rest) else {
+        let Some(mut window) = cli_window(rest) else {
             continue;
         };
         if label == "current session" {
+            window.duration_seconds = Some(5 * 60 * 60);
             five_hour = Some(window);
+        } else if label == "current week (all models)" || label == "current week" {
+            window.duration_seconds = Some(7 * 24 * 60 * 60);
+            week = Some(window);
         } else {
-            weekly.push(window);
+            let Some(scope) = label
+                .strip_prefix("current week (")
+                .and_then(|label| label.strip_suffix(')'))
+            else {
+                continue;
+            };
+            window.duration_seconds = Some(7 * 24 * 60 * 60);
+            scoped_weeks.push((scope.to_owned(), window));
         }
     }
 
-    // Two weekly windows can be in force at once, as an overall limit and a
-    // per-model one. The binding limit is the one with the least left, which
-    // is also what the API path reports.
-    let week = weekly
-        .into_iter()
-        .min_by_key(|window| window.remaining_percent);
-    (five_hour.is_some() || week.is_some()).then_some(ClaudeUsageReport {
-        banked_resets: None,
-        five_hour,
-        week,
-    })
+    (five_hour.is_some() || week.is_some() || !scoped_weeks.is_empty()).then_some(
+        ClaudeUsageReport {
+            banked_resets: None,
+            five_hour,
+            week,
+            scoped_weeks,
+        },
+    )
 }
 
 /// One window from the text after a `/usage` line's label.
@@ -454,6 +481,7 @@ fn cli_window(rest: &str) -> Option<ClaudeUsageWindow> {
     }
     Some(ClaudeUsageWindow {
         remaining_percent: 100 - (used.round().clamp(0.0, 100.0) as u8),
+        duration_seconds: None,
         reset_context: tail
             .split_once("resets ")
             .map(|(_, context)| context.trim().to_owned())
@@ -595,13 +623,42 @@ Last 7d · 5966 requests · 78 sessions
             five_hour.reset_context.as_deref(),
             Some("Sep 18 at 6:20pm (Europe/Paris)")
         );
-        // 40% used is the weekly limit that binds first, not 30%.
+        // The all-models limit remains distinct from the Fable limit.
         let week = report.week.expect("weekly window");
-        assert_eq!(week.remaining_percent, 60);
+        assert_eq!(week.remaining_percent, 70);
         assert_eq!(
             week.reset_context.as_deref(),
-            Some("Sep 20 at 2pm (Europe/Paris)")
+            Some("Sep 20 at 1:59pm (Europe/Paris)")
         );
+        assert_eq!(report.scoped_weeks.len(), 1);
+        assert_eq!(report.scoped_weeks[0].0, "fable");
+        assert_eq!(report.scoped_weeks[0].1.remaining_percent, 60);
+        assert_eq!(report.scoped_weeks[0].1.duration_seconds, Some(604_800));
+    }
+
+    #[test]
+    fn api_usage_keeps_all_and_scoped_weekly_windows_separate() {
+        let report = parse_api_usage(&serde_json::json!({
+            "limits": [
+                {"kind": "weekly_all", "percent": 30},
+                {"kind": "weekly_scoped", "scope": {"model": {"display_name": "Fable"}}, "percent": 40},
+                {"kind": "weekly_scoped", "scope": {"model": {"display_name": "Mythos"}}, "percent": 50}
+            ]
+        })).unwrap();
+        assert_eq!(report.week.unwrap().remaining_percent, 70);
+        assert_eq!(report.scoped_weeks.len(), 2);
+        assert_eq!(report.scoped_weeks[0].0, "fable");
+        assert_eq!(report.scoped_weeks[0].1.remaining_percent, 60);
+        assert_eq!(report.scoped_weeks[1].0, "mythos");
+
+        let legacy = parse_api_usage(&serde_json::json!({
+            "seven_day": {"utilization": 25},
+            "seven_day_fable": {"utilization": 100}
+        }))
+        .unwrap();
+        assert_eq!(legacy.week.unwrap().remaining_percent, 75);
+        assert_eq!(legacy.scoped_weeks[0].0, "fable");
+        assert_eq!(legacy.scoped_weeks[0].1.remaining_percent, 0);
     }
 
     /// The later sections are full of percentages that are not quota.

@@ -1,6 +1,56 @@
 //! Deadline calculation never asks a model to interpret a clock or timezone.
 use super::*;
 
+/// Whether a scoped quota window applies to the selected model.
+pub(crate) fn window_applies(window: &QuotaWindow, model: &str) -> bool {
+    window.model_scope.as_deref().is_none_or(|scope| {
+        model
+            .to_ascii_lowercase()
+            .contains(&scope.to_ascii_lowercase())
+    })
+}
+
+/// Score quota headroom against its reset deadline. Higher scores mean more
+/// sustainable capacity for the requested model.
+pub(crate) fn quota_score(windows: &[QuotaWindow], model: &str, now_seconds: i64) -> Option<f64> {
+    windows
+        .iter()
+        .filter(|window| window_applies(window, model))
+        .filter_map(|window| {
+            let remaining = window.remaining_percent.map(f64::from).or_else(|| {
+                window.used.zip(window.limit).and_then(|(used, limit)| {
+                    (limit > 0).then(|| {
+                        (100.0 * (limit as f64 - used as f64) / limit as f64).clamp(0.0, 100.0)
+                    })
+                })
+            })?;
+            let remaining = remaining.min(100.0);
+            let score = if remaining == 0.0 {
+                0.0
+            } else if window
+                .resets_at_epoch_seconds
+                .is_some_and(|reset| reset <= now_seconds)
+            {
+                1.0
+            } else if let (Some(reset), Some(duration)) = (
+                window.resets_at_epoch_seconds,
+                window.duration_seconds.filter(|d| *d > 0),
+            ) {
+                let seconds_left = reset.saturating_sub(now_seconds).clamp(0, duration);
+                let pace = 100.0 * seconds_left as f64 / duration as f64;
+                if pace <= f64::EPSILON {
+                    4.0
+                } else {
+                    (remaining / pace).min(4.0)
+                }
+            } else {
+                (remaining / 50.0).min(4.0)
+            };
+            Some(score)
+        })
+        .reduce(f64::min)
+}
+
 /// Fill only missing reset data; fresh usage values always win.
 pub(crate) fn merge_reset_windows(windows: &mut Vec<QuotaWindow>, cached: &[QuotaWindow]) -> bool {
     let mut restored = false;
@@ -86,12 +136,65 @@ pub(crate) fn recovery_reset(
 }
 
 #[cfg(test)]
+mod scoring_tests {
+    use super::*;
+
+    fn window(remaining: u8, reset: Option<i64>, duration: Option<i64>) -> QuotaWindow {
+        QuotaWindow {
+            label: "window".into(),
+            remaining_percent: Some(remaining),
+            duration_seconds: duration,
+            model_scope: None,
+            used: None,
+            limit: None,
+            resets: None,
+            resets_at_epoch_seconds: reset,
+        }
+    }
+
+    #[test]
+    fn quota_score_accounts_for_reset_pacing_and_scoped_windows() {
+        let now = 1_000_000;
+        let short = window(5, Some(now + 180), Some(18_000));
+        let weekly = window(5, Some(now + 6 * 24 * 60 * 60), Some(604_800));
+        let short_score = quota_score(std::slice::from_ref(&short), "claude-opus-5", now).unwrap();
+        let weekly_score =
+            quota_score(std::slice::from_ref(&weekly), "claude-opus-5", now).unwrap();
+        assert_eq!(short_score, 4.0);
+        assert!(short_score > weekly_score);
+
+        assert_eq!(
+            quota_score(&[window(0, Some(now + 5), Some(10))], "x", now),
+            Some(0.0)
+        );
+        assert_eq!(
+            quota_score(&[window(20, Some(now), Some(10))], "x", now),
+            Some(1.0)
+        );
+        assert_eq!(quota_score(&[window(25, None, None)], "x", now), Some(0.5));
+        let mut usage = window(0, None, None);
+        usage.remaining_percent = None;
+        usage.used = Some(75);
+        usage.limit = Some(100);
+        assert_eq!(quota_score(&[usage], "x", now), Some(0.5));
+        assert_eq!(quota_score(&[short, weekly], "x", now), Some(weekly_score));
+
+        let mut scoped = window(0, Some(now + 10), Some(10));
+        scoped.model_scope = Some("fable".into());
+        assert_eq!(quota_score(&[scoped.clone()], "claude-opus-5", now), None);
+        assert_eq!(quota_score(&[scoped], "CLAUDE-FABLE-5-1", now), Some(0.0));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     fn window(label: &str, remaining: u8, reset: Option<i64>) -> QuotaWindow {
         QuotaWindow {
             label: label.into(),
             remaining_percent: Some(remaining),
+            duration_seconds: None,
+            model_scope: None,
             used: None,
             limit: None,
             resets: None,

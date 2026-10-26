@@ -117,6 +117,8 @@ fn golden_quota_compact_row() {
         QuotaWindow {
             label: label.into(),
             remaining_percent: Some(remaining),
+            duration_seconds: None,
+            model_scope: None,
             used: None,
             limit: None,
             resets: resets.map(str::to_owned),
@@ -229,6 +231,8 @@ fn golden_quota_compact_row() {
             QuotaWindow {
                 label: "Week".into(),
                 remaining_percent: Some(94),
+                duration_seconds: None,
+                model_scope: None,
                 used: Some(6),
                 limit: Some(100),
                 resets: Some("12:22 Aug 18".into()),
@@ -237,6 +241,8 @@ fn golden_quota_compact_row() {
             QuotaWindow {
                 label: "5H".into(),
                 remaining_percent: Some(97),
+                duration_seconds: None,
+                model_scope: None,
                 used: Some(3),
                 limit: Some(100),
                 resets: Some("10:22 Aug 13".into()),
@@ -972,6 +978,8 @@ fn quota_report(refreshed_at: u64, remaining: Option<u8>) -> ProfileQuota {
             .map(|remaining| QuotaWindow {
                 label: "Week".into(),
                 remaining_percent: Some(remaining),
+                duration_seconds: None,
+                model_scope: None,
                 used: None,
                 limit: None,
                 resets: None,

@@ -60,6 +60,8 @@ mod tests {
             windows: vec![crate::quota::QuotaWindow {
                 label: "5H".into(),
                 remaining_percent: Some(0),
+                duration_seconds: None,
+                model_scope: None,
                 used: None,
                 limit: None,
                 resets: None,
