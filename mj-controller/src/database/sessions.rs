@@ -598,6 +598,26 @@ pub fn save_lifecycle_session(session: &SessionRecord) -> Result<()> {
     })
 }
 
+/// Clear exactly the failure observed at turn start. The writer owns the
+/// comparison and update together so a concurrent lifecycle result survives.
+pub(crate) fn clear_recorded_lifecycle_failure(
+    previous: &SessionRecord,
+    updated_at: &str,
+) -> Result<bool> {
+    if previous.public_error().is_none() {
+        return Ok(false);
+    }
+    let previous = previous.clone();
+    let updated_at = updated_at.to_owned();
+    submit_database_write("clear_recorded_lifecycle_failure", move |connection| {
+        Ok(connection.execute(
+            "UPDATE sessions SET last_error = NULL, updated_at = ?3
+             WHERE session_id = ?1 AND last_error = ?2",
+            params![previous.id, previous.last_error, updated_at],
+        )? == 1)
+    })
+}
+
 /// Install a lifecycle transition together with the checkpoint it just
 /// verified and the harness session id that produced it.
 pub fn save_checkpointed_session(session: &SessionRecord) -> Result<()> {

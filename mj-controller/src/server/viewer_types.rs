@@ -235,14 +235,14 @@ impl ViewerSnapshot {
                     // the local diagnostic to learn why. A failed resume rolls
                     // the record back to stopped and leaves its reason in the
                     // same field, so that state reports it too; every
-                    // successful transition clears `last_error`, so this never
-                    // reports a failure the session has since recovered from.
+                    // successful transition clears `last_error`. A new turn
+                    // also retires a live session's public lifecycle failure.
                     //
                     // A live session's `last_error` is not published here: it
                     // can hold a raw provisioning chain naming profile homes
-                    // and SSH hosts. A failed close leaves the session alive
-                    // and still owes the person a reason, so the sentence the
-                    // controller composed for them is published whatever state
+                    // and SSH hosts. A failed lifecycle operation can leave the
+                    // session alive and still owes the person a reason, so the
+                    // controller's safe sentence is published whatever state
                     // the session is in (#1081).
                     launch_error: matches!(
                         session.state,

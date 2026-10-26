@@ -258,7 +258,7 @@ impl RuntimeState {
     }
 
     pub(super) async fn publish_session(
-        &self,
+        self: &Arc<Self>,
         session_id: String,
         view: ManagedSessionView,
     ) -> Result<()> {
@@ -270,7 +270,7 @@ impl RuntimeState {
             has_snapshot,
             "daemon received a session view"
         );
-        {
+        let recovered_failure = {
             let mut owner = self.owner();
             let controller = owner.controller();
             if !controller.state.sessions.contains_key(&session_id)
@@ -278,6 +278,21 @@ impl RuntimeState {
             {
                 return Ok(());
             }
+            // All prompt sources and harness-initiated turns reach this
+            // projection publication. Compare start positions with the last
+            // observed frontier, not activity: a running turn predating the
+            // failure cannot retire it, nor can its completion. The window
+            // retains starts even when a whole turn coalesces into one update.
+            // The first attachment establishes a baseline; replay is not a
+            // newly observed turn start.
+            let recovered_failure = view.snapshot.as_ref().and_then(|snapshot| {
+                let previous = owner.sessions.get(&session_id)?;
+                previous.operational.as_ref()?;
+                let start = snapshot.window.latest_turn_start_position?;
+                let record = controller.state.sessions.get(&session_id)?;
+                let error = record.public_error()?;
+                (start > previous.projection_ordinal).then(|| error.to_owned())
+            });
             if view.connected
                 && let Some(snapshot) = view.snapshot.as_ref()
                 && let Some(session) = controller.state.sessions.get(&session_id)
@@ -332,7 +347,26 @@ impl RuntimeState {
             } else {
                 owner.background_policies.remove(&session_id);
             }
-            owner.publish_view(session_id, view);
+            owner.publish_view(session_id.clone(), view);
+            recovered_failure
+        };
+        if let Some(recorded_error) = recovered_failure {
+            let state = self.clone();
+            match crate::upgrade::activity("lifecycle failure clear") {
+                Ok(upgrade_task) => {
+                    tokio::spawn(async move {
+                        let _upgrade_task = upgrade_task;
+                        state
+                            .clear_recorded_lifecycle_failure(&session_id, &recorded_error)
+                            .await;
+                    });
+                }
+                Err(error) => tracing::warn!(
+                    %session_id,
+                    %error,
+                    "could not admit lifecycle failure clear"
+                ),
+            }
         }
         reach_test_hook("relay_projection_before_revision_publication").await?;
         self.publish_revision();

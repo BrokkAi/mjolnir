@@ -1485,16 +1485,6 @@ pub(crate) async fn run_server(
                         session_id.as_deref(),
                         &result,
                     );
-                    // A session that is taking work again has recovered from
-                    // whatever its last close did, so it stops reporting it.
-                    if result.is_ok() && let Some(session_id) = session_id.clone() {
-                        let daemon_runtime = daemon_runtime.clone();
-                        let Ok(upgrade_task) = crate::upgrade::activity("close failure clear") else { continue };
-                        tokio::spawn(async move {
-                            let _upgrade_task = upgrade_task;
-                            daemon_runtime.clear_recorded_close_failure(&session_id).await;
-                        });
-                    }
                     request_controller_reload(
                         &mut controller_reload_in_flight,
                         &mut controller_reload_requested,

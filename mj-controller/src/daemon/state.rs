@@ -503,36 +503,36 @@ impl RuntimeState {
         }
     }
 
-    /// Retire a recorded close failure once something for the session has
-    /// succeeded.
-    ///
-    /// The reason is published for a session that is alive, so it has to stop
-    /// being published for one that is working again; a lifecycle transition
-    /// clears `last_error` on its own, and this covers the ordinary actions,
-    /// such as a prompt, that do not.
-    pub async fn clear_recorded_close_failure(self: &Arc<Self>, session_id: &str) {
+    /// Retire the public lifecycle failure observed when a new turn started.
+    /// A later failure must survive a delayed background clear.
+    pub async fn clear_recorded_lifecycle_failure(
+        self: &Arc<Self>,
+        session_id: &str,
+        recorded_error: &str,
+    ) {
         let recorded = self
             .owner()
             .controller()
             .state
             .sessions
             .get(session_id)
-            .is_some_and(|record| record.public_error().is_some());
+            .is_some_and(|record| record.public_error() == Some(recorded_error));
         if !recorded {
             return;
         }
         let cleared = blocking({
             let session_id = session_id.to_owned();
+            let recorded_error = recorded_error.to_owned();
             move || {
                 let mut controller = Controller::load()?;
-                controller.clear_recorded_close_failure(&session_id)
+                controller.clear_recorded_lifecycle_failure(&session_id, &recorded_error)
             }
         })
         .await;
         match cleared {
             Ok(true) => {
                 if let Err(error) = self.reload_controller().await {
-                    tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after clearing a recorded close failure");
+                    tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after clearing a recorded lifecycle failure");
                 }
                 self.publish_revision();
             }
@@ -540,7 +540,7 @@ impl RuntimeState {
             Err(error) => tracing::warn!(
                 %session_id,
                 error = format!("{error:#}"),
-                "could not clear a recorded close failure"
+                "could not clear a recorded lifecycle failure"
             ),
         }
     }

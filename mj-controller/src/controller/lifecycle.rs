@@ -808,28 +808,26 @@ impl Controller {
         Ok(true)
     }
 
-    /// Forget a recorded close failure, because something for this session has
-    /// since succeeded. Only the sentence a failed close wrote is cleared; a
-    /// raw error from any other operation is left alone. Reports whether
-    /// anything changed.
-    pub fn clear_recorded_close_failure(&mut self, session_id: &str) -> Result<bool> {
+    /// Forget only the public lifecycle failure observed at turn start. Raw
+    /// errors and failures recorded after that observation are left alone.
+    pub fn clear_recorded_lifecycle_failure(
+        &mut self,
+        session_id: &str,
+        recorded_error: &str,
+    ) -> Result<bool> {
         let Some(record) = self.state.sessions.get(session_id) else {
             return Ok(false);
         };
-        if record.public_error().is_none() {
+        if record.public_error() != Some(recorded_error) {
             return Ok(false);
         }
-        let previous = record.clone();
+        let updated_at = now();
+        if !crate::database::clear_recorded_lifecycle_failure(record, &updated_at)? {
+            return Ok(false);
+        }
         let record = self.state.sessions.get_mut(session_id).unwrap();
         record.last_error = None;
-        record.updated_at = now();
-        persist_session_record_transition_or_restore(
-            &mut self.state,
-            session_id,
-            &previous,
-            "clear the reason a close did not finish",
-            &crate::database::save_lifecycle_session,
-        )?;
+        record.updated_at = updated_at;
         Ok(true)
     }
 

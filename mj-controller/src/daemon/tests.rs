@@ -3075,6 +3075,191 @@ fn startup_prompt_test_store(name: &str) -> Option<crate::database::DatabaseWrit
     Some(crate::database::install_isolated_test_writer())
 }
 
+// Hard-won: 89a44ed8c: a failed Move remained visible after turns started outside phone actions.
+#[tokio::test]
+async fn relay_turn_start_retires_only_the_recorded_public_lifecycle_failure() {
+    const NAME: &str = "relay_turn_start_retires_only_the_recorded_public_lifecycle_failure";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    use mj_core::relay::{RelayEvent, RelayObservation, relay_event_digest};
+    use mj_transcript::projection::{apply_committed_projection_event, project_relay_event};
+
+    fn observe(view: &mut ManagedSessionView, observation: RelayObservation) {
+        let snapshot = view.snapshot.as_mut().unwrap();
+        let materialized = &mut snapshot.materialized;
+        let mut event = RelayEvent {
+            format: mj_core::relay::RELAY_EVENT_FORMAT_V1,
+            ordinal: materialized.applied_event_ordinal + 1,
+            previous_digest: materialized.applied_event_digest.clone(),
+            digest: String::new(),
+            recorded_at_ms: 100,
+            command_id: None,
+            observation,
+        };
+        event.digest = relay_event_digest(&event).unwrap();
+        let projected = project_relay_event(materialized, &event).unwrap();
+        apply_committed_projection_event(materialized, &event, projected.mutation).unwrap();
+        snapshot.window = mj_core::state::ProjectionWindow::of(materialized);
+    }
+
+    let mut session = runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    session.last_error = Some(format!(
+        "{} while checkpointing",
+        mj_core::state::MOVE_FAILURE_PREFIX
+    ));
+    crate::database::save_session(&session).unwrap();
+    let mut state = test_runtime_state();
+    Arc::get_mut(&mut state).unwrap().committed =
+        Some(crate::database::subscribe_committed_state().unwrap());
+    state
+        .owner()
+        .install_relay_sessions([session.id.clone()].into());
+
+    // Reattachment to a turn already running when the failure was recorded
+    // establishes a frontier. Neither replay nor its completion is recovery.
+    let mut view = ready_startup_view();
+    observe(
+        &mut view,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 100 },
+    );
+    state
+        .publish_session(session.id.clone(), view.clone())
+        .await
+        .unwrap();
+    observe(
+        &mut view,
+        RelayObservation::HarnessTurnSettled {
+            origin: None,
+            prompt_in_flight: false,
+        },
+    );
+    state
+        .publish_session(session.id.clone(), view.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        state.session_record(&session.id).unwrap().last_error,
+        session.last_error
+    );
+
+    // A mailbox/event wake has no ControllerAction. Coalesce its whole turn
+    // to ensure recovery is based on the start, even if it already ended.
+    observe(
+        &mut view,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 200 },
+    );
+    observe(
+        &mut view,
+        RelayObservation::HarnessTurnSettled {
+            origin: None,
+            prompt_in_flight: false,
+        },
+    );
+    state
+        .publish_session(session.id.clone(), view.clone())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while state
+            .session_record(&session.id)
+            .unwrap()
+            .last_error
+            .is_some()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the new relay turn clears the public failure");
+    assert!(
+        crate::database::load_session_record(&session.id)
+            .unwrap()
+            .unwrap()
+            .last_error
+            .is_none()
+    );
+
+    let raw_error = "ssh host private-worker: connection refused";
+    session.last_error = Some(raw_error.into());
+    session.updated_at = "2026-10-26T12:00:00Z".into();
+    crate::database::save_session(&session).unwrap();
+    observe(
+        &mut view,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 300 },
+    );
+    state
+        .publish_session(session.id.clone(), view.clone())
+        .await
+        .unwrap();
+    state
+        .clear_recorded_lifecycle_failure(&session.id, raw_error)
+        .await;
+    assert_eq!(
+        crate::database::load_session_record(&session.id)
+            .unwrap()
+            .unwrap()
+            .last_error
+            .as_deref(),
+        Some(raw_error)
+    );
+
+    // A background clear may run after another lifecycle failure was written.
+    session.last_error = Some(format!("{} again", mj_core::state::MOVE_FAILURE_PREFIX));
+    crate::database::save_session(&session).unwrap();
+    let observed_error = session.last_error.clone().unwrap();
+    let mut controller = Controller::load().unwrap();
+    // A different failure must survive even when the timestamp is unchanged.
+    session.last_error = Some(format!(
+        "{} a later operation",
+        mj_core::state::MOVE_FAILURE_PREFIX
+    ));
+    crate::database::save_session(&session).unwrap();
+    state
+        .clear_recorded_lifecycle_failure(&session.id, &observed_error)
+        .await;
+    assert_eq!(
+        crate::database::load_session_record(&session.id)
+            .unwrap()
+            .unwrap()
+            .last_error,
+        session.last_error
+    );
+    assert!(
+        !controller
+            .clear_recorded_lifecycle_failure(&session.id, &observed_error)
+            .unwrap()
+    );
+
+    // Unrelated writes can bump updated_at while a clear waits to run.
+    // Exercise both the daemon entry and a controller loaded before the write.
+    let observed_error = session.last_error.clone().unwrap();
+    let mut controller = Controller::load().unwrap();
+    session.updated_at = "2026-10-26T12:00:01Z".into();
+    crate::database::save_session(&session).unwrap();
+    assert!(
+        controller
+            .clear_recorded_lifecycle_failure(&session.id, &observed_error)
+            .unwrap()
+    );
+    session.updated_at = "2026-10-26T12:00:02Z".into();
+    crate::database::save_session(&session).unwrap();
+    state
+        .clear_recorded_lifecycle_failure(&session.id, &observed_error)
+        .await;
+    assert!(
+        crate::database::load_session_record(&session.id)
+            .unwrap()
+            .unwrap()
+            .last_error
+            .is_none()
+    );
+}
+
 // Hard-won: #1326: image maintenance recreated an otherwise current session container.
 #[tokio::test]
 async fn a_current_worker_in_an_older_container_keeps_its_environment() {
