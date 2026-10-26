@@ -513,8 +513,9 @@ impl ChatState {
     }
 
     /// Mirrors the session's own review choice, which `mj new` can set.
-    pub fn set_session_review(&mut self, review: Option<mj_core::config::SessionReview>) {
-        self.session_review = review;
+    pub fn set_session_review(&mut self, session: &mj_core::state::SessionRecord) {
+        self.session_review = session.review.clone();
+        self.review_unavailable = session.review_unavailable();
     }
 
     /// `[review]` as it applies to this session.

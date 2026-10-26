@@ -821,7 +821,8 @@ fn failed_node_preflight_retains_error_before_provisioning() {
             },
             &RawRegistrationExecutor,
         )
-        .unwrap();
+        .unwrap()
+        .id;
     assert!(
         crate::database::load_state()
             .unwrap()
@@ -1032,7 +1033,8 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
             },
             &RawRegistrationExecutor,
         )
-        .unwrap();
+        .unwrap()
+        .id;
     // Provisioning has finished: the record names its target, and the worker
     // has not attached yet.
     apply_new_session_provisioning_result(

@@ -294,6 +294,40 @@ fn golden_phone_new_session_preflight() {
     )
     .unwrap();
 
+    // Review is on, but the folder has no Git commits: the review step must
+    // say the session will be created with review off.
+    let folder = tempfile::tempdir().unwrap();
+    let mut config = bare_preflight_config();
+    config.profiles.insert(
+        "codex".into(),
+        mj_core::config::HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Codex,
+            home: PathBuf::from("/home/dev/.codex"),
+            environment: Default::default(),
+            context_window_bytes: None,
+            legacy_subagents: Default::default(),
+            guardian_review_model: None,
+            codex_profile: None,
+        },
+    );
+    config.review.trigger = mj_core::config::ReviewTrigger::Turn;
+    config.review.profile = Some("codex".into());
+    let mut plain = run_new_preflight(
+        config,
+        "hel".into(),
+        "raw".into(),
+        Some(folder.path().to_path_buf()),
+    )
+    .expect("a folder without Git commits is a valid local project");
+    plain.project_directory = Some(PathBuf::from("<folder>"));
+    writeln!(
+        out,
+        "=== folder without Git commits accepted with review off (1 preflight review) ==="
+    )
+    .unwrap();
+    writeln!(out, "{}", serde_json::to_string_pretty(&plain).unwrap()).unwrap();
+
     let mut config = Config::default();
     config.targets.insert(
         "podman".into(),

@@ -1521,6 +1521,10 @@ impl HarnessProfile {
         if !super::secrets::resolves_values() {
             return;
         }
+        if self.kind == HarnessKind::Dsh {
+            self.resolve_dsh_key();
+            return;
+        }
         if let Some(env_key) = self.kind.api_key_variable() {
             self.environment.inherit(env_key);
             return;
@@ -1538,6 +1542,54 @@ impl HarnessProfile {
                 .and_then(|custom| custom.env_key.as_deref())
         {
             self.environment.inherit(env_key);
+        }
+    }
+
+    /// Decide the key a DSH profile authenticates with, first found wins: the
+    /// key saved in DSH itself (its home's `.credentials.yaml`), the one in
+    /// the environment Mjolnir started with, the one in the DSH home's
+    /// `.env`, and last the profile's own `environment` entry, such as a
+    /// secret from `secrets.toml`. The first three are DSH's own order, so a
+    /// session uses the key the person's `dsh` uses.
+    fn resolve_dsh_key(&mut self) {
+        let Some(env_key) = self.kind.api_key_variable() else {
+            return;
+        };
+        let home = self.home.clone();
+        // A DSH file Mjolnir cannot use keeps a lower source usable: the
+        // session sends only the key, so DSH's own refusal of the file does
+        // not stop it. It is the reason when no source has a key.
+        let mut problems = Vec::new();
+        let mut usable = |found: Result<Option<String>>| match found {
+            Ok(key) => key.filter(|key| !key.trim().is_empty()),
+            Err(error) => {
+                problems.push(format!("{error:#}"));
+                None
+            }
+        };
+        let stored = super::dsh_credentials::stored(&home, env_key);
+        let account_signed_in = stored.as_ref().is_ok_and(|stored| stored.account_signed_in);
+        let key = usable(stored.map(|stored| stored.api_key))
+            .or_else(|| usable(Ok(super::secrets::Environment::from_process(env_key))))
+            .or_else(|| usable(super::dsh_credentials::dotenv(&home, env_key)));
+        if !problems.is_empty() {
+            tracing::warn!(home = %home.display(), "DSH credentials: {}", problems.join("; "));
+        }
+        if let Some(key) = key {
+            self.environment.supply(env_key, key);
+            return;
+        }
+        if self.supplies_api_key(env_key) {
+            return;
+        }
+        if account_signed_in {
+            problems.push(format!(
+                "DSH in {} is signed in to a DeepSeek account but holds no API key; dsh-acp authenticates only with an API key, so save one in DSH's Models settings, or export {env_key} and run `mj daemon restart`",
+                home.display()
+            ));
+        }
+        if !problems.is_empty() {
+            self.environment.refuse(env_key, problems.join("; "));
         }
     }
 
@@ -1597,6 +1649,17 @@ impl HarnessProfile {
             if let Some((source, env_key)) = api_key
                 && !self.supplies_api_key(env_key)
             {
+                if self.kind == HarnessKind::Dsh {
+                    bail!(
+                        "DSH authenticates with {env_key}, which is found neither in DSH's own credentials ({}), the environment Mjolnir started with, {}, nor under [profiles.{id}.environment]; save a key in DSH, export {env_key} and run `mj daemon restart`, or put it in secrets.toml and add `{env_key} = {{ from_secret = \"{env_key}\" }}` under [profiles.{id}.environment]",
+                        self.home
+                            .join(super::dsh_credentials::CREDENTIALS_FILE)
+                            .display(),
+                        self.home
+                            .join(super::dsh_credentials::DOTENV_FILE)
+                            .display(),
+                    );
+                }
                 bail!(
                     "{source} authenticates with {env_key}, which is set neither in the environment Mjolnir started with nor under [profiles.{id}.environment]; export {env_key} and run `mj daemon restart`, or put it in secrets.toml and add `{env_key} = {{ from_secret = \"{env_key}\" }}` under [profiles.{id}.environment]"
                 );

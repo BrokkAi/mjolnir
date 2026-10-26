@@ -106,10 +106,11 @@ committed Git checkout is still required wherever Mjolnir has to clone or move
 the project into a bundle workspace, and on SSH and EC2 targets, which address a
 project by the repository it shares with its sessions.
 
-Review captures changes from Git history, so a local directory without a
-committed checkout must be created with `--review off`. A review-enabled launch
-is refused with that remedy, and `/review` reports that it has no Git changes to
-capture.
+Review captures changes from Git history, so a session in a local directory
+without a committed checkout is created with review off. The New Session
+review page says so before you create it, `mj new` prints the same notice, and
+`/review status` in the session gives the reason. `/review` reports that it has
+no Git changes to capture.
 
 ### Bare on this machine
 

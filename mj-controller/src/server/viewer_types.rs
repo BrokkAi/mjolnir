@@ -252,6 +252,7 @@ impl ViewerSnapshot {
                     .flatten()
                     .or_else(|| session.public_error().map(str::to_owned)),
                     review_trigger: config.review.for_session(session.review.as_ref()).trigger,
+                    review_unavailable: session.review_unavailable().map(str::to_owned),
                     storage_problem: None,
                     preview: Vec::new(),
                     queued_prompts: Vec::new(),
@@ -444,6 +445,9 @@ impl ViewerSession {
 pub struct ViewerSession {
     #[serde(default)]
     pub review_trigger: mj_core::config::ReviewTrigger,
+    /// Why review cannot run for this session, when it cannot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_unavailable: Option<String>,
     /// The daemon's creation-settings comparison, also used by Restart itself.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub container_upgrade_supported: bool,
