@@ -1,7 +1,6 @@
 use super::*;
 use crate::targets::{CommandOutput, CommandSpec};
 use mj_core::config::DEFAULT_WORKSPACE_PREFIX;
-use mj_core::config::runtime_kind_name;
 
 fn ssh_machine(host: &str) -> Machine {
     Machine::Ssh {
@@ -213,7 +212,10 @@ fn one_ssh_call_answers_every_runtime_check_of_an_apple_silicon_mac() {
         .find(|(_, target)| matches!(target, TargetTemplate::SshAppleContainer { .. }))
         .expect("the runtime resolves to a target on that machine");
     assert_eq!(id, "mac-apple-container");
-    assert_eq!(runtime_kind_name(&target), "apple-container");
+    assert_eq!(
+        mj_core::config::runtime_kind_name(&target),
+        "apple-container"
+    );
 }
 
 /// A Linux host is told why it cannot run Apple container, and is never
