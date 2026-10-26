@@ -222,6 +222,13 @@ fn xdg_home(name: &str, fallback: &str) -> Option<PathBuf> {
         .or_else(|| crate::path_input::user_home().map(|home| home.join(fallback)))
 }
 
+/// MiMo Code's stock directory in the XDG tree `name` names, such as
+/// `~/.local/share/mimocode`. The stock install names these trees after its
+/// program, `mimocode`, not after Mjolnir's `mimo` harness id.
+fn mimo_stock_xdg_dir(name: &str, fallback: &str) -> Option<PathBuf> {
+    xdg_home(name, fallback).map(|base| base.join("mimocode"))
+}
+
 /// Whether a MiMo Code profile's own `config/` tree carries a configuration
 /// file, which makes it authoritative over the stock XDG configuration.
 fn mimo_config_is_seeded(config: &Path) -> bool {
@@ -354,10 +361,10 @@ impl HarnessKind {
         if self == Self::Mimo && self.is_default_home(home) {
             if home.join("data/auth.json").is_file() {
                 environment.insert(self.home_env().into(), crate::target_path::text(home));
-                if let Some(stock) = xdg_home("XDG_CONFIG_HOME", ".config") {
+                if let Some(stock) = mimo_stock_xdg_dir("XDG_CONFIG_HOME", ".config") {
                     environment.insert(
                         "MIMOCODE_CONFIG_DIR".into(),
-                        crate::target_path::text(&stock.join(self.id())),
+                        crate::target_path::text(&stock),
                     );
                 }
                 environment.insert("MIMOCODE_DISABLE_AUTOUPDATE".into(), "1".into());
@@ -408,7 +415,7 @@ impl HarnessKind {
         if self != Self::Mimo {
             return vec![home.to_path_buf()];
         }
-        let stock = xdg_home("XDG_CONFIG_HOME", ".config").map(|base| base.join(self.id()));
+        let stock = mimo_stock_xdg_dir("XDG_CONFIG_HOME", ".config");
         mimo_configuration_sources(home, self.is_default_home(home), stock.as_deref())
     }
 
@@ -425,7 +432,7 @@ impl HarnessKind {
         if self != Self::Mimo {
             return home.to_path_buf();
         }
-        let stock = xdg_home("XDG_DATA_HOME", ".local/share").map(|base| base.join(self.id()));
+        let stock = mimo_stock_xdg_dir("XDG_DATA_HOME", ".local/share");
         mimo_data_source(home, self.is_default_home(home), stock.as_deref())
     }
 
@@ -2082,6 +2089,22 @@ mod tests {
             home.join("data"),
             "a login Mjolnir created in the profile root wins over the stock one"
         );
+
+        // Hard-won: MiMo sessions staged no login because the stock trees were
+        // looked up under the harness id, `~/.local/share/mimo`.
+        for (variable, fallback) in [
+            ("XDG_CONFIG_HOME", ".config"),
+            ("XDG_DATA_HOME", ".local/share"),
+        ] {
+            assert_eq!(
+                mimo_stock_xdg_dir(variable, fallback)
+                    .unwrap()
+                    .file_name()
+                    .unwrap(),
+                "mimocode",
+                "MiMo Code 0.1.15 names its {variable} tree `mimocode`"
+            );
+        }
 
         assert_eq!(
             HarnessKind::Mimo.configuration_sources(&home),
