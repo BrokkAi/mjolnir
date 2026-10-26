@@ -678,7 +678,7 @@ Most behavior belongs in [configuration](/configuration/). These environment var
 | `GROK_HOME` | Grok Build home used by setup discovery and native import. |
 | `MIMOCODE_HOME` | MiMo Code profile root used by setup discovery; contains `config/` and `data/`. A profile at the conventional `~/.mimocode` home uses the stock `~/.config/mimocode` and `~/.local/share/mimocode` trees instead. |
 | `DSH_ACP_DATA_DIR` | DSH home used by setup discovery. |
-| `DEEPSEEK_API_KEY` | DSH's API key, passed to DSH sessions when the profile's `environment` does not set it. |
+| `DEEPSEEK_API_KEY` | DSH's API key, passed to DSH sessions when DSH's own credentials hold none. It outranks the profile's `environment`. |
 | `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | Muse configuration and external native session storage roots, respectively. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | GitHub token available for syncing into every live target except a bare runtime on this machine. |
 | `GIT_SSH_COMMAND` | SSH command used by checkpoint/archive Git operations. |

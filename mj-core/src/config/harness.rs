@@ -1521,6 +1521,10 @@ impl HarnessProfile {
         if !super::secrets::resolves_values() {
             return;
         }
+        if self.kind == HarnessKind::Dsh {
+            self.resolve_dsh_key();
+            return;
+        }
         if let Some(env_key) = self.kind.api_key_variable() {
             self.environment.inherit(env_key);
             return;
@@ -1538,6 +1542,53 @@ impl HarnessProfile {
                 .and_then(|custom| custom.env_key.as_deref())
         {
             self.environment.inherit(env_key);
+        }
+    }
+
+    /// Decide the key a DSH profile authenticates with, first found wins: the
+    /// key saved in DSH itself (its home's `.credentials.yaml`), the one in
+    /// the environment Mjolnir started with, the one in the DSH home's
+    /// `.env`, and last the profile's own `environment` entry, such as a
+    /// secret from `secrets.toml`. The first three are DSH's own order, so a
+    /// session uses the key the person's `dsh` uses.
+    fn resolve_dsh_key(&mut self) {
+        let Some(env_key) = self.kind.api_key_variable() else {
+            return;
+        };
+        let stored = match super::dsh_credentials::stored(&self.home, env_key) {
+            Ok(stored) => stored,
+            Err(error) => {
+                self.environment.refuse(env_key, format!("{error:#}"));
+                return;
+            }
+        };
+        if let Some(key) = stored.api_key {
+            self.environment.supply(env_key, key);
+            return;
+        }
+        if let Some(key) = super::secrets::Environment::from_process(env_key) {
+            self.environment.supply(env_key, key);
+            return;
+        }
+        match super::dsh_credentials::dotenv(&self.home, env_key) {
+            Ok(Some(key)) => {
+                self.environment.supply(env_key, key);
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.environment.refuse(env_key, format!("{error:#}"));
+                return;
+            }
+        }
+        if stored.account_signed_in && !self.supplies_api_key(env_key) {
+            self.environment.refuse(
+                env_key,
+                format!(
+                    "DSH in {} is signed in to a DeepSeek account but holds no API key; dsh-acp authenticates only with an API key, so save one in DSH's Models settings, or export {env_key} and run `mj daemon restart`",
+                    self.home.display()
+                ),
+            );
         }
     }
 
@@ -1597,6 +1648,17 @@ impl HarnessProfile {
             if let Some((source, env_key)) = api_key
                 && !self.supplies_api_key(env_key)
             {
+                if self.kind == HarnessKind::Dsh {
+                    bail!(
+                        "DSH authenticates with {env_key}, which is found neither in DSH's own credentials ({}), the environment Mjolnir started with, {}, nor under [profiles.{id}.environment]; save a key in DSH, export {env_key} and run `mj daemon restart`, or put it in secrets.toml and add `{env_key} = {{ from_secret = \"{env_key}\" }}` under [profiles.{id}.environment]",
+                        self.home
+                            .join(super::dsh_credentials::CREDENTIALS_FILE)
+                            .display(),
+                        self.home
+                            .join(super::dsh_credentials::DOTENV_FILE)
+                            .display(),
+                    );
+                }
                 bail!(
                     "{source} authenticates with {env_key}, which is set neither in the environment Mjolnir started with nor under [profiles.{id}.environment]; export {env_key} and run `mj daemon restart`, or put it in secrets.toml and add `{env_key} = {{ from_secret = \"{env_key}\" }}` under [profiles.{id}.environment]"
                 );

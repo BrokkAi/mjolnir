@@ -189,6 +189,26 @@ impl Environment {
         }
     }
 
+    /// The value of `key` in the loading process's environment, as `{
+    /// from_env = "key" }` would read it, whether or not the table names it.
+    pub(super) fn from_process(key: &str) -> Option<String> {
+        resolve_active(key, &EnvironmentValue::FromEnv(key.to_owned())).ok()
+    }
+
+    /// Give `key` a value that outranks the table's own entry for it. The
+    /// value is not an entry, so a save never writes it, and it settles an
+    /// entry whose reference did not resolve.
+    pub(super) fn supply(&mut self, key: &str, value: String) {
+        self.unresolved.remove(key);
+        self.resolved.insert(key.to_owned(), value);
+    }
+
+    /// Make `key` unusable for `reason`, whatever the table says.
+    pub(super) fn refuse(&mut self, key: &str, reason: String) {
+        self.resolved.remove(key);
+        self.unresolved.insert(key.to_owned(), reason);
+    }
+
     /// Fail, naming what each one needs, when any entry's reference did not
     /// resolve. The owner of this table must not be used until it does.
     pub fn ensure_resolved(&self) -> Result<()> {

@@ -69,7 +69,7 @@ marks models or counters that cannot be priced from the recorded information.
 | Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
 | OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db`, or a provider key in the environment | no |
 | MiMo Code | `mimo` | `MIMOCODE_HOME` | `~/.mimocode` (stock XDG config and login when unset) | `data/auth.json`, or `~/.local/share/mimocode/auth.json` for the stock install | no |
-| DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh` | `DEEPSEEK_API_KEY` in the environment (no file) | no |
+| DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh` | `DEEPSEEK_API_KEY` saved in DSH, or in the environment | no |
 
 There are eight harness kinds. Codex can use its built-in Amazon Bedrock
 providers; see [Codex on Amazon Bedrock](#codex-on-amazon-bedrock). It can also
@@ -530,10 +530,16 @@ container storage notes, and sub-agent instructions when sub-agent delegation
 applies. On a bare local or SSH target with none of these, it is the profile's
 file unchanged.
 
-DSH authenticates with an API key in `DEEPSEEK_API_KEY`. As with a
-[Codex custom provider](#codex-with-a-custom-provider), Mjolnir takes the key
-from the environment it started with unless the profile's `environment` sets
-it, for example from `secrets.toml`:
+DSH authenticates with a DeepSeek API key, `DEEPSEEK_API_KEY`. Mjolnir uses
+the first of these that holds one:
+
+1. The key saved in DSH itself, under `refs` in `.credentials.yaml` in the
+   profile home (DSH's own home, `~/.dsh` by default), as DSH's Models
+   settings write it. DSH refuses that file when any other user can read it,
+   and so does Mjolnir; `chmod 600` it.
+2. `DEEPSEEK_API_KEY` in the environment Mjolnir started with.
+3. `DEEPSEEK_API_KEY` in `.env` in the profile home.
+4. The profile's `environment`, for example from `secrets.toml`:
 
 ```toml
 [profiles.dsh]
@@ -546,6 +552,10 @@ DEEPSEEK_API_KEY = { from_secret = "DEEPSEEK_API_KEY" }
 
 When detection adds a DSH profile and `secrets.toml` beside `config.toml`
 defines `DEEPSEEK_API_KEY`, it writes that `environment` entry for you.
+
+The first three are the places DSH reads, so a session uses the key `dsh`
+itself uses. A DeepSeek account sign-in is not an API key: dsh-acp cannot send
+it, so a DSH that is signed in but holds no key is refused with that reason.
 
 There is no interactive login, and `mj login` refuses the profile. A profile
 without the key cannot start; the refused session and `mj doctor` say how to
