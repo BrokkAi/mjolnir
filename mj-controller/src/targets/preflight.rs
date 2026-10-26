@@ -874,8 +874,13 @@ pub fn unenforceable_limits_detail(limits: &[CgroupLimit]) -> String {
         .map(|limit| limit.controller())
         .collect::<Vec<_>>()
         .join(" and ");
+    let noun = if limits.len() == 1 {
+        "controller"
+    } else {
+        "controllers"
+    };
     format!(
-        "Rootless Podman cannot enforce session {controllers} limits because systemd does not delegate the {controllers} cgroup controller to this user, so sessions start without them."
+        "Rootless Podman cannot enforce session {controllers} limits because systemd does not delegate the {controllers} cgroup {noun} to this user, so sessions start without them."
     )
 }
 

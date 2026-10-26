@@ -597,7 +597,14 @@ pub(super) fn verify_target(
     let then_retry = check.then_retry();
     match template {
         TargetTemplate::LocalPodman { .. } => targets::verify_local_podman(executor)
-            .map(|_| ())
+            .map(|preflight| {
+                // A launch reports what it changes for these itself.
+                if check == TargetCheck::BeforeLaunch {
+                    for warning in preflight.warnings {
+                        executor.notify_notice(&warning.notice());
+                    }
+                }
+            })
             .map_err(|error| {
                 anyhow::anyhow!(
                     "local Podman is not ready. Fix the problem below{then_retry}: {error:#}"
