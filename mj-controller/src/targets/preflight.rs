@@ -821,10 +821,115 @@ pub(super) fn verify_podman_probes(
         }
     }
 
-    Ok(PodmanPreflight {
-        version,
-        warnings: Vec::new(),
-    })
+    let mut warnings = Vec::new();
+    if !info.unenforceable_limits.is_empty() {
+        warnings.push(PodmanPreflightWarning {
+            detail: unenforceable_limits_detail(&info.unenforceable_limits),
+            remediation: format!(
+                "{}{}",
+                host.remediation_scope(),
+                CGROUP_DELEGATION_REMEDIATION
+            ),
+        });
+    }
+    Ok(PodmanPreflight { version, warnings })
+}
+
+/// A session container limit that rootless Podman applies through a cgroup v2
+/// controller, which systemd must delegate to the user's session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CgroupLimit {
+    Cpu,
+    Memory,
+}
+
+impl CgroupLimit {
+    pub const ALL: [Self; 2] = [Self::Cpu, Self::Memory];
+
+    fn controller(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Memory => "memory",
+        }
+    }
+
+    /// The `podman run` flag, as `backend_container` writes it, `--cpus=4`.
+    pub fn run_flag_prefix(self) -> &'static str {
+        match self {
+            Self::Cpu => "--cpus=",
+            Self::Memory => "--memory=",
+        }
+    }
+}
+
+/// openSUSE and SLE ship `Delegate=` for `user@.service`, so their rootless
+/// Podman runs with only the pids controller. runc then fails every container
+/// that sets `--cpus` or `--memory`, naming a missing `cpu.max` or
+/// `memory.swap.max`.
+pub const CGROUP_DELEGATION_REMEDIATION: &str = "To enforce them, have systemd delegate the controllers to user sessions: create `/etc/systemd/system/user@.service.d/80-delegate.conf` containing `[Service]` and `Delegate=pids memory cpu`, run `sudo systemctl daemon-reload`, then log in again.";
+
+pub fn unenforceable_limits_detail(limits: &[CgroupLimit]) -> String {
+    let controllers = limits
+        .iter()
+        .map(|limit| limit.controller())
+        .collect::<Vec<_>>()
+        .join(" and ");
+    format!(
+        "Rootless Podman cannot enforce session {controllers} limits because systemd does not delegate the {controllers} cgroup controller to this user, so sessions start without them."
+    )
+}
+
+/// The limits Podman cannot enforce, read from the `host` object of
+/// `podman info`. Only cgroup v2 is judged: rootless Podman on v1 already
+/// ignores resource limits itself, and an absent controller list is unknown,
+/// not empty.
+fn unenforceable_limits(host: &serde_json::Value) -> Vec<CgroupLimit> {
+    if host
+        .get("cgroupVersion")
+        .and_then(serde_json::Value::as_str)
+        != Some("v2")
+    {
+        return Vec::new();
+    }
+    let Some(controllers) = host
+        .get("cgroupControllers")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    CgroupLimit::ALL
+        .into_iter()
+        .filter(|limit| {
+            !controllers
+                .iter()
+                .any(|controller| controller.as_str() == Some(limit.controller()))
+        })
+        .collect()
+}
+
+/// Ask the Podman that will run a container which limits it cannot enforce.
+pub fn probe_podman_unenforceable_limits(
+    ssh: Option<&SshTarget>,
+    executor: &impl CommandExecutor,
+) -> Result<Vec<CgroupLimit>> {
+    let host = match ssh {
+        Some(ssh) => PodmanHost::Ssh(ssh),
+        None => PodmanHost::Local,
+    };
+    let output = executor.execute(&host.command(
+        &["podman", "info", "--format", "{{json .Host}}"],
+        "check Podman cgroup controllers",
+    ))?;
+    if output.status != 0 {
+        bail!(
+            "`podman info` failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let host: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .context("`podman info --format '{{json .Host}}'` returned unparsable output")?;
+    Ok(unenforceable_limits(&host))
 }
 
 /// The parts of `podman info` the preflight checks.
@@ -834,6 +939,7 @@ struct PodmanInfo {
     service_is_remote: bool,
     /// `(container_id, host_id, size)` triples from `host.idMappings.uidmap`.
     uid_map: Vec<(u64, u64, u64)>,
+    unenforceable_limits: Vec<CgroupLimit>,
 }
 
 impl PodmanInfo {
@@ -901,6 +1007,10 @@ fn parse_podman_info(host: PodmanHost<'_>, stdout: &[u8]) -> Result<PodmanInfo> 
         rootless,
         service_is_remote,
         uid_map,
+        unenforceable_limits: value
+            .get("host")
+            .map(unenforceable_limits)
+            .unwrap_or_default(),
     })
 }
 
