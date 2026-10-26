@@ -911,10 +911,16 @@ pub(super) fn install_worker_files(
                     format!("{upload}/ownership.json"),
                     format!("{container_id}:{ownership_installed}"),
                 ],
+                // Apple's `container cp` copies a relative `dir/.` as `dir`
+                // itself, nesting the profile one level too deep; only an
+                // absolute source copies the contents, as Docker and Podman
+                // do for either form. The staging path is home-relative.
                 vec![
+                    "sh".into(),
+                    "-c".into(),
+                    r#"exec "$0" cp "$HOME/$1/." "$2""#.into(),
                     engine.into(),
-                    "cp".into(),
-                    format!("{upload}/profile/."),
+                    format!("{upload}/profile"),
                     format!("{container_id}:{profile_home}"),
                 ],
                 std::iter::once(engine.to_owned())
