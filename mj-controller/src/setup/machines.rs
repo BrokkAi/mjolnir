@@ -14,7 +14,9 @@ use anyhow::{Context, Result, ensure};
 use mj_core::config::{
     Config, ContainerTemplate, Machine, PermissionMode, SshConnection, TargetTemplate,
 };
-use mj_core::targets::{CommandOutput, CommandSpec, join_remote_command, posix_quote};
+use mj_core::targets::{
+    CommandOutput, CommandSpec, join_remote_command, posix_quote, remote_command_line,
+};
 
 use super::{DEFAULT_IMAGE, RuntimeKind, RuntimeProbe};
 use crate::doctor::{
@@ -157,7 +159,7 @@ const MACHINE_PROBE_FRAMES: ProbeFrames = ProbeFrames {
 /// replays the answers to the checks.
 fn machine_probe_commands() -> Vec<(String, bool)> {
     let line = |args: &[&str]| {
-        join_remote_command(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())
+        remote_command_line(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())
     };
     vec![
         (line(&PLATFORM_PROBE), false),

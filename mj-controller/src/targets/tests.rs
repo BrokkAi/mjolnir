@@ -537,6 +537,32 @@ fn ssh_podman_preflight_warns_when_linger_check_is_unavailable() {
     assert!(warning.remediation.contains("service manager"));
 }
 
+/// A Mac reached over SSH runs Podman through its Podman machine, which
+/// `podman info` reports as a remote service, and has no `loginctl`. A Linux
+/// host that reports a remote service still points at another host's engine.
+// Hard-won: 2096c275d: an SSH Mac's Podman machine was refused as a remote engine.
+#[test]
+fn ssh_podman_preflight_accepts_the_podman_machine_of_a_mac_host_only() {
+    let machine_on = |platform: &str| {
+        let info = rootless_machine_info();
+        PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
+            ("version", 0, "podman version 6.1.4\n", ""),
+            ("platform", 0, platform, ""),
+            ("info", 0, &info, ""),
+            ("linger", 127, "", "sh: loginctl: command not found\n"),
+        ])])
+    };
+
+    let preflight = verify_ssh_podman(&ssh(), &machine_on("Darwin\n")).unwrap();
+    assert_eq!(preflight.version, "6.1.4");
+    assert!(preflight.warnings.is_empty(), "{:?}", preflight.warnings);
+
+    let error = verify_ssh_podman(&ssh(), &machine_on("Linux\n"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("serviceIsRemote=true"), "{error}");
+}
+
 #[test]
 fn ssh_podman_preflight_reports_an_unreachable_host_separately_from_podman() {
     let executor = PodmanPreflightExecutor::with_outputs([CommandOutput {
@@ -811,17 +837,17 @@ fn podman_target_recovery_uses_the_exact_local_or_remote_container() {
     .unwrap();
     assert_eq!(remote.exists.program, "ssh");
     assert_eq!(
-        remote.exists.args.last().unwrap(),
-        &format!("'podman' 'container' 'exists' '{name}'")
+        unwrapped_remote_line(remote.exists.args.last().unwrap()),
+        format!("'podman' 'container' 'exists' '{name}'")
     );
     assert_eq!(remote.inspect.program, "ssh");
     assert_eq!(
-        remote.inspect.args.last().unwrap(),
-        &format!("'podman' 'container' 'inspect' '{name}'")
+        unwrapped_remote_line(remote.inspect.args.last().unwrap()),
+        format!("'podman' 'container' 'inspect' '{name}'")
     );
     assert_eq!(
-        remote.start.args.last().unwrap(),
-        &format!("'podman' 'start' '{name}'")
+        unwrapped_remote_line(remote.start.args.last().unwrap()),
+        format!("'podman' 'start' '{name}'")
     );
 }
 
@@ -1911,7 +1937,7 @@ fn filesystem_probe_answers_positionally_and_reaches_the_podman_host() {
     assert_eq!(seen[0].program, "ssh");
     assert!(
         seen[0].args.last().is_some_and(|remote| {
-            remote.starts_with("'sh' '-c' ")
+            unwrapped_remote_line(remote).starts_with("'sh' '-c' ")
                 && remote.ends_with("'hel-filesystem' '/host/cache' '/host/models'")
         }),
         "{:?}",
@@ -2355,7 +2381,7 @@ fn ssh_directory_check_quotes_the_source_and_distinguishes_missing() {
     let command = &exists.seen.borrow()[0];
     assert_eq!(command.program, "ssh");
     let remote_command = command.args.last().unwrap();
-    assert!(remote_command.starts_with("'test' '-d' "));
+    assert!(unwrapped_remote_line(remote_command).starts_with("'test' '-d' "));
     assert!(remote_command.contains("'/srv/user'\\''s data'"));
 
     let missing = FakeExecutor {
@@ -2671,7 +2697,7 @@ fn aws_clone_receives_github_token_on_stdin_only() {
     assert!(!clones.is_empty());
     for command in clones {
         let remote = command.args.last().unwrap();
-        assert!(remote.starts_with("'sh' '-c' 'IFS= read -r GH_TOKEN"));
+        assert!(unwrapped_remote_line(remote).starts_with("'sh' '-c' 'IFS= read -r GH_TOKEN"));
         assert!(remote.contains("'credential.helper=' '-c' 'credential.helper=!f()"));
         assert!(remote.contains("'git' '-c'") && remote.contains("'clone'"));
         assert!(!format!("{command:?}").contains(token));
@@ -2682,7 +2708,9 @@ fn aws_clone_receives_github_token_on_stdin_only() {
         plan.commands
             .iter()
             .filter(|command| command.purpose.starts_with("clone "))
-            .all(|command| command.args.last().unwrap().starts_with("'git' 'clone'"))
+            .all(|command| {
+                unwrapped_remote_line(command.args.last().unwrap()).starts_with("'git' 'clone'")
+            })
     );
 }
 
@@ -2812,7 +2840,7 @@ fn shell_arguments_are_single_quoted_at_ssh_boundary() {
     let hostile = "repo'; touch /tmp/pwned; echo '";
     let command = ssh_command(&ssh(), ["git", "clone", "--", hostile]);
     assert_eq!(
-        command.args.last().unwrap(),
+        unwrapped_remote_line(command.args.last().unwrap()),
         "'git' 'clone' '--' 'repo'\\''; touch /tmp/pwned; echo '\\'''"
     );
 }
@@ -4822,7 +4850,7 @@ fn ssh_apple_container_absence_is_confirmed_on_the_remote_host() {
     assert_eq!(executor.seen.borrow()[0].program, "ssh");
     assert_eq!(
         executor.seen.borrow()[0].args.last().unwrap(),
-        &mj_core::targets::join_remote_command(&[
+        &mj_core::targets::remote_command_line(&[
             "container".into(),
             "list".into(),
             "--all".into(),
@@ -5197,4 +5225,13 @@ fn move_destination_generations_have_independent_container_and_volume_ownership(
     );
     assert!(cleanup.commands[0].args.contains(&destination_name));
     assert!(!cleanup.commands[0].args.contains(&source_name));
+}
+
+/// The command an SSH remote line runs, without the macOS system PATH prefix
+/// every remote line carries.
+fn unwrapped_remote_line(remote: &str) -> &str {
+    let prefix = format!("{} ", mj_core::targets::remote_command_line(&[]));
+    remote
+        .strip_prefix(prefix.as_str())
+        .unwrap_or_else(|| panic!("{remote:?} does not run under the macOS system PATH"))
 }

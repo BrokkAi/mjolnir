@@ -73,7 +73,10 @@ The second check reads `host.security.rootless` and `host.idMappings.uidmap`.
 It works through a remote client, so the same check covers local rootless
 Podman on Linux, a rootless `podman machine` on macOS, and a Podman host
 reached over SSH. On Linux, a `serviceIsRemote` engine is rejected because the
-local target would otherwise record containers on another host.
+target would otherwise record containers on another host. A Mac, local or
+reached over SSH, always reports a remote service for its Podman machine, which
+is that Mac's own engine, so it is accepted there; the SSH preflight learns the
+host is a Mac from `uname -s`.
 
 For a session, Mjolnir starts a detached, labeled container from the configured
 image, uses `podman exec` for the worker, Git, harness, and clone commands, and

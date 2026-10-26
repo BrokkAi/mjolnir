@@ -55,7 +55,7 @@ pub fn ssh_command(
 pub fn ssh_command_owned(ssh: &SshTarget, remote_args: Vec<String>) -> CommandSpec {
     let mut args = ssh.ssh_args.clone();
     args.push(ssh.destination.clone());
-    args.push(join_remote_command(&remote_args));
+    args.push(remote_command_line(&remote_args));
     CommandSpec::new("ssh", args).ssh_session(ssh)
 }
 
@@ -376,38 +376,37 @@ pub fn push_connection_reuse_args(args: &mut Vec<String>, ssh: &SshTarget) {
     let _ = (args, ssh);
 }
 
-/// The line a remote shell runs for `args`, each argument quoted.
-///
-/// A command whose program is Apple's `container` runs under the Mac's
-/// system PATH; see [`with_macos_system_path`].
+/// `args` quoted for a POSIX shell, joined into one line.
 pub fn join_remote_command(args: &[String]) -> String {
-    let wrapped;
-    let args = if args.first().is_some_and(|program| program == "container") {
-        wrapped = with_macos_system_path(args.to_vec());
-        &wrapped
-    } else {
-        args
-    };
     args.iter()
         .map(|arg| posix_quote(arg))
         .collect::<Vec<_>>()
         .join(" ")
 }
 
-/// Run `args` on a Mac with the directories macOS lists in /etc/paths and
-/// /etc/paths.d after the session's own PATH, so a directory the account
-/// already chose still comes first.
+/// The command line an `ssh` invocation sends for `args`: each argument
+/// quoted, run under [`with_macos_system_path`]. Every builder of an SSH
+/// remote command uses this, so a Mac host finds the same programs whatever
+/// the command is.
+pub fn remote_command_line(args: &[String]) -> String {
+    join_remote_command(&with_macos_system_path(args.to_vec()))
+}
+
+/// Run `args` with, on a Mac, the directories macOS lists in /etc/paths and
+/// /etc/paths.d and Homebrew's Apple-silicon prefix after the session's own
+/// PATH, so a directory the account already chose still comes first. Another
+/// host, which has no `path_helper`, runs `args` unchanged.
 ///
-/// Apple's signed `container` package installs in /usr/local/bin, which macOS
-/// adds from /etc/paths only in login shells; an OpenSSH command session gets
-/// /usr/bin:/bin:/usr/sbin:/sbin and would not find it. A remote command
-/// whose program is `container` gets this from [`join_remote_command`]; a
-/// remote script that calls `container` inside must be wrapped explicitly.
+/// An OpenSSH command session on macOS gets /usr/bin:/bin:/usr/sbin:/sbin
+/// only: macOS adds /etc/paths in login shells, and Homebrew's installer adds
+/// /opt/homebrew/bin through the login shell's profile. Apple's `container`
+/// (/usr/local/bin) and Homebrew's `docker`, `podman` and `colima` would
+/// otherwise not be found.
 pub fn with_macos_system_path(args: Vec<String>) -> Vec<String> {
     [
         "/bin/sh".to_owned(),
         "-c".to_owned(),
-        r#"session=$PATH; eval "$(PATH= /usr/libexec/path_helper -s)"; PATH=${session:+$session:}$PATH; exec "$@""#
+        r#"if [ -x /usr/libexec/path_helper ]; then session=$PATH; eval "$(PATH= /usr/libexec/path_helper -s)"; PATH=${session:+$session:}$PATH:/opt/homebrew/bin:/opt/homebrew/sbin; fi; exec "$@""#
             .to_owned(),
         "sh".to_owned(),
     ]
@@ -632,7 +631,7 @@ pub fn ssh_validation_command(
         "-o".into(),
         "ServerAliveCountMax=1".into(),
     ]);
-    args.extend([ssh.destination.clone(), join_remote_command(&remote_args)]);
+    args.extend([ssh.destination.clone(), remote_command_line(&remote_args)]);
     CommandSpec::new("ssh", args)
         .ssh_probe_session(ssh)
         .purpose(purpose)
@@ -1819,37 +1818,38 @@ mod tests {
     }
 
     /// An OpenSSH command session on macOS starts with only the base system
-    /// directories on PATH, so the remote line for Apple's `container` must
-    /// bring in /usr/local/bin, where Apple's package installs it, by itself,
-    /// after the directories the session already had.
-    #[cfg(target_os = "macos")]
+    /// directories on PATH, so every remote line must bring in /usr/local/bin
+    /// (Apple's `container`, Docker Desktop) and /opt/homebrew/bin (Homebrew's
+    /// `docker` and `podman`) by itself, after the directories the session
+    /// already had. Another host runs the command with its PATH unchanged.
+    #[cfg(unix)]
     // Hard-won: f6b68bcc9: SSH Apple container probes ran `container` without /usr/local/bin and exited 127.
     #[test]
-    fn remote_apple_container_line_runs_under_the_macos_system_path() {
-        let line = join_remote_command(&["container".into(), "--version".into()]);
-        assert!(line.ends_with(" 'sh' 'container' '--version'"), "{line}");
-        let probe = join_remote_command(&with_macos_system_path(vec![
+    fn remote_lines_run_under_the_macos_system_path() {
+        let session = "/usr/bin:/bin:/usr/sbin:/sbin";
+        let probe = remote_command_line(&[
             "sh".into(),
             "-c".into(),
             "printf '%s|%s' \"$*\" \"$PATH\"".into(),
             "probe".into(),
             "two words".into(),
-        ]));
+        ]);
         let mut command = CommandSpec::new("/bin/sh", ["-c", probe.as_str()]);
         command.clear_env = true;
-        command
-            .env
-            .insert("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into());
+        command.env.insert("PATH".into(), session.into());
         let output = ProcessExecutor.execute(&command).unwrap();
         assert_eq!(output.status, 0, "{output:?}");
         let stdout = String::from_utf8(output.stdout).unwrap();
         let (args, path) = stdout.split_once('|').unwrap();
         assert_eq!(args, "two words");
-        assert!(path.starts_with("/usr/bin:/bin:/usr/sbin:/sbin:"), "{path}");
-        assert!(
-            path.split(':').any(|entry| entry == "/usr/local/bin"),
-            "{path}"
-        );
+        if cfg!(target_os = "macos") {
+            assert!(path.starts_with(&format!("{session}:")), "{path}");
+            for directory in ["/usr/local/bin", "/opt/homebrew/bin"] {
+                assert!(path.split(':').any(|entry| entry == directory), "{path}");
+            }
+        } else {
+            assert_eq!(path, session);
+        }
     }
 
     /// Launch finding R3-11: `*.lock` files stayed in the instance's socket
@@ -2005,6 +2005,7 @@ mod tests {
             ],
         };
         let command = ssh_command(&ssh, ["true"]);
+        let remote = remote_command_line(&["true".to_owned()]);
         assert_eq!(
             command.args,
             [
@@ -2013,7 +2014,7 @@ mod tests {
                 "-o",
                 "ProxyCommand=nc %h %p",
                 "session-options-host",
-                "'true'"
+                remote.as_str()
             ],
             "stored arguments never contain sharing options"
         );
@@ -2040,7 +2041,7 @@ mod tests {
                 "-o".to_owned(),
                 "ProxyCommand=nc %h %p".to_owned(),
                 "session-options-host".to_owned(),
-                "'true'".to_owned(),
+                remote,
             ]
         );
         assert_eq!(masters.openers(), 1);
@@ -2263,7 +2264,13 @@ mod tests {
         };
         let masters = FakeMasters::default();
         let args = spawned_args(&ssh_command(&ssh, ["true"]), Some(&long), &masters);
-        assert_eq!(args, ["long-path-host", "'true'"]);
+        assert_eq!(
+            args,
+            [
+                "long-path-host".to_owned(),
+                remote_command_line(&["true".to_owned()])
+            ]
+        );
         assert_eq!(masters.commands(), 0);
         assert!(!long.exists(), "an unusable directory must not be created");
     }

@@ -599,7 +599,10 @@ pub fn verify_ssh_podman(
     // One SSH round trip carries every probe; a remote shell runs them in
     // sequence and frames each result so the checks below stay unchanged.
     let probes = run_ssh_podman_probes(host, executor)?;
-    let mut preflight = verify_podman_probes(host, |probe| {
+    let macos_host = probes
+        .get(PLATFORM_PROBE_KEY)
+        .is_some_and(|output| output.status == 0 && output.stdout.trim_ascii() == b"Darwin");
+    let mut preflight = verify_podman_probes(host, macos_host, |probe| {
         let output = probes.get(probe.key()).cloned().ok_or_else(|| {
             anyhow::anyhow!(
                 "{}",
@@ -615,7 +618,11 @@ pub fn verify_ssh_podman(
         })?;
         check_podman_probe_status(host, probe, output)
     })?;
-    if let Some(warning) = ssh_podman_linger_warning(ssh, probes.get(LINGER_PROBE_KEY)) {
+    // Lingering is systemd's: a Mac has no `loginctl`, and its engine is the
+    // Podman machine rather than a user service.
+    if !macos_host
+        && let Some(warning) = ssh_podman_linger_warning(ssh, probes.get(LINGER_PROBE_KEY))
+    {
         preflight.warnings.push(warning);
     }
     Ok(preflight)
@@ -773,13 +780,19 @@ pub(super) fn verify_podman(
     host: PodmanHost<'_>,
     executor: &impl CommandExecutor,
 ) -> Result<PodmanPreflight> {
-    verify_podman_probes(host, |probe| execute_podman_probe(executor, host, probe))
+    verify_podman_probes(host, cfg!(target_os = "macos"), |probe| {
+        execute_podman_probe(executor, host, probe)
+    })
 }
 
 /// Apply the rootless Podman postconditions to probe results, however they
 /// were obtained: one command each locally, one batched command over SSH.
+///
+/// `macos_host` says the host running `podman` is a Mac, whose engine is
+/// always its Podman machine.
 pub(super) fn verify_podman_probes(
     host: PodmanHost<'_>,
+    macos_host: bool,
     probe_output: impl Fn(PodmanProbe) -> Result<CommandOutput>,
 ) -> Result<PodmanPreflight> {
     let version = probe_output(PodmanProbe::Version)?;
@@ -800,12 +813,12 @@ pub(super) fn verify_podman_probes(
         ));
     }
 
-    // A remote client is expected only for a local macOS controller using a
-    // Podman machine. On Linux, `serviceIsRemote` means CONTAINER_HOST or a
-    // selected connection points this target at another host's engine, whose
-    // paths and containers are not the local ones Mjolnir records.
-    let macos_machine = matches!(host, PodmanHost::Local) && cfg!(target_os = "macos");
-    if info.service_is_remote && !macos_machine {
+    // A remote client is expected only on a Mac, whose Podman machine is
+    // that host's engine whether Mjolnir runs there or reaches it over SSH.
+    // On Linux, `serviceIsRemote` means CONTAINER_HOST or a selected
+    // connection points this target at another host's engine, whose paths and
+    // containers are not the ones Mjolnir records.
+    if info.service_is_remote && !macos_host {
         return Err(probe_failure(
             host,
             PodmanPostcondition::Remote,
@@ -1188,6 +1201,7 @@ pub(super) fn check_podman_probe_status(
 }
 
 pub(super) const LINGER_PROBE_KEY: &str = "linger";
+pub(super) const PLATFORM_PROBE_KEY: &str = "platform";
 pub(super) const PROBE_BLOCK_BEGIN: &str = "__mj_probe_begin__";
 pub(super) const PROBE_BLOCK_END: &str = "__mj_probe_end__";
 pub(super) const PROBE_STATUS_PREFIX: &str = "__mj_probe_status__";
@@ -1229,6 +1243,7 @@ probe() {
     return "$status"
 }
 probe version podman --version || exit 0
+probe platform uname -s
 probe info podman info --format json
 probe linger sh -c 'loginctl show-user "$(id -u)" --property=Linger --value'
 exit 0

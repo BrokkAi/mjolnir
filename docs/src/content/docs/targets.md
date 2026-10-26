@@ -297,6 +297,12 @@ container field. The container and any workspace volume live on the remote host.
 directory sources are therefore paths on that remote host, not paths on the
 controller. See [SSH and SSH Podman](/ssh/).
 
+The machine can be a Mac running a rootless `podman machine`, or Docker through
+Docker Desktop or Colima. Mjolnir runs each command on a Mac with the
+directories from `/etc/paths`, `/etc/paths.d` and Homebrew's `/opt/homebrew`
+added after the SSH session's own `PATH`, so Homebrew's `podman` and `docker`
+are found without editing shell startup files.
+
 ## AWS EC2
 
 ```toml
