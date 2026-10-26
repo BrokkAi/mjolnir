@@ -460,7 +460,7 @@ impl StandaloneSession {
                     outcome:
                         mj_core::relay::RelayCommandOutcome::Prompt {
                             stop_reason,
-                            diagnostic: Some(diagnostic),
+                            diagnostic,
                             ..
                         },
                     ..
@@ -472,15 +472,49 @@ impl StandaloneSession {
                     stop_reason: stop_reason.clone(),
                 }
                 .result();
-                if result.kind == mj_core::event_outcome::TurnResultKind::Failed
-                    && let Some(fault) = crate::profile_health::ProfileFault::of(diagnostic)
-                {
-                    health_observations.push((command_id.clone(), fault, diagnostic.clone()));
+                match result.kind {
+                    mj_core::event_outcome::TurnResultKind::Failed => {
+                        if let Some(diagnostic) = diagnostic
+                            && let Some(fault) = crate::profile_health::ProfileFault::of(diagnostic)
+                        {
+                            health_observations.push((
+                                command_id.clone(),
+                                crate::profile_health::TurnHealth::Failed(
+                                    fault,
+                                    diagnostic.clone(),
+                                ),
+                            ));
+                        }
+                    }
+                    mj_core::event_outcome::TurnResultKind::Completed => {
+                        if let Ok(millis) = u64::try_from(event.recorded_at_ms) {
+                            health_observations.push((
+                                command_id.clone(),
+                                crate::profile_health::TurnHealth::Succeeded(
+                                    std::time::SystemTime::UNIX_EPOCH
+                                        + std::time::Duration::from_millis(millis),
+                                ),
+                            ));
+                        }
+                    }
+                    mj_core::event_outcome::TurnResultKind::InputRequired
+                    | mj_core::event_outcome::TurnResultKind::Cancelled
+                    | mj_core::event_outcome::TurnResultKind::Rejected
+                    | mj_core::event_outcome::TurnResultKind::Interrupted => {}
                 }
             }
             let session_id = self.materialized.session_id.clone();
             let profile_health = crate::profile_health::shared();
-            for (command_id, fault, diagnostic) in health_observations {
+            for (command_id, observation) in health_observations {
+                // Skip the lookup for a success when no mark could change.
+                if matches!(observation, crate::profile_health::TurnHealth::Succeeded(_))
+                    && !profile_health
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("profile health lock poisoned"))?
+                        .has_marks(now)
+                {
+                    continue;
+                }
                 let lookup_session = session_id.clone();
                 let lookup_command = command_id.clone();
                 let identity = tokio::task::spawn_blocking(move || {
@@ -523,7 +557,7 @@ impl StandaloneSession {
                     tracing::debug!(
                         session_id = %session_id,
                         command_id,
-                        "profile health has no model for the failed turn"
+                        "profile health has no model for the completed turn"
                     );
                     continue;
                 };
@@ -531,7 +565,7 @@ impl StandaloneSession {
                 profile_health
                     .lock()
                     .map_err(|_| anyhow::anyhow!("profile health lock poisoned"))?
-                    .record(&profile_id, &model, fault, &diagnostic, now);
+                    .observe(&profile_id, &model, observation, now);
             }
             let events = events.to_vec();
             let projection = self.materialized.clone();
