@@ -881,6 +881,8 @@ impl ChatState {
 
     /// Rows the composer wants at `width`: the wrapped input, up to three
     /// queued-prompt previews with a separating row, and the block's borders.
+    /// It never asks for fewer than three text rows, so a short draft still
+    /// leaves an easy mouse target.
     pub fn desired_prompt_height(&self, width: u16) -> u16 {
         let content_width = active::prompt_content_width(width);
         let input_rows =
@@ -890,7 +892,7 @@ impl ChatState {
             .saturating_add(queued)
             .saturating_add(u16::from(queued > 0))
             .saturating_add(2)
-            .max(4)
+            .max(5)
     }
 
     /// Draws only the composer band into `area`, for hosts that show the real
