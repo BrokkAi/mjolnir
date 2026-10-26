@@ -16,10 +16,10 @@
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -45,10 +45,10 @@ draft empty: true
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -73,14 +73,14 @@ Alt-V action: None
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
-button area: Some(Rect { x: 2, y: 19, width: 5, height: 1 })
+button area: Some(Rect { x: 2, y: 18, width: 5, height: 1 })
 
 === mouse activates microphone on release (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -100,10 +100,10 @@ button area: Some(Rect { x: 2, y: 19, width: 5, height: 1 })
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -128,15 +128,15 @@ press action: None
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 action: None
-button area: Some(Rect { x: 2, y: 19, width: 5, height: 1 })
+button area: Some(Rect { x: 2, y: 18, width: 5, height: 1 })
 
 === Enter preserves a draft during active voice capture (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -156,10 +156,10 @@ button area: Some(Rect { x: 2, y: 19, width: 5, height: 1 })
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> dictated draft                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Listening… click the microphone to stop · PgUp/PgDn transcript │ ctrl+b then : palette · ? keys
