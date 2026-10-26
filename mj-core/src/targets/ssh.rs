@@ -378,34 +378,42 @@ pub fn push_connection_reuse_args(args: &mut Vec<String>, ssh: &SshTarget) {
 
 /// The line a remote shell runs for `args`, each argument quoted.
 ///
-/// Apple's `container` CLI runs under the Mac's system PATH. Its signed
-/// package installs it in /usr/local/bin, which macOS adds from /etc/paths
-/// only in login shells; an OpenSSH command session gets
-/// /usr/bin:/bin:/usr/sbin:/sbin and would not find it. Every remote command
-/// line passes through here, so no caller can send `container` without it.
+/// A command whose program is Apple's `container` runs under the Mac's
+/// system PATH; see [`with_macos_system_path`].
 pub fn join_remote_command(args: &[String]) -> String {
-    let line = args
-        .iter()
+    let wrapped;
+    let args = if args.first().is_some_and(|program| program == "container") {
+        wrapped = with_macos_system_path(args.to_vec());
+        &wrapped
+    } else {
+        args
+    };
+    args.iter()
         .map(|arg| posix_quote(arg))
         .collect::<Vec<_>>()
-        .join(" ");
-    if args.first().is_some_and(|program| program == "container") {
-        macos_system_path_line(&line)
-    } else {
-        line
-    }
+        .join(" ")
 }
 
-/// Run an already quoted `line` with the directories macOS lists in
-/// /etc/paths and /etc/paths.d after the session's own PATH, so a directory
-/// the account already chose still comes first.
-fn macos_system_path_line(line: &str) -> String {
-    format!(
-        "/bin/sh -c {} sh {line}",
-        posix_quote(
-            r#"session=$PATH; eval "$(PATH= /usr/libexec/path_helper -s)"; PATH=${session:+$session:}$PATH; exec "$@""#
-        )
-    )
+/// Run `args` on a Mac with the directories macOS lists in /etc/paths and
+/// /etc/paths.d after the session's own PATH, so a directory the account
+/// already chose still comes first.
+///
+/// Apple's signed `container` package installs in /usr/local/bin, which macOS
+/// adds from /etc/paths only in login shells; an OpenSSH command session gets
+/// /usr/bin:/bin:/usr/sbin:/sbin and would not find it. A remote command
+/// whose program is `container` gets this from [`join_remote_command`]; a
+/// remote script that calls `container` inside must be wrapped explicitly.
+pub fn with_macos_system_path(args: Vec<String>) -> Vec<String> {
+    [
+        "/bin/sh".to_owned(),
+        "-c".to_owned(),
+        r#"session=$PATH; eval "$(PATH= /usr/libexec/path_helper -s)"; PATH=${session:+$session:}$PATH; exec "$@""#
+            .to_owned(),
+        "sh".to_owned(),
+    ]
+    .into_iter()
+    .chain(args)
+    .collect()
 }
 
 /// Check whether a directory exists on the configured SSH host.
@@ -1819,8 +1827,8 @@ mod tests {
     #[test]
     fn remote_apple_container_line_runs_under_the_macos_system_path() {
         let line = join_remote_command(&["container".into(), "--version".into()]);
-        assert!(line.ends_with(" sh 'container' '--version'"), "{line}");
-        let probe = macos_system_path_line(&join_remote_command(&[
+        assert!(line.ends_with(" 'sh' 'container' '--version'"), "{line}");
+        let probe = join_remote_command(&with_macos_system_path(vec![
             "sh".into(),
             "-c".into(),
             "printf '%s|%s' \"$*\" \"$PATH\"".into(),

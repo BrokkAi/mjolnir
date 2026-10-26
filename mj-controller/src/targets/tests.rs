@@ -4792,6 +4792,11 @@ fn ssh_apple_container_closes_the_container_and_snapshot_over_ssh() {
     assert_eq!(command.program, "ssh");
     let remote = command.args.last().unwrap();
     assert!(remote.contains("container rm --force"), "{remote}");
+    // Hard-won: 946dc3fc0: the close script called `container` inside `sh -c` without the Mac's system PATH.
+    assert!(
+        remote.starts_with("'/bin/sh' '-c' ") && remote.contains("path_helper"),
+        "the close script runs under the Mac's system PATH: {remote}"
+    );
     assert!(
         remote.contains("git/sessions/$2"),
         "removing the shared cache names the session snapshot: {remote}"
