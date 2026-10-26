@@ -191,14 +191,10 @@ impl TargetReadiness {
 pub(crate) struct NewWizard {
     pub(crate) subagents: Box<subagents::SubagentDraft>,
     /// The background check of the bare project directory, for the target and
-    /// directory it ran against: checkout options, and why creation will turn
-    /// review off when it will.
-    pub(crate) worktree_options: Option<(
-        String,
-        String,
-        mj_core::state::ManagedWorktreeOptions,
-        Option<&'static str>,
-    )>,
+    /// directory it ran against: checkout options, and whether creation will
+    /// turn review off.
+    pub(crate) worktree_options:
+        Option<(String, String, mj_core::state::ManagedWorktreeOptions, bool)>,
     pub(crate) create_managed_worktree: bool,
     /// Creation stays in this workspace even if the visible tab changes.
     pub(crate) workspace_id: String,
@@ -363,23 +359,23 @@ impl NewWizard {
             .map(|(options, _)| options)
     }
 
-    /// Why creating this session turns its review off, when it will.
-    fn selected_review_notice(&self, config: &Config) -> Option<&'static str> {
+    /// Whether creating this session turns its review off.
+    fn selected_review_turns_off(&self, config: &Config) -> bool {
         self.selected_directory_check(config)
-            .and_then(|(_, notice)| notice)
+            .is_some_and(|(_, review_turns_off)| review_turns_off)
     }
 
     /// The directory check, only while it still matches the selection.
     fn selected_directory_check(
         &self,
         config: &Config,
-    ) -> Option<(mj_core::state::ManagedWorktreeOptions, Option<&'static str>)> {
+    ) -> Option<(mj_core::state::ManagedWorktreeOptions, bool)> {
         let target_id = nth_key(&config.targets, self.target);
         self.worktree_options
             .as_ref()
-            .and_then(|(target, directory, options, notice)| {
+            .and_then(|(target, directory, options, review_turns_off)| {
                 (target == &target_id && directory == self.project_directory.trim())
-                    .then_some((*options, *notice))
+                    .then_some((*options, *review_turns_off))
             })
     }
 

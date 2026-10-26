@@ -571,6 +571,14 @@ fn unique_id(base: &str, mut is_used: impl FnMut(&str) -> bool) -> String {
     unreachable!("u32 repository/bundle id suffixes exhausted")
 }
 
+/// A newly registered session, and whether registration turned its review
+/// off because its folder has no Git commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRegistration {
+    pub id: String,
+    pub review_turned_off: bool,
+}
+
 pub struct SessionLaunchOptions {
     /// Allow this interactive launch to seed later new-session forms.
     pub remember_launch_choices: bool,
@@ -860,6 +868,21 @@ impl Controller {
         title: impl Into<String>,
         options: SessionLaunchOptions,
     ) -> Result<String> {
+        self.register_session_reporting_review(profile_id, bundle_id, target_id, title, options)
+            .map(|registration| registration.id)
+    }
+
+    /// Register a session and report what registration decided about its
+    /// review, so the caller tells the person instead of guessing from the
+    /// stored record.
+    pub fn register_session_reporting_review(
+        &mut self,
+        profile_id: &str,
+        bundle_id: &str,
+        target_id: &str,
+        title: impl Into<String>,
+        options: SessionLaunchOptions,
+    ) -> Result<SessionRegistration> {
         self.register_session_with_executor(
             profile_id,
             bundle_id,
@@ -878,7 +901,7 @@ impl Controller {
         title: impl Into<String>,
         options: SessionLaunchOptions,
         executor: &impl CommandExecutor,
-    ) -> Result<String> {
+    ) -> Result<SessionRegistration> {
         let SessionLaunchOptions {
             remember_launch_choices,
             remember_container_size,
@@ -1004,6 +1027,7 @@ impl Controller {
                 profile.kind.display_name()
             );
         }
+        let mut review_turned_off = false;
         let (bundle_id, project) = if let Some(bundle) = bundle {
             let project = crate::project_catalog::snapshot(bundle, executor, true)?;
             let canonical = crate::database::store_catalog_project(bundle_id, &project, true)?;
@@ -1023,6 +1047,7 @@ impl Controller {
                 )
             {
                 review = Some(mj_core::config::SessionReview::Off);
+                review_turned_off = true;
             }
             let (id, project) =
                 crate::project_catalog::accept_resolved_directory(host, directory, resolved)?;
@@ -1117,7 +1142,10 @@ impl Controller {
                 ),
             }
         }
-        Ok(id)
+        Ok(SessionRegistration {
+            id,
+            review_turned_off,
+        })
     }
 
     pub fn rename_session(&mut self, session_id: &str, title: &str) -> Result<String> {

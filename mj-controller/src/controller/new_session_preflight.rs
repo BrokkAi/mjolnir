@@ -28,9 +28,9 @@ pub struct NewSessionPreflight {
     pub remote_repairs: Vec<LocalRemoteRepair>,
     pub remote_repositories: Vec<NewSessionRepository>,
     pub local_changes_excluded: bool,
-    /// Set when creating the session will turn its review off, so the person
-    /// reads why before choosing Create.
-    pub review_notice: Option<&'static str>,
+    /// Creating the session will turn its review off, so the person reads
+    /// why before choosing Create.
+    pub review_turns_off: bool,
 }
 
 impl Controller {
@@ -56,28 +56,25 @@ impl Controller {
         if target_is_bare {
             let directory =
                 project_directory.context("project directory is required for a bare target")?;
-            let directory = self.resolve_project_directory(target_id, directory, executor)?;
+            let (directory, plain_directory) =
+                self.resolve_and_classify_project_directory(target_id, directory, executor)?;
             ensure!(
                 !executor.cancellation_requested(),
                 "project preflight cancelled"
             );
             let managed_worktree =
                 self.managed_worktree_options(target_id, &directory, executor)?;
-            // The same classification and rule registration applies. Neither
-            // wizard offers a per-session review choice, so `[review]` decides.
-            let template = &self.config.targets[target_id];
-            let (_, resolved) =
-                crate::project_catalog::resolve_directory(template, &directory, executor)?;
-            let review_notice = (resolved.plain_directory
-                && mj_core::review::settings::plain_directory_turns_review_off(&self.config, None))
-            .then_some(mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF);
+            // The rule registration applies. Neither wizard offers a
+            // per-session review choice, so `[review]` decides.
+            let review_turns_off = plain_directory
+                && mj_core::review::settings::plain_directory_turns_review_off(&self.config, None);
             return Ok(NewSessionPreflight {
                 managed_worktree,
                 project_directory: Some(directory),
                 remote_repairs: Vec::new(),
                 remote_repositories: Vec::new(),
                 local_changes_excluded: false,
-                review_notice,
+                review_turns_off,
             });
         }
         if project_directory.is_some() {
@@ -97,7 +94,7 @@ impl Controller {
                 remote_repairs: repairs,
                 remote_repositories: Vec::new(),
                 local_changes_excluded: true,
-                review_notice: None,
+                review_turns_off: false,
             });
         }
         let remote_repositories = bundle
@@ -130,7 +127,7 @@ impl Controller {
             remote_repairs: Vec::new(),
             remote_repositories,
             local_changes_excluded: true,
-            review_notice: None,
+            review_turns_off: false,
         })
     }
 }
@@ -325,10 +322,7 @@ mod tests {
             .preflight_new_session("", "local-bare", Some(directory.path()), &ProcessExecutor)
             .unwrap();
         assert!(!result.managed_worktree.available);
-        assert_eq!(
-            result.review_notice,
-            Some(mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF)
-        );
+        assert!(result.review_turns_off);
         let missing = directory.path().join("missing");
         assert!(
             controller
@@ -340,13 +334,13 @@ mod tests {
             .preflight_new_session("", "local-bare", Some(directory.path()), &ProcessExecutor)
             .unwrap();
         assert!(!result.managed_worktree.available);
-        assert!(result.review_notice.is_some());
+        assert!(result.review_turns_off);
 
         let repository = committed_repository();
         let result = controller
             .preflight_new_session("", "local-bare", Some(repository.path()), &ProcessExecutor)
             .unwrap();
-        assert_eq!(result.review_notice, None);
+        assert!(!result.review_turns_off);
     }
 
     #[test]

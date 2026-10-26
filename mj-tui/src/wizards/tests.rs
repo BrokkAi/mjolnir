@@ -1583,7 +1583,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
                 available: true,
                 default_create: true,
             },
-            None,
+            false,
         )),
     );
 
@@ -1880,7 +1880,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
                 available: true,
                 default_create: true,
             },
-            None,
+            false,
         )),
     );
     assert_eq!(
@@ -3476,7 +3476,7 @@ fn raw_review_waits_for_worktree_inspection_and_preserves_explicit_selection() {
                 available: true,
                 default_create: true,
             },
-            None,
+            false,
         )),
     );
     let Mode::New(wizard) = &mut dashboard.mode else {
@@ -3502,7 +3502,7 @@ fn raw_review_waits_for_worktree_inspection_and_preserves_explicit_selection() {
                 available: true,
                 default_create: true,
             },
-            None,
+            false,
         )),
     );
     let Mode::New(wizard) = &mut dashboard.mode else {
@@ -3545,7 +3545,7 @@ fn worktree_inspection_ignores_old_directories_and_allows_linked_checkout_opt_in
                 available: true,
                 default_create: true,
             },
-            None,
+            false,
         )),
     );
     let Mode::New(wizard) = &dashboard.mode else {
@@ -3561,7 +3561,7 @@ fn worktree_inspection_ignores_old_directories_and_allows_linked_checkout_opt_in
                 available: true,
                 default_create: false,
             },
-            None,
+            false,
         )),
     );
     let Mode::New(wizard) = &mut dashboard.mode else {
@@ -4073,7 +4073,7 @@ fn new_session_skips_the_target_step_when_only_one_target_is_offered() {
         Ok((
             PathBuf::from("/work/project"),
             mj_core::state::ManagedWorktreeOptions::default(),
-            Some(mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF),
+            true,
         )),
     );
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Review);
@@ -4778,7 +4778,7 @@ fn the_review_compute_row_does_not_start_with_a_separator() {
                 available: false,
                 default_create: false,
             },
-            None,
+            false,
         )),
     );
 
@@ -5357,7 +5357,7 @@ fn single_profile_and_raw_target_create_from_project_without_confirm() {
                 available: true,
                 default_create: true,
             },
-            None,
+            false,
         )),
     );
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Launching);

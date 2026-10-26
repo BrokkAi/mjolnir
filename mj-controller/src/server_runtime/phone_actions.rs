@@ -64,6 +64,8 @@ pub(super) fn action_reference(action_id: u64) -> String {
 pub(super) struct PhoneActionStarted {
     pub(super) action_id: u64,
     pub(super) session: SessionRecord,
+    /// Registration turned review off because the folder has no Git commits.
+    pub(super) review_turned_off: bool,
     pub(super) published: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
 }
 

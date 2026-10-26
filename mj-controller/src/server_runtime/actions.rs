@@ -182,7 +182,7 @@ pub(super) async fn apply_phone_action(
             });
             let session_title_override = Some(title.clone());
             let (published, publication) = tokio::sync::oneshot::channel();
-            let registered = services
+            let (registered, review_turned_off) = services
                 .daemon_runtime
                 .start_create_session_controlled(
                     CreateSessionRequest {
@@ -220,6 +220,7 @@ pub(super) async fn apply_phone_action(
                 .send(PhoneActionStarted {
                     action_id,
                     session: registered.session,
+                    review_turned_off,
                     published,
                 })
                 .map_err(|_| anyhow::anyhow!("phone server stopped before publishing session"))?;

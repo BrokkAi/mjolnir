@@ -1183,7 +1183,7 @@ pub(crate) async fn apply_dashboard_action(
                             .project_directory
                             .context("bare preflight returned no directory")?,
                         result.managed_worktree,
-                        result.review_notice,
+                        result.review_turns_off,
                     ))
                 },
                 move |result| DashboardIoUpdate::ProjectValidation {

@@ -296,9 +296,8 @@ pub(crate) fn render_new_wizard(
                 remote_preflight_in_flight: wizard.remote_preflight_in_flight,
                 remote_preflight_error: wizard.remote_preflight_error.as_deref(),
                 local_changes_excluded: !raw_project,
-                review_notice: raw_project
-                    .then(|| wizard.selected_review_notice(&dashboard.config))
-                    .flatten(),
+                review_notice: (raw_project && wizard.selected_review_turns_off(&dashboard.config))
+                    .then_some(mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF),
                 conversion: None,
             },
             &mut form,

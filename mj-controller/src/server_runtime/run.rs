@@ -1380,13 +1380,11 @@ pub(crate) async fn run_server(
                         continue;
                     };
                     let started_session_id = started.session.id.clone();
-                    // The controller turned review off for a session it
-                    // cannot review; tell whoever asked for it.
-                    let started_notice = (started.session.review
-                        == Some(mj_core::config::SessionReview::Off))
-                    .then(|| started.session.review_unavailable())
-                    .flatten()
-                    .map(str::to_owned);
+                    // Registration turned review off for a session it cannot
+                    // review; tell whoever asked for it.
+                    let started_notice = started.review_turned_off.then(|| {
+                        mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF.to_owned()
+                    });
                     let publication = if !action_cancellations.contains_key(&started.action_id) {
                         Err("phone action completed before its provisional session was published".into())
                     } else {

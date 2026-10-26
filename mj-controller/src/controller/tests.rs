@@ -859,7 +859,6 @@ fn registration_rejects_a_start_commit_it_cannot_honour() {
     windows,
     ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
 )]
-// Hard-won: 96713be6c: a review-enabled session in a folder without Git commits was refused instead of created with review off.
 #[test]
 fn registration_records_a_plain_local_directory_as_its_project() {
     const MARKER: &str = "MJ_TEST_PLAIN_PROJECT_CHILD";
@@ -885,11 +884,23 @@ fn registration_records_a_plain_local_directory_as_its_project() {
         config,
         state: State::default(),
     };
+    // A session that asked for review off already has it, so registration
+    // reports no change for the caller to announce.
     let mut options = launch_options(Vec::new());
     options.project_directory = Some(workspace.path().to_owned());
-    let id = controller
-        .register_session_with_resources("codex", "project", "local", "plain", options)
+    options.review = Some(mj_core::config::SessionReview::Off);
+    let explicit = controller
+        .register_session_reporting_review("codex", "project", "local", "plain", options)
         .unwrap();
+    assert!(!explicit.review_turned_off);
+
+    let mut options = launch_options(Vec::new());
+    options.project_directory = Some(workspace.path().to_owned());
+    let registration = controller
+        .register_session_reporting_review("codex", "project", "local", "plain", options)
+        .unwrap();
+    assert!(registration.review_turned_off);
+    let id = registration.id;
 
     let stored = &controller.state.sessions[&id];
     assert_eq!(stored.review, Some(mj_core::config::SessionReview::Off));

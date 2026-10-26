@@ -246,7 +246,7 @@ impl DashboardState {
             (
                 std::path::PathBuf,
                 mj_core::state::ManagedWorktreeOptions,
-                Option<&'static str>,
+                bool,
             ),
             String,
         >,
@@ -255,7 +255,7 @@ impl DashboardState {
             return;
         }
         match result {
-            Ok((resolved, options, review_notice)) => {
+            Ok((resolved, options, review_turns_off)) => {
                 let value = resolved.to_string_lossy().into_owned();
                 if let Mode::New(wizard) = &mut self.mode {
                     let target = nth_key(&self.config.targets, wizard.target);
@@ -275,7 +275,8 @@ impl DashboardState {
                     if !options.available {
                         wizard.create_managed_worktree = false;
                     }
-                    wizard.worktree_options = Some((target, value.clone(), options, review_notice));
+                    wizard.worktree_options =
+                        Some((target, value.clone(), options, review_turns_off));
                     wizard.remote_preflight_in_flight = false;
                     wizard.remote_preflight_error = None;
                     wizard.project_directory.set_value(&value);

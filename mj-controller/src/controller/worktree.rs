@@ -57,10 +57,22 @@ impl Controller {
         directory: &Path,
         executor: &impl CommandExecutor,
     ) -> Result<PathBuf> {
+        self.resolve_and_classify_project_directory(target_id, directory, executor)
+            .map(|(directory, _)| directory)
+    }
+
+    /// [`Self::resolve_project_directory`], also saying whether the directory
+    /// is a plain folder without Git commits rather than a committed checkout.
+    pub fn resolve_and_classify_project_directory(
+        &self,
+        target_id: &str,
+        directory: &Path,
+        executor: &impl CommandExecutor,
+    ) -> Result<(PathBuf, bool)> {
         mj_core::path_input::validate_absolute_input(directory)?;
         let directory = self.resolve_input_path(target_id, directory, executor)?;
-        self.validate_project_directory(target_id, &directory, executor)?;
-        Ok(directory)
+        let plain_directory = self.classify_project_directory(target_id, &directory, executor)?;
+        Ok((directory, plain_directory))
     }
 
     /// Verify a bare project before leaving the project-directory dialog.
@@ -70,6 +82,18 @@ impl Controller {
         directory: &Path,
         executor: &impl CommandExecutor,
     ) -> Result<()> {
+        self.classify_project_directory(target_id, directory, executor)
+            .map(|_| ())
+    }
+
+    /// Verify a bare project, and say whether it is a plain folder. Only a
+    /// local target accepts one; a remote bare project must be a repository.
+    fn classify_project_directory(
+        &self,
+        target_id: &str,
+        directory: &Path,
+        executor: &impl CommandExecutor,
+    ) -> Result<bool> {
         let target = self
             .config
             .targets
@@ -83,8 +107,10 @@ impl Controller {
                 );
                 // This also accepts a plain folder, a repository without its
                 // first commit, and a host where Git is not installed.
-                mj_core::repository::resolve_local_directory(directory, executor)?;
-                Ok(())
+                Ok(
+                    mj_core::repository::resolve_local_directory(directory, executor)?
+                        .plain_directory,
+                )
             }
             TargetTemplate::SshBare { ssh, .. } => {
                 targets::validate_bare_project_directory(
@@ -99,7 +125,7 @@ impl Controller {
                         ssh: SshTarget::from(ssh),
                     },
                 )?;
-                Ok(())
+                Ok(false)
             }
             _ => bail!("project directory validation requires a bare target"),
         }

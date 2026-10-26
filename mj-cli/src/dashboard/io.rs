@@ -428,7 +428,7 @@ pub(crate) enum DashboardIoUpdate {
             (
                 std::path::PathBuf,
                 mj_core::state::ManagedWorktreeOptions,
-                Option<&'static str>,
+                bool,
             ),
             String,
         >,
