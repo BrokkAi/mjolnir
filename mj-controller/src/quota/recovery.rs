@@ -38,6 +38,18 @@ pub(crate) fn message_reset(message: &str, observed_ms: i64) -> Option<i64> {
         .map(|t| t.timestamp())
 }
 
+/// Whether `window` shows no quota left and has not reset by `now_seconds`.
+pub(crate) fn exhausted(window: &QuotaWindow, now_seconds: i64) -> bool {
+    window
+        .resets_at_epoch_seconds
+        .is_none_or(|t| t > now_seconds)
+        && (window.remaining_percent == Some(0)
+            || window
+                .used
+                .zip(window.limit)
+                .is_some_and(|(used, limit)| limit > 0 && used >= limit))
+}
+
 /// A reset already used for an unsuccessful retry cannot schedule another retry.
 pub(crate) fn recovery_reset(
     windows: &[QuotaWindow],
@@ -48,13 +60,7 @@ pub(crate) fn recovery_reset(
     let usable = |time: i64| time > now_seconds && consumed.is_none_or(|old| time > old);
     let exhausted: Vec<_> = windows
         .iter()
-        .filter(|w| w.resets_at_epoch_seconds.is_none_or(|t| t > now_seconds))
-        .filter(|w| {
-            w.remaining_percent == Some(0)
-                || w.used
-                    .zip(w.limit)
-                    .is_some_and(|(used, limit)| limit > 0 && used >= limit)
-        })
+        .filter(|w| exhausted(w, now_seconds))
         .collect();
     if !exhausted.is_empty() {
         // Unknown exhausted windows must not be silently ignored. A provider's

@@ -1501,4 +1501,4 @@ fn format_reset_label(reset: DateTime<FixedOffset>) -> String {
 mod tests;
 
 mod recovery;
-pub(crate) use recovery::{merge_reset_windows, message_reset, recovery_reset};
+pub(crate) use recovery::{exhausted, merge_reset_windows, message_reset, recovery_reset};

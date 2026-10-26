@@ -6,11 +6,14 @@
 //! of failing the same way. A later successful turn clears a mark only when
 //! it completed after that mark was set. A malformed request, a refused login
 //! (which `RejectedLogins` owns) and network trouble on our side are not marks.
+//! Quota reports can extend active quota marks to the reported reset.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
+use crate::quota::QuotaWindow;
+use chrono::{DateTime, Local};
 use mj_core::diagnostic::TurnDiagnostic;
 
 /// The first backoff, doubled for each further failure that follows soon
@@ -97,12 +100,14 @@ struct Mark {
     unhealthy: Unhealthy,
     strikes: u32,
     set_at: SystemTime,
+    explicit_reset: Option<i64>,
 }
 
 /// The daemon's one record of profile health, keyed by profile and model.
 #[derive(Debug, Default)]
 pub struct ProfileHealth {
     marks: BTreeMap<(String, String), Mark>,
+    quota_windows: BTreeMap<String, Vec<QuotaWindow>>,
 }
 
 static SHARED: OnceLock<Mutex<ProfileHealth>> = OnceLock::new();
@@ -118,7 +123,7 @@ impl ProfileHealth {
     /// several sessions that started before the mark all fail together, and
     /// that is one event, not many. A failure soon after a mark ended doubles
     /// the backoff using the schedule for its fault. A provider reset time,
-    /// when given, sets the end instead.
+    /// when given, sets the end. Quota marks also use the latest quota report.
     pub fn record(
         &mut self,
         profile_id: &str,
@@ -140,7 +145,29 @@ impl ProfileHealth {
             ProfileFault::RateLimited | ProfileFault::QuotaExhausted => (BASE_BACKOFF, MAX_BACKOFF),
         };
         let backoff = base.saturating_mul(1 << (strikes - 1).min(16)).min(maximum);
-        let until = provider_reset(diagnostic, now).unwrap_or(now + backoff);
+        let explicit_reset_at = provider_reset(diagnostic, now);
+        let explicit_reset = explicit_reset_at
+            .map(|at| DateTime::<chrono::Utc>::from(at).timestamp())
+            .or_else(|| {
+                (fault == ProfileFault::QuotaExhausted)
+                    .then(|| {
+                        let now_ms = DateTime::<chrono::Utc>::from(now).timestamp_millis();
+                        crate::quota::message_reset(&diagnostic.message, now_ms)
+                    })
+                    .flatten()
+            });
+        let until = if fault == ProfileFault::QuotaExhausted {
+            quota_reset(
+                self.quota_windows
+                    .get(profile_id)
+                    .map_or(&[], Vec::as_slice),
+                explicit_reset,
+                now,
+            )
+            .unwrap_or(now + backoff)
+        } else {
+            explicit_reset_at.unwrap_or(now + backoff)
+        };
         self.marks.insert(
             key,
             Mark {
@@ -151,6 +178,7 @@ impl ProfileHealth {
                 },
                 strikes,
                 set_at: now,
+                explicit_reset,
             },
         );
     }
@@ -190,6 +218,30 @@ impl ProfileHealth {
             .any(|mark| mark.unhealthy.until + QUIET_RESET > now)
     }
 
+    /// Replace the latest quota windows for a profile and extend active quota
+    /// marks when the report gives a later reset. A report never shortens a
+    /// mark; only a successful turn ends one early.
+    pub fn observe_quota(&mut self, profile_id: &str, windows: &[QuotaWindow], now: SystemTime) {
+        self.quota_windows
+            .insert(profile_id.to_owned(), windows.to_vec());
+        for ((marked_profile, _), mark) in &mut self.marks {
+            if marked_profile != profile_id
+                || mark.unhealthy.fault != ProfileFault::QuotaExhausted
+                || mark.unhealthy.until <= now
+            {
+                continue;
+            }
+            if let Some(reset) = quota_reset(windows, mark.explicit_reset, now) {
+                mark.unhealthy.until = mark.unhealthy.until.max(reset);
+            }
+        }
+    }
+
+    /// Forget a profile's quota windows when the profile is no longer enabled.
+    pub fn forget_quota(&mut self, profile_id: &str) {
+        self.quota_windows.remove(profile_id);
+    }
+
     /// The mark on `profile_id` and `model` that has not yet ended.
     pub fn unhealthy(&self, profile_id: &str, model: &str, now: SystemTime) -> Option<&Unhealthy> {
         self.marks
@@ -199,8 +251,26 @@ impl ProfileHealth {
     }
 }
 
-/// The provider's reset time, when it gave one in a form with a timezone:
-/// RFC 3339, or seconds (or milliseconds) since the Unix epoch.
+/// When exhausted quota comes back, as autocontinue decides it, but from the
+/// exhausted windows only. A window with quota left says nothing about the
+/// limit that failed, so its reset must not hold the mark.
+fn quota_reset(
+    windows: &[QuotaWindow],
+    explicit_reset: Option<i64>,
+    now: SystemTime,
+) -> Option<SystemTime> {
+    let now_seconds = DateTime::<chrono::Utc>::from(now).timestamp();
+    let exhausted = windows
+        .iter()
+        .filter(|window| crate::quota::exhausted(window, now_seconds))
+        .cloned()
+        .collect::<Vec<_>>();
+    crate::quota::recovery_reset(&exhausted, explicit_reset, now_seconds, None)
+        .and_then(|seconds| u64::try_from(seconds).ok())
+        .map(|seconds| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds))
+}
+
+/// The provider's reset time, when it gave one in a supported form.
 fn provider_reset(diagnostic: &TurnDiagnostic, now: SystemTime) -> Option<SystemTime> {
     let value = diagnostic.reset_at.as_deref()?.trim();
     let at = if let Ok(number) = value.parse::<u64>() {
@@ -211,7 +281,10 @@ fn provider_reset(diagnostic: &TurnDiagnostic, now: SystemTime) -> Option<System
         };
         SystemTime::UNIX_EPOCH + Duration::from_millis(millis)
     } else {
-        chrono::DateTime::parse_from_rfc3339(value).ok()?.into()
+        let local_now = DateTime::<chrono::Utc>::from(now)
+            .with_timezone(&Local)
+            .fixed_offset();
+        crate::quota::normalize_reset_at(value, local_now)?.into()
     };
     (at > now).then_some(at)
 }
@@ -226,6 +299,17 @@ mod tests {
             code: code.map(str::to_owned),
             http_status,
             reset_at: None,
+        }
+    }
+
+    fn quota_window(label: &str, remaining: u8, reset: Option<i64>) -> QuotaWindow {
+        QuotaWindow {
+            label: label.into(),
+            remaining_percent: Some(remaining),
+            used: None,
+            limit: None,
+            resets: None,
+            resets_at_epoch_seconds: reset,
         }
     }
 
@@ -384,6 +468,183 @@ mod tests {
         assert_eq!(
             health.unhealthy("codex2", "sol", start).unwrap().until,
             start + BASE_BACKOFF
+        );
+    }
+
+    #[test]
+    fn clock_reset_text_sets_the_mark_end() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-21T16:50:00Z")
+            .unwrap()
+            .with_timezone(&Local)
+            .fixed_offset();
+        let now_system = SystemTime::from(now);
+        let failure = TurnDiagnostic {
+            reset_at: Some("23:00 UTC".into()),
+            ..diagnostic("429", Some("limit"), None)
+        };
+        let expected = SystemTime::from(
+            crate::quota::normalize_reset_at("23:00 UTC", now)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        );
+        let mut health = ProfileHealth::default();
+        health.record(
+            "codex2",
+            "sol",
+            ProfileFault::RateLimited,
+            &failure,
+            now_system,
+        );
+        assert_eq!(
+            health.unhealthy("codex2", "sol", now_system).unwrap().until,
+            expected
+        );
+    }
+
+    #[test]
+    fn exhausted_quota_uses_reported_reset_without_the_backoff_cap() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let reset = 1_002_000_i64;
+        let mut health = ProfileHealth::default();
+        health.observe_quota("codex2", &[quota_window("Week", 0, Some(reset))], now);
+        health.record(
+            "codex2",
+            "sol",
+            ProfileFault::QuotaExhausted,
+            &diagnostic("quota exhausted", Some("usageLimitExceeded"), None),
+            now,
+        );
+        assert_eq!(
+            health.unhealthy("codex2", "sol", now).unwrap().until,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(reset as u64)
+        );
+    }
+
+    #[test]
+    fn exhausted_quota_without_a_reset_uses_the_first_backoff() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let mut health = ProfileHealth::default();
+        health.record(
+            "codex2",
+            "sol",
+            ProfileFault::QuotaExhausted,
+            &diagnostic("quota exhausted", Some("usageLimitExceeded"), None),
+            now,
+        );
+        assert_eq!(
+            health.unhealthy("codex2", "sol", now).unwrap().until,
+            now + BASE_BACKOFF
+        );
+    }
+
+    #[test]
+    fn quota_failure_uses_reset_from_message() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-21T16:50:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let now_system = SystemTime::from(chrono::DateTime::from_timestamp_millis(now).unwrap());
+        let expected = crate::quota::message_reset(
+            "You've hit your quota; resets at 6:20pm (America/Chicago)",
+            now,
+        )
+        .unwrap();
+        let mut health = ProfileHealth::default();
+        health.record(
+            "codex2",
+            "sol",
+            ProfileFault::QuotaExhausted,
+            &diagnostic(
+                "You've hit your quota; resets at 6:20pm (America/Chicago)",
+                None,
+                Some(402),
+            ),
+            now_system,
+        );
+        assert_eq!(
+            health.unhealthy("codex2", "sol", now_system).unwrap().until,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(expected as u64)
+        );
+    }
+
+    #[test]
+    fn quota_reports_only_lengthen_active_quota_marks() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let failure = diagnostic("failure", None, Some(402));
+        let mut health = ProfileHealth::default();
+        health.record(
+            "codex2",
+            "quota",
+            ProfileFault::QuotaExhausted,
+            &failure,
+            now,
+        );
+        health.record("codex2", "rate", ProfileFault::RateLimited, &failure, now);
+        health.record(
+            "codex2",
+            "provider",
+            ProfileFault::ProviderError,
+            &failure,
+            now,
+        );
+        let long_reset = 1_002_000_i64;
+        health.observe_quota("codex2", &[quota_window("Week", 0, Some(long_reset))], now);
+        assert_eq!(
+            health.unhealthy("codex2", "quota", now).unwrap().until,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(long_reset as u64)
+        );
+        let shorter_reset = 1_001_000_i64;
+        health.observe_quota(
+            "codex2",
+            &[quota_window("Week", 0, Some(shorter_reset))],
+            now,
+        );
+        assert_eq!(
+            health.unhealthy("codex2", "quota", now).unwrap().until,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(long_reset as u64)
+        );
+        assert_eq!(
+            health.unhealthy("codex2", "rate", now).unwrap().until,
+            now + BASE_BACKOFF
+        );
+        assert_eq!(
+            health.unhealthy("codex2", "provider", now).unwrap().until,
+            now + PROVIDER_ERROR_BASE_BACKOFF
+        );
+    }
+
+    #[test]
+    fn windows_with_quota_left_do_not_hold_a_quota_mark() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let failure = diagnostic("quota exhausted", Some("usageLimitExceeded"), None);
+        let mut health = ProfileHealth::default();
+        health.observe_quota("codex2", &[quota_window("5h", 30, Some(1_014_400))], now);
+        health.record("codex2", "sol", ProfileFault::QuotaExhausted, &failure, now);
+        assert_eq!(
+            health.unhealthy("codex2", "sol", now).unwrap().until,
+            now + BASE_BACKOFF
+        );
+        health.observe_quota("codex2", &[quota_window("5h", 30, Some(1_014_400))], now);
+        assert_eq!(
+            health.unhealthy("codex2", "sol", now).unwrap().until,
+            now + BASE_BACKOFF
+        );
+    }
+
+    #[test]
+    fn rate_limit_ignores_stored_quota_windows() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let mut health = ProfileHealth::default();
+        health.observe_quota("codex2", &[quota_window("Week", 0, Some(2_000_000))], now);
+        health.record(
+            "codex2",
+            "sol",
+            ProfileFault::RateLimited,
+            &diagnostic("429", None, Some(429)),
+            now,
+        );
+        assert_eq!(
+            health.unhealthy("codex2", "sol", now).unwrap().until,
+            now + BASE_BACKOFF
         );
     }
 }

@@ -4,6 +4,7 @@ use crate::pollers::*;
 use crate::quota::ProfileQuota;
 use crate::server_runtime::profile_catalog::ProfileCatalog;
 use crate::worker_client::CredentialSyncCoordinator;
+use std::time::SystemTime;
 use tokio::sync::{mpsc, watch};
 
 #[derive(Clone)]
@@ -144,10 +145,25 @@ impl Policy {
                 &mut self.batch,
                 &self.profiles_tx,
             );
-            let mut reports = self.reports.lock().expect("quota reports poisoned");
-            reports.retain(|id, _| controller.config.enabled_profile(id).is_some());
-            self.quotas_tx.send_replace(reports.clone());
-            drop(reports);
+            let removed = {
+                let mut reports = self.reports.lock().expect("quota reports poisoned");
+                let removed = reports
+                    .keys()
+                    .filter(|id| controller.config.enabled_profile(id).is_none())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                reports.retain(|id, _| controller.config.enabled_profile(id).is_some());
+                self.quotas_tx.send_replace(reports.clone());
+                removed
+            };
+            if !removed.is_empty() {
+                let mut health = crate::profile_health::shared()
+                    .lock()
+                    .expect("profile health poisoned");
+                for id in removed {
+                    health.forget_quota(&id);
+                }
+            }
             self.probing
                 .retain(|id| controller.config.enabled_profile(id).is_some());
             self.publish_quotas();
@@ -180,9 +196,26 @@ impl Policy {
                         .sync_profile_now(&outcome.report.profile_id, None);
                 }
                 self.probing.remove(&outcome.report.profile_id);
-                let mut reports = self.reports.lock().expect("quota reports poisoned");
-                reports.insert(outcome.report.profile_id.clone(), outcome.report);
-                self.quotas_tx.send_replace(reports.clone());
+                let profile_id = outcome.report.profile_id.clone();
+                // A usage-priced profile has no allowance to run out of.
+                let windows = outcome.report.error.is_none().then(|| {
+                    if outcome.report.is_usage_priced() {
+                        Vec::new()
+                    } else {
+                        outcome.report.windows.clone()
+                    }
+                });
+                {
+                    let mut reports = self.reports.lock().expect("quota reports poisoned");
+                    reports.insert(profile_id.clone(), outcome.report);
+                    self.quotas_tx.send_replace(reports.clone());
+                }
+                if let Some(windows) = windows {
+                    crate::profile_health::shared()
+                        .lock()
+                        .expect("profile health poisoned")
+                        .observe_quota(&profile_id, &windows, SystemTime::now());
+                }
             }
             QuotaUpdate::Finished { .. } => {
                 self.probing.clear();
