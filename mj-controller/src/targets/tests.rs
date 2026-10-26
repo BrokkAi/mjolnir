@@ -4817,7 +4817,12 @@ fn ssh_apple_container_absence_is_confirmed_on_the_remote_host() {
     assert_eq!(executor.seen.borrow()[0].program, "ssh");
     assert_eq!(
         executor.seen.borrow()[0].args.last().unwrap(),
-        "'container' 'list' '--all' '--quiet'"
+        &mj_core::targets::join_remote_command(&[
+            "container".into(),
+            "list".into(),
+            "--all".into(),
+            "--quiet".into(),
+        ])
     );
 
     let executor = PodmanPreflightExecutor::with_outputs([podman_output(format!(

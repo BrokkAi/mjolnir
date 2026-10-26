@@ -376,11 +376,36 @@ pub fn push_connection_reuse_args(args: &mut Vec<String>, ssh: &SshTarget) {
     let _ = (args, ssh);
 }
 
+/// The line a remote shell runs for `args`, each argument quoted.
+///
+/// Apple's `container` CLI runs under the Mac's system PATH. Its signed
+/// package installs it in /usr/local/bin, which macOS adds from /etc/paths
+/// only in login shells; an OpenSSH command session gets
+/// /usr/bin:/bin:/usr/sbin:/sbin and would not find it. Every remote command
+/// line passes through here, so no caller can send `container` without it.
 pub fn join_remote_command(args: &[String]) -> String {
-    args.iter()
+    let line = args
+        .iter()
         .map(|arg| posix_quote(arg))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    if args.first().is_some_and(|program| program == "container") {
+        macos_system_path_line(&line)
+    } else {
+        line
+    }
+}
+
+/// Run an already quoted `line` with the directories macOS lists in
+/// /etc/paths and /etc/paths.d after the session's own PATH, so a directory
+/// the account already chose still comes first.
+fn macos_system_path_line(line: &str) -> String {
+    format!(
+        "/bin/sh -c {} sh {line}",
+        posix_quote(
+            r#"session=$PATH; eval "$(PATH= /usr/libexec/path_helper -s)"; PATH=${session:+$session:}$PATH; exec "$@""#
+        )
+    )
 }
 
 /// Check whether a directory exists on the configured SSH host.
@@ -1782,6 +1807,40 @@ mod tests {
                 .contains("'podman' 'exec' '--detach' 'session' 'true'"),
             "{:?}",
             command.args
+        );
+    }
+
+    /// An OpenSSH command session on macOS starts with only the base system
+    /// directories on PATH, so the remote line for Apple's `container` must
+    /// bring in /usr/local/bin, where Apple's package installs it, by itself,
+    /// after the directories the session already had.
+    #[cfg(target_os = "macos")]
+    // Hard-won: f6b68bcc9: SSH Apple container probes ran `container` without /usr/local/bin and exited 127.
+    #[test]
+    fn remote_apple_container_line_runs_under_the_macos_system_path() {
+        let line = join_remote_command(&["container".into(), "--version".into()]);
+        assert!(line.ends_with(" sh 'container' '--version'"), "{line}");
+        let probe = macos_system_path_line(&join_remote_command(&[
+            "sh".into(),
+            "-c".into(),
+            "printf '%s|%s' \"$*\" \"$PATH\"".into(),
+            "probe".into(),
+            "two words".into(),
+        ]));
+        let mut command = CommandSpec::new("/bin/sh", ["-c", probe.as_str()]);
+        command.clear_env = true;
+        command
+            .env
+            .insert("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into());
+        let output = ProcessExecutor.execute(&command).unwrap();
+        assert_eq!(output.status, 0, "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let (args, path) = stdout.split_once('|').unwrap();
+        assert_eq!(args, "two words");
+        assert!(path.starts_with("/usr/bin:/bin:/usr/sbin:/sbin:"), "{path}");
+        assert!(
+            path.split(':').any(|entry| entry == "/usr/local/bin"),
+            "{path}"
         );
     }
 
