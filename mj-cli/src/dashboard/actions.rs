@@ -285,13 +285,9 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
             );
         }
-        DashboardAction::CheckMachineRuntimes {
-            generation,
-            machines,
-        } => {
-            super::io::spawn_machine_runtime_check(
+        DashboardAction::CheckAvailability { generation } => {
+            super::io::spawn_availability_check(
                 generation,
-                machines,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );
@@ -655,68 +651,6 @@ pub(crate) async fn apply_dashboard_action(
                     result,
                 },
             );
-        }
-        DashboardAction::CheckTargetReadiness {
-            generation,
-            target_ids,
-        } => {
-            for target_id in target_ids {
-                let template = context.controller.config.targets.get(&target_id).cloned();
-                // A local engine found not installed is not checked, or
-                // logged, on every poll (launch finding R8-6).
-                if let Some(message) = context.absent_engines.answer(
-                    &target_id,
-                    template.as_ref(),
-                    std::env::var_os("PATH").as_deref(),
-                ) {
-                    context
-                        .dashboard
-                        .apply_target_runtime_missing(generation, target_id, message);
-                    continue;
-                }
-                let checked_template = template.clone();
-                let config = context.controller.config.clone();
-                let reported_id = target_id.clone();
-                spawn_cancellable_io(
-                    context.critical_operations.clone(),
-                    format!("checking target {target_id}"),
-                    context.dashboard_io_tx.clone(),
-                    move |cancelled| {
-                        let executor = CancellableProcessExecutor::new(cancelled)
-                            .with_deadline(std::time::Duration::from_secs(15));
-                        // An engine that is not installed is an answer, not a
-                        // failure of the check, so it is not logged as one.
-                        match config_only_controller(config)
-                            .check_target_readiness(&target_id, &executor)
-                        {
-                            Ok(()) => Ok((Ok(()), false)),
-                            Err(error)
-                                if checked_template.as_ref().is_some_and(|template| {
-                                    crate::dashboard::absent_engines::engine_absent(
-                                        template,
-                                        std::env::var_os("PATH").as_deref(),
-                                    )
-                                }) =>
-                            {
-                                Ok((Err(format!("{error:#}")), true))
-                            }
-                            Err(error) => Err(error),
-                        }
-                    },
-                    move |checked| {
-                        let (result, engine_absent) = match checked {
-                            Ok(checked) => checked,
-                            Err(error) => (Err(error), false),
-                        };
-                        DashboardIoUpdate::TargetReadiness {
-                            generation,
-                            target_id: reported_id,
-                            result,
-                            absent_engine: template.filter(|_| engine_absent),
-                        }
-                    },
-                );
-            }
         }
         DashboardAction::CheckProjectDirectories { paths } => {
             for path in paths {

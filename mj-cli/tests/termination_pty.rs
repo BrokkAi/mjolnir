@@ -1117,7 +1117,8 @@ fn simple_mode_detaches_on_direct_ctrl_q_and_never_claims_ctrl_b() {
 
 #[test]
 fn dashboard_detach_restores_terminal_then_exits_promptly_with_final_message() {
-    const REATTACH_MESSAGE: &str = "Active sessions will continue working; Mjolnir will reattach to them on your next invocation.";
+    const REATTACH_MESSAGE: &str = "The Mjolnir daemon is still running with no active sessions. \
+         `mj --instance terminal-regression daemon stop` stops it.";
     let DashboardPty {
         _storage,
         mut master,

@@ -39,16 +39,16 @@ matching paths: [["targets", "podman", "memory"]]
 │ Create   Open   Fi  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                     │
 │hel ───────────────  │                                                                                              │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Type                              Podman ▾                                          Remove   │                     │
-│  │ No messages yet  │ Machine                           local ▾                                                    │                     │
-│  │                  │ Container image                   ubuntu:24.04                                               │                     │
+│  Stopped  podman    │ ☒ Enabled                                                                           Remove   │                     │
+│  │ No messages yet  │ Type                              Podman ▾                                                   │                     │
+│  │                  │ Machine                           local ▾                                                    │                     │
+│                     │ Container image                   ubuntu:24.04                                               │                     │
 │                     │ Download image policy             Pull if missing ▾                                          │                     │
 │                     │ CPU platform                      Default                                                    │                     │
 │                     │ CPU limit                         Default                                                    │                     │
 │                     │ Memory limit                      Default                                                    │                     │
-│                     │   Environment variables           0 settings  ›                                              │                     │
-│                     │   Workspace storage               1 setting  ›                                               │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
+│                     │   Environment variables           0 settings  ›                                              │  ───────────────────╯
+│                     │   Workspace storage               1 setting  ›                                               │  ───────────────────╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯

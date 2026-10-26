@@ -104,7 +104,8 @@ fn machine_defaults(kind: &str) -> Value {
 /// The fields one runtime kind needs. Every runtime names the machine it runs
 /// on; the host settings are on that machine, not here.
 fn target_defaults(kind: &str) -> Value {
-    let mut fields = json!({"kind":kind, "machine":mj_core::config::LOCAL_MACHINE_ID});
+    let mut fields =
+        json!({"enabled":true, "kind":kind, "machine":mj_core::config::LOCAL_MACHINE_ID});
     if kind == "bare" {
         fields
             .as_object_mut()

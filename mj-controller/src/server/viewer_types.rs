@@ -331,10 +331,9 @@ impl ViewerSnapshot {
             })
             .collect();
         let targets = config
-            .targets
-            .iter()
+            .enabled_targets()
             .map(|(id, target)| ViewerTarget {
-                id: id.clone(),
+                id: id.to_owned(),
                 kind: target.kind_name().into(),
                 resource_allocation_kind: target.into(),
                 requires_project_directory: matches!(
@@ -1223,7 +1222,7 @@ fn public_title(session: &mj_core::state::SessionRecord) -> String {
 }
 
 impl ViewerLifecycleCategory {
-    pub(super) const fn of(state: SessionState) -> Self {
+    pub const fn of(state: SessionState) -> Self {
         match state {
             SessionState::Provisioning => Self::Starting,
             // A parked sub-agent stays on the dashboard with its parent.

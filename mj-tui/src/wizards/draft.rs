@@ -532,11 +532,12 @@ impl WizardDraft for NewWizard {
     fn handle_extra_shortcut(&mut self, _dashboard: &DashboardState, _key: KeyEvent) {}
 
     fn profile_count(&self, dashboard: &DashboardState) -> usize {
-        dashboard.config.enabled_profiles().count()
+        dashboard.offered_profiles().count()
     }
 
+    /// A new session can start on any offered target.
     fn target_rejection(&self, dashboard: &DashboardState, target_id: &str) -> Option<String> {
-        dashboard.target_readiness_rejection(target_id)
+        dashboard.target_unavailable(target_id)
     }
 
     /// A new session can start on any target.

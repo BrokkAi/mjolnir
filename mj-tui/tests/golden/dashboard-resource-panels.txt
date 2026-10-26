@@ -1,5 +1,3 @@
-target readiness request: Some(CheckTargetReadiness { generation: 1, target_ids: ["docker", "podman", "sandbox"] })
-checked target ids: ["docker", "podman", "sandbox"]
 === Targets hides unavailable defaults (160x40) ===
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                         ≡ ││                                                                                                         │

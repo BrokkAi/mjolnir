@@ -541,17 +541,7 @@ fn a_saved_project_with_a_missing_directory_is_marked_unavailable() {
     let mut checks = Vec::new();
     let mut collect = |dashboard: &mut DashboardState| {
         while let Some(action) = dashboard.take_prerequisite_check() {
-            match action {
-                DashboardAction::CheckTargetReadiness {
-                    generation,
-                    target_ids,
-                } => {
-                    for id in target_ids {
-                        dashboard.apply_target_readiness(generation, id, Ok(()));
-                    }
-                }
-                other => checks.push(other),
-            }
+            checks.push(action);
         }
     };
     open_new_session_wizard(&mut dashboard);
@@ -1702,6 +1692,47 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
 
 /// The profile step reads as a table: the marker, profile, harness, and quota
 /// columns start at the same cell on the heading and on every row.
+/// A profile whose installation is gone is not offered: the profile step
+/// lists only what is there and names the missing one under the table, with
+/// why and what to do.
+fn a_missing_profile_is_left_out_of_the_profile_step_and_named() {
+    let mut config = config();
+    config.profiles.insert(
+        "kimi-1".into(),
+        HarnessProfile {
+            enabled: true,
+            context_window_bytes: None,
+            legacy_subagents: Default::default(),
+            guardian_review_model: None,
+            codex_profile: None,
+            kind: HarnessKind::Kimi,
+            home: PathBuf::from("/profiles/kimi"),
+            environment: Default::default(),
+        },
+    );
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+    ready_open_new_wizard(&mut dashboard);
+    crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+        let mut answer = crate::test_support::availability_answer(dashboard, &[], &[]);
+        answer.profiles.get_mut("kimi-1").unwrap().1 = Some(
+            "Kimi Code is not installed here: /profiles/kimi does not exist and `kimi` is not \
+             on PATH. Install Kimi Code, or turn the profile off in Settings › Profiles."
+                .into(),
+        );
+        answer
+    });
+    let text = captured_drawn(&mut dashboard, 120, 30).join("\n");
+    assert!(text.contains("claude-1"), "{text}");
+    assert!(
+        text.contains("kimi-1: Kimi Code is not installed here"),
+        "{text}"
+    );
+    assert!(
+        dashboard.offered_profiles().all(|(id, _)| id != "kimi-1"),
+        "a missing profile is not offered"
+    );
+}
+
 fn new_session_profile_step_aligns_its_columns() {
     let mut config = config();
     config.profiles.insert(
@@ -3586,261 +3617,169 @@ fn worktree_inspection_ignores_old_directories_and_allows_linked_checkout_opt_in
     ));
 }
 
-/// Complete availability probes as a healthy runtime would for wizard tests
-/// concerned with other behavior. Readiness-specific tests use handle_key directly.
-/// Opens the full new-session wizard through its live binding, settling the
-/// target readiness probes on either side the way `ready_key` does.
+/// Opens the full new-session wizard through its live binding, for wizard
+/// tests concerned with other behavior. No availability answer is needed:
+/// until one arrives, everything configured is offered.
 fn ready_open_new_wizard(dashboard: &mut DashboardState) -> DashboardAction {
-    complete_ready_targets(dashboard);
-    let action = open_new_session_wizard(dashboard);
-    complete_ready_targets(dashboard);
-    action
+    open_new_session_wizard(dashboard)
 }
 
 fn ready_key(dashboard: &mut DashboardState, event: crossterm::event::KeyEvent) -> DashboardAction {
-    complete_ready_targets(dashboard);
     let action = dashboard.handle_key(event);
     capture_action(&action);
-    complete_ready_targets(dashboard);
     action
 }
 
-fn complete_ready_targets(dashboard: &mut DashboardState) {
-    let on_target = matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Target)
-        || matches!(&dashboard.mode, Mode::Resume(wizard) if wizard.step == WizardStep::Target);
-    if on_target
-        && let Some(DashboardAction::CheckTargetReadiness {
-            generation,
-            target_ids,
-        }) = dashboard.take_prerequisite_check()
-    {
-        for id in target_ids {
-            dashboard.apply_target_readiness(generation, id, Ok(()));
-        }
-    }
-}
-
+/// An answer that a runtime is gone removes it from the open picker, and an
+/// answer that it is back returns it, with nothing shown in between. A
+/// check is never repeated while one runs, and an answer that arrives after
+/// a newer check started is dropped.
 #[test]
-fn unavailable_target_blocks_launch_and_refresh_allows_recovery() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.begin_new();
-    dashboard.handle_key(key(KeyCode::Enter));
-    let Some(DashboardAction::CheckTargetReadiness {
-        generation,
-        target_ids,
-    }) = dashboard.take_prerequisite_check()
-    else {
-        panic!("availability check must start");
-    };
-    assert_eq!(target_ids, ["podman"]);
-    dashboard.handle_key(key(KeyCode::Enter));
-    assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Target));
-    dashboard.apply_target_readiness(
-        generation,
-        "podman".into(),
-        Err("service is stopped".into()),
-    );
-    let mut terminal = Terminal::new(TestBackend::new(180, 32)).unwrap();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let text = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(text.contains("unavailable"), "{text}");
-    assert!(text.contains("podman: service is stopped"), "{text}");
-    // Launch finding C-10 (#1175): a reason too long for the row is not cut
-    // off; it sits under the table and wraps.
-    dashboard.apply_target_readiness(
-        generation,
-        "podman".into(),
-        Err(
-            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. \
-             Is the docker daemon running?"
-                .into(),
-        ),
-    );
-    let mut terminal = Terminal::new(TestBackend::new(160, 32)).unwrap();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let lines = buffer_lines(terminal.backend().buffer());
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("podman: Cannot connect")),
-        "{lines:#?}"
-    );
-    assert!(
-        lines.iter().any(|line| line.contains("running?")),
-        "{lines:#?}"
-    );
-    assert!(
-        !lines
-            .iter()
-            .any(|line| line.contains("podman") && line.contains('…')),
-        "{lines:#?}"
-    );
-    dashboard.handle_key(key(KeyCode::Enter));
-    assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Target));
-    chord(&mut dashboard, crate::CommandId::Refresh);
-    let Some(DashboardAction::CheckTargetReadiness {
-        generation: fresh, ..
-    }) = dashboard.take_prerequisite_check()
-    else {
-        panic!("refresh must recheck");
-    };
-    dashboard.apply_target_readiness(generation, "podman".into(), Ok(()));
-    assert!(dashboard.target_readiness_rejection("podman").is_some());
-    dashboard.apply_target_readiness(fresh, "podman".into(), Ok(()));
-    dashboard.handle_key(key(KeyCode::Enter));
-    assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Bundle));
-}
-
-#[test]
-fn readiness_checks_are_independent_and_ignore_changed_configuration() {
-    let mut config = config();
-    config.targets.insert(
-        "remote".into(),
-        TargetTemplate::SshBare {
-            ssh: SshConnection {
-                host: "example.test".into(),
-                user: None,
-                identity_file: None,
-                extra_args: vec![],
-            },
-            permissions: mj_core::config::PermissionMode::Guardian,
-            workspace_prefix: PathBuf::from("workspaces"),
-        },
-    );
+fn availability_answers_change_the_open_picker_only_when_they_differ() {
+    let mut config = standard_local_targets_config();
+    config.default_targets.clear();
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-    dashboard.begin_new();
-    dashboard.handle_key(key(KeyCode::Enter));
-    let Some(DashboardAction::CheckTargetReadiness {
-        generation,
-        target_ids,
-    }) = dashboard.take_prerequisite_check()
+    let Some(DashboardAction::CheckAvailability {
+        generation: startup,
+    }) = dashboard.take_availability_check()
     else {
-        panic!("check");
+        panic!("startup checks what is there");
     };
-    assert_eq!(target_ids.len(), 2);
-    dashboard.apply_target_readiness(generation, "remote".into(), Ok(()));
-    assert!(dashboard.target_readiness_rejection("remote").is_none());
-    assert!(dashboard.target_readiness_rejection("podman").is_some());
-    if let TargetTemplate::SshBare { ssh, .. } = dashboard.config.targets.get_mut("remote").unwrap()
-    {
-        ssh.host = "changed.test".into();
-    }
-    dashboard.apply_target_readiness(generation, "remote".into(), Ok(()));
-    assert!(dashboard.target_readiness_rejection("remote").is_some());
-    dashboard.handle_key(key(KeyCode::Esc));
-    assert!(!matches!(dashboard.mode, Mode::New(_)));
-}
-
-/// A target's template changing between wizard opens invalidates the cached
-/// readiness result even though it has not gone stale.
-#[test]
-fn reopening_wizard_after_template_change_reprobes() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.begin_new();
-    dashboard.handle_key(key(KeyCode::Enter));
-    let Some(DashboardAction::CheckTargetReadiness {
-        generation,
-        target_ids,
-    }) = dashboard.take_prerequisite_check()
-    else {
-        panic!("the first open must probe the non-local target");
-    };
-    assert_eq!(target_ids, ["podman"]);
-    dashboard.apply_target_readiness(generation, "podman".into(), Ok(()));
-    dashboard.handle_key(key(KeyCode::Esc));
-    assert!(!matches!(dashboard.mode, Mode::New(_)));
-
-    match dashboard.config.targets.get_mut("podman").unwrap() {
-        TargetTemplate::LocalPodman { container } => {
-            container.image = "ubuntu:22.04".into();
-        }
-        other => panic!("expected a podman target, got {other:?}"),
-    }
-
-    dashboard.begin_new();
-    dashboard.handle_key(key(KeyCode::Enter));
-    let Some(DashboardAction::CheckTargetReadiness { target_ids, .. }) =
-        dashboard.take_prerequisite_check()
-    else {
-        panic!("a changed template must be re-probed even though a result is cached");
-    };
-    assert_eq!(target_ids, ["podman"]);
-}
-
-/// A readiness result older than [`TARGET_READINESS_TTL`] is treated as
-/// missing: the wizard shows the checking state again and rejects Create
-/// until a fresh probe completes.
-#[test]
-fn stale_readiness_result_is_treated_as_missing_and_reprobes() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.begin_new();
-    dashboard.handle_key(key(KeyCode::Enter));
-    let Some(DashboardAction::CheckTargetReadiness {
-        generation,
-        target_ids,
-    }) = dashboard.take_prerequisite_check()
-    else {
-        panic!("the first open must probe the non-local target");
-    };
-    assert_eq!(target_ids, ["podman"]);
-    dashboard.apply_target_readiness(generation, "podman".into(), Ok(()));
-    assert!(dashboard.target_readiness_rejection("podman").is_none());
-
-    dashboard.readiness_clock_advance = TARGET_READINESS_TTL;
-
+    open_new_session_wizard(&mut dashboard);
     assert_eq!(
-        dashboard.target_readiness_rejection("podman"),
-        Some("checking availability…".into()),
-        "a stale result must reject exactly like a missing one"
+        dashboard.take_availability_check(),
+        None,
+        "a check in flight is not repeated"
     );
-    let Some(DashboardAction::CheckTargetReadiness { target_ids, .. }) =
-        dashboard.take_prerequisite_check()
-    else {
-        panic!("a stale result must be re-probed");
-    };
-    assert_eq!(target_ids, ["podman"]);
-}
-
-/// A failed result is kept only briefly: a failure is usually a host that is
-/// asleep or a probe that timed out, which the user fixes and retries within
-/// minutes, so it is re-probed long before a success would be.
-#[test]
-fn failed_readiness_result_is_reprobed_after_the_short_failure_ttl() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.begin_new();
     dashboard.handle_key(key(KeyCode::Enter));
-    let Some(DashboardAction::CheckTargetReadiness { generation, .. }) =
-        dashboard.take_prerequisite_check()
-    else {
-        panic!("the first open must probe the non-local target");
-    };
-    dashboard.apply_target_readiness(generation, "podman".into(), Err("host asleep".into()));
-    assert_eq!(
-        dashboard.target_readiness_rejection("podman"),
-        Some("unavailable: host asleep".into())
-    );
+    let before = crate::test_support::drawn(&mut dashboard, 160, 40).join("\n");
+    assert!(before.contains("docker"), "{before}");
+    assert!(!before.contains("checking"), "{before}");
+
+    let answer = crate::test_support::availability_answer(&dashboard, &["docker"], &[]);
+    dashboard.apply_availability_check(startup, Ok(answer));
+    let gone = crate::test_support::drawn(&mut dashboard, 160, 40).join("\n");
     assert!(
-        dashboard.take_prerequisite_check().is_none(),
-        "a fresh failure is not re-probed on its own"
+        gone.contains("docker: docker is not installed here."),
+        "a configured runtime that is gone is named: {gone}"
     );
+    assert!(!gone.contains("unavailable"), "{gone}");
 
-    dashboard.readiness_clock_advance = TARGET_READINESS_FAILURE_TTL;
-
-    assert_eq!(
-        dashboard.target_readiness_rejection("podman"),
-        Some("checking availability…".into()),
-        "an aged failure must reject like a missing entry, not repeat the old error"
-    );
-    let Some(DashboardAction::CheckTargetReadiness { target_ids, .. }) =
-        dashboard.take_prerequisite_check()
+    // The picker opened while the startup check ran, so another is due.
+    let Some(DashboardAction::CheckAvailability { generation: stale }) =
+        dashboard.take_availability_check()
     else {
-        panic!("an aged failure must be re-probed");
+        panic!("opening the picker asked for a check");
     };
-    assert_eq!(target_ids, ["podman"]);
+    dashboard.handle_key(key(KeyCode::Esc));
+    open_new_session_wizard(&mut dashboard);
+    let answer = crate::test_support::availability_answer(&dashboard, &[], &[]);
+    dashboard.apply_availability_check(stale, Ok(answer));
+    let back = crate::test_support::drawn(&mut dashboard, 160, 40).join("\n");
+    assert!(!back.contains("not installed"), "{back}");
+    let answer = crate::test_support::availability_answer(&dashboard, &["docker"], &[]);
+    dashboard.apply_availability_check(stale, Ok(answer));
+    assert!(
+        dashboard.target_offered("docker"),
+        "an answer to a finished check changes nothing"
+    );
+}
+
+// Hard-won: #1370: an answer under the help overlay left a stale profile index, one mid-launch closed the wizard, and the startup check raced first-run setup.
+#[test]
+fn availability_answers_reach_a_wizard_under_help_and_spare_a_launch() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.hold_availability_check();
+    assert_eq!(
+        dashboard.take_availability_check(),
+        None,
+        "nothing is checked while first-run setup decides"
+    );
+    dashboard.release_availability_check();
+    let Some(DashboardAction::CheckAvailability { generation }) =
+        dashboard.take_availability_check()
+    else {
+        panic!("the startup check starts once setup is done");
+    };
+    open_new_session_wizard(&mut dashboard);
+    let last = dashboard.offered_profiles().count() - 1;
+    let chosen = dashboard.nth_offered_profile(last).unwrap();
+    match &mut dashboard.mode {
+        Mode::New(wizard) => wizard.profile = last,
+        _ => panic!("expected the new-session wizard"),
+    }
+    dashboard.begin_help();
+    let first = dashboard.nth_offered_profile(0).unwrap();
+    let mut answer = crate::test_support::availability_answer(&dashboard, &[], &[]);
+    answer.profiles.get_mut(&first).unwrap().1 = Some("gone".into());
+    dashboard.apply_availability_check(generation, Ok(answer));
+    dashboard.handle_key(key(KeyCode::Esc));
+    let wizard = new_wizard(&dashboard);
+    assert_eq!(
+        dashboard.nth_offered_profile(wizard.profile).as_deref(),
+        Some(chosen.as_str()),
+        "the wizard under help keeps its choice"
+    );
+    crate::test_support::drawn(&mut dashboard, 140, 40);
+
+    match &mut dashboard.mode {
+        Mode::New(wizard) => wizard.step = WizardStep::Launching,
+        _ => panic!("expected the new-session wizard"),
+    }
+    crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+        let mut answer = crate::test_support::availability_answer(dashboard, &[], &[]);
+        for (_, missing) in answer.profiles.values_mut() {
+            *missing = Some("gone".into());
+        }
+        answer
+    });
+    assert_eq!(
+        new_wizard(&dashboard).step,
+        WizardStep::Launching,
+        "a submitted launch is left to its own preflight"
+    );
+    crate::test_support::drawn(&mut dashboard, 140, 40);
+}
+
+/// A runtime the wizard already chose that turns out to be gone sends the
+/// wizard back to the target step with the reason, rather than launching on
+/// it or silently swapping in another.
+#[test]
+fn a_chosen_runtime_that_disappears_returns_the_wizard_to_its_step() {
+    let mut config = standard_local_targets_config();
+    config.default_targets.clear();
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+    let Some(DashboardAction::CheckAvailability { generation }) =
+        dashboard.take_availability_check()
+    else {
+        panic!("startup checks what is there");
+    };
+    open_new_session_wizard(&mut dashboard);
+    let docker = dashboard
+        .config
+        .targets
+        .keys()
+        .position(|id| id == "docker")
+        .unwrap();
+    match &mut dashboard.mode {
+        Mode::New(wizard) => {
+            wizard.target = docker;
+            wizard.step = WizardStep::Bundle;
+        }
+        _ => panic!("expected the new-session wizard"),
+    }
+    let answer = crate::test_support::availability_answer(&dashboard, &["docker"], &[]);
+    dashboard.apply_availability_check(generation, Ok(answer));
+    let wizard = new_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Target);
+    assert_ne!(nth_key(&dashboard.config.targets, wizard.target), "docker");
+    assert!(
+        dashboard
+            .notice()
+            .is_some_and(|notice| notice.contains("docker is no longer available")),
+        "{:?}",
+        dashboard.notice()
+    );
 }
 
 /// The fixture's targets plus the other standard local ones that
@@ -3857,6 +3796,8 @@ fn standard_local_targets_config() -> mj_core::config::Config {
     config
         .targets
         .insert("docker".into(), TargetTemplate::LocalDocker { container });
+    // As `Config::with_local_targets` supplies them, not as the user wrote.
+    config.default_targets = ["localhost", "podman", "docker"].map(str::to_owned).into();
     config
 }
 
@@ -3874,25 +3815,13 @@ fn bare_ssh_target() -> TargetTemplate {
     }
 }
 
-/// Answers the availability checks a wizard starts on its profile step, as
-/// the dashboard loop would: the targets in `unavailable` fail and every
-/// other one is ready.
-fn answer_target_checks(dashboard: &mut DashboardState, unavailable: &[&str]) {
-    let Some(DashboardAction::CheckTargetReadiness {
-        generation,
-        target_ids,
-    }) = dashboard.take_prerequisite_check()
-    else {
-        panic!("the profile step checks the targets");
-    };
-    for id in target_ids {
-        let result = if unavailable.contains(&id.as_str()) {
-            Err(format!("{id} is not installed"))
-        } else {
-            Ok(())
-        };
-        dashboard.apply_target_readiness(generation, id, result);
-    }
+/// Answers the availability check a wizard asks for when it opens: the
+/// engines of the targets in `uninstalled` were never installed here, and
+/// everything else is there.
+fn answer_target_checks(dashboard: &mut DashboardState, uninstalled: &[&str]) {
+    crate::test_support::answer_availability(dashboard, |dashboard| {
+        crate::test_support::availability_answer(dashboard, uninstalled, &[])
+    });
 }
 
 /// Activates the open wizard's Back button from the keyboard: Tab from
@@ -3980,29 +3909,12 @@ fn a_machine_without_a_runtime_keeps_the_target_step_and_says_why() {
         workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
         build_cache: None,
     };
-    config.machines.insert("nas".into(), nas.clone());
+    config.machines.insert("nas".into(), nas);
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-    let Some(DashboardAction::CheckMachineRuntimes { generation, .. }) =
-        dashboard.take_machine_runtime_check()
-    else {
-        panic!("the machine is checked");
-    };
-    dashboard.apply_machine_runtime_check(
-        generation,
-        Ok(crate::MachineRuntimesChecked {
-            probes: vec![crate::MachineRuntimeProbe {
-                machine_id: "nas".into(),
-                machine: nas,
-                finding: crate::MachineFinding::Unreachable {
-                    detail: "`ssh dev@nas.example.test true` failed: Connection timed out".into(),
-                    remediation: "Check that nas.example.test is up.".into(),
-                },
-            }],
-            added: BTreeMap::new(),
-        }),
-    );
     open_new_session_wizard(&mut dashboard);
-    answer_target_checks(&mut dashboard, &["podman", "docker"]);
+    crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+        crate::test_support::availability_answer(dashboard, &["podman", "docker"], &["nas"])
+    });
     dashboard.handle_key(key(KeyCode::Enter));
     let wizard = new_wizard(&dashboard);
     assert_eq!(wizard.step, WizardStep::Target);
@@ -4087,8 +3999,8 @@ fn new_session_skips_the_target_step_when_only_one_target_is_offered() {
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
 }
 
-/// A second target the step could offer keeps the step: one that is ready,
-/// and one whose availability check has not answered yet.
+/// A second target the step could offer keeps the step: one that is there,
+/// and one no availability answer has reached yet.
 fn new_session_shows_the_target_step_when_a_second_target_may_be_chosen() {
     for podman_ready in [true, false] {
         let mut dashboard = DashboardState::new(
@@ -4097,19 +4009,9 @@ fn new_session_shows_the_target_step_when_a_second_target_may_be_chosen() {
             BTreeMap::new(),
         );
         open_new_session_wizard(&mut dashboard);
+        // A check that has not answered leaves every target offered.
         if podman_ready {
             answer_target_checks(&mut dashboard, &["docker"]);
-        } else {
-            let Some(DashboardAction::CheckTargetReadiness { generation, .. }) =
-                dashboard.take_prerequisite_check()
-            else {
-                panic!("the profile step checks the targets");
-            };
-            dashboard.apply_target_readiness(
-                generation,
-                "docker".into(),
-                Err("docker is not installed".into()),
-            );
         }
         let profile = captured_drawn(&mut dashboard, 140, 40).join("\n");
         assert!(profile.contains("New session · 1/4 profile"), "{profile}");
@@ -4288,40 +4190,38 @@ fn move_shows_the_target_step_when_two_targets_suit_the_session() {
     assert!(target.contains("Move · 2/3 new target"), "{target}");
 }
 
-/// Answers the profile step's availability checks the way the dashboard loop
-/// does on a host with no Docker: `docker` is not installed (permanent for
-/// the host), `machine` did not answer (transient), and the rest are ready.
+/// Answers the availability check the way the dashboard loop does on a host
+/// with no Docker: `docker` was never installed, `machine` did not answer,
+/// and everything else is there.
 fn answer_checks_without_docker(dashboard: &mut DashboardState) {
-    let Some(DashboardAction::CheckTargetReadiness {
-        generation,
-        target_ids,
-    }) = dashboard.take_prerequisite_check()
+    crate::test_support::answer_availability(dashboard, |dashboard| {
+        crate::test_support::availability_answer(dashboard, &["docker"], &["machine"])
+    });
+}
+
+/// The machine `bare_ssh_target` runs on.
+fn bare_ssh_machine() -> mj_core::config::Machine {
+    let TargetTemplate::SshBare {
+        ssh,
+        workspace_prefix,
+        ..
+    } = bare_ssh_target()
     else {
-        panic!("the profile step checks the targets");
+        unreachable!("a bare SSH target");
     };
-    for id in target_ids {
-        match id.as_str() {
-            "docker" => dashboard.apply_target_runtime_missing(
-                generation,
-                id,
-                "Docker is not installed on this host. Install Docker or choose another target."
-                    .into(),
-            ),
-            "machine" => dashboard.apply_target_readiness(
-                generation,
-                id,
-                Err("the host did not answer its last check".into()),
-            ),
-            _ => dashboard.apply_target_readiness(generation, id, Ok(())),
-        }
+    mj_core::config::Machine::Ssh {
+        ssh,
+        workspace_prefix,
+        build_cache: None,
     }
 }
 
-/// The user's rule: a target whose runtime is not on this host is left out of
-/// the pickers, while a host that did not answer stays listed with its
-/// status. The step shows the same rows for New, Resume and Move.
+/// The user's rule: the pickers list only what is there. A standard runtime
+/// whose engine was never installed is left out without a word; a runtime
+/// whose host did not answer is left out and named under the list with the
+/// reason. The step shows the same rows for New, Resume and Move.
 #[test]
-fn target_steps_omit_a_missing_runtime_and_keep_an_unresponsive_host() {
+fn target_steps_list_only_what_is_there_and_name_an_unresponsive_host() {
     for flow in ["New session", "Resume", "Move"] {
         let mut session = if flow == "Move" {
             running_session()
@@ -4336,6 +4236,10 @@ fn target_steps_omit_a_missing_runtime_and_keep_an_unresponsive_host() {
             .config
             .targets
             .insert("machine".into(), bare_ssh_target());
+        dashboard
+            .config
+            .machines
+            .insert("machine".into(), bare_ssh_machine());
         match flow {
             "New session" => {
                 open_new_session_wizard(&mut dashboard);
@@ -4357,8 +4261,8 @@ fn target_steps_omit_a_missing_runtime_and_keep_an_unresponsive_host() {
         assert!(text.contains("target"), "{flow}: {text}");
         assert!(text.contains("podman"), "{flow}: {text}");
         assert!(
-            text.contains("machine") && text.contains("unavailable"),
-            "{flow}: an unresponsive host stays listed with its status: {text}"
+            text.contains("machine: machine did not answer.") && !text.contains("unavailable"),
+            "{flow}: an unresponsive host is named, not listed: {text}"
         );
         assert!(
             !text.contains("docker"),
@@ -5793,6 +5697,10 @@ fn golden_profile_picker_table() {
         (
             "resume_profile_step_aligns_its_columns_and_explains_the_marker",
             resume_profile_step_aligns_its_columns_and_explains_the_marker,
+        ),
+        (
+            "a_missing_profile_is_left_out_of_the_profile_step_and_named",
+            a_missing_profile_is_left_out_of_the_profile_step_and_named,
         ),
     ] {
         capture_scenario(label, run);

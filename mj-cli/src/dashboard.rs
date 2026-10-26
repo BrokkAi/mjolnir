@@ -10,7 +10,6 @@
 //! wait, the drains, and the action handling in [`actions`] be separate
 //! functions over the same state.
 
-pub(crate) mod absent_engines;
 pub(crate) mod actions;
 mod attachment;
 mod composer_drafts;
@@ -340,9 +339,6 @@ pub(crate) struct DashboardContext {
     /// The daemon's finished-cycle count in the latest snapshot.
     pub(crate) quota_cycles: u64,
     pub(crate) target_test_cancel: Option<Arc<AtomicBool>>,
-    /// Local container targets whose engine is not installed, answered
-    /// without a check until their configuration or the engine changes.
-    pub(crate) absent_engines: absent_engines::AbsentEngines,
     /// The active global review choice discovery. New profile/model
     /// selections cancel the old request before starting another one.
     pub(crate) path_input_job: Option<(String, Arc<AtomicBool>)>,
@@ -532,6 +528,10 @@ pub(crate) async fn run_dashboard_for_workspace(
         context.restore_upgrade(resume).await;
     }
     if automatic_setup {
+        // First-run setup decides whether this is a new installation from
+        // whether the configuration is empty, so nothing else may add to it
+        // first.
+        context.dashboard.hold_availability_check();
         io::spawn_first_run_setup(
             context.dashboard_io_tx.clone(),
             context.critical_operations.clone(),
@@ -959,12 +959,9 @@ pub(crate) async fn run_dashboard_for_workspace(
             if let Some(refresh) = context.dashboard.take_mount_history_refresh() {
                 actions::apply_dashboard_action(&mut context, refresh).await?;
             }
-            if let Some(check) = context.dashboard.take_target_availability_check() {
-                actions::apply_dashboard_action(&mut context, check).await?;
-            }
-            // A machine no runtime runs on, found at startup or brought by a
-            // save or another client's edit, is probed for its runtimes.
-            if let Some(check) = context.dashboard.take_machine_runtime_check() {
+            // What is there is checked at startup and whenever a picker
+            // opens, one check at a time.
+            if let Some(check) = context.dashboard.take_availability_check() {
                 actions::apply_dashboard_action(&mut context, check).await?;
             }
             // Settings shows whether each saved profile has a login. Reading
@@ -1730,7 +1727,6 @@ impl DashboardContext {
             manual_quota_refresh_cycles: None,
             quota_cycles: 0,
             target_test_cancel: None,
-            absent_engines: absent_engines::AbsentEngines::default(),
             path_input_job: None,
             completion_job: None,
             review_discovery_cancel: None,

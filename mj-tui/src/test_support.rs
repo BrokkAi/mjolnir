@@ -240,6 +240,7 @@ pub(crate) fn config() -> Config {
         sessionwiki: Default::default(),
         legacy_startup: (),
         default_targets: Default::default(),
+        disabled_targets: Default::default(),
         machines: Default::default(),
         profiles: BTreeMap::from([
             (
@@ -759,4 +760,81 @@ pub(crate) fn operation(
         active_stages,
         resume_destination: None,
     }
+}
+
+/// The availability answer for every profile and runtime `dashboard`
+/// configures: everything is there except the local engines of the targets
+/// in `uninstalled`, which were never installed, and the machines in
+/// `unreachable`, which did not answer.
+pub(crate) fn availability_answer(
+    dashboard: &DashboardState,
+    uninstalled: &[&str],
+    unreachable: &[&str],
+) -> crate::AvailabilityChecked {
+    let config = &dashboard.config;
+    let missing_kinds: Vec<&str> = uninstalled
+        .iter()
+        .map(|id| mj_core::config::runtime_kind_name(&config.targets[*id]))
+        .collect();
+    let local = ["podman", "docker", "apple-container"]
+        .into_iter()
+        .map(|kind| {
+            let gone = missing_kinds.contains(&kind);
+            (
+                kind.to_owned(),
+                crate::LocalEngine {
+                    missing: gone.then(|| format!("{kind} is not installed here.")),
+                    installed: !gone,
+                },
+            )
+        })
+        .collect();
+    let machines = config
+        .machines
+        .iter()
+        .filter(|(_, machine)| !matches!(machine, mj_core::config::Machine::Local { .. }))
+        .map(|(id, machine)| crate::MachineRuntimeProbe {
+            machine_id: id.clone(),
+            machine: machine.clone(),
+            finding: if unreachable.contains(&id.as_str()) {
+                crate::MachineFinding::Unreachable {
+                    detail: format!("`ssh {id} true` failed: Connection timed out"),
+                    remediation: format!("Check that {id} is up."),
+                }
+            } else {
+                crate::MachineFinding::Answered {
+                    runtimes: config
+                        .machine_runtimes(id)
+                        .map(|(id, target)| (id.to_owned(), target.clone()))
+                        .collect(),
+                    rejected: Vec::new(),
+                }
+            },
+        })
+        .collect();
+    crate::AvailabilityChecked {
+        profiles: config
+            .profiles
+            .iter()
+            .map(|(id, profile)| (id.clone(), (profile.clone(), None)))
+            .collect(),
+        local,
+        machines,
+        added_profiles: Vec::new(),
+        added_runtimes: BTreeMap::new(),
+    }
+}
+
+/// Answers the availability check the dashboard asks for, as its loop would.
+pub(crate) fn answer_availability(
+    dashboard: &mut DashboardState,
+    answer: impl FnOnce(&DashboardState) -> crate::AvailabilityChecked,
+) {
+    let Some(DashboardAction::CheckAvailability { generation }) =
+        dashboard.take_availability_check()
+    else {
+        panic!("a check of what is there is due");
+    };
+    let answer = answer(dashboard);
+    dashboard.apply_availability_check(generation, Ok(answer));
 }

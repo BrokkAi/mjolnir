@@ -66,7 +66,7 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 18
+version = 19
 ```
 
 The top-level keys are listed below. The legacy `[mailbox] enabled` switch is
@@ -100,7 +100,7 @@ and `theme` under **Interface**. This is a presentation grouping: the prefix
 remains at `keys.prefix`, while the other three fields remain at the top level
 in `config.toml`.
 
-A missing or empty file is treated as an empty version 18 configuration. Older
+A missing or empty file is treated as an empty version 19 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -932,6 +932,13 @@ when it is `local`.
 | --- | --- | --- | --- | --- |
 | `kind` | string enum | yes | none | `bare`, `podman`, `docker`, or `apple-container`. |
 | `machine` | string | no | `"local"` | The id of a `[machines.<id>]` entry, or `local`. |
+| `enabled` | boolean | no | `true` | `false` keeps the runtime configured but out of every picker; launch, resume and move refuse it, and running sessions continue. Written only when `false`. Detection never adds a kind its machine already has configured, enabled or not. |
+
+Mjolnir checks what is there when the dashboard starts and whenever the
+new-session or resume picker opens: this computer directly, and each SSH
+machine with one SSH call. It adds each runtime kind a machine newly runs and
+leaves out of the pickers any runtime that is gone, naming it under the list.
+Version 19 added `enabled`; older builds refuse a version 19 file.
 
 `permissions` is valid only on `bare`; setting it on another runtime is an
 error. Build cache settings are valid only on a machine; setting them on a
@@ -1104,7 +1111,7 @@ and runtime kinds from the examples above rather than mixing fields between
 variants.
 
 ```toml
-version = 18
+version = 19
 
 [phone]
 enabled = true

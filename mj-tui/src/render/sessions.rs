@@ -1682,16 +1682,17 @@ pub(crate) fn capacity_target_labels(
 ) -> Line<'static> {
     let config = &dashboard.config;
     let mut spans = Vec::new();
-    // A default candidate whose runtime is missing is not listed: the user
-    // never configured it. A configured one stays, marked unavailable.
+    // A standard runtime whose engine was never installed is not listed:
+    // the user never configured it. Any other missing runtime stays, marked
+    // unavailable.
     let listed = target_ids
         .iter()
-        .filter(|id| !(config.is_default_target(id) && dashboard.target_runtime_missing(id)));
+        .filter(|id| dashboard.target_missing(id) != Some(crate::availability::Missing::Silent));
     for (index, target_id) in listed.enumerate() {
         if index > 0 {
             spans.push(Span::raw(", "));
         }
-        if dashboard.target_known_unavailable(target_id) {
+        if dashboard.target_missing(target_id).is_some() {
             spans.push(Span::styled(
                 format!("{target_id} (unavailable)"),
                 Style::default().fg(theme::palette().muted),

@@ -52,10 +52,7 @@ use crate::widgets::{
     truncate_to_cells,
 };
 
-use crate::{
-    DashboardAction, DashboardState, Mode, RemoteRepositoryPreview, move_index,
-    nth_enabled_profile, nth_key,
-};
+use crate::{DashboardAction, DashboardState, Mode, RemoteRepositoryPreview, move_index, nth_key};
 
 /// Keep the frame and action row in place while moving between wizard steps.
 fn wizard_modal(frame: &mut Frame<'_>, surfaces: &mut FrameSurfaces, area: Rect) -> Rect {
@@ -123,38 +120,6 @@ pub(crate) enum WizardControl {
     Submit,
 }
 
-/// How long a stored readiness result stays usable across wizard opens
-/// before it is treated as missing and re-probed. An SSH probe opens its own
-/// connection when no shared one is up (up to a second) and an AWS probe calls
-/// the AWS API, so this keeps repeated wizard opens in the same dashboard
-/// session from re-probing every time while still catching a target that went
-/// unavailable a while ago.
-pub(crate) const TARGET_READINESS_TTL: Duration = Duration::from_secs(30 * 60);
-
-/// How long a failed readiness result is kept. Failures are usually
-/// transient (a sleeping host, a VPN that is down, an expired cloud session,
-/// a probe that timed out) and the user fixes them within minutes, so they
-/// are re-probed much sooner than successes; the re-probe only costs the
-/// user whose target is already broken.
-pub(crate) const TARGET_READINESS_FAILURE_TTL: Duration = Duration::from_secs(60);
-
-#[derive(Debug, Clone)]
-pub(crate) struct TargetReadiness {
-    template: TargetTemplate,
-    generation: u64,
-    result: Option<Result<(), String>>,
-    /// Whether the target's runtime is not present on this host (Docker or
-    /// Podman not installed). That is permanent for the host, unlike a host
-    /// that did not answer, so the pickers leave the target out. It is kept
-    /// while a recheck is pending, so the row does not come back as
-    /// "checking…" every minute.
-    runtime_missing: bool,
-    /// When `result` was stored. Only meaningful once `result` is `Some`; a
-    /// pending check (`result: None`) is never considered stale, so a
-    /// probe already in flight is never re-requested.
-    recorded_at: Instant,
-}
-
 /// What is known about one configured project directory.
 #[derive(Debug, Clone)]
 pub(crate) struct ProjectDirectoryCheck {
@@ -175,17 +140,6 @@ pub(crate) enum ProjectDirectoryState {
 /// A directory that was missing may come back, and one that was there may
 /// go, so answers are re-checked on a later visit to the project step.
 const PROJECT_DIRECTORY_CHECK_TTL: Duration = Duration::from_secs(60);
-
-impl TargetReadiness {
-    fn is_stale(&self, now: Instant) -> bool {
-        let ttl = match &self.result {
-            None => return false,
-            Some(Ok(())) => TARGET_READINESS_TTL,
-            Some(Err(_)) => TARGET_READINESS_FAILURE_TTL,
-        };
-        now.saturating_duration_since(self.recorded_at) >= ttl
-    }
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct NewWizard {

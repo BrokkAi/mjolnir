@@ -215,6 +215,13 @@ pub fn verify_ssh_docker(
     })
 }
 
+/// The remote commands the Apple container check runs on an SSH host, in
+/// order. The machine probe sends the same command lines in its one batch.
+pub(crate) const PLATFORM_PROBE: [&str; 2] = ["uname", "-sm"];
+pub(crate) const APPLE_CONTAINER_MACOS_PROBE: [&str; 2] = ["sw_vers", "-productVersion"];
+pub(crate) const APPLE_CONTAINER_VERSION_PROBE: [&str; 2] = ["container", "--version"];
+pub(crate) const APPLE_CONTAINER_STATUS_PROBE: [&str; 3] = ["container", "system", "status"];
+
 /// What a reachable Apple container host reported about itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppleContainerPreflight {
@@ -261,7 +268,7 @@ pub fn verify_ssh_apple_container(
     };
 
     let uname = reported(&probe(
-        ["uname", "-sm"],
+        PLATFORM_PROBE,
         "detect the Apple container host platform",
     ))?;
     let platform = TargetPlatform::parse(&uname).with_context(|| {
@@ -278,7 +285,7 @@ pub fn verify_ssh_apple_container(
     );
 
     let macos_version = reported(&probe(
-        ["sw_vers", "-productVersion"],
+        APPLE_CONTAINER_MACOS_PROBE,
         "detect the remote macOS release",
     ))?;
     let major: u32 = macos_version
@@ -296,18 +303,14 @@ pub fn verify_ssh_apple_container(
     );
 
     let version = reported(&probe(
-        ["container", "--version"],
+        APPLE_CONTAINER_VERSION_PROBE,
         "check the remote Apple container installation",
     ))?;
     // `container system status` exits nonzero while the daemon is stopped, so
     // it is checked for its status rather than its words.
     let status = ssh_validation_command(
         ssh,
-        vec![
-            "container".to_owned(),
-            "system".to_owned(),
-            "status".to_owned(),
-        ],
+        APPLE_CONTAINER_STATUS_PROBE.map(str::to_owned).to_vec(),
         "check the remote Apple container daemon",
     )
     .stage(ProvisionStage::Provisioning);
@@ -510,13 +513,21 @@ fn is_missing_program(error: &anyhow::Error) -> bool {
     })
 }
 
+/// The command the Docker check runs: it answers only when a daemon does.
+pub(crate) const DOCKER_SERVER_VERSION: [&str; 4] = [
+    "docker",
+    "version",
+    "--format",
+    "{{.Server.Version}} {{.Server.Os}}",
+];
+
 pub(super) fn verify_docker(
     ssh: Option<&SshTarget>,
     executor: &impl CommandExecutor,
 ) -> Result<DockerPreflight> {
     let command = CommandSpec::new(
-        "docker",
-        ["version", "--format", "{{.Server.Version}} {{.Server.Os}}"],
+        DOCKER_SERVER_VERSION[0],
+        DOCKER_SERVER_VERSION[1..].iter().copied(),
     )
     .purpose("check Docker daemon")
     .stage(ProvisionStage::Provisioning);
@@ -1181,6 +1192,22 @@ pub(super) const PROBE_BLOCK_BEGIN: &str = "__mj_probe_begin__";
 pub(super) const PROBE_BLOCK_END: &str = "__mj_probe_end__";
 pub(super) const PROBE_STATUS_PREFIX: &str = "__mj_probe_status__";
 
+/// The markers a batched probe script frames each result with. A script that
+/// runs another batched script as one of its probes uses different markers,
+/// so the inner script's frames stay opaque inside the outer one's.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProbeFrames {
+    pub begin: &'static str,
+    pub end: &'static str,
+    pub status: &'static str,
+}
+
+const PODMAN_PROBE_FRAMES: ProbeFrames = ProbeFrames {
+    begin: PROBE_BLOCK_BEGIN,
+    end: PROBE_BLOCK_END,
+    status: PROBE_STATUS_PREFIX,
+};
+
 /// Run every remote Podman probe in one SSH round trip.
 ///
 /// Each probe's stdout is captured in a shell variable and reprinted between
@@ -1188,7 +1215,7 @@ pub(super) const PROBE_STATUS_PREFIX: &str = "__mj_probe_status__";
 /// inside its own frame, so multi-line and arbitrary output survives intact.
 /// The version probe short-circuits the rest: without Podman the later probes
 /// can only repeat its failure.
-pub(super) const SSH_PODMAN_PREFLIGHT_SCRIPT: &str = r#"
+pub(crate) const SSH_PODMAN_PREFLIGHT_SCRIPT: &str = r#"
 exec 3>&1
 probe() {
     name=$1
@@ -1270,12 +1297,21 @@ pub(crate) fn ssh_podman_probe_fixture(probes: &[(&str, i32, &str, &str)]) -> Ve
 /// A probe appears only once its status line has been read, so output truncated
 /// mid-probe is reported as a missing probe rather than a partial result.
 pub(super) fn parse_podman_probe_output(stdout: &[u8]) -> BTreeMap<String, CommandOutput> {
+    parse_framed_probes(stdout, PODMAN_PROBE_FRAMES)
+}
+
+/// Split framed output into one result per probe, as
+/// [`parse_podman_probe_output`] does for `frames`.
+pub(crate) fn parse_framed_probes(
+    stdout: &[u8],
+    frames: ProbeFrames,
+) -> BTreeMap<String, CommandOutput> {
     let text = String::from_utf8_lossy(stdout);
     let mut blocks: BTreeMap<String, String> = BTreeMap::new();
     let mut probes = BTreeMap::new();
     let mut lines = text.lines();
     while let Some(line) = lines.next() {
-        if let Some(name) = line.strip_prefix(PROBE_BLOCK_BEGIN).and_then(|rest| {
+        if let Some(name) = line.strip_prefix(frames.begin).and_then(|rest| {
             rest.strip_prefix(' ')
                 .filter(|name| !name.is_empty())
                 .map(str::to_owned)
@@ -1283,7 +1319,7 @@ pub(super) fn parse_podman_probe_output(stdout: &[u8]) -> BTreeMap<String, Comma
             let mut body = Vec::new();
             let mut closed = false;
             for line in lines.by_ref() {
-                if line == PROBE_BLOCK_END {
+                if line == frames.end {
                     closed = true;
                     break;
                 }
@@ -1294,7 +1330,7 @@ pub(super) fn parse_podman_probe_output(stdout: &[u8]) -> BTreeMap<String, Comma
             }
             continue;
         }
-        let Some(rest) = line.strip_prefix(PROBE_STATUS_PREFIX) else {
+        let Some(rest) = line.strip_prefix(frames.status) else {
             continue;
         };
         let mut fields = rest.split_whitespace();
