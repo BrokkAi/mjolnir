@@ -1219,7 +1219,7 @@ fn public_title(session: &mj_core::state::SessionRecord) -> String {
 }
 
 impl ViewerLifecycleCategory {
-    pub(super) const fn of(state: SessionState) -> Self {
+    pub const fn of(state: SessionState) -> Self {
         match state {
             SessionState::Provisioning => Self::Starting,
             // A parked sub-agent stays on the dashboard with its parent.

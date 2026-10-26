@@ -271,10 +271,24 @@ struct DaemonArgs {
 enum DaemonCommand {
     /// Show daemon PID, version, start time, and client count.
     Status,
-    /// Gracefully stop the daemon. Detached workers keep running.
-    Stop,
+    /// Gracefully stop the daemon. Detached workers keep running unless
+    /// `--suspend-sessions` suspends them first.
+    Stop(DaemonStopArgs),
     /// Gracefully replace the daemon with this Mjolnir build.
     Restart,
+}
+
+#[derive(Debug, Args)]
+struct DaemonStopArgs {
+    /// Suspend every active session first, saving a recovery copy of each,
+    /// then stop the daemon. A session that does not suspend keeps the
+    /// daemon running and is named.
+    #[arg(long)]
+    suspend_sessions: bool,
+    /// Confirm suspending sessions whose saved Git work is not verified as
+    /// pushed.
+    #[arg(long, requires = "suspend_sessions")]
+    acknowledge_unpublished_work: bool,
 }
 
 #[derive(Debug, Args)]
@@ -529,13 +543,13 @@ fn run(cli: Cli) -> Result<()> {
         &result,
         Ok(DashboardExit::Detached | DashboardExit::Interrupted | DashboardExit::Restart { .. })
     ) {
+        let detached = matches!(result, Ok(DashboardExit::Detached))
+            .then(|| runtime.block_on(detach_notice()));
         // A dashboard has already drained durable mutations and restored its
         // terminal. Do not let disposable blocking reads delay process exit.
         shutdown_dashboard_runtime(runtime);
-        if matches!(result, Ok(DashboardExit::Detached)) {
-            println!(
-                "Active sessions will continue working; Mjolnir will reattach to them on your next invocation."
-            );
+        if let Some(notice) = detached {
+            println!("{notice}");
         }
     } else {
         mj_core::runtime::shutdown(
@@ -548,6 +562,158 @@ fn run(cli: Cli) -> Result<()> {
         DashboardExit::Restart { target, resume } => resume.restart(&target),
         _ => Ok(()),
     }
+}
+
+/// How long a detaching terminal waits to count the daemon's sessions before
+/// it leaves without the count.
+const DETACH_COUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What a detaching terminal says it leaves behind: the daemon, how many
+/// sessions it is still running, and the command that stops them all.
+async fn detach_notice() -> String {
+    let count = tokio::time::timeout(DETACH_COUNT_TIMEOUT, active_session_count())
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("no answer within {DETACH_COUNT_TIMEOUT:?}")));
+    let stop_all = mj_command("daemon stop --suspend-sessions");
+    match count {
+        Ok(0) => format!(
+            "The Mjolnir daemon is still running with no active sessions. \
+             `{}` stops it.",
+            mj_command("daemon stop")
+        ),
+        Ok(count) => format!(
+            "The Mjolnir daemon is still running, and {count} active session{} keep{} working; \
+             Mjolnir reattaches to them on your next invocation.\n\
+             `{stop_all}` suspends every session and stops the daemon.",
+            if count == 1 { "" } else { "s" },
+            if count == 1 { "s" } else { "" },
+        ),
+        Err(error) if daemon::daemon_not_running(&error).is_some() => format!(
+            "The Mjolnir daemon is not running. Sessions whose workers are still running \
+             keep working; `{stop_all}` suspends them."
+        ),
+        Err(error) => {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "could not count active sessions on detach"
+            );
+            format!(
+                "The Mjolnir daemon is still running, and its active sessions keep working; \
+                 Mjolnir reattaches to them on your next invocation.\n\
+                 `{stop_all}` suspends every session and stops the daemon."
+            )
+        }
+    }
+}
+
+/// An `mj` command line for this instance, for a message to suggest.
+fn mj_command(arguments: &str) -> String {
+    match mj_core::config::instance_name() {
+        Some(instance) => format!("mj --instance {instance} {arguments}"),
+        None => format!("mj {arguments}"),
+    }
+}
+
+/// One active top-level session, as a stop or detach message names it.
+struct ActiveSession {
+    id: String,
+    title: String,
+    lifecycle: mj_controller::server::ViewerLifecycleCategory,
+}
+
+/// The top-level sessions the daemon still holds on its dashboard, in every
+/// workspace, read from the runtime feed the dashboard itself follows. They
+/// are what the web API lists as active: the same lifecycle category, and no
+/// sub-agents, since each one belongs to a parent listed here and suspending
+/// the parent stops it. The socket is used rather than the web API so this
+/// works with the web viewer disabled.
+async fn active_sessions(client: &mut daemon::DaemonClient) -> Result<Vec<ActiveSession>> {
+    let mj_client::runtime_feed::RuntimeFrame::Snapshot { projection, .. } =
+        client.runtime_changes(None, false).await?
+    else {
+        bail!("the daemon answered a request for its sessions without a snapshot");
+    };
+    Ok(projection
+        .records
+        .values()
+        .filter(|record| !projection.subagents.contains_key(&record.id))
+        .map(|record| ActiveSession {
+            id: record.id.clone(),
+            title: record.listed_title().to_owned(),
+            lifecycle: mj_controller::server::ViewerLifecycleCategory::of(record.state),
+        })
+        .filter(|session| session.lifecycle.is_dashboard_visible())
+        .collect())
+}
+
+/// How many top-level sessions the running daemon is still running. It
+/// never starts a daemon.
+async fn active_session_count() -> Result<usize> {
+    Ok(active_sessions(&mut daemon::connect_existing().await?)
+        .await?
+        .len())
+}
+
+/// Suspend every active top-level session, together, and return once each
+/// suspension has ended, as `mj daemon stop --suspend-sessions` does before
+/// it stops the daemon. Suspending a parent stops its sub-agents. A session
+/// already suspending or being destroyed is left to that operation, which
+/// the daemon's graceful stop waits for. Fails, naming each session, when
+/// any suspension fails; those that succeeded stay suspended, so running the
+/// command again picks up only what is left. Returns how many sessions were
+/// active.
+async fn suspend_all_sessions(acknowledge_unpublished_work: bool) -> Result<usize> {
+    // Workers outlive a stopped daemon, so this starts one when none is
+    // running: only a daemon can suspend them.
+    let sessions = active_sessions(&mut daemon::connect_or_start().await?).await?;
+    let count = sessions.len();
+    if count == 0 {
+        return Ok(0);
+    }
+    println!(
+        "Suspending {count} active session{}…",
+        if count == 1 { "" } else { "s" }
+    );
+    let mut jobs = tokio::task::JoinSet::new();
+    for session in sessions {
+        let name = format!("{} ({})", session.id, session.title);
+        if session.lifecycle == mj_controller::server::ViewerLifecycleCategory::Suspending {
+            println!("{name} is already stopping.");
+            continue;
+        }
+        // A suspension answers when it has ended, which takes as long as its
+        // recovery copy, so each one has its own connection.
+        jobs.spawn(async move {
+            let result = async {
+                daemon::connect_existing()
+                    .await?
+                    .suspend_session_with_ack(session.id, acknowledge_unpublished_work)
+                    .await
+            }
+            .await;
+            (name, result)
+        });
+    }
+    let mut failures = Vec::new();
+    while let Some(joined) = jobs.join_next().await {
+        match joined {
+            Ok((name, Ok(()))) => println!("Suspended {name}."),
+            Ok((name, Err(error))) => failures.push(format!(
+                "{name}: {:#}",
+                api_commands::name_suspend_flags(error)
+            )),
+            Err(error) => failures.push(format!("a suspension task failed: {error}")),
+        }
+    }
+    if failures.is_empty() {
+        return Ok(count);
+    }
+    bail!(
+        "{} session{} did not suspend:\n  {}",
+        failures.len(),
+        if failures.len() == 1 { "" } else { "s" },
+        failures.join("\n  ")
+    )
 }
 
 fn install_panic_logging() {
@@ -1833,11 +1999,24 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 );
             }
         }
-        DaemonCommand::Stop => {
+        DaemonCommand::Stop(stop) => {
             mj_core::config::ensure_may_control_store(
                 &mj_core::config::data_dir(),
                 "stop the Mjolnir daemon",
             )?;
+            if stop.suspend_sessions {
+                let suspended = suspend_all_sessions(stop.acknowledge_unpublished_work)
+                    .await
+                    .context("the Mjolnir daemon was left running")?;
+                let daemon = daemon::connect_management().await?;
+                daemon.stop_and_wait().await?;
+                if suspended == 0 {
+                    println!("Mjolnir daemon stopped; no sessions were active.");
+                } else {
+                    println!("Mjolnir daemon stopped; every session is suspended.");
+                }
+                return Ok(());
+            }
             let daemon = match daemon::connect_management().await {
                 Ok(daemon) => daemon,
                 Err(error) if daemon::daemon_not_running(&error).is_some() => {
@@ -1847,7 +2026,11 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 Err(error) => return Err(error.context("Mjolnir daemon is not answering")),
             };
             daemon.stop_and_wait().await?;
-            println!("Mjolnir daemon stopped; detached workers remain active.");
+            println!(
+                "Mjolnir daemon stopped; detached workers remain active. \
+                 `{}` suspends them too.",
+                mj_command("daemon stop --suspend-sessions")
+            );
         }
         DaemonCommand::Restart => {
             let restarted = daemon::restart_daemon().await?;
