@@ -48,11 +48,8 @@ impl DashboardState {
             }
             WizardStep::Target => {
                 let target_template_id = nth_key(&self.config.targets, wizard.target);
-                if !self.target_offered(&target_template_id) {
-                    self.notices.set(
-                        self.target_missing_line(&target_template_id)
-                            .unwrap_or_else(|| format!("{target_template_id} is not available.")),
-                    );
+                if let Some(reason) = self.target_unavailable(&target_template_id) {
+                    self.notices.set(reason);
                     self.mode = Mode::New(wizard);
                     return DashboardAction::None;
                 }
@@ -336,7 +333,9 @@ impl DashboardState {
                         .is_some_and(|options| options.available),
             ),
             workspace_id: wizard.workspace_id.clone(),
-            profile_id: self.nth_offered_profile(wizard.profile),
+            // A profile that vanished after the launch was submitted is
+            // refused by name by the controller.
+            profile_id: self.nth_offered_profile(wizard.profile).unwrap_or_default(),
             bundle_id: if raw_project {
                 raw_project_context_id(&wizard.project_directory)
             } else {

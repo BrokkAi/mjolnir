@@ -1275,6 +1275,10 @@ impl Controller {
                 .remove(old_id)
                 .expect("target was checked in the transaction");
             config.targets.insert(new_id.to_owned(), target);
+            // A runtime switched off stays off under its new name.
+            if config.disabled_targets.remove(old_id) {
+                config.disabled_targets.insert(new_id.to_owned());
+            }
             Ok(())
         }) {
             Ok(result) => result,

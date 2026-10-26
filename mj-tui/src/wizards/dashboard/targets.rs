@@ -124,7 +124,8 @@ impl DashboardState {
         session_id: &str,
         target_id: &str,
     ) -> Option<String> {
-        self.resume_target_incompatibility(session_id, target_id)
+        self.target_unavailable(target_id)
+            .or_else(|| self.resume_target_incompatibility(session_id, target_id))
     }
 
     /// Why this session could not resume on `target_id` even once the target

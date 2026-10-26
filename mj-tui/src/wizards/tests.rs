@@ -3679,6 +3679,62 @@ fn availability_answers_change_the_open_picker_only_when_they_differ() {
     );
 }
 
+// Hard-won: #1370: an answer under the help overlay left a stale profile index, one mid-launch closed the wizard, and the startup check raced first-run setup.
+#[test]
+fn availability_answers_reach_a_wizard_under_help_and_spare_a_launch() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.hold_availability_check();
+    assert_eq!(
+        dashboard.take_availability_check(),
+        None,
+        "nothing is checked while first-run setup decides"
+    );
+    dashboard.release_availability_check();
+    let Some(DashboardAction::CheckAvailability { generation }) =
+        dashboard.take_availability_check()
+    else {
+        panic!("the startup check starts once setup is done");
+    };
+    open_new_session_wizard(&mut dashboard);
+    let last = dashboard.offered_profiles().count() - 1;
+    let chosen = dashboard.nth_offered_profile(last).unwrap();
+    match &mut dashboard.mode {
+        Mode::New(wizard) => wizard.profile = last,
+        _ => panic!("expected the new-session wizard"),
+    }
+    dashboard.begin_help();
+    let first = dashboard.nth_offered_profile(0).unwrap();
+    let mut answer = crate::test_support::availability_answer(&dashboard, &[], &[]);
+    answer.profiles.get_mut(&first).unwrap().1 = Some("gone".into());
+    dashboard.apply_availability_check(generation, Ok(answer));
+    dashboard.handle_key(key(KeyCode::Esc));
+    let wizard = new_wizard(&dashboard);
+    assert_eq!(
+        dashboard.nth_offered_profile(wizard.profile).as_deref(),
+        Some(chosen.as_str()),
+        "the wizard under help keeps its choice"
+    );
+    crate::test_support::drawn(&mut dashboard, 140, 40);
+
+    match &mut dashboard.mode {
+        Mode::New(wizard) => wizard.step = WizardStep::Launching,
+        _ => panic!("expected the new-session wizard"),
+    }
+    crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+        let mut answer = crate::test_support::availability_answer(dashboard, &[], &[]);
+        for (_, missing) in answer.profiles.values_mut() {
+            *missing = Some("gone".into());
+        }
+        answer
+    });
+    assert_eq!(
+        new_wizard(&dashboard).step,
+        WizardStep::Launching,
+        "a submitted launch is left to its own preflight"
+    );
+    crate::test_support::drawn(&mut dashboard, 140, 40);
+}
+
 /// A runtime the wizard already chose that turns out to be gone sends the
 /// wizard back to the target step with the reason, rather than launching on
 /// it or silently swapping in another.

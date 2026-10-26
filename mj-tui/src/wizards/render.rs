@@ -248,7 +248,9 @@ pub(crate) fn render_new_wizard(
                             .is_some_and(|options| options.available),
                     )
                 }),
-                profile_id: &dashboard.nth_offered_profile(wizard.profile),
+                profile_id: &dashboard
+                    .nth_offered_profile(wizard.profile)
+                    .unwrap_or_default(),
                 project_label: if raw_project {
                     "Project directory"
                 } else {

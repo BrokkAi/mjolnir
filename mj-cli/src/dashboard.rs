@@ -528,6 +528,10 @@ pub(crate) async fn run_dashboard_for_workspace(
         context.restore_upgrade(resume).await;
     }
     if automatic_setup {
+        // First-run setup decides whether this is a new installation from
+        // whether the configuration is empty, so nothing else may add to it
+        // first.
+        context.dashboard.hold_availability_check();
         io::spawn_first_run_setup(
             context.dashboard_io_tx.clone(),
             context.critical_operations.clone(),

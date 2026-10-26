@@ -1280,6 +1280,12 @@ fn configuration_id_rename_rewrites_durable_session_references() {
     controller
         .rename_profile_id("codex", "codex-renamed")
         .unwrap();
+    // Hard-won: #1370: a runtime switched off came back on under its new name.
+    let (_, ()) = Config::update(|config| {
+        config.disabled_targets.insert("podman".into());
+        Ok(())
+    })
+    .unwrap();
     controller
         .rename_target_id("podman", "podman-renamed")
         .unwrap();
@@ -1290,6 +1296,7 @@ fn configuration_id_rename_rewrites_durable_session_references() {
     assert_eq!(session.target_template_id, "podman-renamed");
     assert!(loaded.config.profiles.contains_key("codex-renamed"));
     assert!(loaded.config.targets.contains_key("podman-renamed"));
+    assert!(loaded.config.enabled_target("podman-renamed").is_none());
     assert!(!config_rename_journal_path().exists());
 }
 

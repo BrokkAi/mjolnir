@@ -561,11 +561,14 @@ pub(crate) fn spawn_availability_check(
         updates,
         move |cancelled| {
             use mj_controller::setup::{self, DEFAULT_IMAGE};
+            // Only quitting stops the check. A host that runs out the
+            // deadline fails its own probe; every other answer still lands.
+            let quit = cancelled.clone();
             let executor =
                 CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(60));
             let report =
                 setup::check_availability(&mj_core::config::config_path(), &executor, &|| {
-                    executor.is_cancelled()
+                    quit.load(std::sync::atomic::Ordering::Acquire)
                 })?;
             let path = std::env::var_os("PATH");
             let local = report

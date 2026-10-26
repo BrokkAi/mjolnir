@@ -52,7 +52,12 @@ pub fn profile_presence(
         profile.auth_scheme(),
         AuthScheme::NativeLogin | AuthScheme::NativeLoginStore
     );
-    if logs_in_at_home && !profile.home.is_dir() && !harness_cli_installed(profile.kind, executor) {
+    // A probe that could not run says nothing, so only a command known to
+    // be absent makes the profile missing.
+    if logs_in_at_home
+        && !profile.home.is_dir()
+        && harness_cli_installed(profile.kind, executor) == Some(false)
+    {
         let name = profile.kind.display_name();
         return Err(format!(
             "{name} is not installed here: {} does not exist and `{}` is not on PATH. Install {name}, or turn the profile off in Settings › Profiles.",

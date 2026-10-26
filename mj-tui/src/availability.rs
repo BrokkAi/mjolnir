@@ -72,6 +72,9 @@ pub struct AvailabilityChecked {
 pub(crate) struct Availability {
     /// A check should start: at startup, and whenever a picker opens.
     wanted: bool,
+    /// No check may start: first-run setup has not finished deciding
+    /// whether the configuration is new.
+    held: bool,
     in_flight: Option<u64>,
     generation: u64,
     profiles: BTreeMap<String, (HarnessProfile, Option<String>)>,
@@ -86,6 +89,7 @@ impl Default for Availability {
     fn default() -> Self {
         Self {
             wanted: true,
+            held: false,
             in_flight: None,
             generation: 0,
             profiles: BTreeMap::new(),
@@ -111,12 +115,25 @@ impl DashboardState {
         self.availability.wanted = true;
     }
 
+    /// Keep checks from starting until [`Self::release_availability_check`].
+    pub fn hold_availability_check(&mut self) {
+        self.availability.held = true;
+    }
+
+    pub fn release_availability_check(&mut self) {
+        self.availability.held = false;
+    }
+
     /// Start a check if one is wanted and none is running. Settings holds
     /// its own draft of profiles and machines, so a check waits for it to
     /// close rather than write under it.
     pub fn take_availability_check(&mut self) -> Option<DashboardAction> {
         let availability = &mut self.availability;
-        if !availability.wanted || availability.in_flight.is_some() || setup_open(&self.mode) {
+        if !availability.wanted
+            || availability.held
+            || availability.in_flight.is_some()
+            || setup_open(&self.mode)
+        {
             return None;
         }
         availability.wanted = false;
@@ -189,12 +206,11 @@ impl DashboardState {
             .filter(|(id, _)| self.profile_missing(id).is_none())
     }
 
-    /// The id of the offered profile at `index`.
-    pub(crate) fn nth_offered_profile(&self, index: usize) -> String {
+    /// The id of the offered profile at `index`, if there is one.
+    pub(crate) fn nth_offered_profile(&self, index: usize) -> Option<String> {
         self.offered_profiles()
             .nth(index)
             .map(|(id, _)| id.to_owned())
-            .expect("a wizard opens only with an offered profile")
     }
 
     /// Why enabled profile `id` is missing, from the latest answer about it
@@ -241,6 +257,18 @@ impl DashboardState {
             .collect();
         lines.extend(self.machines_without_runtime_lines());
         lines
+    }
+
+    /// Why runtime `id` cannot be chosen for new work, or `None` when it can.
+    /// Every picker's target step asks this.
+    pub(crate) fn target_unavailable(&self, id: &str) -> Option<String> {
+        if self.target_offered(id) {
+            return None;
+        }
+        Some(
+            self.target_missing_line(id)
+                .unwrap_or_else(|| format!("{id} is not available.")),
+        )
     }
 
     /// Whether runtime `id` is offered for new work.
@@ -327,9 +355,9 @@ impl DashboardState {
     }
 
     /// The ids an open wizard has chosen, so an answer that removes one can
-    /// move the wizard off it.
+    /// move the wizard off it. A wizard under the help overlay counts.
     fn wizard_selection(&self) -> Option<(Option<String>, String)> {
-        match &self.mode {
+        match wizard_mode(&self.mode) {
             Mode::New(wizard) => Some((
                 self.offered_profiles()
                     .nth(wizard.profile)
@@ -346,24 +374,31 @@ impl DashboardState {
         }
     }
 
-    /// Keep an open wizard on the profile and runtime it had chosen. One
-    /// that is no longer offered gives way to the first that is, and the
+    /// Keep an open wizard on the profile and runtime it had chosen, by id.
+    /// One that is no longer offered gives way to the first that is, and the
     /// wizard returns to that step so the change is seen before anything
-    /// launches. A wizard left with nothing to offer closes with the reason.
+    /// launches. A launch already submitted keeps its choices and is left to
+    /// its own preflight. A wizard left with nothing to offer, before it
+    /// launches, closes with the reason.
     fn reselect_wizard(&mut self, selected: Option<(Option<String>, String)>) {
+        use crate::wizards::WizardStep;
         let Some((profile_id, target_id)) = selected else {
             return;
         };
-        let profiles: Vec<String> = match &self.mode {
-            Mode::New(_) => self
-                .offered_profiles()
-                .map(|(id, _)| id.to_owned())
-                .collect(),
-            Mode::Resume(wizard) => self
-                .resume_wizard_profiles(wizard)
-                .into_iter()
-                .map(|(id, _)| id.clone())
-                .collect(),
+        let (profiles, launching): (Vec<String>, bool) = match wizard_mode(&self.mode) {
+            Mode::New(wizard) => (
+                self.offered_profiles()
+                    .map(|(id, _)| id.to_owned())
+                    .collect(),
+                wizard.step == WizardStep::Launching,
+            ),
+            Mode::Resume(wizard) => (
+                self.resume_wizard_profiles(wizard)
+                    .into_iter()
+                    .map(|(id, _)| id.clone())
+                    .collect(),
+                wizard.step == WizardStep::Launching,
+            ),
             _ => return,
         };
         let first_target = self
@@ -371,13 +406,16 @@ impl DashboardState {
             .targets
             .keys()
             .position(|id| self.target_offered(id));
-        if profiles.is_empty() || first_target.is_none() {
+        if !launching && (profiles.is_empty() || first_target.is_none()) {
             let reason = match profile_id.as_deref() {
                 Some(id) if profiles.is_empty() => self
                     .profile_missing(id)
-                    .map(|reason| format!("{id}: {reason}"))
-                    .unwrap_or_else(|| "No profile is available.".to_owned()),
-                _ => "No runtime is available.".to_owned(),
+                    .map(|reason| format!("No profile is available here. {id}: {reason}"))
+                    .unwrap_or_else(|| "No profile is available here.".to_owned()),
+                _ => self
+                    .target_missing_line(&target_id)
+                    .map(|reason| format!("No runtime is available here. {target_id}: {reason}"))
+                    .unwrap_or_else(|| "No runtime is available here.".to_owned()),
             };
             self.mode = Mode::Dashboard;
             self.set_failure_notice(reason);
@@ -386,31 +424,32 @@ impl DashboardState {
         let profile = profile_id
             .as_deref()
             .and_then(|id| profiles.iter().position(|offered| offered == id));
-        let target = self
-            .config
-            .targets
-            .keys()
-            .position(|id| *id == target_id)
-            .filter(|_| self.target_offered(&target_id));
-        let mut notice = None;
-        match &mut self.mode {
-            Mode::New(wizard) => {
-                wizard.profile = profile.unwrap_or(0);
-                wizard.target = target.or(first_target).unwrap_or(0);
-                notice =
-                    return_to_changed_step(&mut wizard.step, profile.is_none(), target.is_none());
-            }
+        let target_index = self.config.targets.keys().position(|id| *id == target_id);
+        let target = target_index.filter(|_| self.target_offered(&target_id));
+        let last_profile = profiles.len().saturating_sub(1);
+        let mut gone = None;
+        let mut place =
+            |step: &mut WizardStep, wizard_profile: &mut usize, wizard_target: &mut usize| {
+                if *step == WizardStep::Launching {
+                    // Keep pointing at the same choices; the launch carries them.
+                    *wizard_profile = profile.unwrap_or((*wizard_profile).min(last_profile));
+                    *wizard_target = target_index.unwrap_or(*wizard_target);
+                    return;
+                }
+                *wizard_profile = profile.unwrap_or(0);
+                *wizard_target = target.or(first_target).unwrap_or(0);
+                gone = return_to_changed_step(step, profile.is_none(), target.is_none());
+            };
+        match wizard_mode_mut(&mut self.mode) {
+            Mode::New(wizard) => place(&mut wizard.step, &mut wizard.profile, &mut wizard.target),
             Mode::Resume(wizard) => {
-                wizard.profile = profile.unwrap_or(0);
-                wizard.target = target.or(first_target).unwrap_or(0);
-                notice =
-                    return_to_changed_step(&mut wizard.step, profile.is_none(), target.is_none());
+                place(&mut wizard.step, &mut wizard.profile, &mut wizard.target)
             }
             _ => {}
         }
-        if let Some(gone) = notice {
+        if let Some(gone) = gone {
             let (id, reason) = match gone {
-                crate::wizards::WizardStep::Profile => {
+                WizardStep::Profile => {
                     let id = profile_id.unwrap_or_default();
                     let reason = self.profile_missing(&id).map(str::to_owned);
                     (id, reason)
@@ -461,6 +500,21 @@ fn return_to_changed_step(
         return Some(WizardStep::Target);
     }
     None
+}
+
+/// The mode under any help overlay, which keeps the wizard it was opened over.
+fn wizard_mode(mode: &Mode) -> &Mode {
+    match mode {
+        Mode::Help(overlay) => wizard_mode(&overlay.return_to),
+        mode => mode,
+    }
+}
+
+fn wizard_mode_mut(mode: &mut Mode) -> &mut Mode {
+    match mode {
+        Mode::Help(overlay) => wizard_mode_mut(&mut overlay.return_to),
+        mode => mode,
+    }
 }
 
 fn setup_open(mode: &Mode) -> bool {

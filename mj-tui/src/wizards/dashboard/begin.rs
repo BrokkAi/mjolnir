@@ -14,16 +14,29 @@ impl DashboardState {
     }
 
     pub(crate) fn begin_new_wizard(&mut self) -> DashboardAction {
-        if self.offered_profiles().next().is_none() || self.config.targets.is_empty() {
+        // Opening a picker is when what is there matters; the answer arrives
+        // in the background and changes the list only if it differs. It is
+        // asked for even when nothing is offered now, so a stale answer is
+        // replaced.
+        self.want_availability_check();
+        if self.offered_profiles().next().is_none() {
             self.begin_settings_section("profiles", None);
             if let Some(missing) = self.missing_profiles_notice() {
                 self.notices.set(missing);
             }
             return DashboardAction::None;
         }
-        // Opening a picker is when what is there matters; the answer arrives
-        // in the background and changes the list only if it differs.
-        self.want_availability_check();
+        if self.offered_target_indices().is_empty() {
+            self.begin_settings_section("targets", None);
+            let missing = self.missing_target_lines();
+            if !missing.is_empty() {
+                self.notices.set(format!(
+                    "No runtime is available here. {}",
+                    missing.join(" ")
+                ));
+            }
+            return DashboardAction::None;
+        }
         let interactive = self.recent_launch.as_ref().map(|recent| LaunchRecency {
             bundle_id: recent.bundle_id.clone(),
             last_profile: recent.profile_id.clone(),
@@ -51,7 +64,9 @@ impl DashboardState {
         let target = self.offered_target_index_or_first(
             recent.map_or("localhost", |session| session.target_template_id.as_str()),
         );
-        let profile_id = self.nth_offered_profile(profile);
+        let profile_id = self
+            .nth_offered_profile(profile)
+            .expect("an offered profile was checked above");
         let profile_id = profile_id.as_str();
         let mut delegation = subagents::SubagentDraft::new(self.state.last_subagent_policy.clone());
         delegation.refresh_create(
@@ -120,14 +135,16 @@ impl DashboardState {
                 .set("This session has no verified recovery copy to resume.");
             return DashboardAction::None;
         }
-        if self.compatible_profiles(&session.id).is_empty() || self.config.targets.is_empty() {
+        self.want_availability_check();
+        if self.compatible_profiles(&session.id).is_empty()
+            || self.offered_target_indices().is_empty()
+        {
             self.notices.set(
                 self.missing_profiles_notice()
                     .unwrap_or_else(|| "Resume needs a profile and a target template.".into()),
             );
             return DashboardAction::None;
         }
-        self.want_availability_check();
         let profile = self
             .compatible_profiles(&session.id)
             .iter()
@@ -185,14 +202,14 @@ impl DashboardState {
         profile_id: Option<&str>,
         target_id: Option<&str>,
     ) -> DashboardAction {
-        if self.offered_profiles().next().is_none() || self.config.targets.is_empty() {
+        self.want_availability_check();
+        if self.offered_profiles().next().is_none() || self.offered_target_indices().is_empty() {
             self.notices.set(
                 self.missing_profiles_notice()
                     .unwrap_or_else(|| "Restoring needs a profile and a target template.".into()),
             );
             return DashboardAction::None;
         }
-        self.want_availability_check();
         // A wizard opened now could only end in a refused Restore.
         if self.archive_restore_in_flight(&wiki_id) {
             self.notices.set(super::resume::ARCHIVE_RESTORE_IN_FLIGHT);
@@ -259,14 +276,16 @@ impl DashboardState {
                 .set("This session already has an operation in progress.");
             return DashboardAction::None;
         }
-        if self.compatible_profiles(&session.id).is_empty() || self.config.targets.is_empty() {
+        self.want_availability_check();
+        if self.compatible_profiles(&session.id).is_empty()
+            || self.offered_target_indices().is_empty()
+        {
             self.notices.set(
                 self.missing_profiles_notice()
                     .unwrap_or_else(|| "Move needs a profile and a target template.".into()),
             );
             return DashboardAction::None;
         }
-        self.want_availability_check();
         let profile = self
             .compatible_profiles(&session.id)
             .iter()

@@ -249,7 +249,7 @@ fn discover_installed_harnesses(
             });
             continue;
         }
-        if harness_cli_installed(kind, executor) {
+        if harness_cli_installed(kind, executor) == Some(true) {
             homes.push(DiscoveredHome {
                 kind,
                 path: home,
@@ -260,20 +260,25 @@ fn discover_installed_harnesses(
     }
 }
 
-/// Whether the harness's own command answers on this machine. Discovery
-/// offers a profile for an installed command before its first login, and a
+/// Whether the harness's own command answers on this machine, or `None`
+/// when the probe could not run (cancelled, timed out). Discovery offers a
+/// profile for an installed command before its first login, and a
 /// configured profile without a home is still present while it does.
-pub(crate) fn harness_cli_installed(kind: HarnessKind, executor: &impl CommandExecutor) -> bool {
+pub(crate) fn harness_cli_installed(
+    kind: HarnessKind,
+    executor: &impl CommandExecutor,
+) -> Option<bool> {
     let probe = CommandSpec::new(kind.cli_binary_name(), ["--version"])
         .purpose("detect installed harness before first login");
     match executor.execute(&probe) {
-        Ok(output) => output.status == 0,
+        Ok(output) => Some(output.status == 0),
+        Err(error) if crate::controller::is_missing_command(&error) => Some(false),
         Err(error) => {
             tracing::debug!(
                 harness = kind.id(),
                 "installation probe unavailable: {error:#}"
             );
-            false
+            None
         }
     }
 }

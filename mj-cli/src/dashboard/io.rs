@@ -1331,13 +1331,16 @@ impl DashboardContext {
                 self.dashboard.welcome_configured(report.summary());
                 self.dashboard.welcome_managed_setup_available(no_agents);
             }
-            DashboardIoUpdate::FirstRunChecked(result) => match result {
+            DashboardIoUpdate::FirstRunChecked(result) => {
+                self.dashboard.release_availability_check();
+                match result {
                 Ok(Some(errors)) => self.dashboard.welcome_checked(errors),
                 Ok(None) => {}
                 Err(error) => self.dashboard.welcome_checked(vec![format!(
                     "Setup could not finish: {error}. Run `mj setup` to retry."
                 )]),
-            },
+                }
+            }
             DashboardIoUpdate::SetupSaved {
                 generation,
                 result,

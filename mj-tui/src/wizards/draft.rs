@@ -535,10 +535,9 @@ impl WizardDraft for NewWizard {
         dashboard.offered_profiles().count()
     }
 
-    /// Every offered target can start a new session; what is not there is
-    /// not offered.
-    fn target_rejection(&self, _dashboard: &DashboardState, _target_id: &str) -> Option<String> {
-        None
+    /// A new session can start on any offered target.
+    fn target_rejection(&self, dashboard: &DashboardState, target_id: &str) -> Option<String> {
+        dashboard.target_unavailable(target_id)
     }
 
     /// A new session can start on any target.
