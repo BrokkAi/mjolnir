@@ -1212,26 +1212,34 @@ fn inherited_git_settings_reject_malformed_or_non_utf8_output() {
 #[test]
 fn global_git_settings_read_a_missing_global_file_as_no_settings() {
     let home = tempfile::tempdir().unwrap();
-    let git = |args: &[&str]| {
+    let git = || {
         let mut command = Command::new("git");
         command
             .env_remove("GIT_CONFIG_GLOBAL")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("HOME", home.path())
-            .env("XDG_CONFIG_HOME", home.path().join("xdg"))
-            .args(args);
+            .env("XDG_CONFIG_HOME", home.path().join("xdg"));
         command
     };
 
-    assert!(read_global_git_settings(git(&[])).unwrap().is_empty());
+    assert!(read_global_git_settings(git()).unwrap().unwrap().is_empty());
+    assert!(!global_git_identity(git()).unwrap().is_complete());
 
-    let status = git(&["config", "--global", "user.name", "Ada Lovelace"])
-        .status()
-        .unwrap();
-    assert!(status.success());
+    // The prompt's answer must create the missing file and read back whole.
+    let identity = write_global_git_identity(&git, " Ada Lovelace ", "ada@example.test").unwrap();
     assert_eq!(
-        read_global_git_settings(git(&[])).unwrap(),
-        BTreeMap::from([("user.name".to_owned(), "Ada Lovelace".to_owned())])
+        identity,
+        GitIdentity {
+            name: Some("Ada Lovelace".to_owned()),
+            email: Some("ada@example.test".to_owned()),
+        }
+    );
+    assert_eq!(
+        read_global_git_settings(git()).unwrap().unwrap(),
+        BTreeMap::from([
+            ("user.email".to_owned(), "ada@example.test".to_owned()),
+            ("user.name".to_owned(), "Ada Lovelace".to_owned()),
+        ])
     );
 }
 

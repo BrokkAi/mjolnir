@@ -84,6 +84,23 @@ pub(crate) async fn apply_dashboard_action(
     context.cancel_stale_path_input();
     match action {
         DashboardAction::None => {}
+        DashboardAction::CheckGitIdentity => {
+            super::io::spawn_io(
+                "reading the Git identity",
+                context.dashboard_io_tx.clone(),
+                mj_controller::controller::controller_git_identity,
+                DashboardIoUpdate::GitIdentityChecked,
+            );
+        }
+        DashboardAction::SaveGitIdentity { name, email } => {
+            super::io::spawn_critical_io(
+                context.critical_operations.clone(),
+                "saving the Git identity",
+                context.dashboard_io_tx.clone(),
+                move || mj_controller::controller::set_controller_git_identity(&name, &email),
+                DashboardIoUpdate::GitIdentitySaved,
+            );
+        }
         DashboardAction::CopyNativeSessionId { native_session_id } => {
             context.copy_text(&native_session_id, "Copied session ID")?;
         }

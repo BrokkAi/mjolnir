@@ -1695,14 +1695,14 @@ fn inherited_git_setting_commands(
 }
 
 fn controller_git_settings() -> Result<BTreeMap<String, String>> {
-    read_global_git_settings(Command::new("git"))
+    Ok(read_global_git_settings(Command::new("git"))?.unwrap_or_default())
 }
 
 /// Reads the inherited keys from the global Git configuration. A user with
 /// no global configuration file at all is the same as one who set none of
 /// these keys: `--get-regexp` exits 1 for both, while `--list` fails on the
-/// missing file.
-fn read_global_git_settings(mut git: Command) -> Result<BTreeMap<String, String>> {
+/// missing file. `None` means Git itself is not installed.
+fn read_global_git_settings(mut git: Command) -> Result<Option<BTreeMap<String, String>>> {
     let output = match git
         .args([
             "config",
@@ -1716,18 +1716,97 @@ fn read_global_git_settings(mut git: Command) -> Result<BTreeMap<String, String>
         .output()
     {
         Ok(output) => output,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).context("read controller Git configuration"),
     };
     match output.status.code() {
-        Some(0) => parse_inherited_git_settings(&output.stdout),
-        Some(1) => Ok(BTreeMap::new()),
+        Some(0) => parse_inherited_git_settings(&output.stdout).map(Some),
+        Some(1) => Ok(Some(BTreeMap::new())),
         _ => bail!(
             "read controller Git configuration failed with status {}: {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         ),
     }
+}
+
+/// The commit author identity in this host's global Git configuration.
+/// Sessions on the host use it directly and container sessions inherit it,
+/// so without both parts no session can commit.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GitIdentity {
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+
+impl GitIdentity {
+    pub fn is_complete(&self) -> bool {
+        self.name.is_some() && self.email.is_some()
+    }
+}
+
+/// Reads the controller host's Git author identity. Blocking: run it from
+/// supervised background work, never on a UI loop.
+pub fn controller_git_identity() -> Result<GitIdentity> {
+    global_git_identity(Command::new("git"))
+}
+
+/// Writes the author identity into the controller host's global Git
+/// configuration, creating the file when there is none, and returns the
+/// identity Git now reports. Blocking, like [`controller_git_identity`].
+pub fn set_controller_git_identity(name: &str, email: &str) -> Result<GitIdentity> {
+    write_global_git_identity(&|| Command::new("git"), name, email)
+}
+
+fn global_git_identity(git: Command) -> Result<GitIdentity> {
+    // Without Git there is no identity to set up, and asking for one would
+    // only fail on save.
+    let mut settings = read_global_git_settings(git)?
+        .context("Git is not installed on this host, so sessions have no commit author")?;
+    let mut take = |key| {
+        settings
+            .remove(key)
+            .filter(|value| !value.trim().is_empty())
+    };
+    Ok(GitIdentity {
+        name: take("user.name"),
+        email: take("user.email"),
+    })
+}
+
+fn write_global_git_identity(
+    git: &dyn Fn() -> Command,
+    name: &str,
+    email: &str,
+) -> Result<GitIdentity> {
+    let name = validated_identity_part("name", name)?;
+    let email = validated_identity_part("email", email)?;
+    ensure!(email.contains('@'), "Git email {email:?} needs an @");
+    for (key, value) in [("user.name", name), ("user.email", email)] {
+        let mut command = git();
+        command.args(["config", "--global", "--replace-all", "--", key, value]);
+        let output = mj_core::subprocess::run_with_input(&mut command, b"")
+            .with_context(|| format!("set Git {key}"))?;
+        ensure!(
+            output.status.success(),
+            "set Git {key} failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    global_git_identity(git())
+}
+
+fn validated_identity_part<'a>(label: &str, value: &'a str) -> Result<&'a str> {
+    let value = value.trim();
+    ensure!(!value.is_empty(), "Git {label} cannot be empty");
+    // Git strips angle brackets and line breaks from author fields, so a
+    // value containing them would not be the identity the user typed.
+    ensure!(
+        !value.contains(['<', '>']) && !value.chars().any(char::is_control),
+        "Git {label} cannot contain angle brackets or control characters"
+    );
+    Ok(value)
 }
 
 fn parse_inherited_git_settings(output: &[u8]) -> Result<BTreeMap<String, String>> {

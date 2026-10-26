@@ -144,6 +144,10 @@ pub(super) fn router(options: ServerOptions) -> Router {
         .route("/api/paths/complete", post(complete_path))
         .route("/api/projects/discover", post(discover_projects))
         .route("/api/projects", get(read_projects).post(refresh_projects))
+        .route(
+            "/api/git-identity",
+            get(read_git_identity).post(save_git_identity),
+        )
         .route("/api/moves/prepare", post(prepare_move))
         .route(
             "/api/sessions/{session_id}/container-upgrade",
@@ -219,14 +223,20 @@ pub(super) async fn upgrade_admission(
     next: Next,
 ) -> Response<Body> {
     if !gate.is_open() {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [("retry-after", "1"), (UPGRADE_HEADER, "pending")],
-            "Mjolnir is completing an upgrade",
-        )
-            .into_response();
+        return upgrade_pending_response();
     }
     next.run(request).await
+}
+
+/// The refusal a viewer request gets when handoff admission is closed. The
+/// browser keeps the request and sends it again to the next daemon.
+pub(super) fn upgrade_pending_response() -> Response<Body> {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [("retry-after", "1"), (UPGRADE_HEADER, "pending")],
+        "Mjolnir is completing an upgrade",
+    )
+        .into_response()
 }
 
 pub(super) async fn require_session(

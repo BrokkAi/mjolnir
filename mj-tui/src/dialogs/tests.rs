@@ -1231,6 +1231,77 @@ fn golden_dashboard_dialogs() {
     assert!(matches!(&usage.mode,Mode::SessionUsageReport(dialog) if dialog.report.is_none()));
     usage.handle_key(key(KeyCode::Esc));
 
+    // The first new session asks the binary to read the host's Git identity;
+    // asking again while that read runs starts nothing more.
+    let mut identity = dashboard_with_session(running_session());
+    identity.require_git_identity_check();
+    let action = identity.dispatch_command(crate::CommandId::NewSessionWizard);
+    writeln!(
+        output,
+        "new session before the Git identity check: {action:?}"
+    )
+    .unwrap();
+    let action = identity.dispatch_command(crate::CommandId::NewSessionWizard);
+    writeln!(output, "new session while the check runs: {action:?}").unwrap();
+    identity.apply_git_identity_check(Ok((Some("Ada Lovelace".into()), None)));
+    for character in "ada.example.com".chars() {
+        identity.handle_key(key(KeyCode::Char(character)));
+    }
+    append_dialog_render(
+        &mut output,
+        "Git identity with the email typed",
+        100,
+        24,
+        &drawn(&mut identity, 100, 24),
+    );
+    let action = identity.handle_key(key(KeyCode::Enter));
+    writeln!(output, "action: {action:?}").unwrap();
+    let action = identity.handle_key(key(KeyCode::Esc));
+    writeln!(output, "escape while saving: {action:?}").unwrap();
+    append_dialog_render(
+        &mut output,
+        "Git identity saving",
+        100,
+        24,
+        &drawn(&mut identity, 100, 24),
+    );
+    identity.apply_git_identity_save(Err("Git email \"ada.example.com\" needs an @".into()));
+    append_dialog_render(
+        &mut output,
+        "Git identity save failure keeps the fields",
+        100,
+        24,
+        &drawn(&mut identity, 100, 24),
+    );
+    let action = identity.handle_key(key(KeyCode::Enter));
+    writeln!(output, "action: {action:?}").unwrap();
+    identity.apply_git_identity_save(Ok(("Ada Lovelace".into(), "ada@example.com".into())));
+    let followup = identity.take_git_identity_followup();
+    writeln!(output, "follow-up after saving: {followup:?}").unwrap();
+    writeln!(
+        output,
+        "notice after saving: {:?}",
+        identity.notices.current()
+    )
+    .unwrap();
+    assert!(matches!(identity.mode, Mode::New(_)));
+    let action = identity.dispatch_command(crate::CommandId::NewSessionWizard);
+    assert!(!matches!(action, DashboardAction::CheckGitIdentity));
+
+    let mut skipped = dashboard_with_session(running_session());
+    skipped.require_git_identity_check();
+    skipped.dispatch_command(crate::CommandId::NewSessionWizard);
+    skipped.apply_git_identity_check(Ok((None, None)));
+    let action = skipped.handle_key(key(KeyCode::Esc));
+    writeln!(output, "skip: {action:?}").unwrap();
+    writeln!(
+        output,
+        "notice after skipping: {:?}",
+        skipped.notices.current()
+    )
+    .unwrap();
+    assert!(matches!(skipped.mode, Mode::New(_)));
+
     mj_core::golden::assert_golden(
         env!("CARGO_MANIFEST_DIR"),
         "dashboard-dialogs",

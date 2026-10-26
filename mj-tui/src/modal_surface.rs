@@ -196,6 +196,18 @@ impl DialogModal for RenameEditor {
     }
 }
 
+impl DialogModal for crate::dialogs::GitIdentityDialog {
+    dialog_form!(crate::dialogs::GitIdentityControl);
+
+    fn text_input_focused(&self) -> bool {
+        crate::dialogs::GitIdentityDialog::text_input_focused(self)
+    }
+
+    fn prepare(&mut self) {
+        self.prepare_dialog_state();
+    }
+}
+
 impl DialogModal for ConfigIdEditor {
     dialog_form!(DialogControl);
 
@@ -442,6 +454,7 @@ mode_surfaces!(
     SessionCpuReport,
     SessionUsageReport,
     EditContainer,
+    GitIdentity,
     Importing,
     ConfirmImportBundle,
     Confirm,

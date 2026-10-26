@@ -98,6 +98,9 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
         }
         Mode::NoticeLog(dialog) => render_notice_log(frame, area, dashboard, dialog, &mut surfaces),
         Mode::EditContainer(editor) => render_container_editor(frame, area, editor, &mut surfaces),
+        Mode::GitIdentity(dialog) => {
+            crate::dialogs::render_git_identity_dialog(frame, area, dialog, &mut surfaces)
+        }
         Mode::Importing(progress) => render_import_progress(frame, area, progress, &mut surfaces),
         Mode::ConfirmImportBundle(confirmation) => {
             render_import_bundle_confirmation(frame, area, confirmation, &mut surfaces)

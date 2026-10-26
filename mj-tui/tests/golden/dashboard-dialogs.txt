@@ -802,3 +802,90 @@ Ent                                                                             
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
 Usa
+new session before the Git identity check: CheckGitIdentity
+new session while the check runs: None
+
+=== Git identity with the email typed (100x24) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                          │
+╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
+│ Create   Open                                                                   ersation.        │
+│hel ─────────────                                                                                 │
+│› · ACP pretty na  ╭ × Set up Git identity ───────────────────────────────────╮                   │
+│  Idle  podman  c  │Git on this host has no commit author, so sessions cannot │                   │
+│  │ No messages y  │commit. Mjolnir saves this to your global Git             │                   │
+│  │                │configuration.                                            │  ─────────────────╯
+│                   │                                                          │  ─────────────────╮
+│                   │Name:  Ada Lovelace                                       │                   │
+│                   │Email: ada.example.com                                    │   one to open.    │
+│                   │                                                          │  ─────────────────╯
+│                   │                                                          │  ────────── ▁   ▄ ╮
+│                   │                                                          │                   │
+│                   │  Skip     Save                                           │  ─────────────────╯
+│                   ╰──────────────────────────────────────────────────────────╯  ────────── ▁   ▄ ╮
+│                                                                                 ts  5H Resets    │
+│                                                                                                  │
+│                                      ││  codex-1   Codex        refreshing…                      │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
+action: SaveGitIdentity { name: "Ada Lovelace", email: "ada.example.com" }
+escape while saving: None
+
+=== Git identity saving (100x24) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                          │
+╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
+│ Create   Open                                                                   ersation.        │
+│hel ─────────────                                                                                 │
+│› · ACP pretty na  ╭ × Set up Git identity ───────────────────────────────────╮                   │
+│  Idle  podman  c  │Git on this host has no commit author, so sessions cannot │                   │
+│  │ No messages y  │commit. Mjolnir saves this to your global Git             │                   │
+│  │                │configuration.                                            │  ─────────────────╯
+│                   │                                                          │  ─────────────────╮
+│                   │Name:  Ada Lovelace                                       │                   │
+│                   │Email: ada.example.com                                    │   one to open.    │
+│                   │                                                          │  ─────────────────╯
+│                   │Saving Git identity…                                      │  ────────── ▁   ▄ ╮
+│                   │                                                          │                   │
+│                   │  Skip     Save                                           │  ─────────────────╯
+│                   ╰──────────────────────────────────────────────────────────╯  ────────── ▁   ▄ ╮
+│                                                                                 ts  5H Resets    │
+│                                                                                                  │
+│                                      ││  codex-1   Codex        refreshing…                      │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
+
+=== Git identity save failure keeps the fields (100x24) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                          │
+╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
+│ Create   Open                                                                   ersation.        │
+│hel ─────────────                                                                                 │
+│› · ACP pretty na  ╭ × Set up Git identity ───────────────────────────────────╮                   │
+│  Idle  podman  c  │Git on this host has no commit author, so sessions cannot │                   │
+│  │ No messages y  │commit. Mjolnir saves this to your global Git             │                   │
+│  │                │configuration.                                            │  ─────────────────╯
+│                   │                                                          │  ─────────────────╮
+│                   │Name:  Ada Lovelace                                       │                   │
+│                   │Email: ada.example.com                                    │   one to open.    │
+│                   │                                                          │  ─────────────────╯
+│                   │Git email "ada.example.com" needs an @                    │  ────────── ▁   ▄ ╮
+│                   │                                                          │                   │
+│                   │  Skip     Save                                           │  ─────────────────╯
+│                   ╰──────────────────────────────────────────────────────────╯  ────────── ▁   ▄ ╮
+│                                                                                 ts  5H Resets    │
+│                                                                                                  │
+│                                      ││  codex-1   Codex        refreshing…                      │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
+action: SaveGitIdentity { name: "Ada Lovelace", email: "ada.example.com" }
+follow-up after saving: None
+notice after saving: Some("Git identity saved: Ada Lovelace <ada@example.com>")
+skip: None
+notice after skipping: Some("Sessions cannot commit until Git has an identity; Mjolnir will ask again next start.")
