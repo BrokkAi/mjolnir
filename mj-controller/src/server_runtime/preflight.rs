@@ -245,5 +245,6 @@ pub(super) fn run_new_preflight_with_executor(
             })
             .collect(),
         local_changes_excluded: result.local_changes_excluded,
+        review_notice: result.review_notice.map(str::to_owned),
     })
 }

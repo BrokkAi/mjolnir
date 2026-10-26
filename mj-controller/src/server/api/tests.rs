@@ -2099,6 +2099,7 @@ async fn model_first_session_start_selects_the_profile_that_offers_the_model() {
         .reply
         .send(ActionOutcome::Accepted {
             session_id: Some("session-2".into()),
+            notice: None,
         })
         .unwrap();
     let response = response.await.unwrap().unwrap();
@@ -2240,6 +2241,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
         .reply
         .send(ActionOutcome::Accepted {
             session_id: Some("session-2".into()),
+            notice: None,
         })
         .unwrap();
 
@@ -2318,6 +2320,7 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
         .reply
         .send(ActionOutcome::Accepted {
             session_id: Some("session-2".into()),
+            notice: None,
         })
         .unwrap();
     assert_eq!(
@@ -2415,6 +2418,7 @@ async fn start_without_a_profile_uses_the_saved_default_to_break_quota_ties() {
         .reply
         .send(ActionOutcome::Accepted {
             session_id: Some("session-2".into()),
+            notice: None,
         })
         .unwrap();
     assert_eq!(
@@ -2466,6 +2470,7 @@ async fn start_without_a_saved_default_selects_a_model_with_an_explicit_target()
         .reply
         .send(ActionOutcome::Accepted {
             session_id: Some("session-2".into()),
+            notice: None,
         })
         .unwrap();
     assert_eq!(
@@ -2658,6 +2663,7 @@ async fn start_sizes_a_container_session_from_the_host_default_and_overrides() {
         .reply
         .send(ActionOutcome::Accepted {
             session_id: Some("session-2".into()),
+            notice: None,
         })
         .unwrap();
     assert_eq!(
@@ -4648,7 +4654,10 @@ async fn structured_inputs_are_listed_validated_and_forwarded() {
     );
     action
         .reply
-        .send(ActionOutcome::Accepted { session_id: None })
+        .send(ActionOutcome::Accepted {
+            session_id: None,
+            notice: None,
+        })
         .unwrap();
     assert_eq!(
         response.await.unwrap().unwrap().status(),
@@ -4742,7 +4751,10 @@ async fn resume_response_waits_until_a_stale_stopped_snapshot_shows_the_operatio
     assert!(matches!(request.action, ControllerAction::Resume { .. }));
     request
         .reply
-        .send(ActionOutcome::Accepted { session_id: None })
+        .send(ActionOutcome::Accepted {
+            session_id: None,
+            notice: None,
+        })
         .unwrap();
     tokio::task::yield_now().await;
     assert!(
@@ -5537,6 +5549,7 @@ async fn start_without_identifiers_uses_the_saved_default() {
         .reply
         .send(ActionOutcome::Accepted {
             session_id: Some("session-2".into()),
+            notice: None,
         })
         .unwrap();
     assert_eq!(
@@ -5566,6 +5579,7 @@ async fn start_without_identifiers_uses_the_saved_default() {
         .reply
         .send(ActionOutcome::Accepted {
             session_id: Some("session-2".into()),
+            notice: None,
         })
         .unwrap();
     assert_eq!(

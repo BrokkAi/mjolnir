@@ -888,7 +888,7 @@ impl Controller {
             base,
             no_later_history,
             subagents,
-            review,
+            mut review,
             no_project_memory,
             no_github_events,
             initial_prompt,
@@ -1016,13 +1016,14 @@ impl Controller {
             // validation has already refused anything else.
             let (host, resolved) =
                 crate::project_catalog::resolve_directory(template, directory, executor)?;
-            let review_requested = self.config.review.for_session(review.as_ref()).trigger
-                != mj_core::config::ReviewTrigger::Off
-                && mj_core::review::settings::can_review(&self.config, review.as_ref());
-            ensure!(
-                !resolved.plain_directory || !review_requested,
-                "a directory without a committed Git checkout cannot be reviewed; select a committed Git project or turn review off for this session"
-            );
+            if resolved.plain_directory
+                && mj_core::review::settings::plain_directory_turns_review_off(
+                    &self.config,
+                    review.as_ref(),
+                )
+            {
+                review = Some(mj_core::config::SessionReview::Off);
+            }
             let (id, project) =
                 crate::project_catalog::accept_resolved_directory(host, directory, resolved)?;
             (id, Some(project))

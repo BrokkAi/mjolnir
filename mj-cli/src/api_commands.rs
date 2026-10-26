@@ -1207,6 +1207,9 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     if let Some(turn_id) = response.turn_id {
         println!("turn {turn_id}");
     }
+    if let Some(notice) = &response.notice {
+        eprintln!("{notice}");
+    }
     Ok(())
 }
 

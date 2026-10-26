@@ -296,6 +296,9 @@ pub(crate) fn render_new_wizard(
                 remote_preflight_in_flight: wizard.remote_preflight_in_flight,
                 remote_preflight_error: wizard.remote_preflight_error.as_deref(),
                 local_changes_excluded: !raw_project,
+                review_notice: raw_project
+                    .then(|| wizard.selected_review_notice(&dashboard.config))
+                    .flatten(),
                 conversion: None,
             },
             &mut form,
@@ -726,6 +729,8 @@ pub(crate) struct ReviewWizardView<'a> {
     remote_preflight_in_flight: bool,
     remote_preflight_error: Option<&'a str>,
     local_changes_excluded: bool,
+    /// Why creating this session turns its review off, when it will.
+    review_notice: Option<&'a str>,
     /// Present only when a move converts a local checkout into an isolated
     /// workspace, so the review can say what travels before the confirmation.
     conversion: Option<&'a mj_core::state::RawConversionPreview>,
@@ -768,6 +773,7 @@ pub(crate) fn render_review_wizard(
         remote_preflight_in_flight,
         remote_preflight_error,
         local_changes_excluded,
+        review_notice,
         conversion,
     } = view;
     let target = &dashboard.config.targets[target_id];
@@ -934,6 +940,13 @@ pub(crate) fn render_review_wizard(
         ));
         row
     });
+    if let Some(notice) = review_notice {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            notice,
+            Style::default().fg(theme::palette().warning),
+        ));
+    }
     let queue_label = queue.map(|(count, _)| format!("Queued prompts: {count}"));
     if let Some(label) = &queue_label {
         lines.push(Line::raw(""));
@@ -1762,6 +1775,7 @@ pub(crate) fn render_resume_wizard(
                 remote_preflight_in_flight: false,
                 remote_preflight_error: None,
                 local_changes_excluded: false,
+                review_notice: None,
                 conversion: wizard
                     .preparation
                     .as_ref()

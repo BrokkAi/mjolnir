@@ -1827,6 +1827,16 @@ pub struct StartSelection {
 }
 
 impl SessionRecord {
+    /// Why review cannot run for this session, when it cannot: its folder
+    /// has no Git commits for review to find changes in.
+    #[must_use]
+    pub fn review_unavailable(&self) -> Option<&'static str> {
+        self.project
+            .as_ref()
+            .is_some_and(crate::repository::ProjectBundleSnapshot::primary_is_plain_directory)
+            .then_some(crate::review::settings::PLAIN_DIRECTORY_REVIEW_OFF)
+    }
+
     /// Checkout shape recorded by this session, before State applies any
     /// sub-agent borrowing relationship. Call [`State::checkout`] whenever
     /// State is available so a child resolves to its parent's owner.

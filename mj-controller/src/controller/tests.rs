@@ -859,6 +859,7 @@ fn registration_rejects_a_start_commit_it_cannot_honour() {
     windows,
     ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
 )]
+// Hard-won: 96713be6c: a review-enabled session in a folder without Git commits was refused instead of created with review off.
 #[test]
 fn registration_records_a_plain_local_directory_as_its_project() {
     const MARKER: &str = "MJ_TEST_PLAIN_PROJECT_CHILD";
@@ -886,22 +887,12 @@ fn registration_records_a_plain_local_directory_as_its_project() {
     };
     let mut options = launch_options(Vec::new());
     options.project_directory = Some(workspace.path().to_owned());
-    let error = controller
-        .register_session_with_resources("codex", "project", "local", "plain", options)
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("cannot be reviewed"),
-        "{error:#}"
-    );
-
-    let mut options = launch_options(Vec::new());
-    options.project_directory = Some(workspace.path().to_owned());
-    options.review = Some(mj_core::config::SessionReview::Off);
     let id = controller
         .register_session_with_resources("codex", "project", "local", "plain", options)
         .unwrap();
 
     let stored = &controller.state.sessions[&id];
+    assert_eq!(stored.review, Some(mj_core::config::SessionReview::Off));
     assert_eq!(stored.project_directory.as_deref(), Some(workspace.path()));
     assert!(stored.managed_worktree.is_none());
     let project = stored.project.as_ref().expect("plain project was recorded");

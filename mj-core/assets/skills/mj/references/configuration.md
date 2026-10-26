@@ -966,9 +966,9 @@ the new checkout is created below the repository's own `.mj/clones/` tree. A
 bare runtime on an EC2 machine launches one instance per session. See
 [SSH and SSH Podman](/ssh/) and [AWS EC2](/aws/).
 
-Review needs a committed Git checkout to capture changes. Create a local
-directory session with `mj new --review off`; automatic review for a plain
-directory is refused, and `/review` explains that it cannot capture changes.
+Review needs a committed Git checkout to capture changes. A local directory
+session without one is created with review off for that session, and `mj new`
+prints a notice saying so; `/review` explains that it cannot capture changes.
 
 ### Common container fields
 

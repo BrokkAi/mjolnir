@@ -1380,6 +1380,13 @@ pub(crate) async fn run_server(
                         continue;
                     };
                     let started_session_id = started.session.id.clone();
+                    // The controller turned review off for a session it
+                    // cannot review; tell whoever asked for it.
+                    let started_notice = (started.session.review
+                        == Some(mj_core::config::SessionReview::Off))
+                    .then(|| started.session.review_unavailable())
+                    .flatten()
+                    .map(str::to_owned);
                     let publication = if !action_cancellations.contains_key(&started.action_id) {
                         Err("phone action completed before its provisional session was published".into())
                     } else {
@@ -1411,6 +1418,7 @@ pub(crate) async fn run_server(
                         match &publication {
                             Ok(()) => ActionOutcome::Accepted {
                                 session_id: Some(started_session_id),
+                                notice: started_notice,
                             },
                             // Publication fails only for reasons this loop
                             // words itself -- a race for the new session, or
@@ -1447,7 +1455,7 @@ pub(crate) async fn run_server(
                     action_replies.resolve(
                         action_id,
                         match &result {
-                            Ok(()) => ActionOutcome::Accepted { session_id: session_id.clone() },
+                            Ok(()) => ActionOutcome::Accepted { session_id: session_id.clone(), notice: None },
                             Err(failure) => failure.outcome(&reference),
                         },
                     );

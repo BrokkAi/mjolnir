@@ -734,10 +734,14 @@ impl ChatState {
                             ChatAction::None
                         }
                         "status" => {
-                            self.set_notice(review_status_line(
-                                &review,
-                                self.turn_review.is_some(),
-                            ));
+                            if let Some(reason) = self.review_unavailable {
+                                self.set_notice(reason);
+                            } else {
+                                self.set_notice(review_status_line(
+                                    &review,
+                                    self.turn_review.is_some(),
+                                ));
+                            }
                             ChatAction::None
                         }
                         _ => {

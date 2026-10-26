@@ -28,6 +28,9 @@ pub struct NewSessionPreflight {
     pub remote_repairs: Vec<LocalRemoteRepair>,
     pub remote_repositories: Vec<NewSessionRepository>,
     pub local_changes_excluded: bool,
+    /// Set when creating the session will turn its review off, so the person
+    /// reads why before choosing Create.
+    pub review_notice: Option<&'static str>,
 }
 
 impl Controller {
@@ -60,12 +63,21 @@ impl Controller {
             );
             let managed_worktree =
                 self.managed_worktree_options(target_id, &directory, executor)?;
+            // The same classification and rule registration applies. Neither
+            // wizard offers a per-session review choice, so `[review]` decides.
+            let template = &self.config.targets[target_id];
+            let (_, resolved) =
+                crate::project_catalog::resolve_directory(template, &directory, executor)?;
+            let review_notice = (resolved.plain_directory
+                && mj_core::review::settings::plain_directory_turns_review_off(&self.config, None))
+            .then_some(mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF);
             return Ok(NewSessionPreflight {
                 managed_worktree,
                 project_directory: Some(directory),
                 remote_repairs: Vec::new(),
                 remote_repositories: Vec::new(),
                 local_changes_excluded: false,
+                review_notice,
             });
         }
         if project_directory.is_some() {
@@ -85,6 +97,7 @@ impl Controller {
                 remote_repairs: repairs,
                 remote_repositories: Vec::new(),
                 local_changes_excluded: true,
+                review_notice: None,
             });
         }
         let remote_repositories = bundle
@@ -117,6 +130,7 @@ impl Controller {
             remote_repairs: Vec::new(),
             remote_repositories,
             local_changes_excluded: true,
+            review_notice: None,
         })
     }
 }
@@ -290,11 +304,31 @@ mod tests {
     #[test]
     fn bare_preflight_accepts_non_git_and_unborn_directories_but_rejects_missing_projects() {
         let directory = tempfile::tempdir().unwrap();
-        let controller = config_only_controller(resume_compatibility_config());
+        let mut config = resume_compatibility_config();
+        config.profiles.insert(
+            "codex".into(),
+            mj_core::config::HarnessProfile {
+                enabled: true,
+                kind: mj_core::config::HarnessKind::Codex,
+                home: PathBuf::from("/home/dev/.codex"),
+                environment: Default::default(),
+                context_window_bytes: None,
+                legacy_subagents: Default::default(),
+                guardian_review_model: None,
+                codex_profile: None,
+            },
+        );
+        config.review.trigger = mj_core::config::ReviewTrigger::Turn;
+        config.review.profile = Some("codex".into());
+        let controller = config_only_controller(config);
         let result = controller
             .preflight_new_session("", "local-bare", Some(directory.path()), &ProcessExecutor)
             .unwrap();
         assert!(!result.managed_worktree.available);
+        assert_eq!(
+            result.review_notice,
+            Some(mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF)
+        );
         let missing = directory.path().join("missing");
         assert!(
             controller
@@ -306,6 +340,13 @@ mod tests {
             .preflight_new_session("", "local-bare", Some(directory.path()), &ProcessExecutor)
             .unwrap();
         assert!(!result.managed_worktree.available);
+        assert!(result.review_notice.is_some());
+
+        let repository = committed_repository();
+        let result = controller
+            .preflight_new_session("", "local-bare", Some(repository.path()), &ProcessExecutor)
+            .unwrap();
+        assert_eq!(result.review_notice, None);
     }
 
     #[test]

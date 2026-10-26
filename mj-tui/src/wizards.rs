@@ -190,7 +190,15 @@ impl TargetReadiness {
 #[derive(Debug, Clone)]
 pub(crate) struct NewWizard {
     pub(crate) subagents: Box<subagents::SubagentDraft>,
-    pub(crate) worktree_options: Option<(String, String, mj_core::state::ManagedWorktreeOptions)>,
+    /// The background check of the bare project directory, for the target and
+    /// directory it ran against: checkout options, and why creation will turn
+    /// review off when it will.
+    pub(crate) worktree_options: Option<(
+        String,
+        String,
+        mj_core::state::ManagedWorktreeOptions,
+        Option<&'static str>,
+    )>,
     pub(crate) create_managed_worktree: bool,
     /// Creation stays in this workspace even if the visible tab changes.
     pub(crate) workspace_id: String,
@@ -351,12 +359,27 @@ impl NewWizard {
         &self,
         config: &Config,
     ) -> Option<mj_core::state::ManagedWorktreeOptions> {
+        self.selected_directory_check(config)
+            .map(|(options, _)| options)
+    }
+
+    /// Why creating this session turns its review off, when it will.
+    fn selected_review_notice(&self, config: &Config) -> Option<&'static str> {
+        self.selected_directory_check(config)
+            .and_then(|(_, notice)| notice)
+    }
+
+    /// The directory check, only while it still matches the selection.
+    fn selected_directory_check(
+        &self,
+        config: &Config,
+    ) -> Option<(mj_core::state::ManagedWorktreeOptions, Option<&'static str>)> {
         let target_id = nth_key(&config.targets, self.target);
         self.worktree_options
             .as_ref()
-            .and_then(|(target, directory, options)| {
+            .and_then(|(target, directory, options, notice)| {
                 (target == &target_id && directory == self.project_directory.trim())
-                    .then_some(*options)
+                    .then_some((*options, *notice))
             })
     }
 

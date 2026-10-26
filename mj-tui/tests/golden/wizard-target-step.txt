@@ -694,12 +694,12 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                           │ ☐ Create isolated checkout                                                       │                           │
 │                           │ Use the selected directory directly.                                             │                           │
 │                           │                                                                                  │                           │
+│                           │ Code review is off for this session: its folder has no Git commits, and review   │                           │
+│                           │ finds changes through Git history.                                               │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │ Delegation Native ▾                                                              │                           │
 │                           │ Set up Mjolnir sub-agents in Settings -> Sub-agents                              │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ─────────────────────────╮
