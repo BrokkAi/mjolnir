@@ -4337,24 +4337,6 @@ function renderTargets() {
           band(100 - percent),
         ]);
       }
-      if (reading.container_capacity) {
-        const capacity = reading.container_capacity;
-        if (capacity.complete) {
-          rows.push([
-            'RAM left',
-            `${capacityGiBText(capacity.remaining.memory_bytes)} GiB of ${capacityGiBText(capacity.total.memory_bytes)} GiB`,
-            capacity.remaining.memory_bytes > 0 ? '' : 'reading-low',
-          ]);
-          rows.push([
-            'CPU left',
-            `${capacity.remaining.cpus} of ${capacity.total.cpus}`,
-            capacity.remaining.cpus > 0 ? '' : 'reading-low',
-          ]);
-        } else {
-          rows.push(['RAM left', 'unavailable (live container sizing unknown)', 'reading-low']);
-          rows.push(['CPU left', 'unavailable (live container sizing unknown)', 'reading-low']);
-        }
-      }
       if (reading.logical_cores) rows.push(['Cores', String(reading.logical_cores), '']);
       if (reading.disk_total_bytes) {
         rows.push(['Disk', formatBytes(reading.disk_total_bytes), '']);

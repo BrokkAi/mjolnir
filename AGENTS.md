@@ -124,6 +124,17 @@ the primary design not working. This includes options in third-party tools
 that quietly degrade, such as OpenSSH's `ControlMaster=auto` opening a direct
 connection when sharing fails: choose the configuration that fails visibly.
 
+Never leave the user stuck. When a request conflicts with a setting, or the
+setting cannot apply here, do not refuse and tell the user to change something
+before they can try again. Do the sensible thing for them, such as creating the
+session with the feature that cannot work turned off for that session, and say
+plainly what changed and why. Refuse only when no reasonable action exists. The
+refusal must then say exactly how to proceed, and the surface must offer that
+step instead of sending the user to edit configuration or retype a command.
+Failing visibly means reporting what happened. It does not mean blocking the
+user when the system can act for them. A notice reports the change; a dead end
+is a defect.
+
 Upgrades must complete without user intervention after installation or initial
 upgrade consent. Ordinary startup must coordinate daemon replacement, database
 migration, and service readiness before serving the upgraded client, including
