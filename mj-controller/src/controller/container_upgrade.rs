@@ -169,11 +169,14 @@ impl Controller {
             .targets
             .get(&record.target_template_id)
             .context("legacy target configuration missing")?;
-        let target = backend::backend_target(
+        let mut target = backend::backend_target(
             configured,
             record.resource_allocation.as_ref(),
             backend::ContainerOverrides::for_session(&record),
         )?;
+        for notice in super::provisioning::enforce_cgroup_capable_limits(&mut target, executor) {
+            executor.notify_notice(&notice);
+        }
         let canonical = match record.target.as_ref() {
             Some(locator) => locator.clone(),
             None => backend::locator_after_provision_named(
