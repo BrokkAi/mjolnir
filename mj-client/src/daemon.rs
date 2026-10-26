@@ -405,6 +405,31 @@ pub struct RegisteredSession {
     pub remembered_container_size: Option<(String, HostContainerSize)>,
 }
 
+/// The commit author in the daemon host's Git configuration. Sessions on the
+/// host use it directly and container sessions inherit it, so without both
+/// parts no session can commit.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitIdentity {
+    pub name: Option<String>,
+    pub email: Option<String>,
+    /// The global configuration picks an identity per directory with
+    /// `includeIf`, which only applies inside a repository. Writing a plain
+    /// identity would override those choices, so it is not offered.
+    #[serde(default)]
+    pub per_directory: bool,
+}
+
+impl GitIdentity {
+    pub fn is_complete(&self) -> bool {
+        self.name.is_some() && self.email.is_some()
+    }
+
+    /// Whether a surface should offer to set the identity.
+    pub fn needs_setup(&self) -> bool {
+        !self.is_complete() && !self.per_directory
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DraftPreview {
@@ -446,6 +471,13 @@ pub enum DaemonAction {
     UpgradeBlockers,
     Status,
     WebViewerAccess,
+    /// The daemon host's Git commit author, which its sessions inherit.
+    GitIdentity,
+    /// Write the daemon host's global Git commit author.
+    SetGitIdentity {
+        name: String,
+        email: String,
+    },
     RecoverWebViewer(crate::web::WebViewerRecovery),
     InspectWebListener,
     ListWorkspaces,
@@ -792,6 +824,7 @@ pub enum DaemonReply {
     UpgradeBlockers(Vec<String>),
     Status(DaemonStatus),
     WebViewerAccess(crate::web::WebViewerAccess),
+    GitIdentity(GitIdentity),
     WebListeners(Vec<crate::web::WebListenerProcess>),
     SubagentOptions(mj_core::subagent::SubagentOptions),
     Workspaces(Vec<WorkspaceListing>),
@@ -1460,6 +1493,23 @@ impl DaemonClient {
         match self.request(DaemonAction::RefreshQuota).await? {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected refresh-quota reply {reply:?}"),
+        }
+    }
+
+    pub async fn git_identity(&mut self) -> Result<GitIdentity> {
+        match self.request(DaemonAction::GitIdentity).await? {
+            DaemonReply::GitIdentity(identity) => Ok(identity),
+            reply => bail!("unexpected git-identity reply {reply:?}"),
+        }
+    }
+
+    pub async fn set_git_identity(&mut self, name: String, email: String) -> Result<GitIdentity> {
+        match self
+            .request(DaemonAction::SetGitIdentity { name, email })
+            .await?
+        {
+            DaemonReply::GitIdentity(identity) => Ok(identity),
+            reply => bail!("unexpected set-git-identity reply {reply:?}"),
         }
     }
 
@@ -2418,7 +2468,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Creation and runtime metadata carry interactive launch-choice provenance.
 // New-session creation independently controls whether its container size
 // becomes the host's saved default.
-pub const PROTOCOL_VERSION: u32 = 62;
+// Clients read and set the daemon host's Git commit author.
+pub const PROTOCOL_VERSION: u32 = 63;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

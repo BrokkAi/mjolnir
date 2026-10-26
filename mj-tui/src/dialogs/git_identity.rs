@@ -4,7 +4,8 @@
 //!
 //! The dashboard never touches Git itself: it returns
 //! [`DashboardAction::CheckGitIdentity`] and [`DashboardAction::SaveGitIdentity`]
-//! for the binary to run in the background, and takes the results through
+//! for the binary to ask the daemon in the background, since the daemon's Git
+//! environment is the one sessions inherit, and takes the results through
 //! [`DashboardState::apply_git_identity_check`] and
 //! [`DashboardState::apply_git_identity_save`].
 
@@ -22,17 +23,20 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::widgets::{centered_modal, dismissible_modal_title};
+use mj_client::daemon::GitIdentity;
+
 use crate::{DashboardAction, DashboardState, Mode};
 
 const EXPLANATION: &str = "Git on this host has no commit author, so sessions cannot commit. \
      Mjolnir saves this to your global Git configuration.";
+const UNSET_NOTICE: &str = "Git on this host has no commit author, so sessions cannot commit; start a new session to set one.";
 const SKIPPED_NOTICE: &str =
     "Sessions cannot commit until Git has an identity; Mjolnir will ask again next start.";
 
 /// Where this run stands on the host's Git identity. The dialog being open is
 /// not a state here: it is [`Mode::GitIdentity`], so closing it by any route
 /// can never leave the gate waiting on a dialog that is gone.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) enum GitIdentityGate {
     /// No check is wanted, or this run already decided. Embedders that never
     /// arm the gate, tests among them, start here.
@@ -40,8 +44,18 @@ pub(crate) enum GitIdentityGate {
     Settled,
     /// The next new session asks for a check first.
     Unchecked,
-    /// The check is running; another new-session request waits for it.
-    Checking,
+    /// The check is running and holds the request that started it.
+    Checking(GitIdentityResume),
+}
+
+/// The new-session request a check or the dialog holds, continued once the
+/// identity is settled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GitIdentityResume {
+    /// Open the new-session flow, as the new-session key does.
+    BeginNew,
+    /// Run a launch that was already decided, such as a fast-start recipe.
+    Launch(Box<DashboardAction>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +68,7 @@ pub(crate) enum GitIdentityControl {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GitIdentityDialog {
+    pub(crate) resume: GitIdentityResume,
     pub(crate) name: TextInput,
     pub(crate) email: TextInput,
     /// A save is running; input waits for its result.
@@ -63,7 +78,7 @@ pub(crate) struct GitIdentityDialog {
 }
 
 impl GitIdentityDialog {
-    fn new(name: Option<String>, email: Option<String>) -> Self {
+    fn new(resume: GitIdentityResume, name: Option<String>, email: Option<String>) -> Self {
         let initial = if name.is_some() {
             GitIdentityControl::Email
         } else {
@@ -76,6 +91,7 @@ impl GitIdentityDialog {
         form.declare(GitIdentityControl::Save, ControlKind::Button);
         form.end_frame(initial);
         Self {
+            resume,
             name: TextInput::from_value(name.unwrap_or_default()),
             email: TextInput::from_value(email.unwrap_or_default()),
             saving: false,
@@ -111,74 +127,104 @@ impl DashboardState {
         self.git_identity_gate = GitIdentityGate::Unchecked;
     }
 
-    /// What a new-session request does first, or `None` once this run has
+    /// What the new-session key does first, or `None` once this run has
     /// settled the identity and the request can proceed.
     pub(crate) fn git_identity_gate_action(&mut self) -> Option<DashboardAction> {
+        self.hold_for_git_identity(GitIdentityResume::BeginNew)
+    }
+
+    /// Every launch that bypasses the new-session key, such as a fast-start
+    /// recipe, passes through here: it runs now once the identity is settled,
+    /// and otherwise waits for the check.
+    pub fn gate_launch_on_git_identity(&mut self, launch: DashboardAction) -> DashboardAction {
+        self.hold_for_git_identity(GitIdentityResume::Launch(Box::new(launch.clone())))
+            .unwrap_or(launch)
+    }
+
+    fn hold_for_git_identity(&mut self, resume: GitIdentityResume) -> Option<DashboardAction> {
         match self.git_identity_gate {
             GitIdentityGate::Settled => None,
             GitIdentityGate::Unchecked => {
-                self.git_identity_gate = GitIdentityGate::Checking;
+                self.git_identity_gate = GitIdentityGate::Checking(resume);
+                self.set_notice("Checking the Git identity on this host…");
                 Some(DashboardAction::CheckGitIdentity)
             }
-            GitIdentityGate::Checking => Some(DashboardAction::None),
+            GitIdentityGate::Checking(_) => {
+                self.set_notice("Still checking the Git identity on this host…");
+                Some(DashboardAction::None)
+            }
         }
     }
 
-    /// Takes the identity the background check read: proceeds into the new
-    /// session when it is complete, and otherwise asks for the missing part.
-    /// A check that failed is reported and does not hold the session back.
-    pub fn apply_git_identity_check(
-        &mut self,
-        result: Result<(Option<String>, Option<String>), String>,
-    ) {
-        if self.git_identity_gate != GitIdentityGate::Checking {
+    /// Takes the identity the daemon read: continues the held request when
+    /// no setup is needed, and otherwise asks for the missing part. A check
+    /// that failed is reported and does not hold the session back.
+    pub fn apply_git_identity_check(&mut self, result: Result<GitIdentity, String>) {
+        let GitIdentityGate::Checking(resume) = std::mem::take(&mut self.git_identity_gate) else {
             return;
-        }
+        };
         match result {
-            Ok((Some(_), Some(_))) => self.settle_git_identity(),
-            Ok((name, email)) => {
-                // Until the dialog settles it, the next new session checks
-                // again. That also covers a user who moved on while Git was
-                // read: the dialog does not open over their work.
-                self.git_identity_gate = GitIdentityGate::Unchecked;
+            Ok(identity) if !identity.needs_setup() => {
+                self.clear_notice();
+                self.settle_git_identity(resume);
+            }
+            Ok(identity) => {
                 if matches!(self.mode, Mode::Dashboard) {
-                    self.mode = Mode::GitIdentity(GitIdentityDialog::new(name, email));
+                    // The dialog settles the gate; until then, the next new
+                    // session checks again.
+                    self.git_identity_gate = GitIdentityGate::Unchecked;
+                    self.clear_notice();
+                    self.mode = Mode::GitIdentity(GitIdentityDialog::new(
+                        resume,
+                        identity.name,
+                        identity.email,
+                    ));
+                } else {
+                    // The user moved on while Git was read; the dialog does
+                    // not open over their work, and the request still runs.
+                    self.git_identity_gate = GitIdentityGate::Unchecked;
+                    self.set_notice(UNSET_NOTICE);
+                    self.resume_after_git_identity(resume);
                 }
             }
             Err(error) => {
                 self.set_failure_notice(format!(
                     "Could not read the Git identity on this host: {error}"
                 ));
-                self.settle_git_identity();
+                self.settle_git_identity(resume);
             }
         }
     }
 
     /// Takes the result of saving the identity. A failure keeps the dialog
     /// and what was typed, with the reason under the fields.
-    pub fn apply_git_identity_save(&mut self, result: Result<(String, String), String>) {
-        let dialog = match &mut self.mode {
-            Mode::GitIdentity(dialog) if dialog.saving => Some(dialog),
-            _ => None,
-        };
-        match (result, dialog) {
-            (Ok((name, email)), dialog) => {
-                let open = dialog.is_some();
-                self.set_notice(format!("Git identity saved: {name} <{email}>"));
-                if open {
-                    self.mode = Mode::Dashboard;
-                    self.settle_git_identity();
+    pub fn apply_git_identity_save(&mut self, result: Result<GitIdentity, String>) {
+        let saving = matches!(&self.mode, Mode::GitIdentity(dialog) if dialog.saving);
+        match result {
+            Ok(identity) => {
+                self.set_notice(format!(
+                    "Git identity saved: {} <{}>",
+                    identity.name.unwrap_or_default(),
+                    identity.email.unwrap_or_default()
+                ));
+                if saving {
+                    let Mode::GitIdentity(dialog) =
+                        std::mem::replace(&mut self.mode, Mode::Dashboard)
+                    else {
+                        unreachable!("checked above");
+                    };
+                    self.settle_git_identity(dialog.resume);
                 } else {
                     self.git_identity_gate = GitIdentityGate::Settled;
                 }
             }
-            (Err(error), Some(dialog)) => {
-                dialog.saving = false;
-                dialog.error = Some(error);
-            }
-            (Err(error), None) => {
-                self.set_failure_notice(format!("Could not save the Git identity: {error}"));
-            }
+            Err(error) => match &mut self.mode {
+                Mode::GitIdentity(dialog) if saving => {
+                    dialog.saving = false;
+                    dialog.error = Some(error);
+                }
+                _ => self.set_failure_notice(format!("Could not save the Git identity: {error}")),
+            },
         }
     }
 
@@ -188,13 +234,26 @@ impl DashboardState {
         self.git_identity_followup.take()
     }
 
-    fn settle_git_identity(&mut self) {
+    fn settle_git_identity(&mut self, resume: GitIdentityResume) {
         self.git_identity_gate = GitIdentityGate::Settled;
-        if matches!(self.mode, Mode::Dashboard) {
-            let action = self.begin_new();
-            if action != DashboardAction::None {
-                self.git_identity_followup = Some(action);
+        self.resume_after_git_identity(resume);
+    }
+
+    fn resume_after_git_identity(&mut self, resume: GitIdentityResume) {
+        let action = match resume {
+            // The new-session flow opens over the dashboard only; a user who
+            // opened something else meanwhile is told how to continue.
+            GitIdentityResume::BeginNew if matches!(self.mode, Mode::Dashboard) => self.begin_new(),
+            GitIdentityResume::BeginNew => {
+                if self.git_identity_gate == GitIdentityGate::Settled {
+                    self.set_notice("Git identity checked; start the new session again.");
+                }
+                return;
             }
+            GitIdentityResume::Launch(launch) => *launch,
+        };
+        if action != DashboardAction::None {
+            self.git_identity_followup = Some(action);
         }
     }
 
@@ -212,10 +271,10 @@ impl DashboardState {
         self.last_event_consumed.set(result.consumed);
         match result.action {
             Some(Interaction::Cancel | Interaction::Activate(GitIdentityControl::Skip)) => {
-                self.git_identity_gate = GitIdentityGate::Settled;
                 self.mode = Mode::Dashboard;
                 self.set_notice(SKIPPED_NOTICE);
-                self.begin_new()
+                self.settle_git_identity(dialog.resume);
+                DashboardAction::None
             }
             Some(Interaction::Edit(id, edit)) => {
                 let field = match id {

@@ -233,9 +233,9 @@ pub(crate) enum DashboardIoUpdate {
     QuotaRefreshRequested(std::result::Result<(), String>),
     /// The host's global Git author identity, read before the first new
     /// session of this run.
-    GitIdentityChecked(std::result::Result<mj_controller::controller::GitIdentity, String>),
+    GitIdentityChecked(std::result::Result<mj_client::daemon::GitIdentity, String>),
     /// The host's global Git author identity after the dialog saved it.
-    GitIdentitySaved(std::result::Result<mj_controller::controller::GitIdentity, String>),
+    GitIdentitySaved(std::result::Result<mj_client::daemon::GitIdentity, String>),
     WebAccess {
         generation: u64,
         access: WebViewerAccess,
@@ -1232,18 +1232,11 @@ impl DashboardContext {
                     .dashboard
                     .set_notice(format!("Could not rename {what}: {error}")),
             },
-            DashboardIoUpdate::GitIdentityChecked(result) => self
-                .dashboard
-                .apply_git_identity_check(result.map(|identity| (identity.name, identity.email))),
+            DashboardIoUpdate::GitIdentityChecked(result) => {
+                self.dashboard.apply_git_identity_check(result)
+            }
             DashboardIoUpdate::GitIdentitySaved(result) => {
-                self.dashboard
-                    .apply_git_identity_save(result.and_then(|identity| {
-                        match (identity.name, identity.email) {
-                            (Some(name), Some(email)) => Ok((name, email)),
-                            _ => Err("Git still reports no complete identity after saving it"
-                                .to_owned()),
-                        }
-                    }))
+                self.dashboard.apply_git_identity_save(result)
             }
             DashboardIoUpdate::QuotaRefreshRequested(Ok(())) => {}
             DashboardIoUpdate::QuotaRefreshRequested(Err(error)) => {

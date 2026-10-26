@@ -82,22 +82,42 @@ pub(crate) async fn apply_dashboard_action(
     action: DashboardAction,
 ) -> Result<()> {
     context.cancel_stale_path_input();
+    // A fast-start launch bypasses the new-session key, so it meets the Git
+    // identity check here.
+    let action = match action {
+        launch @ DashboardAction::GoLaunch { .. } => {
+            context.dashboard.gate_launch_on_git_identity(launch)
+        }
+        action => action,
+    };
     match action {
         DashboardAction::None => {}
         DashboardAction::CheckGitIdentity => {
-            super::io::spawn_io(
-                "reading the Git identity",
-                context.dashboard_io_tx.clone(),
-                mj_controller::controller::controller_git_identity,
-                DashboardIoUpdate::GitIdentityChecked,
-            );
+            // The daemon reads Git in the environment its sessions inherit.
+            let updates = context.dashboard_io_tx.clone();
+            tokio::spawn(async move {
+                let result = async { daemon::connect_or_start().await?.git_identity().await }
+                    .await
+                    .map_err(|e: anyhow::Error| format!("{e:#}"));
+                report(
+                    "reading the Git identity",
+                    &updates,
+                    DashboardIoUpdate::GitIdentityChecked(result),
+                );
+            });
         }
         DashboardAction::SaveGitIdentity { name, email } => {
-            super::io::spawn_critical_io(
+            super::io::spawn_critical_async(
                 context.critical_operations.clone(),
                 "saving the Git identity",
                 context.dashboard_io_tx.clone(),
-                move || mj_controller::controller::set_controller_git_identity(&name, &email),
+                super::io::SAVE_ACK_TIMEOUT,
+                async move {
+                    daemon::connect_or_start()
+                        .await?
+                        .set_git_identity(name, email)
+                        .await
+                },
                 DashboardIoUpdate::GitIdentitySaved,
             );
         }

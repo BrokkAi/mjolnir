@@ -1243,7 +1243,16 @@ fn golden_dashboard_dialogs() {
     .unwrap();
     let action = identity.dispatch_command(crate::CommandId::NewSessionWizard);
     writeln!(output, "new session while the check runs: {action:?}").unwrap();
-    identity.apply_git_identity_check(Ok((Some("Ada Lovelace".into()), None)));
+    writeln!(
+        output,
+        "notice while the check runs: {:?}",
+        identity.notices.current()
+    )
+    .unwrap();
+    identity.apply_git_identity_check(Ok(mj_client::daemon::GitIdentity {
+        name: Some("Ada Lovelace".into()),
+        ..Default::default()
+    }));
     for character in "ada.example.com".chars() {
         identity.handle_key(key(KeyCode::Char(character)));
     }
@@ -1275,7 +1284,11 @@ fn golden_dashboard_dialogs() {
     );
     let action = identity.handle_key(key(KeyCode::Enter));
     writeln!(output, "action: {action:?}").unwrap();
-    identity.apply_git_identity_save(Ok(("Ada Lovelace".into(), "ada@example.com".into())));
+    identity.apply_git_identity_save(Ok(mj_client::daemon::GitIdentity {
+        name: Some("Ada Lovelace".into()),
+        email: Some("ada@example.com".into()),
+        per_directory: false,
+    }));
     let followup = identity.take_git_identity_followup();
     writeln!(output, "follow-up after saving: {followup:?}").unwrap();
     writeln!(
@@ -1291,9 +1304,11 @@ fn golden_dashboard_dialogs() {
     let mut skipped = dashboard_with_session(running_session());
     skipped.require_git_identity_check();
     skipped.dispatch_command(crate::CommandId::NewSessionWizard);
-    skipped.apply_git_identity_check(Ok((None, None)));
+    skipped.apply_git_identity_check(Ok(Default::default()));
     let action = skipped.handle_key(key(KeyCode::Esc));
     writeln!(output, "skip: {action:?}").unwrap();
+    let followup = skipped.take_git_identity_followup();
+    writeln!(output, "follow-up after skipping: {followup:?}").unwrap();
     writeln!(
         output,
         "notice after skipping: {:?}",
@@ -1301,6 +1316,34 @@ fn golden_dashboard_dialogs() {
     )
     .unwrap();
     assert!(matches!(skipped.mode, Mode::New(_)));
+
+    // A launch that bypasses the new-session key waits for the same check,
+    // and runs even when the user moved on before the answer came back.
+    let mut launch = dashboard_with_session(running_session());
+    launch.require_git_identity_check();
+    let recipe = DashboardAction::GoLaunch {
+        recipe: mj_core::go::GoRecipe {
+            profile_id: "codex".into(),
+            target_id: "localhost".into(),
+            bundle_id: None,
+            project_directory: None,
+            create_managed_worktree: None,
+            subagents: None,
+            additional_mounts: Vec::new(),
+            resource_allocation: None,
+        },
+    };
+    let action = launch.gate_launch_on_git_identity(recipe.clone());
+    writeln!(output, "fast-start launch before the check: {action:?}").unwrap();
+    launch.dispatch_command(crate::CommandId::Help);
+    launch.apply_git_identity_check(Ok(Default::default()));
+    assert_eq!(launch.take_git_identity_followup(), Some(recipe));
+    writeln!(
+        output,
+        "notice when the check finds no identity behind another dialog: {:?}",
+        launch.notices.current()
+    )
+    .unwrap();
 
     mj_core::golden::assert_golden(
         env!("CARGO_MANIFEST_DIR"),

@@ -29,8 +29,14 @@ To see it working, start Mjolnir in an isolated instance with `HOME` pointed at 
 - Decision: Write the identity to the host's global Git configuration, not to Mjolnir's own config.
   Rationale: The user chose this. One identity then serves the host and every session, and git itself remains the single owner of the fact, so no copy can go stale.
   Date/Author: 2026-10-26 / user and agent.
-- Decision: The TUI calls the controller helpers directly from supervised background work instead of through a new daemon protocol action.
-  Rationale: The TUI already runs host-side Git work locally (see `start_create_session_preflight` in `mj-cli/src/dashboard/actions.rs`), and it always talks to a daemon on the same host. The web viewer can be remote, so it goes through the daemon HTTP API.
+- Decision: The TUI asks the daemon (`DaemonAction::GitIdentity` / `SetGitIdentity`, protocol 63) instead of running Git in its own process.
+  Rationale: Review of #1368 pointed out that a daemon started under systemd or launchd, or from a shell with a different `HOME` or `GIT_CONFIG_GLOBAL`, sees a different global config than the TUI. Provisioning reads Git in the daemon, so the daemon is the only owner of the fact. This supersedes the first design, which ran the helpers inside the TUI process.
+  Date/Author: 2026-10-26 / agent.
+- Decision: The identity merges the system and global scopes, and `includeIf` in the global file marks it `per_directory`, which suppresses the prompt.
+  Rationale: Host sessions also take their author from `/etc/gitconfig`. A conditional identity only applies inside matching repositories, and writing a plain `[user]` section would override it. `GIT_AUTHOR_*` environment variables are still not considered.
+  Date/Author: 2026-10-26 / agent.
+- Decision: The gate holds the exact request it paused (open the new-session flow, or a decided launch such as a fast-start recipe), and every exit path resumes it.
+  Rationale: Review found that `mj simple` and Go launches bypassed `begin_new`, and that a result arriving behind another dialog dropped the request silently.
   Date/Author: 2026-10-26 / agent.
 - Decision: The web viewer writes through a dedicated `POST /api/git-identity`, not a `set-git-identity` action.
   Rationale: `/api/actions` answers 202 before the work runs, so it cannot return the saved identity or an inline error. The write takes upgrade admission with `enter_unless_draining("viewer Git identity")`.

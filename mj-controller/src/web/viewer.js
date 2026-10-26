@@ -5356,10 +5356,32 @@ function offerGitIdentitySetup() {
       gitIdentityAsked = false;
       return;
     }
-    if (!identity?.name || !identity?.email) openGitIdentitySetup(identity || {});
+    // Per-directory identities apply only inside repositories, so a plain
+    // one written here would override them; the daemon says when to ask.
+    if (identityNeedsSetup(identity)) openGitIdentitySetup(identity);
   }, failure => {
-    console.warn('Could not read the Git identity', failure);
+    if (route.name !== 'new') {
+      gitIdentityAsked = false;
+      return;
+    }
+    // A host without Git, or with a config Git cannot read, is still a reason
+    // sessions cannot commit, so the person hears about it.
+    const dialog = openSessionDialog('git-identity-dialog', 'Git identity unavailable');
+    const { controls, cancel, confirm } = dialogControls('OK');
+    cancel.remove();
+    confirm.onclick = () => dialog.close();
+    dialog.append(
+      el('h2', '', 'Git identity unavailable'),
+      el('p', 'error', `Could not read the Git identity on this host: ${failure.message}`),
+      el('p', 'dim', 'Sessions may not be able to commit until this is fixed.'),
+      controls,
+    );
+    confirm.focus();
   });
+}
+
+function identityNeedsSetup(identity) {
+  return !identity.per_directory && !(identity.name && identity.email);
 }
 
 function openGitIdentitySetup(identity) {

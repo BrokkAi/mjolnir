@@ -804,6 +804,7 @@ Ent                                                                             
 Usa
 new session before the Git identity check: CheckGitIdentity
 new session while the check runs: None
+notice while the check runs: Some("Still checking the Git identity on this host…")
 
 === Git identity with the email typed (100x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
@@ -888,4 +889,7 @@ action: SaveGitIdentity { name: "Ada Lovelace", email: "ada.example.com" }
 follow-up after saving: None
 notice after saving: Some("Git identity saved: Ada Lovelace <ada@example.com>")
 skip: None
+follow-up after skipping: None
 notice after skipping: Some("Sessions cannot commit until Git has an identity; Mjolnir will ask again next start.")
+fast-start launch before the check: CheckGitIdentity
+notice when the check finds no identity behind another dialog: Some("Git on this host has no commit author, so sessions cannot commit; start a new session to set one.")
