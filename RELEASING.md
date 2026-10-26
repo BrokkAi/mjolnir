@@ -57,8 +57,8 @@ published, so partial publication can resume without overwriting packages.
 Manual `publish.yml` and `publish-npm.yml` runs support inspection with
 `publish` disabled.
 
-Homebrew remains a separate manual formula update in `BrokkAi/homebrew-tap`.
-Its wrapper exports `MJOLNIR_MANAGED_BY_HOMEBREW`, not
+The Homebrew formula in `BrokkAi/homebrew-tap` updates and deploys on its own;
+releases need no Homebrew step. Its wrapper exports `MJOLNIR_MANAGED_BY_HOMEBREW`, not
 `MJOLNIR_NO_UPDATE_CHECK`. Discord announcement failures are warnings and do
 not invalidate a release. The installer's SCRIPT_VERSION is independent of
 the application version.
