@@ -2,6 +2,9 @@ use super::*;
 
 impl DashboardState {
     pub(crate) fn begin_new(&mut self) -> DashboardAction {
+        if let Some(action) = self.git_identity_gate_action() {
+            return action;
+        }
         if let Some(go) = &self.go {
             if let Some(recipe) = &go.recipe {
                 return DashboardAction::GoLaunch {

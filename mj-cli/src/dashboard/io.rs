@@ -231,6 +231,11 @@ pub(crate) enum DashboardIoUpdate {
     /// The daemon's answer to a Refresh: it accepted the request, or it could
     /// not be reached.
     QuotaRefreshRequested(std::result::Result<(), String>),
+    /// The host's global Git author identity, read before the first new
+    /// session of this run.
+    GitIdentityChecked(std::result::Result<mj_client::daemon::GitIdentity, String>),
+    /// The host's global Git author identity after the dialog saved it.
+    GitIdentitySaved(std::result::Result<mj_client::daemon::GitIdentity, String>),
     WebAccess {
         generation: u64,
         access: WebViewerAccess,
@@ -1227,6 +1232,12 @@ impl DashboardContext {
                     .dashboard
                     .set_notice(format!("Could not rename {what}: {error}")),
             },
+            DashboardIoUpdate::GitIdentityChecked(result) => {
+                self.dashboard.apply_git_identity_check(result)
+            }
+            DashboardIoUpdate::GitIdentitySaved(result) => {
+                self.dashboard.apply_git_identity_save(result)
+            }
             DashboardIoUpdate::QuotaRefreshRequested(Ok(())) => {}
             DashboardIoUpdate::QuotaRefreshRequested(Err(error)) => {
                 self.manual_quota_refresh_cycles = None;

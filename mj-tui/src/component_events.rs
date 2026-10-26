@@ -111,6 +111,7 @@ impl DashboardState {
             Mode::Setup(dialog) => self.handle_setup_event(event, dialog),
             Mode::Welcome(dialog) => self.handle_welcome_event(event, dialog),
             Mode::Rename(dialog) => self.handle_rename_event(event, dialog),
+            Mode::GitIdentity(dialog) => self.handle_git_identity_event(event, dialog),
             Mode::ChangedFiles(dialog) => self.handle_changed_files_event(event, dialog),
             Mode::SessionCpuReport(dialog) => self.handle_session_cpu_report_event(event, dialog),
             Mode::SessionUsageReport(dialog) => {

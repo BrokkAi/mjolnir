@@ -38,6 +38,20 @@ pub(super) async fn handle_action(
         DaemonAction::WebViewerAccess => {
             Ok(DaemonReply::WebViewerAccess(state.web_viewer.access()))
         }
+        // Git runs in the daemon's environment, which is the one its
+        // sessions inherit; a client's environment may differ.
+        DaemonAction::GitIdentity => {
+            tokio::task::spawn_blocking(crate::controller::controller_git_identity)
+                .await
+                .context("Git identity read panicked")?
+                .map(DaemonReply::GitIdentity)
+        }
+        DaemonAction::SetGitIdentity { name, email } => tokio::task::spawn_blocking(move || {
+            crate::controller::set_controller_git_identity(&name, &email)
+        })
+        .await
+        .context("Git identity save panicked")?
+        .map(DaemonReply::GitIdentity),
         DaemonAction::SubagentOptions {
             profile,
             model,

@@ -1921,6 +1921,24 @@ async fn a_path_completion_requires_a_session() {
     assert!(preflights.try_recv().is_err());
 }
 
+/// Saving the Git author rewrites this host's global Git configuration, so it
+/// lives behind the viewer cookie. The body is one the handler would refuse,
+/// so a regression that exposed the route still could not touch the host.
+#[tokio::test]
+async fn saving_the_git_identity_requires_a_session() {
+    let (app, _, _, _, _) = app();
+    let response = app
+        .oneshot(
+            Request::post("/api/git-identity")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"name":"","email":""}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
 /// Everything an agent writes goes through the Markdown renderer, so the
 /// renderer is where injection is stopped. These checks run the shipped
 /// module against a fake DOM: structure has to come out as elements, and

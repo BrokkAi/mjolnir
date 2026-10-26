@@ -223,6 +223,15 @@ const TEST_VERSION_LABEL: &str = "vX.Y.Z";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DashboardAction {
     None,
+    /// Read the host's global Git author identity before the first new
+    /// session; the result goes to [`DashboardState::apply_git_identity_check`].
+    CheckGitIdentity,
+    /// Write the host's global Git author identity; the result goes to
+    /// [`DashboardState::apply_git_identity_save`].
+    SaveGitIdentity {
+        name: String,
+        email: String,
+    },
     GoLaunch {
         recipe: mj_core::go::GoRecipe,
     },
@@ -840,6 +849,8 @@ pub(crate) enum Mode {
     SessionCpuReport(dialogs::SessionCpuReportDialog),
     SessionUsageReport(session_usage_report::SessionUsageDialog),
     EditContainer(ContainerEditor),
+    /// Asks for the host's missing Git author identity before a new session.
+    GitIdentity(dialogs::GitIdentityDialog),
     Importing(ImportProgress),
     ConfirmImportBundle(ImportBundleConfirmation),
     Confirm(ConfirmDialog),
@@ -972,6 +983,9 @@ pub struct DashboardState {
     /// The New wizard opened and the stored mount and project history should
     /// be read again, since sessions created after startup add to it.
     pub(crate) mount_history_refresh_pending: bool,
+    pub(crate) git_identity_gate: dialogs::GitIdentityGate,
+    /// The new-session action a settled Git identity check let through.
+    pub(crate) git_identity_followup: Option<DashboardAction>,
     pub(crate) command_session_override: Option<String>,
     /// Persisted scroll offsets for the three list panes, so each scrolls only
     /// far enough to keep its selection visible instead of jumping back to the
@@ -1282,6 +1296,8 @@ impl DashboardState {
             readiness_clock_advance: std::time::Duration::ZERO,
             project_directory_checks: BTreeMap::new(),
             mount_history_refresh_pending: false,
+            git_identity_gate: Default::default(),
+            git_identity_followup: None,
 
             command_session_override: None,
             sessions_scroll: Cell::new(0),

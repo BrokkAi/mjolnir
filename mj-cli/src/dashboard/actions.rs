@@ -82,8 +82,45 @@ pub(crate) async fn apply_dashboard_action(
     action: DashboardAction,
 ) -> Result<()> {
     context.cancel_stale_path_input();
+    // A fast-start launch bypasses the new-session key, so it meets the Git
+    // identity check here.
+    let action = match action {
+        launch @ DashboardAction::GoLaunch { .. } => {
+            context.dashboard.gate_launch_on_git_identity(launch)
+        }
+        action => action,
+    };
     match action {
         DashboardAction::None => {}
+        DashboardAction::CheckGitIdentity => {
+            // The daemon reads Git in the environment its sessions inherit.
+            let updates = context.dashboard_io_tx.clone();
+            tokio::spawn(async move {
+                let result = async { daemon::connect_or_start().await?.git_identity().await }
+                    .await
+                    .map_err(|e: anyhow::Error| format!("{e:#}"));
+                report(
+                    "reading the Git identity",
+                    &updates,
+                    DashboardIoUpdate::GitIdentityChecked(result),
+                );
+            });
+        }
+        DashboardAction::SaveGitIdentity { name, email } => {
+            super::io::spawn_critical_async(
+                context.critical_operations.clone(),
+                "saving the Git identity",
+                context.dashboard_io_tx.clone(),
+                super::io::SAVE_ACK_TIMEOUT,
+                async move {
+                    daemon::connect_or_start()
+                        .await?
+                        .set_git_identity(name, email)
+                        .await
+                },
+                DashboardIoUpdate::GitIdentitySaved,
+            );
+        }
         DashboardAction::CopyNativeSessionId { native_session_id } => {
             context.copy_text(&native_session_id, "Copied session ID")?;
         }

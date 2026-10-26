@@ -430,6 +430,7 @@ function renderRoute() {
   switch (route.name) {
     case 'new':
       renderNewForm();
+      offerGitIdentitySetup();
       break;
     case 'resume':
       renderResumable();
@@ -5332,6 +5333,93 @@ function openContainerSettings(session) {
       });
       dialog.close();
       await refresh();
+    } catch (failure) {
+      if (dialog.open) error.textContent = failure.message;
+      confirm.disabled = false;
+    }
+  };
+}
+
+/// Whether this page load has asked about the host's Git author. Asked once:
+/// Skip, Save and a failed check all leave it set until the page reloads.
+let gitIdentityAsked = false;
+
+/// Sessions commit as the controller host's global Git author, so the
+/// new-session form offers to set one when that identity is incomplete. The
+/// check runs beside the form and never holds it up.
+function offerGitIdentitySetup() {
+  if (gitIdentityAsked) return;
+  gitIdentityAsked = true;
+  request('/api/git-identity').then(identity => {
+    // Someone who left the form before the answer came is asked next time.
+    if (route.name !== 'new') {
+      gitIdentityAsked = false;
+      return;
+    }
+    // Per-directory identities apply only inside repositories, so a plain
+    // one written here would override them; the daemon says when to ask.
+    if (identityNeedsSetup(identity)) openGitIdentitySetup(identity);
+  }, failure => {
+    if (route.name !== 'new') {
+      gitIdentityAsked = false;
+      return;
+    }
+    // A host without Git, or with a config Git cannot read, is still a reason
+    // sessions cannot commit, so the person hears about it.
+    const dialog = openSessionDialog('git-identity-dialog', 'Git identity unavailable');
+    const { controls, cancel, confirm } = dialogControls('OK');
+    cancel.remove();
+    confirm.onclick = () => dialog.close();
+    dialog.append(
+      el('h2', '', 'Git identity unavailable'),
+      el('p', 'error', `Could not read the Git identity on this host: ${failure.message}`),
+      el('p', 'dim', 'Sessions may not be able to commit until this is fixed.'),
+      controls,
+    );
+    confirm.focus();
+  });
+}
+
+function identityNeedsSetup(identity) {
+  return !identity.per_directory && !(identity.name && identity.email);
+}
+
+function openGitIdentitySetup(identity) {
+  const dialog = openSessionDialog('git-identity-dialog', 'Set up Git identity');
+  dialog.append(
+    el('h2', '', 'Set up Git identity'),
+    el('p', 'dim', 'Git on this host has no commit author, so sessions cannot commit. Mjolnir saves this to your global Git configuration.'),
+  );
+  const field = (label, value, type, autocomplete) => {
+    const wrapper = el('label', 'field');
+    wrapper.append(el('span', '', label));
+    const input = el('input');
+    input.type = type;
+    input.autocomplete = autocomplete;
+    input.value = value || '';
+    wrapper.append(input);
+    dialog.append(wrapper);
+    return input;
+  };
+  const nameInput = field('Name', identity.name, 'text', 'name');
+  const emailInput = field('Email', identity.email, 'email', 'email');
+  const error = el('p', 'error');
+  error.setAttribute('role', 'alert');
+  const { controls, cancel, confirm } = dialogControls('Save');
+  cancel.textContent = 'Skip';
+  cancel.onclick = () => dialog.close();
+  dialog.append(error, controls);
+  (identity.name ? emailInput : nameInput).focus();
+  confirm.onclick = async () => {
+    confirm.disabled = true;
+    error.textContent = '';
+    try {
+      const saved = await request('/api/git-identity', {
+        method: 'POST',
+        body: JSON.stringify({ name: nameInput.value, email: emailInput.value }),
+      });
+      dialog.close();
+      announce(`Git commits on this host now use ${saved.name} <${saved.email}>.`);
     } catch (failure) {
       if (dialog.open) error.textContent = failure.message;
       confirm.disabled = false;

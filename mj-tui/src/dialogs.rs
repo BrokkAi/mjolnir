@@ -5,6 +5,10 @@ pub(crate) use render::*;
 
 mod container;
 pub(crate) use container::{ContainerEditFocus, ContainerEditor, render_container_editor};
+mod git_identity;
+pub(crate) use git_identity::{
+    GitIdentityControl, GitIdentityDialog, GitIdentityGate, render_git_identity_dialog,
+};
 
 use std::cell::RefCell;
 use std::time::{Duration, Instant};

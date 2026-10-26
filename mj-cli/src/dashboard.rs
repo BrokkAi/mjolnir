@@ -946,6 +946,11 @@ pub(crate) async fn run_dashboard_for_workspace(
         if !context.shutdown_requested {
             context.apply_chat_outcome(chat_outcome).await;
             actions::apply_dashboard_action(&mut context, action).await?;
+            // A settled Git identity check lets the new session it held back
+            // continue as though the user had just asked for it.
+            if let Some(followup) = context.dashboard.take_git_identity_followup() {
+                actions::apply_dashboard_action(&mut context, followup).await?;
+            }
             // Input or a background result can open an isolated creation
             // review; either way its prerequisite check starts here.
             if let Some(discovery) = context.dashboard.take_project_discovery() {
@@ -1606,6 +1611,9 @@ impl DashboardContext {
         );
         dashboard.set_workspace_names(workspace_names);
         dashboard.set_launch_recency(launch_recency);
+        // Sessions inherit this host's Git author identity; the first new
+        // session of the run makes sure there is one.
+        dashboard.require_git_identity_check();
         // Tabs follow creation order, which a restart does not change; the
         // listing itself leads with the most recently opened workspace.
         let mut by_creation = workspaces.iter().collect::<Vec<_>>();

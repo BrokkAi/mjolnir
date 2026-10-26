@@ -37,8 +37,18 @@ pub struct AgentIsolation {
 #[allow(dead_code)]
 impl AgentIsolation {
     pub fn under(root: &Path) -> Self {
+        // A host's own Git config must not reach the fixture, and the
+        // dashboard asks for a commit author before a new session when the
+        // global config has none.
+        let git_config = root.join(".gitconfig");
+        std::fs::write(
+            &git_config,
+            "[user]\n\tname = Mjolnir Test\n\temail = test@example.invalid\n",
+        )
+        .expect("write the fixture's global Git config");
         Self {
             set: vec![
+                ("GIT_CONFIG_GLOBAL", git_config),
                 ("HOME", root.to_path_buf()),
                 // `mj_core::path_input::user_home` reads it on Windows.
                 ("USERPROFILE", root.to_path_buf()),
