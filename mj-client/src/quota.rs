@@ -100,8 +100,8 @@ impl ProfileQuota {
         self.error.is_none() && self.windows.is_empty() && self.extra.as_deref() == Some(API_LABEL)
     }
 
-    /// Whether the report says the harness never shares its quota. MiMo Code,
-    /// for one, neither publishes an allowance nor receives one from its
+    /// Whether the report says the harness never shares its quota. MiMo Code
+    /// and OpenCode neither publish an allowance nor read one from their
     /// providers, so the profile reads `n/a` rather than as a failed probe.
     pub fn is_not_reported(&self) -> bool {
         self.error.is_none()

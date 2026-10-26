@@ -664,11 +664,9 @@ async fn refresh_profile_with_cache_root(
                 refreshed_at_epoch_seconds,
                 rate_limited_until_epoch_seconds: None,
             }),
-        // OpenCode talks to many third-party providers through its own
-        // gateway; it publishes no quota endpoint of its own to poll.
-        HarnessKind::OpenCode => Err(anyhow::anyhow!(
-            "OpenCode does not publish a quota endpoint"
-        )),
+        // OpenCode reads no allowance from any provider: rate-limit headers
+        // reach it only on failed requests.
+        HarnessKind::OpenCode => Ok(not_reported()),
         // MiMo Code reads no allowance from Xiaomi or any other provider;
         // Xiaomi's Token Plan usage is only on its web console.
         HarnessKind::Mimo => Ok(not_reported()),
