@@ -1,6 +1,8 @@
 use super::launch::*;
 use super::*;
 
+use crate::targets::tests::unwrapped_remote_line;
+
 fn stamped_worker(body: &[u8]) -> Vec<u8> {
     let mut bytes = body.to_vec();
     bytes.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
@@ -1315,7 +1317,7 @@ fn stopping_a_worker_runs_the_daemon_stop_script() {
         commands[0]
             .args
             .last()
-            .is_some_and(|remote| remote.starts_with("'sh' '-c' ")),
+            .is_some_and(|remote| unwrapped_remote_line(remote).starts_with("'sh' '-c' ")),
         "raw SSH worker management must not source login profiles: {commands:?}"
     );
     let script = commands[0]
