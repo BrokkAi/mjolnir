@@ -16,11 +16,7 @@ pub(in crate::controller) fn replace_installed_worker_binary(
     worker: &WorkerInstall,
 ) -> Result<()> {
     let _owner = crate::worker_lifecycle::require(session_id)?;
-    let plan = installed_worker_binary_replacement_plan(locator, session_id, worker)?;
-    for command in plan.commands {
-        execute_checked(executor, command)?;
-    }
-    Ok(())
+    install_worker_binary(executor, locator, session_id, worker, "hel")
 }
 
 /// Upload without changing the executable path used by the running worker or
@@ -41,9 +37,9 @@ pub(crate) struct PreparedWorkerBinary<'a, E: CommandExecutor> {
 /// Recovery stages under the worker permit and an upgrade stages before taking
 /// it, so two preparations for one session can overlap. This registry is the
 /// one owner of "which staged files are still in use": a new staging removes
-/// every other `hel.prepared-*` file in the worker root, which can only be a
+/// every other private staging file in the worker root, which can only be a
 /// leftover from an attempt that failed or a daemon that stopped mid-upload.
-struct LiveStaging {
+pub(super) struct LiveStaging {
     key: (PathBuf, String),
     name: String,
 }
@@ -56,6 +52,25 @@ fn live_stagings() -> &'static LiveStagingRegistry {
 }
 
 impl LiveStaging {
+    pub(super) fn register_and_sweep(
+        executor: &impl CommandExecutor,
+        locator: &targets::TargetLocator,
+        session_id: &str,
+        root: &str,
+        name: &str,
+    ) -> Result<Self> {
+        // A snapshot must remain current until its sweep finishes. Other
+        // registrations wait here before creating their first directory entry.
+        let gate = super::store::store_gate(locator, &format!("{root}/staging"));
+        let _owner = super::store::lock_gate(executor, &gate)?;
+        let (live, names) = Self::register(session_id, name);
+        execute_checked(
+            executor,
+            sweep_stale_stagings_command(locator, root, &names),
+        )?;
+        Ok(live)
+    }
+
     /// Register `name` and return every name live for the session, this one
     /// included, from the same locked view.
     fn register(session_id: &str, name: &str) -> (Self, Vec<String>) {
@@ -90,7 +105,7 @@ impl Drop for LiveStaging {
     }
 }
 
-/// Remove the `hel.prepared-*` files in `worker_root` that no live staging
+/// Remove prepared binaries and store pins in `worker_root` that no live staging
 /// owns. A failed upload once left its partial `.next` file behind, and on a
 /// full disk those accumulated by the dozen.
 fn sweep_stale_stagings_command(
@@ -99,12 +114,12 @@ fn sweep_stale_stagings_command(
     live: &[String],
 ) -> CommandSpec {
     let script = r#"root=$1; shift
-for path in "$root"/hel.prepared-*; do
+for path in "$root"/hel.prepared-* "$root"/hel.store-*; do
     [ -e "$path" ] || continue
     name=${path##*/}
     keep=0
     for live in "$@"; do
-        case $name in "$live"|"$live".next) keep=1 ;; esac
+        case $name in "$live"|"$live".next|"$live".store-*) keep=1 ;; esac
     done
     [ "$keep" = 1 ] || rm -f -- "$path"
 done"#;
@@ -194,17 +209,8 @@ pub(in crate::controller) fn stage_worker_binary_for_upgrade<'a, E: CommandExecu
         "hel.prepared-{}",
         crate::session_manager::new_command_id("upgrade-stage")?
     );
-    let plan = worker_binary_replacement_plan(locator, session_id, worker, &staging)?;
     let root = targets::worker_root(locator, session_id)?;
-    if let Some(worker_binary) = worker.host_binary() {
-        crate::target_storage::ensure_room_for(
-            locator,
-            [format!("{root}/{staging}.next").as_str()],
-            || file_size(worker_binary),
-            "stage the replacement Mjolnir worker",
-        )?;
-    }
-    let (live, live_names) = LiveStaging::register(session_id, &staging);
+    let live = LiveStaging::register_and_sweep(executor, locator, session_id, &root, &staging)?;
     // The guard exists before the first byte is written, so a failed or
     // cancelled upload removes its partial `.next` file on the way out.
     let prepared = PreparedWorkerBinary {
@@ -225,13 +231,15 @@ pub(in crate::controller) fn stage_worker_binary_for_upgrade<'a, E: CommandExecu
         session_id: session_id.to_owned(),
         _live: live,
     };
-    execute_checked(
-        executor,
-        sweep_stale_stagings_command(locator, &root, &live_names),
-    )?;
-    plan.execute(executor)?;
+    install_worker_binary(executor, locator, session_id, worker, &prepared.name)?;
     Ok(prepared)
 }
+
+// mv rejects two different names for the same inode. Reinstalling a current
+// shared binary therefore consumes the private link without changing hel.
+pub(super) const PROMOTE_WORKER_BINARY: &str = r#"promote_worker_binary() {
+    if [ "$1" -ef "$2" ]; then rm -f -- "$1"; else mv -f -- "$1" "$2"; fi
+}"#;
 
 pub(in crate::controller) fn install_staged_worker_binary(
     owner: &crate::worker_lifecycle::WorkerPermit,
@@ -254,9 +262,10 @@ pub(in crate::controller) fn install_staged_worker_binary(
         targets::locator_command(
             locator,
             vec![
-                "mv".into(),
-                "-f".into(),
-                "--".into(),
+                "sh".into(),
+                "-c".into(),
+                format!("{PROMOTE_WORKER_BINARY}\npromote_worker_binary \"$1\" \"$2\""),
+                "mj-worker-promote".into(),
                 format!("{root}/{staging}"),
                 format!("{root}/hel"),
             ],
@@ -302,7 +311,7 @@ pub(in crate::controller) fn prepare_managed_harness_for_upgrade(
             crate::target_storage::harness_cache_path(locator).as_str(),
             launch.harness_home.to_string_lossy().as_ref(),
         ],
-        || worker.host_binary().map_or(Ok(0), file_size),
+        || Ok(0),
         "prepare the managed harness",
     )?;
     if locator.container_engine().is_some() {
@@ -360,20 +369,23 @@ pub(in crate::controller) fn prepare_managed_harness_for_upgrade(
             crate::targets::ssh_command(ssh, ["mkdir", "-p", &staging_root])
                 .purpose("create managed harness preparation staging"),
         )?;
-        execute_checked(
+        let staging_name = Path::new(&staging_root)
+            .file_name()
+            .context("harness staging has no name")?;
+        install_worker_binary(
             executor,
-            crate::targets::scp_upload(ssh, worker_binary, &staging_binary, false)
-                .purpose("stage current worker for managed harness preparation"),
+            locator,
+            session_id,
+            worker,
+            &mj_core::target_path::text(&mj_core::target_path::join(
+                Path::new(staging_name),
+                Path::new("hel"),
+            )),
         )?;
         execute_checked(
             executor,
             crate::targets::scp_upload(ssh, &local_config, &staging_config, false)
                 .purpose("stage managed harness launch configuration"),
-        )?;
-        execute_checked(
-            executor,
-            crate::targets::ssh_command(ssh, ["chmod", "700", &staging_binary])
-                .purpose("make managed harness preparation worker executable"),
         )?;
         execute_checked(
             executor,
@@ -426,8 +438,7 @@ fn prepare_container_harness_for_upgrade(
     let staging_root = format!("{worker_root}/{name}");
     let staging_binary = format!("{staging_root}/hel");
     let staging_config = format!("{staging_root}/launch.json");
-    let upload =
-        worker_binary_replacement_plan(locator, session_id, worker, &format!("{name}/hel"))?;
+
     let result = (|| -> Result<()> {
         execute_checked(
             executor,
@@ -437,7 +448,13 @@ fn prepare_container_harness_for_upgrade(
             )
             .purpose("create container harness preparation staging"),
         )?;
-        upload.execute(executor)?;
+        install_worker_binary(
+            executor,
+            locator,
+            session_id,
+            worker,
+            &format!("{name}/hel"),
+        )?;
         execute_checked(
             executor,
             write_launch_config_command(
@@ -518,22 +535,17 @@ pub(super) fn prepare_installed_managed_harness(
     Ok(())
 }
 
-pub(super) fn installed_worker_binary_replacement_plan(
+/// Transfer into a private path. Published store and session paths never
+/// appear as upload destinations; callers verify before publishing them.
+pub(super) fn worker_binary_upload_plan(
     locator: &targets::TargetLocator,
     session_id: &str,
     worker: &WorkerInstall,
-) -> Result<CommandPlan> {
-    worker_binary_replacement_plan(locator, session_id, worker, "hel")
-}
-
-fn worker_binary_replacement_plan(
-    locator: &targets::TargetLocator,
-    session_id: &str,
-    worker: &WorkerInstall,
-    installed_name: &str,
+    installed: &str,
+    remote_source: Option<&str>,
 ) -> Result<CommandPlan> {
     let worker_root = targets::worker_root(locator, session_id)?;
-    let installed = format!("{worker_root}/{installed_name}");
+    let installed = installed.to_owned();
     let staged = format!("{installed}.next");
     let worker_binary = match worker {
         WorkerInstall::Host(worker_binary) => worker_binary,
@@ -649,16 +661,22 @@ fn worker_binary_replacement_plan(
             let engine = locator
                 .container_engine()
                 .expect("matched a remote container target");
-            let upload = format!(
-                "{}/{}",
-                targets::REMOTE_UPLOAD_STAGING,
-                crate::session_manager::new_command_id("worker-upload")?
-            );
+            let upload = match remote_source {
+                Some(source) => source.to_owned(),
+                None => format!(
+                    "{}/{}",
+                    targets::REMOTE_UPLOAD_STAGING,
+                    crate::session_manager::new_command_id("worker-upload")?
+                ),
+            };
             vec![
                 crate::targets::ssh_command(ssh, ["mkdir", "-p", targets::REMOTE_UPLOAD_STAGING])
                     .purpose("create remote replacement worker staging"),
-                crate::targets::scp_upload(ssh, worker_binary, &upload, false)
-                    .purpose("stage replacement Mjolnir worker"),
+                match remote_source {
+                    Some(_) => crate::targets::ssh_command(ssh, ["true"]),
+                    None => crate::targets::scp_upload(ssh, worker_binary, &upload, false),
+                }
+                .purpose("stage replacement Mjolnir worker"),
                 crate::targets::ssh_command(
                     ssh,
                     [engine, "cp", &upload, &format!("{container_id}:{staged}")],
@@ -806,9 +824,14 @@ pub(crate) fn refresh_target_worker_binary_if_stale(
     let WorkerInstall::Host(source) = &worker else {
         // Relinking is cheap and idempotent; digests cannot tell an image's
         // worker from a host copy of the same build.
-        installed_worker_binary_replacement_plan(&refresh.locator, &refresh.session_id, &worker)?
-            .execute(executor)
-            .context("link the image's Mjolnir worker")?;
+        install_worker_binary(
+            executor,
+            &refresh.locator,
+            &refresh.session_id,
+            &worker,
+            "hel",
+        )
+        .context("link the image's Mjolnir worker")?;
         return Ok(());
     };
     replace_target_worker_binary_if_stale(
@@ -863,18 +886,13 @@ pub(super) fn replace_target_worker_binary_if_stale(
     if matches {
         return Ok(false);
     }
-    crate::target_storage::ensure_room_for(
-        locator,
-        [targets::worker_root(locator, session_id)?.as_str()],
-        || file_size(source),
-        "replace the stale Mjolnir worker",
-    )?;
-    installed_worker_binary_replacement_plan(
+    install_worker_binary(
+        executor,
         locator,
         session_id,
         &WorkerInstall::Host(source.to_owned()),
-    )?
-    .execute(executor)
+        "hel",
+    )
     .context("replace stale relay worker binary")?;
     Ok(true)
 }

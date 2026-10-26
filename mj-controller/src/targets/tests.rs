@@ -4611,7 +4611,10 @@ fn cancellable_executor_enforces_its_inline_deadline() {
         )
         .unwrap_err();
 
-    assert!(error.to_string().contains("operation cancelled"));
+    assert_eq!(
+        error.to_string(),
+        "timed out after 0.05 s while test bounded process execution"
+    );
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 

@@ -34,6 +34,39 @@ fn recovery_source_target() -> mj_core::state::TargetLocator {
     }
 }
 
+// Hard-won: 9317fe87c: recovery exhausted its 30-second deadline during staging.
+#[tokio::test]
+#[cfg_attr(windows, ignore = "worker recovery commands require Unix")]
+async fn recovery_allows_preparation_longer_than_the_previous_thirty_second_deadline() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = WorkerRecoveryPlan {
+        source_target: recovery_source_target(),
+        target: None,
+        workspace: None,
+        exit_record: None,
+        liveness_probe: CommandSpec::new("sh", ["-c", "sleep 31; printf dead"])
+            .purpose("probe slowly staged recovery"),
+        binary_refresh: None,
+        launch_refresh: None,
+        restart: CommandPlan {
+            description: "restart after slow preparation".into(),
+            commands: vec![CommandSpec::new(
+                "touch",
+                [directory
+                    .path()
+                    .join("restarted")
+                    .to_string_lossy()
+                    .into_owned()],
+            )],
+        },
+    };
+    assert_eq!(
+        recover_worker(plan, false).await.unwrap(),
+        WorkerRecoveryOutcome::RestartedDead
+    );
+    assert!(directory.path().join("restarted").exists());
+}
+
 #[tokio::test]
 async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
     let (commands, mut requests) = mpsc::channel(1);
