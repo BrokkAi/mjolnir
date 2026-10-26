@@ -138,7 +138,7 @@ Targets Runtimes… action: None
 │hel ───────────────  │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │                     │
 │› · ACP pretty name  │ run.                                                                                         │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
-│  │ No messages yet  │   podman                          9 settings  ›                            Add               │                     │
+│  │ No messages yet  │   podman                          10 settings  ›                           Add               │                     │
 │  │                  │                                                                            Detect runtimes   │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -348,7 +348,7 @@ Targets number 2 action: None
 │hel ───────────────  │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │                     │
 │› · ACP pretty name  │ run.                                                                                         │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
-│  │ No messages yet  │   podman                          9 settings  ›                            Add               │                     │
+│  │ No messages yet  │   podman                          10 settings  ›                           Add               │                     │
 │  │                  │                                                                            Detect runtimes   │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -559,7 +559,7 @@ Targets Enter setup action: None
 │hel ───────────────  │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │                     │
 │› · ACP pretty name  │ run.                                                                                         │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
-│  │ No messages yet  │   podman                          9 settings  ›                            Add               │                     │
+│  │ No messages yet  │   podman                          10 settings  ›                           Add               │                     │
 │  │                  │                                                                            Detect runtimes   │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │

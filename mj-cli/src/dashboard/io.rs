@@ -195,14 +195,6 @@ pub(crate) enum DashboardIoUpdate {
         session_id: String,
         result: std::result::Result<DashboardMetadata, String>,
     },
-    TargetReadiness {
-        generation: u64,
-        target_id: String,
-        result: std::result::Result<(), String>,
-        /// The configuration checked, when the check found its local
-        /// engine's command not installed.
-        absent_engine: Option<mj_core::config::TargetTemplate>,
-    },
     /// Whether a configured project's local directory exists; `None` when
     /// the check could not tell.
     ProjectDirectory {
@@ -286,7 +278,6 @@ pub(crate) enum DashboardIoUpdate {
     FirstRunStarted,
     FirstRunConfigured(mj_controller::setup::SetupReport),
     FirstRunChecked(std::result::Result<Option<Vec<String>>, String>),
-    StartupProfilesDetected(std::result::Result<Vec<String>, String>),
     SetupSaved {
         generation: u64,
         result: std::result::Result<Config, String>,
@@ -301,9 +292,9 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         result: std::result::Result<BTreeMap<String, mj_core::credentials::LoginStatus>, String>,
     },
-    MachineRuntimesChecked {
+    AvailabilityChecked {
         generation: u64,
-        result: std::result::Result<mj_tui::MachineRuntimesChecked, String>,
+        result: std::result::Result<mj_tui::AvailabilityChecked, String>,
     },
     BuildCachePreviewed {
         generation: u64,
@@ -1179,33 +1170,6 @@ impl DashboardContext {
                     tracing::warn!(%error, "could not refresh recent project directories");
                 }
             },
-            DashboardIoUpdate::TargetReadiness {
-                generation,
-                target_id,
-                result,
-                absent_engine,
-            } => {
-                if let (Some(template), Err(message)) = (&absent_engine, &result)
-                    && self
-                        .absent_engines
-                        .record(&target_id, template, message.clone())
-                {
-                    tracing::info!(
-                        target_id,
-                        reason = %message,
-                        "the target's container engine is not installed; the dashboard checks it \
-                         again only when its configuration changes or the engine is installed"
-                    );
-                }
-                match (&absent_engine, result) {
-                    (Some(_), Err(message)) => self
-                        .dashboard
-                        .apply_target_runtime_missing(generation, target_id, message),
-                    (_, result) => self
-                        .dashboard
-                        .apply_target_readiness(generation, target_id, result),
-                }
-            }
             DashboardIoUpdate::ProjectDirectory { path, exists } => {
                 self.dashboard.apply_project_directory_check(path, exists);
             }
@@ -1358,24 +1322,15 @@ impl DashboardContext {
                     tracing::warn!(%error, "could not read profile sign-in status");
                 }
             },
-            DashboardIoUpdate::MachineRuntimesChecked { generation, result } => self
+            DashboardIoUpdate::AvailabilityChecked { generation, result } => self
                 .dashboard
-                .apply_machine_runtime_check(generation, result),
+                .apply_availability_check(generation, result),
             DashboardIoUpdate::FirstRunStarted => self.dashboard.begin_welcome(),
             DashboardIoUpdate::FirstRunConfigured(report) => {
                 let no_agents = report.agents.is_empty();
                 self.dashboard.welcome_configured(report.summary());
                 self.dashboard.welcome_managed_setup_available(no_agents);
             }
-            DashboardIoUpdate::StartupProfilesDetected(result) => match result {
-                Ok(added) if added.is_empty() => {}
-                Ok(added) => self
-                    .dashboard
-                    .set_notice(format!("Added agent profiles: {}.", added.join(", "))),
-                Err(error) => self
-                    .dashboard
-                    .set_failure_notice(format!("Detecting agent profiles failed: {error}")),
-            },
             DashboardIoUpdate::FirstRunChecked(result) => match result {
                 Ok(Some(errors)) => self.dashboard.welcome_checked(errors),
                 Ok(None) => {}

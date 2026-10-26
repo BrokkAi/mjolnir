@@ -14,10 +14,16 @@ impl DashboardState {
     }
 
     pub(crate) fn begin_new_wizard(&mut self) -> DashboardAction {
-        if self.config.enabled_profiles().next().is_none() || self.config.targets.is_empty() {
+        if self.offered_profiles().next().is_none() || self.config.targets.is_empty() {
             self.begin_settings_section("profiles", None);
+            if let Some(missing) = self.missing_profiles_notice() {
+                self.notices.set(missing);
+            }
             return DashboardAction::None;
         }
+        // Opening a picker is when what is there matters; the answer arrives
+        // in the background and changes the list only if it differs.
+        self.want_availability_check();
         let interactive = self.recent_launch.as_ref().map(|recent| LaunchRecency {
             bundle_id: recent.bundle_id.clone(),
             last_profile: recent.profile_id.clone(),
@@ -31,8 +37,7 @@ impl DashboardState {
         };
         let profile = recent
             .and_then(|session| {
-                self.config
-                    .enabled_profiles()
+                self.offered_profiles()
                     .position(|(id, _)| id == session.last_profile)
             })
             .unwrap_or(0);
@@ -43,21 +48,11 @@ impl DashboardState {
                     .position(|id| *id == session.bundle_id)
             })
             .unwrap_or(0);
-        let target = recent
-            .and_then(|session| {
-                self.config
-                    .targets
-                    .keys()
-                    .position(|id| id == &session.target_template_id)
-            })
-            .unwrap_or_else(|| {
-                self.config
-                    .targets
-                    .keys()
-                    .position(|id| id == "localhost")
-                    .unwrap_or(0)
-            });
-        let profile_id = self.config.enabled_profiles().nth(profile).unwrap().0;
+        let target = self.offered_target_index_or_first(
+            recent.map_or("localhost", |session| session.target_template_id.as_str()),
+        );
+        let profile_id = self.nth_offered_profile(profile);
+        let profile_id = profile_id.as_str();
         let mut delegation = subagents::SubagentDraft::new(self.state.last_subagent_policy.clone());
         delegation.refresh_create(
             profile_id,
@@ -126,21 +121,19 @@ impl DashboardState {
             return DashboardAction::None;
         }
         if self.compatible_profiles(&session.id).is_empty() || self.config.targets.is_empty() {
-            self.notices
-                .set("Resume needs a profile and a target template.");
+            self.notices.set(
+                self.missing_profiles_notice()
+                    .unwrap_or_else(|| "Resume needs a profile and a target template.".into()),
+            );
             return DashboardAction::None;
         }
+        self.want_availability_check();
         let profile = self
             .compatible_profiles(&session.id)
             .iter()
             .position(|(profile_id, _)| profile_id.as_str() == session.last_profile)
             .unwrap_or(0);
-        let target = self
-            .config
-            .targets
-            .keys()
-            .position(|target_id| target_id == &session.target_template_id)
-            .unwrap_or(0);
+        let target = self.offered_target_index_or_first(&session.target_template_id);
         self.mode = Mode::Resume(ResumeWizard {
             subagents: Box::new(subagents::SubagentDraft::new(
                 session.subagents.clone().unwrap_or_default(),
@@ -192,11 +185,14 @@ impl DashboardState {
         profile_id: Option<&str>,
         target_id: Option<&str>,
     ) -> DashboardAction {
-        if self.config.enabled_profiles().next().is_none() || self.config.targets.is_empty() {
-            self.notices
-                .set("Restoring needs a profile and a target template.");
+        if self.offered_profiles().next().is_none() || self.config.targets.is_empty() {
+            self.notices.set(
+                self.missing_profiles_notice()
+                    .unwrap_or_else(|| "Restoring needs a profile and a target template.".into()),
+            );
             return DashboardAction::None;
         }
+        self.want_availability_check();
         // A wizard opened now could only end in a refused Restore.
         if self.archive_restore_in_flight(&wiki_id) {
             self.notices.set(super::resume::ARCHIVE_RESTORE_IN_FLIGHT);
@@ -205,11 +201,7 @@ impl DashboardState {
         // The same lists the wizard indexes into: `resume_wizard_profiles` for
         // an archive source, and every configured target.
         let profile = profile_id
-            .and_then(|wanted| {
-                self.config
-                    .enabled_profiles()
-                    .position(|(id, _)| id == wanted)
-            })
+            .and_then(|wanted| self.offered_profiles().position(|(id, _)| id == wanted))
             .unwrap_or(0);
         let target = target_id
             .and_then(|wanted| self.config.targets.keys().position(|id| id == wanted))
@@ -268,21 +260,19 @@ impl DashboardState {
             return DashboardAction::None;
         }
         if self.compatible_profiles(&session.id).is_empty() || self.config.targets.is_empty() {
-            self.notices
-                .set("Move needs a profile and a target template.");
+            self.notices.set(
+                self.missing_profiles_notice()
+                    .unwrap_or_else(|| "Move needs a profile and a target template.".into()),
+            );
             return DashboardAction::None;
         }
+        self.want_availability_check();
         let profile = self
             .compatible_profiles(&session.id)
             .iter()
             .position(|(profile_id, _)| profile_id.as_str() == session.last_profile)
             .unwrap_or(0);
-        let target = self
-            .config
-            .targets
-            .keys()
-            .position(|target_id| target_id == &session.target_template_id)
-            .unwrap_or(0);
+        let target = self.offered_target_index_or_first(&session.target_template_id);
         self.mode = Mode::Resume(ResumeWizard {
             subagents: Box::new(subagents::SubagentDraft::new(
                 session.subagents.clone().unwrap_or_default(),

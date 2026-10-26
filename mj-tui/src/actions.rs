@@ -1943,13 +1943,11 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::Refresh => {
-                // Refreshing re-probes target readiness as well. It is allowed
-                // through an open modal (see `command_allowed_now`), so a
-                // wizard sitting on its target step sees fresh readiness. A
-                // cleared entry is re-probed on the next render.
-                self.target_readiness.clear();
+                // Refreshing checks again what is available. It is allowed
+                // through an open modal (see `command_allowed_now`), so an
+                // open picker gets fresh answers.
                 self.project_directory_checks.clear();
-                self.recheck_machine_runtimes();
+                self.want_availability_check();
                 DashboardAction::RefreshAll
             }
             CommandId::ManageProfiles => {
@@ -2361,15 +2359,6 @@ mod tests {
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::None
         );
-        if let Some(DashboardAction::CheckTargetReadiness {
-            generation,
-            target_ids,
-        }) = dashboard.take_prerequisite_check()
-        {
-            for id in target_ids {
-                dashboard.apply_target_readiness(generation, id, Ok(()));
-            }
-        }
         let preparation_request_id = match dashboard.handle_key(key(KeyCode::Enter)) {
             DashboardAction::MoveSession {
                 preparation_request_id: Some(request_id),

@@ -262,18 +262,14 @@ pub(crate) fn render_picker(
             ..
         })
     ) as u16;
-    let side_width = if navigation.side_actions.is_empty() {
-        0
-    } else {
-        mj_chat::components::ButtonColumn::width(navigation.side_actions)
-            + mj_chat::components::ButtonColumn::BODY_GAP
-    };
-    let help = wrap_lines(help, popup.width.saturating_sub(4 + side_width));
     let content = DialogShell::padded_inner(popup);
     let layout = DialogShell::layout(content, 1);
     let button_area = layout.actions;
     let columns = form.split_actions(layout.body, navigation.side_actions);
     let body = columns.body;
+    // Wrapped to the width it is drawn in, so a long reason wraps instead of
+    // being cut off at the dialog's padding.
+    let help = wrap_lines(help, body.width);
     let list_height = u16::try_from(choices.len())
         .unwrap_or(u16::MAX)
         .max(u16::from(

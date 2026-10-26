@@ -219,10 +219,11 @@ pub fn run_setup_command(config_path: &Path) -> Result<()> {
         writeln!(output, "{line}")?;
     }
     // A machine is a session target only through its runtimes, so setup adds
-    // them for every machine that has none yet.
+    // every runtime kind each machine newly runs, as the dashboard's check does.
     let machines: Vec<_> = Config::load_from(config_path)?
-        .machines_without_runtimes()
-        .map(|(id, machine)| (id.to_owned(), machine.clone()))
+        .machines
+        .into_iter()
+        .filter(|(_, machine)| !matches!(machine, mj_core::config::Machine::Local { .. }))
         .collect();
     let found = probe_machines(&machines, &probes);
     for (machine, runtimes) in add_machine_runtimes(config_path, &found, &|| false)? {

@@ -15,8 +15,8 @@ To see it: in an isolated instance (`mj --instance avail`) with Docker stopped, 
 - [x] (2026-10-26 05:39Z) Mapped the current detection paths, the per-target readiness checks in the pickers, the machine probe, and the configuration shape. Created branch `detection-availability`.
 - [x] (2026-10-26 07:10Z) Milestone 1: one SSH call per machine probe (`record_machine`, `RecordedMachine` in `mj-controller/src/setup/machines.rs`), EC2 probe through the AWS checks, `profile_presence` and `check_availability` (`mj-controller/src/setup/availability.rs`). Every check adds missing runtime kinds on every machine. The doctor golden is unchanged byte for byte.
 - [x] (2026-10-26 07:10Z) Milestone 2: `targets.<id>.enabled` (configuration version 19, `Config::disabled_targets`, `enabled_targets`, `enabled_target`, `ensure_target_enabled`), refused by launch, resume and move, left out of the daemon's viewer projection, kept when a standard local runtime is switched off, and an Enabled checkbox on each Settings runtime. Remaining for the pickers: Milestone 3.
-- [ ] Milestone 3: the dashboard owns one availability snapshot, replaces target readiness and the machine-runtime check, and the pickers list only present entries.
-- [ ] Milestone 4: tests, documentation, full validation, live check in an isolated instance.
+- [x] (2026-10-26 07:45Z) Milestone 3: `mj-tui/src/availability.rs` owns one snapshot (`Availability`) and replaces `target_readiness`, `TARGET_READINESS_TTL`, the machine-runtime check and the CLI's absent-engine cache. Opening New session, Resume, Move or an archive restore asks for a check; the dashboard runs one at a time (`take_availability_check`), never while Settings is open. The profile and target steps list only offered entries and name each missing one under the list; an answer that removes a chosen entry returns the wizard to that step with the reason.
+- [x] (2026-10-26 07:50Z) Milestone 4: goldens extended (`profile-picker-table` names a missing profile; `wizard-target-step` shows no "checking" and names an unreachable machine), docs updated (`docs/src/content/docs/targets.md`, `profiles.md`, `cli-reference.md`, `docs/SSH.md`, the `mj` skill's configuration reference), clippy clean, mj-core, mj-tui and mj-cli suites pass apart from the macOS-only failures below, and a live run in an isolated instance.
 - [ ] Pull request, review, fixes, merge.
 
 ## Surprises & Discoveries
@@ -32,6 +32,12 @@ To see it: in an isolated instance (`mj --instance avail`) with Docker stopped, 
 
 - Observation: `HarnessProfile::ensure_ready` is already the one owner of "can a harness start from this profile"; every launch asks it. Profile presence is that plus "the installation is still here", not a second readiness rule.
   Evidence: `mj-core/src/config/harness.rs`, `ensure_ready`.
+
+- Observation: the wizard's help lines were wrapped to the dialog's outer width but drawn in its padded body, so a line within a few columns of the edge was cut off mid-word. Reasons for missing entries are long enough to hit it.
+  Evidence: the regenerated golden showed "failed: Connecti" clipped; `render_picker` in `mj-tui/src/wizards/picker.rs` now wraps to `body.width`.
+
+- Observation: `mj-cli/tests/instance.rs` `setup_reruns_without_questions_and_preserves_existing_accounts` fails on this macOS host on unmodified master too.
+  Evidence: the same assertion (`left: 2, right: 1`) with the change stashed.
 
 - Observation: Mjolnir installs and runs its own pinned agent bridges, so a profile does not need the user's agent command to run. The user's credentials live in the profile's home directory.
   Evidence: `mj-core/src/harness_runtime.rs`, "Exact harness versions used by Mjolnir-managed installations."
@@ -62,13 +68,23 @@ To see it: in an isolated instance (`mj --instance avail`) with Docker stopped, 
   Rationale: this reverses the #1329 rule that a machine with a runtime is never probed for more. The user asked that detection find what is there without editing configuration. Profiles already work this way.
   Date/Author: 2026-10-26, user and Claude.
 
+- Decision: an entry no answer has reached is offered; only an entry found missing is left out.
+  Rationale: hiding unanswered entries would empty the profile list at the first frame (which sends the user to Settings) and move the cursor off the recent target while a host answers. The first check after start answers within a second locally and a few seconds remotely, the picker opens on the last answer afterwards, and the launch preflight refuses what vanished in between.
+  Date/Author: 2026-10-26, Claude.
+
+- Decision: a standard local runtime (supplied by `Config::with_local_targets`) whose engine command is not on `PATH` is left out without a line; one whose engine is installed but not working is named.
+  Rationale: a host without Docker would otherwise name `docker` under every picker forever. Docker Desktop stopped is the case worth saying.
+  Date/Author: 2026-10-26, Claude.
+
 - Decision: configuration version 19 is breaking.
   Rationale: an older build reading `enabled = false` on a container runtime ignores the unknown key (container settings are flattened, which turns off `deny_unknown_fields`) and a save drops it, so the runtime would come back enabled; on a bare runtime an older build refuses the file. Older writers cannot preserve the switch.
   Date/Author: 2026-10-26, Claude.
 
 ## Outcomes & Retrospective
 
-To be written at completion.
+Detection now has one owner for "what is there", consulted by every picker. The live run in an isolated instance (`MJ_CONFIG_DIR`, `MJ_DATA_DIR`, `--instance avail`) on a Mac with Apple container but no Docker or Podman showed: the startup check added the agents installed since the file was written ("Added agent profiles: claude-2, codex, dsh."); the profile step left out a Grok profile whose home and command are gone and named it with the fix; the target step listed `apple-container` and `localhost`, left the standard `podman` and `docker` out without a word, and named the hand-written `mydocker` ("Docker is not installed on this host…") and the unreachable `nas` (the SSH resolution error and its fix). No row said "checking".
+
+Remaining: the web viewer's launch options still use the daemon's own engine probe rather than this snapshot, apart from leaving disabled runtimes out; making the daemon own the snapshot would let every client share it, and is a follow-up. The doctor's SSH remediation repeats the SSH error it follows, which shows in the reason for an unreachable machine.
 
 ## Context and Orientation
 

@@ -1,101 +1,6 @@
 use super::*;
 
 impl DashboardState {
-    /// The instant readiness answers are judged against.
-    fn readiness_now(&self) -> Instant {
-        #[cfg(test)]
-        return Instant::now() + self.readiness_clock_advance;
-        #[cfg(not(test))]
-        Instant::now()
-    }
-
-    pub(in crate::wizards) fn target_readiness_rejection(&self, target_id: &str) -> Option<String> {
-        let template = self.config.targets.get(target_id)?;
-        // A raw local target runs in this controller process's host; there is
-        // no external service or connection whose readiness needs a probe.
-        if matches!(template, TargetTemplate::LocalBare) {
-            return None;
-        }
-        match self
-            .target_readiness
-            .get(target_id)
-            .filter(|check| &check.template == template && !check.is_stale(self.readiness_now()))
-            .and_then(|check| check.result.as_ref())
-        {
-            Some(Ok(())) => None,
-            Some(Err(error)) => Some(format!("unavailable: {error}")),
-            None => Some("checking availability…".into()),
-        }
-    }
-
-    /// Start readiness checks for those of `target_ids` with no current
-    /// result, sharing one generation. A check in flight is never repeated.
-    pub(in crate::wizards) fn begin_target_readiness_checks(
-        &mut self,
-        target_ids: Vec<String>,
-    ) -> Option<DashboardAction> {
-        let now = self.readiness_now();
-        let target_ids: Vec<_> = target_ids
-            .into_iter()
-            .filter(|id| {
-                self.config.targets.get(id).is_some_and(|template| {
-                    self.target_readiness
-                        .get(id)
-                        .is_none_or(|check| &check.template != template || check.is_stale(now))
-                })
-            })
-            .collect();
-        if target_ids.is_empty() {
-            return None;
-        }
-        self.target_readiness_generation = self.target_readiness_generation.wrapping_add(1);
-        let generation = self.target_readiness_generation;
-        for id in &target_ids {
-            let runtime_missing = self.target_runtime_missing(id);
-            self.target_readiness.insert(
-                id.clone(),
-                TargetReadiness {
-                    template: self.config.targets[id].clone(),
-                    generation,
-                    result: None,
-                    runtime_missing,
-                    recorded_at: now,
-                },
-            );
-        }
-        Some(DashboardAction::CheckTargetReadiness {
-            generation,
-            target_ids,
-        })
-    }
-
-    /// Check the local container targets the Targets pane lists. The standard
-    /// ones exist whether or not their engine is installed
-    /// (`Config::with_local_targets` offers them as candidates that callers
-    /// must check), so the pane has to find out which of them can run. Only
-    /// local container engines are probed here: each check is a quick local
-    /// command, while SSH and AWS targets would open connections.
-    pub fn take_target_availability_check(&mut self) -> Option<DashboardAction> {
-        let target_ids: Vec<_> = self
-            .capacity_details
-            .values()
-            .filter(|detail| detail.target.local)
-            .flat_map(|detail| detail.target.target_ids.iter())
-            .filter(|id| {
-                matches!(
-                    self.config.targets.get(*id),
-                    Some(
-                        TargetTemplate::LocalPodman { .. }
-                            | TargetTemplate::LocalDocker { .. }
-                            | TargetTemplate::AppleContainer { .. }
-                    )
-                )
-            })
-            .cloned()
-            .collect();
-        self.begin_target_readiness_checks(target_ids)
-    }
-
     /// Start checks for the local directories of configured projects that
     /// have no current answer. A check in flight is never repeated.
     pub(in crate::wizards) fn begin_project_directory_checks(&mut self) -> Option<DashboardAction> {
@@ -170,32 +75,8 @@ impl DashboardState {
             .collect()
     }
 
-    /// Whether the last readiness check of `target_id` failed. A target not
-    /// yet checked is not called unavailable.
-    pub(crate) fn target_known_unavailable(&self, target_id: &str) -> bool {
-        let Some(template) = self.config.targets.get(target_id) else {
-            return false;
-        };
-        self.target_readiness.get(target_id).is_some_and(|check| {
-            &check.template == template && matches!(check.result, Some(Err(_)))
-        })
-    }
-
-    /// Whether the last check found the runtime `target_id` needs not
-    /// installed on this host. Such a target is permanently unavailable here,
-    /// so the wizards do not offer it; a host that merely did not answer is
-    /// transient and stays listed.
-    pub(crate) fn target_runtime_missing(&self, target_id: &str) -> bool {
-        let Some(template) = self.config.targets.get(target_id) else {
-            return false;
-        };
-        self.target_readiness
-            .get(target_id)
-            .is_some_and(|check| &check.template == template && check.runtime_missing)
-    }
-
     /// The indexes into `config.targets` of the targets the wizards list:
-    /// every one whose runtime is not known to be missing on this host.
+    /// every one that is offered (`DashboardState::target_offered`).
     /// `wizard.target` keeps indexing the full map; only the rows shown, and
     /// the position selected among them, go through this list.
     pub(in crate::wizards) fn offered_target_indices(&self) -> Vec<usize> {
@@ -203,7 +84,7 @@ impl DashboardState {
             .targets
             .keys()
             .enumerate()
-            .filter(|(_, id)| !self.target_runtime_missing(id))
+            .filter(|(_, id)| self.target_offered(id))
             .map(|(index, _)| index)
             .collect()
     }
@@ -216,60 +97,6 @@ impl DashboardState {
             .iter()
             .position(|index| *index == target)
             .unwrap_or(0)
-    }
-
-    /// Record that the check of `target_id` found its runtime not installed.
-    pub fn apply_target_runtime_missing(
-        &mut self,
-        generation: u64,
-        target_id: String,
-        reason: String,
-    ) {
-        self.apply_target_readiness(generation, target_id.clone(), Err(reason));
-        let Some(check) = self.target_readiness.get_mut(&target_id) else {
-            return;
-        };
-        if check.generation != generation {
-            return;
-        }
-        check.runtime_missing = true;
-        self.move_wizard_off_missing_target(&target_id);
-    }
-
-    /// A wizard left on a target that has just disappeared from its list
-    /// moves to the first target still offered.
-    fn move_wizard_off_missing_target(&mut self, target_id: &str) {
-        let Some(missing) = self.config.targets.keys().position(|id| id == target_id) else {
-            return;
-        };
-        let Some(first) = self.offered_target_indices().first().copied() else {
-            return;
-        };
-        match &mut self.mode {
-            Mode::New(wizard) if wizard.target == missing => wizard.target = first,
-            Mode::Resume(wizard) if wizard.target == missing => wizard.target = first,
-            _ => {}
-        }
-    }
-
-    pub fn apply_target_readiness(
-        &mut self,
-        generation: u64,
-        target_id: String,
-        result: Result<(), String>,
-    ) {
-        let now = self.readiness_now();
-        let Some(check) = self.target_readiness.get_mut(&target_id) else {
-            return;
-        };
-        if check.generation != generation
-            || self.config.targets.get(&target_id) != Some(&check.template)
-        {
-            return;
-        }
-        check.result = Some(result);
-        check.runtime_missing = false;
-        check.recorded_at = now;
     }
 
     /// The profiles the resume wizard offers. A record's resume is limited to
@@ -285,7 +112,7 @@ impl DashboardState {
                 .config
                 .profiles
                 .iter()
-                .filter(|(_, profile)| profile.enabled)
+                .filter(|(id, _)| self.profile_offered(id))
                 .map(|(id, profile)| (id, profile.kind))
                 .collect(),
         }
@@ -297,8 +124,7 @@ impl DashboardState {
         session_id: &str,
         target_id: &str,
     ) -> Option<String> {
-        self.target_readiness_rejection(target_id)
-            .or_else(|| self.resume_target_incompatibility(session_id, target_id))
+        self.resume_target_incompatibility(session_id, target_id)
     }
 
     /// Why this session could not resume on `target_id` even once the target
@@ -326,15 +152,13 @@ impl DashboardState {
     /// The index of the only target the target step would offer `wizard`,
     /// when that step has nothing else to decide.
     ///
-    /// The step lists every configured and built-in target. A target counts
-    /// as offered unless its last availability check failed, such as the
-    /// built-in docker on a host without Docker, or the draft cannot use it,
-    /// such as a bundle session on a local bare target. A target whose check
-    /// has not answered yet still counts, so the step is shown while it
-    /// might gain a choice. The one target must also be usable now and have
-    /// no size to set: a container or EC2 target is sized on that step, so
-    /// its step is kept. So is the step of a configuration with a machine no
-    /// runtime runs on, which the step names.
+    /// The step lists every offered target. One counts unless the draft
+    /// cannot use it, such as a bundle session on a local bare target. A
+    /// target no answer has reached yet is offered, so the step is shown
+    /// while it might gain a choice. The one target must also have no size
+    /// to set: a container or EC2 target is sized on that step, so its step
+    /// is kept. So is the step of a configuration with a machine no runtime
+    /// runs on, which the step names.
     pub(in crate::wizards) fn lone_target<W: WizardDraft>(&self, wizard: &W) -> Option<usize> {
         if self.config.machines_without_runtimes().next().is_some() {
             return None;
@@ -344,9 +168,7 @@ impl DashboardState {
             .targets
             .iter()
             .enumerate()
-            .filter(|(_, (id, _))| {
-                !self.target_known_unavailable(id) && wizard.target_compatible(self, id)
-            });
+            .filter(|(_, (id, _))| self.target_offered(id) && wizard.target_compatible(self, id));
         let (index, (id, template)) = offered.next()?;
         if offered.next().is_some() {
             return None;

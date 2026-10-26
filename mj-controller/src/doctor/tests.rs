@@ -293,7 +293,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     )]);
     let probes = FakeExecutor::new([
         // builder
-        Ok(output(&crate::setup::machine_probe_fixture(&[
+        Ok(output(crate::setup::machine_probe_fixture(&[
             ("platform", 0, b"Linux x86_64\n", ""),
             ("podman", 0, &podman_missing, ""),
             ("docker", 0, b"27.5.1 linux\n", ""),
@@ -305,7 +305,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
             stderr: b"Host key verification failed.".to_vec(),
         }),
         // pi
-        Ok(output(&crate::setup::machine_probe_fixture(&[
+        Ok(output(crate::setup::machine_probe_fixture(&[
             ("platform", 0, b"Linux riscv64\n", ""),
             ("podman", 0, &podman_missing, ""),
             (

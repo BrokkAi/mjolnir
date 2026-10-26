@@ -63,7 +63,8 @@ first interactive startup. It detects installed harnesses and home-directory
 overrides, adds profiles and a bundle for the current GitHub origin, and
 preserves existing entries and preferences. Matching entries are reused;
 identifier collisions get separate names. It also probes every SSH or EC2
-machine that has no runtime yet and adds the runtimes it can run. It saves
+machine and adds each runtime kind it newly runs; a runtime switched off with
+`enabled = false` is never added back. It saves
 additions without questions and reports actionable doctor errors. Container
 downloads remain background
 daemon work. Configure container options, SSH hosts, and AWS targets in Settings;
