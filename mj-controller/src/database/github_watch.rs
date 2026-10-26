@@ -390,10 +390,19 @@ pub(crate) fn commit_github_timeline(
 /// Reconstruct turn intervals from the same persisted start and completion
 /// facts exposed by the transcript projection. An unmatched start counts only
 /// when the materialized projection still names it as the active turn.
+/// Turns the harness starts on its own have neither fact; see
+/// [`harness_turn_windows`].
 pub(crate) fn load_github_session_turn_windows(
     session_id: &str,
 ) -> Result<Vec<GithubSessionTurnWindow>> {
-    let mut connection = open_reader(&database_path())?;
+    load_github_session_turn_windows_from(&database_path(), session_id)
+}
+
+pub(super) fn load_github_session_turn_windows_from(
+    path: &Path,
+    session_id: &str,
+) -> Result<Vec<GithubSessionTurnWindow>> {
+    let mut connection = open_reader(path)?;
     let tx = connection.transaction()?;
     let bodies = {
         let mut statement = tx.prepare(
@@ -407,11 +416,13 @@ pub(crate) fn load_github_session_turn_windows(
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
     let mut starts = BTreeMap::<String, i64>::new();
+    let mut prompt_turn_starts = BTreeSet::new();
     let mut windows = Vec::new();
     for body in bodies {
         let event: mj_core::storage::ApiEventData = serde_json::from_str(&body)?;
         match event {
             mj_core::storage::ApiEventData::TurnStarted { turn } => {
+                prompt_turn_starts.insert(turn.turn_start_position as i64);
                 starts.insert(turn.command_id, turn.started_at_ms);
             }
             mj_core::storage::ApiEventData::TurnEnded { turn } => {
@@ -425,19 +436,21 @@ pub(crate) fn load_github_session_turn_windows(
             _ => {}
         }
     }
-    let active_turn_json: Option<String> = tx
+    let (running, active_turn_json): (bool, Option<String>) = tx
         .query_row(
-            "SELECT active_turn_json FROM materialized_sessions WHERE session_id=?1",
+            "SELECT execution_state='running', active_turn_json
+             FROM materialized_sessions WHERE session_id=?1",
             [session_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?
-        .flatten();
-    if let Some(active_turn) = active_turn_json
+        .unwrap_or_default();
+    let active_turn = active_turn_json
         .map(|json| serde_json::from_str::<Option<MaterializedTurn>>(&json))
         .transpose()?
-        .flatten()
-    {
+        .flatten();
+    let harness_turn_running = running && active_turn.is_none();
+    if let Some(active_turn) = active_turn {
         let started_at_ms = starts
             .remove(&active_turn.command_id)
             .unwrap_or(active_turn.started_at_ms);
@@ -446,7 +459,81 @@ pub(crate) fn load_github_session_turn_windows(
             completed_at_ms: None,
         });
     }
+    windows.extend(harness_turn_windows(
+        &tx,
+        session_id,
+        &prompt_turn_starts,
+        harness_turn_running,
+    )?);
     tx.commit()?;
+    Ok(windows)
+}
+
+/// A turn the harness starts on its own, such as work a finished background
+/// command woke, records no turn events. Its "Agent continued on its own"
+/// marker starts it. The agent's last message, thought or tool call before
+/// the next turn or restart ends it. A running session with no active prompt
+/// is still in the last such turn.
+fn harness_turn_windows(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    prompt_turn_starts: &BTreeSet<i64>,
+    harness_turn_running: bool,
+) -> Result<Vec<GithubSessionTurnWindow>> {
+    let markers = {
+        let mut statement = tx.prepare(
+            "SELECT position, stable_id GLOB ?2, created_at_ms
+             FROM materialized_transcript_items
+             WHERE session_id=?1 AND (stable_id GLOB ?2 OR stable_id GLOB ?3)
+             ORDER BY position",
+        )?;
+        statement
+            .query_map(
+                params![
+                    session_id,
+                    format!("{}*", mj_core::transcript::HARNESS_TURN_ITEM_PREFIX),
+                    format!("{}*", mj_core::transcript::SESSION_RESTART_ITEM_PREFIX),
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?, row.get(2)?)),
+            )?
+            .collect::<rusqlite::Result<Vec<(i64, bool, i64)>>>()?
+    };
+    let boundaries = markers
+        .iter()
+        .map(|(position, ..)| *position)
+        .chain(prompt_turn_starts.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let mut last_work = tx.prepare(
+        "SELECT MAX(last_changed_at_ms) FROM materialized_transcript_items
+         WHERE session_id=?1 AND position > ?2 AND position < ?3
+           AND (stable_id GLOB 'agent:*' OR stable_id GLOB 'thought:*'
+                OR stable_id GLOB 'tool:*')",
+    )?;
+    let mut windows = Vec::new();
+    for (position, starts_turn, started_at_ms) in markers {
+        // A prompt with no text starts its turn with the same marker.
+        if !starts_turn || prompt_turn_starts.contains(&position) {
+            continue;
+        }
+        let next = boundaries.range(position + 1..).next().copied();
+        let completed_at_ms = if next.is_none() && harness_turn_running {
+            None
+        } else {
+            let last_changed_at_ms: Option<i64> = last_work.query_row(
+                params![session_id, position, next.unwrap_or(i64::MAX)],
+                |row| row.get(0),
+            )?;
+            // A turn that produced nothing could not have posted anything.
+            let Some(last_changed_at_ms) = last_changed_at_ms else {
+                continue;
+            };
+            Some(last_changed_at_ms)
+        };
+        windows.push(GithubSessionTurnWindow {
+            started_at_ms,
+            completed_at_ms,
+        });
+    }
     Ok(windows)
 }
 
@@ -594,4 +681,133 @@ pub(crate) fn seed_github_repo_start(owner: &str, repo: &str, at: &str) -> Resul
         )?;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::schema::v1::{
+        ContentBlock, ContentChunk, SessionUpdate, TextContent, ToolCall, ToolCallStatus,
+        ToolCallUpdate, ToolCallUpdateFields,
+    };
+    use mj_core::relay::{RelayEvent, RelayObservation, relay_event_digest};
+    use mj_transcript::projection::{apply_committed_projection_event, project_relay_event};
+
+    fn agent_message(text: &str, message_id: &str) -> RelayObservation {
+        RelayObservation::SessionUpdate {
+            update: Box::new(SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
+                    .message_id(message_id),
+            )),
+        }
+    }
+
+    // Hard-won: b4476dc76: comments a session posted in turns the harness started on its own still came back to it.
+    #[test]
+    fn turns_the_harness_starts_end_with_its_last_work_before_the_next_turn_or_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("harness-turns.sqlite");
+        save_session_to(
+            &path,
+            &super::super::tests::session("session-1", "project-1"),
+        )
+        .unwrap();
+        let observations = [
+            (
+                1_000,
+                RelayObservation::HarnessTurnStarted {
+                    started_at_ms: 1_000,
+                },
+            ),
+            (
+                1_500,
+                RelayObservation::SessionUpdate {
+                    update: Box::new(SessionUpdate::ToolCall(ToolCall::new(
+                        "comment",
+                        "gh issue comment",
+                    ))),
+                },
+            ),
+            (
+                4_000,
+                RelayObservation::SessionUpdate {
+                    update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                        "comment",
+                        ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+                    ))),
+                },
+            ),
+            (5_000, agent_message("Posted.", "reply")),
+            (
+                5_200,
+                RelayObservation::HarnessTurnSettled {
+                    origin: None,
+                    prompt_in_flight: false,
+                },
+            ),
+            // A notice while idle is not the agent's work.
+            (
+                60_000,
+                RelayObservation::Notice {
+                    message: "Delivered 1 mailbox event".into(),
+                },
+            ),
+            (
+                100_000,
+                RelayObservation::HarnessTurnStarted {
+                    started_at_ms: 100_000,
+                },
+            ),
+            (100_500, agent_message("Working.", "interrupted")),
+            (200_000, RelayObservation::SessionRestarted),
+            // A message after the restart does not stretch the interrupted turn.
+            (300_000, agent_message("Resumed.", "resume-notice")),
+            (
+                400_000,
+                RelayObservation::HarnessTurnStarted {
+                    started_at_ms: 400_000,
+                },
+            ),
+            (400_500, agent_message("Still working.", "running")),
+        ];
+        let mut current = load_materialized_session_from(&path, "session-1")
+            .unwrap()
+            .unwrap();
+        apply_projection_page_to(&path, "session-1", |page| {
+            for (recorded_at_ms, observation) in observations {
+                let mut event = RelayEvent {
+                    format: mj_core::relay::RELAY_EVENT_FORMAT_V1,
+                    ordinal: current.applied_event_ordinal + 1,
+                    previous_digest: current.applied_event_digest.clone(),
+                    digest: String::new(),
+                    recorded_at_ms,
+                    command_id: None,
+                    observation,
+                };
+                event.digest = relay_event_digest(&event)?;
+                let mutation = project_relay_event(&current, &event)?.mutation;
+                page.apply(
+                    event.ordinal,
+                    &event.previous_digest,
+                    &event.digest,
+                    &mutation,
+                )?;
+                apply_committed_projection_event(&mut current, &event, mutation)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let window = |started_at_ms, completed_at_ms| GithubSessionTurnWindow {
+            started_at_ms,
+            completed_at_ms,
+        };
+        assert_eq!(
+            load_github_session_turn_windows_from(&path, "session-1").unwrap(),
+            vec![
+                window(1_000, Some(5_200)),
+                window(100_000, Some(200_000)),
+                window(400_000, None),
+            ]
+        );
+    }
 }
