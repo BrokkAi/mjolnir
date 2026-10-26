@@ -147,9 +147,14 @@ pub fn reference_secret_api_keys(discovered: &mut Config, config_path: &Path) {
             key.to_owned(),
             mj_core::config::EnvironmentValue::FromSecret(key.to_owned()),
         );
-        profile.environment = mj_core::config::with_secret_resolver(
+        // Resolve as a load of the saved profile will, so discovery reports
+        // the key the profile will run on, such as one saved in DSH.
+        mj_core::config::with_secret_resolver(
             mj_core::config::SecretResolver::beside(config_path),
-            || mj_core::config::Environment::from_sources(sources),
+            || {
+                profile.environment = mj_core::config::Environment::from_sources(sources);
+                profile.inherit_provider_key();
+            },
         );
     }
 }

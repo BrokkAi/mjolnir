@@ -536,7 +536,8 @@ the first of these that holds one:
 1. The key saved in DSH itself, under `refs` in `.credentials.yaml` in the
    profile home (DSH's own home, `~/.dsh` by default), as DSH's Models
    settings write it. DSH refuses that file when any other user can read it,
-   and so does Mjolnir; `chmod 600` it.
+   so Mjolnir skips its key then, moves on to the next source, and names the
+   file (`chmod 600` it) when no source has a key.
 2. `DEEPSEEK_API_KEY` in the environment Mjolnir started with.
 3. `DEEPSEEK_API_KEY` in `.env` in the profile home.
 4. The profile's `environment`, for example from `secrets.toml`:

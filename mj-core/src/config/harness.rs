@@ -1555,40 +1555,41 @@ impl HarnessProfile {
         let Some(env_key) = self.kind.api_key_variable() else {
             return;
         };
-        let stored = match super::dsh_credentials::stored(&self.home, env_key) {
-            Ok(stored) => stored,
+        let home = self.home.clone();
+        // A DSH file Mjolnir cannot use keeps a lower source usable: the
+        // session sends only the key, so DSH's own refusal of the file does
+        // not stop it. It is the reason when no source has a key.
+        let mut problems = Vec::new();
+        let mut usable = |found: Result<Option<String>>| match found {
+            Ok(key) => key.filter(|key| !key.trim().is_empty()),
             Err(error) => {
-                self.environment.refuse(env_key, format!("{error:#}"));
-                return;
+                problems.push(format!("{error:#}"));
+                None
             }
         };
-        if let Some(key) = stored.api_key {
+        let stored = super::dsh_credentials::stored(&home, env_key);
+        let account_signed_in = stored.as_ref().is_ok_and(|stored| stored.account_signed_in);
+        let key = usable(stored.map(|stored| stored.api_key))
+            .or_else(|| usable(Ok(super::secrets::Environment::from_process(env_key))))
+            .or_else(|| usable(super::dsh_credentials::dotenv(&home, env_key)));
+        if !problems.is_empty() {
+            tracing::warn!(home = %home.display(), "DSH credentials: {}", problems.join("; "));
+        }
+        if let Some(key) = key {
             self.environment.supply(env_key, key);
             return;
         }
-        if let Some(key) = super::secrets::Environment::from_process(env_key) {
-            self.environment.supply(env_key, key);
+        if self.supplies_api_key(env_key) {
             return;
         }
-        match super::dsh_credentials::dotenv(&self.home, env_key) {
-            Ok(Some(key)) => {
-                self.environment.supply(env_key, key);
-                return;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                self.environment.refuse(env_key, format!("{error:#}"));
-                return;
-            }
+        if account_signed_in {
+            problems.push(format!(
+                "DSH in {} is signed in to a DeepSeek account but holds no API key; dsh-acp authenticates only with an API key, so save one in DSH's Models settings, or export {env_key} and run `mj daemon restart`",
+                home.display()
+            ));
         }
-        if stored.account_signed_in && !self.supplies_api_key(env_key) {
-            self.environment.refuse(
-                env_key,
-                format!(
-                    "DSH in {} is signed in to a DeepSeek account but holds no API key; dsh-acp authenticates only with an API key, so save one in DSH's Models settings, or export {env_key} and run `mj daemon restart`",
-                    self.home.display()
-                ),
-            );
+        if !problems.is_empty() {
+            self.environment.refuse(env_key, problems.join("; "));
         }
     }
 

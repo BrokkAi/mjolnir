@@ -33,8 +33,8 @@ pub(super) struct StoredCredentials {
 }
 
 /// Read `name` from the store in `home`. A missing file holds nothing; a file
-/// DSH itself would refuse to load is an error, so the person fixes it rather
-/// than running on a key DSH would not use.
+/// DSH itself would refuse to load is an error; the caller decides whether
+/// another source makes it harmless.
 pub(super) fn stored(home: &Path, name: &str) -> Result<StoredCredentials> {
     let path = home.join(CREDENTIALS_FILE);
     let text = match std::fs::read_to_string(&path) {
@@ -47,33 +47,14 @@ pub(super) fn stored(home: &Path, name: &str) -> Result<StoredCredentials> {
                 .with_context(|| format!("read DSH's credentials {}", path.display()));
         }
     };
-    ensure_private(&path)?;
-    parse(&text, name).with_context(|| format!("read DSH's credentials {}", path.display()))
-}
-
-/// DSH refuses a credential file any other user can read.
-#[cfg(unix)]
-fn ensure_private(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(path)
-        .with_context(|| format!("inspect DSH's credentials {}", path.display()))?
-        .permissions()
-        .mode();
-    if mode & 0o077 != 0 {
+    // DSH refuses a credential file any other user can read.
+    if let Some(problem) = super::secrets::secrets_permission_problem(&path)? {
         bail!(
-            "DSH's credentials {} are readable beyond their owner (mode {:o}), so DSH refuses them; run `chmod 600 {}`",
-            path.display(),
-            mode & 0o777,
+            "{problem}, so DSH refuses it; run `chmod 600 {}`",
             path.display()
         );
     }
-    Ok(())
-}
-
-/// Windows has no mode to inspect, and DSH skips the check there too.
-#[cfg(not(unix))]
-fn ensure_private(_path: &Path) -> Result<()> {
-    Ok(())
+    parse(&text, name).with_context(|| format!("read DSH's credentials {}", path.display()))
 }
 
 fn parse(text: &str, name: &str) -> Result<StoredCredentials> {
@@ -102,7 +83,13 @@ fn parse(text: &str, name: &str) -> Result<StoredCredentials> {
             account_signed_in: false,
         });
     };
-    if version.as_i64() != Some(DOCUMENT_VERSION) {
+    // DSH compares with `!==`, so `1.0` is version 1 too.
+    let is_current = match version {
+        Yaml::Integer(version) => *version == DOCUMENT_VERSION,
+        Yaml::Real(version) => version.parse::<f64>() == Ok(DOCUMENT_VERSION as f64),
+        _ => false,
+    };
+    if !is_current {
         bail!("declares a layout version other than {DOCUMENT_VERSION}, the one Mjolnir reads");
     }
     let api_key = match field("refs") {
@@ -138,8 +125,9 @@ fn reference(section: &Yaml, name: &str) -> Result<Option<String>> {
 /// with Node's `util.parseEnv`; this reads the same syntax for one variable.
 pub(super) fn dotenv(home: &Path, name: &str) -> Result<Option<String>> {
     let path = home.join(DOTENV_FILE);
-    match std::fs::read_to_string(&path) {
-        Ok(text) => Ok(parse_dotenv(&text, name).filter(|value| !value.is_empty())),
+    // Node decodes the file as UTF-8, replacing what is not.
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(parse_dotenv(&String::from_utf8_lossy(&bytes), name)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| format!("read DSH's {}", path.display())),
     }
@@ -174,7 +162,7 @@ fn parse_dotenv(text: &str, name: &str) -> Option<String> {
                 // The closing quote may be on a later line; the value then
                 // continues through it.
                 let body = &value[1..];
-                if let Some(end) = body.find(quote) {
+                let quoted = if let Some(end) = body.find(quote) {
                     Some(body[..end].to_owned())
                 } else if let Some(end) = rest.find(quote) {
                     let value = format!("{body}\n{}", &rest[..end]);
@@ -183,16 +171,15 @@ fn parse_dotenv(text: &str, name: &str) -> Option<String> {
                         .map_or("", |(_, after)| after);
                     Some(value)
                 } else {
+                    None
+                };
+                match quoted {
+                    // Only a closed double-quoted value expands `\n`.
+                    Some(value) if quote == '"' => Some(value.replace("\\n", "\n")),
+                    Some(value) => Some(value),
                     // An unclosed quote is read as written up to the line end.
-                    Some(value.trim_end().to_owned())
+                    None => Some(value.trim_end().to_owned()),
                 }
-                .map(|value| {
-                    if quote == '"' {
-                        value.replace("\\n", "\n")
-                    } else {
-                        value
-                    }
-                })
             }
             None => Some(
                 value
@@ -214,7 +201,7 @@ mod tests {
     use super::parse_dotenv;
 
     /// DSH loads `.env` with Node's `util.parseEnv`; each expectation is what
-    /// Node 22 returns for the same text.
+    /// Node 24 returns for the same text.
     #[test]
     fn dotenv_values_match_node_parse_env() {
         let cases: &[(&str, Option<&str>)] = &[
@@ -225,6 +212,10 @@ mod tests {
             ("A='single # x'", Some("single # x")),
             ("A=`back`", Some("back")),
             ("A=\"unclosed", Some("\"unclosed")),
+            ("A=\"unc\\nx", Some("\"unc\\nx")),
+            ("garbage line\nA=sk-x", Some("sk-x")),
+            ("\tA=\tx\t", Some("x")),
+            ("A=x\ty", Some("x\ty")),
             ("  A =  spaced  ", Some("spaced")),
             ("A=1\nA=2", Some("2")),
             ("A=\"x\" trailing", Some("x")),

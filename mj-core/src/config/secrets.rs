@@ -184,7 +184,7 @@ impl Environment {
         if self.sources.contains_key(key) || SOURCES_ONLY.get() {
             return;
         }
-        if let Ok(value) = resolve_active(key, &EnvironmentValue::FromEnv(key.to_owned())) {
+        if let Some(value) = Self::from_process(key) {
             self.resolved.insert(key.to_owned(), value);
         }
     }

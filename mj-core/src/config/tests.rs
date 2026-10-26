@@ -473,11 +473,14 @@ fn a_dsh_profile_takes_its_key_from_dsh_before_the_environment_and_secrets() {
         "\n[profiles.dsh.environment]\nDEEPSEEK_API_KEY = { from_secret = \"DEEPSEEK_API_KEY\" }\n",
         "",
     );
-    let signed_in: Config = with_secret_resolver(
-        SecretResolver::fixed(BTreeMap::new(), BTreeMap::new()),
-        || toml::from_str(&text_without_secret),
-    )
-    .expect("read the configuration");
+    let signed_in_config = |text: &str| -> Config {
+        with_secret_resolver(
+            SecretResolver::fixed(BTreeMap::new(), BTreeMap::new()),
+            || toml::from_str(text),
+        )
+        .expect("read the configuration")
+    };
+    let signed_in = signed_in_config(&text_without_secret);
     let error = signed_in.profiles["dsh"]
         .ensure_ready("dsh")
         .expect_err("no API key")
@@ -485,7 +488,9 @@ fn a_dsh_profile_takes_its_key_from_dsh_before_the_environment_and_secrets() {
     assert!(error.contains("signed in to a DeepSeek account"), "{error}");
     assert!(!error.contains("account-token"), "{error}");
 
-    // DSH refuses a store others can read, so a session must not run on it.
+    // DSH refuses a store others can read, so its key is never used. A key
+    // from another source still works, because the session sends only the
+    // key; with none, the refusal says how to fix the file.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -494,7 +499,8 @@ fn a_dsh_profile_takes_its_key_from_dsh_before_the_environment_and_secrets() {
             "version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-saved-in-dsh\n",
         );
         fs::set_permissions(&credentials, fs::Permissions::from_mode(0o644)).expect("chmod 644");
-        let error = read(&exported).profiles["dsh"]
+        assert_eq!(key(&read(&exported)), "sk-exported");
+        let error = signed_in_config(&text_without_secret).profiles["dsh"]
             .ensure_ready("dsh")
             .expect_err("readable by others")
             .to_string();
