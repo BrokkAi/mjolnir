@@ -571,13 +571,12 @@ impl DashboardState {
                         {
                             for runtime in &runtimes {
                                 targets.remove(runtime);
-                                removed_paths
-                                    .push(vec!["targets".to_owned(), runtime.clone()]);
+                                removed_paths.push(vec!["targets".to_owned(), runtime.clone()]);
                             }
                             dialog.notice = Some(match runtimes.as_slice() {
-                                [only] => format!(
-                                    "Removed machine {key:?} and its runtime {only:?}."
-                                ),
+                                [only] => {
+                                    format!("Removed machine {key:?} and its runtime {only:?}.")
+                                }
                                 _ => format!(
                                     "Removed machine {key:?} and its {} runtimes {}.",
                                     runtimes.len(),
