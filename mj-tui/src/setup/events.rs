@@ -547,6 +547,16 @@ impl DashboardState {
                         dialog.notice = Some("This machine is always available.".into());
                     } else {
                         let removed_path = dialog.path.clone();
+                        // A runtime cannot outlive the machine it names, so
+                        // removing a machine takes its runtimes with it. Left
+                        // behind, they would make the next save fail on a
+                        // machine the file no longer defines.
+                        let runtimes = if parent == ["machines"] {
+                            dialog.runtime_ids_on_machine(&key)
+                        } else {
+                            Vec::new()
+                        };
+                        let mut removed_paths = vec![removed_path];
                         match dialog.draft.pointer_mut(&pointer(&parent)).unwrap() {
                             Value::Object(object) => {
                                 object.remove(&key);
@@ -555,6 +565,29 @@ impl DashboardState {
                                 array.remove(key.parse::<usize>().expect("array entry path"));
                             }
                             _ => {}
+                        }
+                        if !runtimes.is_empty()
+                            && let Some(targets) = dialog.draft["targets"].as_object_mut()
+                        {
+                            for runtime in &runtimes {
+                                targets.remove(runtime);
+                                removed_paths
+                                    .push(vec!["targets".to_owned(), runtime.clone()]);
+                            }
+                            dialog.notice = Some(match runtimes.as_slice() {
+                                [only] => format!(
+                                    "Removed machine {key:?} and its runtime {only:?}."
+                                ),
+                                _ => format!(
+                                    "Removed machine {key:?} and its {} runtimes {}.",
+                                    runtimes.len(),
+                                    runtimes
+                                        .iter()
+                                        .map(|runtime| format!("{runtime:?}"))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
+                            });
                         }
                         let array_index = dialog
                             .draft
@@ -565,7 +598,10 @@ impl DashboardState {
                         dialog.fields = std::mem::take(&mut dialog.fields)
                             .into_iter()
                             .filter_map(|(mut path, field)| {
-                                if path.starts_with(&removed_path) {
+                                if removed_paths
+                                    .iter()
+                                    .any(|removed| path.starts_with(removed))
+                                {
                                     return None;
                                 }
                                 if let Some(removed) = array_index

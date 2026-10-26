@@ -139,6 +139,28 @@ impl SetupDialog {
     pub(super) fn collection(&self) -> bool {
         is_collection(&self.path, self.current())
     }
+
+    /// The ids of the runtimes in the draft that name `machine_id`. A runtime
+    /// that names no machine runs on this computer, which is an implied
+    /// machine the file may not have a table for.
+    pub(super) fn runtime_ids_on_machine(&self, machine_id: &str) -> Vec<String> {
+        self.draft["targets"]
+            .as_object()
+            .map(|targets| {
+                targets
+                    .iter()
+                    .filter(|(_, target)| {
+                        target
+                            .get("machine")
+                            .and_then(Value::as_str)
+                            .unwrap_or(mj_core::config::LOCAL_MACHINE_ID)
+                            == machine_id
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 impl SetupDialog {
     pub(super) fn descriptor(&self, id: SetupControl) -> Option<&SettingControl> {
