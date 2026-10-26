@@ -11,7 +11,7 @@ use mj_core::state::{
 };
 
 use mj_chat::selection::SurfaceId;
-use mj_client::quota::{API_LABEL, ProfileQuota, QuotaWindow};
+use mj_client::quota::{API_LABEL, NOT_REPORTED_LABEL, ProfileQuota, QuotaWindow};
 use mj_core::targets::{DeploymentCapacityUsage, ProvisionStage};
 
 use super::*;
@@ -3257,6 +3257,26 @@ fn golden_dashboard_resource_panels() {
     append_dashboard_golden(
         &mut output,
         "usage-priced API quota",
+        120,
+        28,
+        &mut dashboard,
+    );
+
+    let mut mimo_config = config();
+    let mut mimo = mimo_config.profiles["codex-1"].clone();
+    mimo.kind = HarnessKind::Mimo;
+    mimo.home = std::path::PathBuf::from("/profiles/mimo");
+    mimo_config.profiles.insert("mimo-1".into(), mimo);
+    let mut dashboard = DashboardState::new(mimo_config, State::default(), BTreeMap::new());
+    dashboard.apply_quota(ProfileQuota {
+        harness: HarnessKind::Mimo,
+        extra: Some(NOT_REPORTED_LABEL.into()),
+        refreshed_at_epoch_seconds: 0,
+        ..api_quota("mimo-1")
+    });
+    append_dashboard_golden(
+        &mut output,
+        "quota a harness never shares",
         120,
         28,
         &mut dashboard,

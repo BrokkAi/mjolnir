@@ -9,6 +9,10 @@ use mj_core::config::HarnessKind;
 /// Label used when a harness is billed by API usage rather than a subscription.
 pub const API_LABEL: &str = "API";
 
+/// Label used when a harness never shares its quota with any client, so there
+/// is no reading to take and none is missing.
+pub const NOT_REPORTED_LABEL: &str = "n/a";
+
 /// A quota window reported by a harness.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuotaWindow {
@@ -94,6 +98,27 @@ impl ProfileQuota {
     /// in place of one rather than inventing a percentage.
     pub fn is_usage_priced(&self) -> bool {
         self.error.is_none() && self.windows.is_empty() && self.extra.as_deref() == Some(API_LABEL)
+    }
+
+    /// Whether the report says the harness never shares its quota. MiMo Code,
+    /// for one, neither publishes an allowance nor receives one from its
+    /// providers, so the profile reads `n/a` rather than as a failed probe.
+    pub fn is_not_reported(&self) -> bool {
+        self.error.is_none()
+            && self.windows.is_empty()
+            && self.extra.as_deref() == Some(NOT_REPORTED_LABEL)
+    }
+
+    /// What a report without windows shows in place of a reading: `API` for a
+    /// usage-priced profile, `n/a` for a harness that never shares its quota.
+    pub fn windowless_label(&self) -> Option<&'static str> {
+        if self.is_usage_priced() {
+            Some(API_LABEL)
+        } else if self.is_not_reported() {
+            Some(NOT_REPORTED_LABEL)
+        } else {
+            None
+        }
     }
 
     pub fn five_hour_projects_exhaustion(&self) -> bool {

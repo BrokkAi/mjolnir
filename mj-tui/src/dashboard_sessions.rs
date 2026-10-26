@@ -4,7 +4,6 @@ use mj_chat::text_input::EditOutcome;
 use ratatui::style::Style;
 
 use mj_client::daemon::SessionTextMatchKind;
-use mj_client::quota::API_LABEL;
 
 use crate::render::{headroom_color, quota_remaining_percent, weekly_quota_exhausted};
 
@@ -1250,8 +1249,8 @@ impl DashboardState {
                     .unwrap_or_else(|| "unavailable".to_string()),
             );
         }
-        if quota.is_usage_priced() {
-            return plain(API_LABEL);
+        if let Some(label) = quota.windowless_label() {
+            return plain(label);
         }
         let Some(primary) = quota.summary_window().and_then(quota_remaining_percent) else {
             return plain("unavailable");
