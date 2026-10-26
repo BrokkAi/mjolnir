@@ -15,6 +15,11 @@ ARG MJ_RUST_TOOLCHAIN=1.99.1
 # Keep REQUIRED_BIFROST_VERSION in mj-review/src/bifrost.rs equal to this value.
 ARG BIFROST_VERSION=0.12.0
 ARG BIFROST_BUILDER_IMAGE=docker.io/library/rust:1.97.1-trixie
+# Go installs below from go.dev's official tarball, not apt: Debian's golang
+# package trails upstream by months. GO_VERSION plays the role
+# rust-toolchain.toml plays for Rust; the build checks a per-arch sha256 and
+# fails unless the installed toolchain reports exactly this version.
+ARG GO_VERSION=1.27.3
 
 FROM ${NODE_IMAGE} AS node
 
@@ -83,6 +88,7 @@ RUN set -eu \
 
 FROM ${RUST_IMAGE}
 ARG MJ_RUST_TOOLCHAIN
+ARG GO_VERSION
 
 # The Node image and Rust image share the Trixie base. Copying /usr/local
 # brings in Node, npm, npx, Corepack, and the headers needed by native modules.
@@ -147,6 +153,33 @@ RUN apt-get update \
 # architectures. Keep uv on the shared PATH, including unprivileged sessions.
 COPY --from=ghcr.io/astral-sh/uv:0.12.20 /uv /uvx /usr/local/bin/
 RUN uv --version && uvx --version && python3-config --embed --ldflags
+
+# Pinned go.dev tarball per arch, like cargo-nextest below. The `go` binary
+# resolves GOROOT from its own path, so symlinking into /usr/local/bin (which
+# Debian's login-shell PATH keeps) is enough; /usr/local/go/bin needs no PATH
+# entry.
+RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && case "$ARCH" in \
+        amd64) \
+            GOARCH=amd64; \
+            GO_SHA256=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 \
+            ;; \
+        arm64) \
+            GOARCH=arm64; \
+            GO_SHA256=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49 \
+            ;; \
+        *) echo "unsupported arch $ARCH" >&2; exit 1 ;; \
+    esac \
+    && GO_TARBALL="go${GO_VERSION}.linux-${GOARCH}.tar.gz" \
+    && curl --fail --location --silent --show-error "https://go.dev/dl/${GO_TARBALL}" --output "/tmp/${GO_TARBALL}" \
+    && echo "${GO_SHA256}  /tmp/${GO_TARBALL}" | sha256sum --check --strict \
+    && rm -rf /usr/local/go \
+    && tar -xzf "/tmp/${GO_TARBALL}" -C /usr/local \
+    && rm "/tmp/${GO_TARBALL}" \
+    && ln -s /usr/local/go/bin/go /usr/local/bin/go \
+    && ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
+    && go version \
+    && [ "$(go env GOVERSION)" = "go${GO_VERSION}" ]
 
 # Keep these in lockstep with mj-core/src/harness_runtime.rs (see "Harness
 # pins" in AGENTS.md). Kimi, Grok, and dsh-acp are not in the image; they
@@ -312,7 +345,7 @@ COPY --from=worker /out/mj-worker /opt/mjolnir/mj-worker
 ARG MJ_WORKER_BUILD_ID
 LABEL org.opencontainers.image.title="Mjolnir agent development environment" \
       org.opencontainers.image.source="https://github.com/BrokkAi/mjolnir" \
-      org.opencontainers.image.description="Mjolnir agent development environment with Node, Rust, cargo-nextest, OpenJDK, and the pinned ACP bridges" \
+      org.opencontainers.image.description="Mjolnir agent development environment with Node, Rust, Go, cargo-nextest, OpenJDK, and the pinned ACP bridges" \
       org.brokk.mjolnir.worker-build="${MJ_WORKER_BUILD_ID}"
 
 # Hel overrides the command with the same keepalive, but retaining it here also

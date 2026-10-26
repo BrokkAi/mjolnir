@@ -90,7 +90,7 @@ a native `mj-worker` for local bare sessions.
 ## Get the agent-dev image
 
 Mjolnir ships a reference container image with everything a session needs
-pre-installed: Rust, cargo-nextest, Node 24, OpenJDK 25, Python 3 with its
+pre-installed: Rust, Go, cargo-nextest, Node 24, OpenJDK 25, Python 3 with its
 native development headers and library, uv, Git, GitHub CLI, the Codex and
 Claude ACP bridges, Muse Code with `muse-acp`, and MiMo Code. Kimi, Grok,
 OpenCode, and dsh-acp install on demand. It also carries
