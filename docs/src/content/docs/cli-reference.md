@@ -63,7 +63,8 @@ first interactive startup. It detects installed harnesses and home-directory
 overrides, adds profiles and a bundle for the current GitHub origin, and
 preserves existing entries and preferences. Matching entries are reused;
 identifier collisions get separate names. It also probes every SSH or EC2
-machine that has no runtime yet and adds the runtimes it can run. It saves
+machine and adds each runtime kind it newly runs; a runtime switched off with
+`enabled = false` is never added back. It saves
 additions without questions and reports actionable doctor errors. Container
 downloads remain background
 daemon work. Configure container options, SSH hosts, and AWS targets in Settings;
@@ -678,7 +679,7 @@ Most behavior belongs in [configuration](/configuration/). These environment var
 | `GROK_HOME` | Grok Build home used by setup discovery and native import. |
 | `MIMOCODE_HOME` | MiMo Code profile root used by setup discovery; contains `config/` and `data/`. A profile at the conventional `~/.mimocode` home uses the stock `~/.config/mimocode` and `~/.local/share/mimocode` trees instead. |
 | `DSH_ACP_DATA_DIR` | DSH home used by setup discovery. |
-| `DEEPSEEK_API_KEY` | DSH's API key, passed to DSH sessions when the profile's `environment` does not set it. |
+| `DEEPSEEK_API_KEY` | DSH's API key, passed to DSH sessions when DSH's own credentials hold none. It outranks the profile's `environment`. |
 | `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | Muse configuration and external native session storage roots, respectively. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | GitHub token available for syncing into every live target except a bare runtime on this machine. |
 | `GIT_SSH_COMMAND` | SSH command used by checkpoint/archive Git operations. |

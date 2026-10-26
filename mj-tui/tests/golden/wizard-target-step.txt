@@ -51,10 +51,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  │ No messages yet        ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
 │  │                        │                                                                                  │                           │
 │                           │   TARGET  KIND          CPU     MEM (GiB)     STATUS                             │                           │
-│                           │   podman  local Podman  —       —             checking…                          │                           │
-│                           │                                                                                  │                           │
+│                           │   podman  local Podman  —       —                                                │                           │
+│                           │ ☐ Save as default sizing                                                         │                           │
 │                           │ Host totals unavailable; resource limits cannot be checked.                      │                           │
-│                           │ ctrl+b shift+r recheck availability                                              │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -354,12 +354,12 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 
   ╭ × New session · 2/4 target ──────────────────────────╮
   │                                                      │
-  │   TARGET  KIND     CPU     MEM (GiB)     STATUS      │
-  │   podman  local …  —       —             checking…   │
-  │                                                      │
+  │   TARGET  KIND        CPU     MEM (GiB)     STATUS   │
+  │   podman  local Pod…  —       —                      │
+  │ ☐ Save as default sizing                             │
   │ Host totals unavailable; resource limits cannot be   │
   │ checked.                                             │
-  │ ctrl+b shift+r recheck availability                  │
+  │                                                      │
   │                                                      │
   │                                                      │
   │                                                      │
@@ -563,11 +563,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
 │                           │   TARGET  KIND          CPU     MEM (GiB)     STATUS                             │                           │
-│                           │   docker  local Podman  4       8             checking…                          │                           │
-│                           │   podman  local Podman  —       —             checking…                          │                           │
-│                           │                                                                                  │                           │
+│                           │   docker  local Podman  4       8                                                │                           │
+│                           │   podman  local Podman  —       —                                                │                           │
+│                           │ ☐ Save as default sizing                                                         │                           │
 │                           │ Host totals unavailable; resource limits cannot be checked.                      │                           │
-│                           │ ctrl+b shift+r recheck availability                                              │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -694,12 +694,12 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                           │ ☐ Create isolated checkout                                                       │                           │
 │                           │ Use the selected directory directly.                                             │                           │
 │                           │                                                                                  │                           │
+│                           │ Code review is off for this session: its folder has no Git commits, and review   │                           │
+│                           │ finds changes through Git history.                                               │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │ Delegation Native ▾                                                              │                           │
 │                           │ Set up Mjolnir sub-agents in Settings -> Sub-agents                              │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ─────────────────────────╮
@@ -728,15 +728,15 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                           ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
 │                           │   TARGET     KIND           CPU     MEM (GiB)     STATUS                         │                           │
-│                           │   docker     local Docker   —       —             unavailable                    │                           │
 │                           │   localhost  raw localhost  —       —                                            │                           │
-│                           │   podman     local Podman   —       —             unavailable                    │                           │
 │                           │                                                                                  │                           │
-│                           │ docker: docker is not installed                                                  │                           │
-│                           │ podman: podman is not installed                                                  │                           │
-│                           │ Machine nas has no runtime: it did not answer. `ssh dev@nas.example.test true`   │                           │
-│                           │ failed: Connection timed out. Check that nas.example.test is up.                 │                           │
-│                           │ ctrl+b shift+r recheck availability                                              │                           │
+│                           │ Machine nas has no runtime: it did not answer. `ssh nas true` failed:            │                           │
+│                           │ Connection timed out. Check that nas is up.                                      │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -756,7 +756,7 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Machine nas has no runtime: it did not answer. `ssh dev@nas.example.test true` failed: Connection timed out. Check that nas.example.test is
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === new_session_shows_the_target_step_when_a_second_target_may_be_chosen (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
@@ -810,12 +810,12 @@ Machine nas has no runtime: it did not answer. `ssh dev@nas.example.test true` f
 │                           ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
 │                           │   TARGET     KIND           CPU     MEM (GiB)     STATUS                         │                           │
-│                           │   docker     local Docker   —       —             unavailable                    │                           │
 │                           │   localhost  raw localhost  —       —                                            │                           │
 │                           │   podman     local Podman   —       —                                            │                           │
 │                           │                                                                                  │                           │
-│                           │ docker: docker is not installed                                                  │                           │
-│                           │ ctrl+b shift+r recheck availability                                              │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -892,12 +892,12 @@ Machine nas has no runtime: it did not answer. `ssh dev@nas.example.test true` f
 │                           ╭ × New session · 2/4 target ──────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
 │                           │   TARGET     KIND           CPU     MEM (GiB)     STATUS                         │                           │
-│                           │   docker     local Docker   —       —             unavailable                    │                           │
+│                           │   docker     local Docker   —       —                                            │                           │
 │                           │   localhost  raw localhost  —       —                                            │                           │
-│                           │   podman     local Podman   —       —             checking…                      │                           │
+│                           │   podman     local Podman   —       —                                            │                           │
 │                           │                                                                                  │                           │
-│                           │ docker: docker is not installed                                                  │                           │
-│                           │ ctrl+b shift+r recheck availability                                              │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -936,7 +936,7 @@ Machine nas has no runtime: it did not answer. `ssh dev@nas.example.test true` f
 │                           │   podman  local Podman  4       8                                                │                           │
 │                           │ ☐ Save as default sizing                                                         │                           │
 │                           │ Host totals unavailable; resource limits cannot be checked.                      │                           │
-│                           │ ctrl+b shift+r recheck availability                                              │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -1100,12 +1100,12 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  │ No messages yet        ╭ × Resume · 2/3 new target ───────────────────────────────────────────────────────╮                           │
 │  │                        │                                                                                  │                           │
 │                           │   TARGET     KIND           CPU     MEM (GiB)     STATUS                         │                           │
-│                           │   docker     local Docker   —       —             unavailable                    │                           │
 │                           │   localhost  raw localhost  —       —                                            │                           │
 │                           │   podman     local Podman   —       —                                            │                           │
 │                           │                                                                                  │                           │
-│                           │ docker: docker is not installed                                                  │                           │
-│                           │ ctrl+b shift+r recheck availability                                              │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -1267,12 +1267,12 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  │ No messages yet        ╭ × Move · 2/3 new target ─────────────────────────────────────────────────────────╮                           │
 │  │                        │                                                                                  │                           │
 │                           │   TARGET     KIND           CPU     MEM (GiB)     STATUS                         │                           │
-│                           │   docker     local Docker   —       —             unavailable                    │                           │
 │                           │   localhost  raw localhost  —       —                                            │                           │
 │                           │   podman     local Podman   —       —                                            │                           │
 │                           │                                                                                  │                           │
-│                           │ docker: docker is not installed                                                  │                           │
-│                           │ ctrl+b shift+r recheck availability                                              │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -1311,7 +1311,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                     │   localhost  raw localhost  —       —                                            │                                     │
 │                                     │   podman     local Podman   —       —                                            │                                     │
 │                                     │                                                                                  │                                     │
-│                                     │ ctrl+b shift+r recheck availability                                              │                                     │
+│                                     │                                                                                  │                                     │
 │                                     │                                                                                  │                                     │
 │                                     │                                                                                  │                                     │
 │                                     │                                                                                  │                                     │
@@ -1354,7 +1354,7 @@ selection: podman (the next visible row; docker is hidden)
 │                                     │   podman     local Podman   4       8                                            │                                     │
 │                                     │ ☐ Save as default sizing                                                         │                                     │
 │                                     │ Host totals unavailable; resource limits cannot be checked.                      │                                     │
-│                                     │ ctrl+b shift+r recheck availability                                              │                                     │
+│                                     │                                                                                  │                                     │
 │                                     │                                                                                  │                                     │
 │                                     │                                                                                  │                                     │
 │                                     │                                                                                  │                                     │
@@ -1388,9 +1388,9 @@ selection: podman (the next visible row; docker is hidden)
 │No sessions yet            │                                                                                  │                           │
 │Create new work or open a  │   TARGET  KIND           CPU     MEM (GiB)     STATUS                            │                           │
 │                           │   bare    raw localhost  —       —                                               │                           │
-│                           │   podman  local Podman   —       —             checking…                         │                           │
+│                           │   podman  local Podman   —       —                                               │                           │
 │                           │                                                                                  │                           │
-│                           │ ctrl+b shift+r recheck availability                                              │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -1421,10 +1421,10 @@ selection: podman (the next visible row; docker is hidden)
 │No sessions yet            │                                                                                  │                           │
 │Create new work or open a  │   TARGET  KIND           CPU     MEM (GiB)     STATUS                            │                           │
 │                           │   bare    raw localhost  —       —                                               │                           │
-│                           │   podman  local Podman   —       —             checking…                         │                           │
-│                           │                                                                                  │                           │
+│                           │   podman  local Podman   —       —                                               │                           │
+│                           │ ☐ Save as default sizing                                                         │                           │
 │                           │ Host totals unavailable; resource limits cannot be checked.                      │                           │
-│                           │ ctrl+b shift+r recheck availability                                              │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -1461,7 +1461,7 @@ action: None
 │                           │   podman  local Podman  4       8                                                │                           │
 │                           │ ☐ Save as default sizing                                                         │                           │
 │                           │ Host totals unavailable; resource limits cannot be checked.                      │                           │
-│                           │ ctrl+b shift+r recheck availability                                              │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -1503,7 +1503,7 @@ cell style: CPU and MEM (GiB) inputs are underlined before focus
 │                           │   podman  local Podman  4       12.5                                             │                           │
 │                           │ ☐ Save as default sizing                                                         │                           │
 │                           │ Host totals unavailable; resource limits cannot be checked.                      │                           │
-│                           │ ctrl+b shift+r recheck availability                                              │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -1538,7 +1538,7 @@ cell style: CPU and MEM (GiB) inputs are underlined before focus
   │   podman  local Podman  4       8                                        │
   │ ☐ Save as default sizing                                                 │
   │ Host totals unavailable; resource limits cannot be checked.              │
-  │ ctrl+b shift+r recheck availability                                      │
+  │                                                                          │
   │                                                                          │
   │                                                                          │
   │                                                                          │
@@ -1564,7 +1564,7 @@ cell style: CPU and MEM (GiB) inputs are underlined before focus
   │   podman  local Podman  4       12.5                                     │
   │ ☐ Save as default sizing                                                 │
   │ Host totals unavailable; resource limits cannot be checked.              │
-  │ ctrl+b shift+r recheck availability                                      │
+  │                                                                          │
   │                                                                          │
   │                                                                          │
   │                                                                          │
@@ -1590,7 +1590,7 @@ cell style: CPU and MEM (GiB) inputs are underlined before focus
   │ ☐ Save as default sizing                             │
   │ Host totals unavailable; resource limits cannot be   │
   │ checked.                                             │
-  │ ctrl+b shift+r recheck availability                  │
+  │                                                      │
   │                                                      │
   │                                                      │
   │                                                      │
@@ -1612,7 +1612,7 @@ cell style: CPU and MEM (GiB) inputs are underlined before focus
   │ ☐ Save as default sizing                             │
   │ Host totals unavailable; resource limits cannot be   │
   │ checked.                                             │
-  │ ctrl+b shift+r recheck availability                  │
+  │                                                      │
   │                                                      │
   │                                                      │
   │                                                      │

@@ -252,6 +252,7 @@ impl ViewerSnapshot {
                     .flatten()
                     .or_else(|| session.public_error().map(str::to_owned)),
                     review_trigger: config.review.for_session(session.review.as_ref()).trigger,
+                    review_unavailable: session.review_unavailable().map(str::to_owned),
                     storage_problem: None,
                     preview: Vec::new(),
                     queued_prompts: Vec::new(),
@@ -330,10 +331,9 @@ impl ViewerSnapshot {
             })
             .collect();
         let targets = config
-            .targets
-            .iter()
+            .enabled_targets()
             .map(|(id, target)| ViewerTarget {
-                id: id.clone(),
+                id: id.to_owned(),
                 kind: target.kind_name().into(),
                 resource_allocation_kind: target.into(),
                 requires_project_directory: matches!(
@@ -444,6 +444,9 @@ impl ViewerSession {
 pub struct ViewerSession {
     #[serde(default)]
     pub review_trigger: mj_core::config::ReviewTrigger,
+    /// Why review cannot run for this session, when it cannot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_unavailable: Option<String>,
     /// The daemon's creation-settings comparison, also used by Restart itself.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub container_upgrade_supported: bool,
@@ -1219,7 +1222,7 @@ fn public_title(session: &mj_core::state::SessionRecord) -> String {
 }
 
 impl ViewerLifecycleCategory {
-    pub(super) const fn of(state: SessionState) -> Self {
+    pub const fn of(state: SessionState) -> Self {
         match state {
             SessionState::Provisioning => Self::Starting,
             // A parked sub-agent stays on the dashboard with its parent.

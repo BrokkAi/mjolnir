@@ -68,12 +68,25 @@ fn close_plan_scoped(
             },
         };
         let local = close_plan_scoped(&local_locator, session_id, remove_shared_cache)?;
+        let apple = matches!(locator, TargetLocator::SshAppleContainer { .. });
         return Ok(CommandPlan {
             description: local.description,
             commands: local
                 .commands
                 .into_iter()
-                .map(|command| command_over_ssh(command, ssh))
+                .map(|mut command| {
+                    // The Apple close script calls `container` inside `sh -c`.
+                    if apple {
+                        let mut wrapped = with_macos_system_path(
+                            std::iter::once(command.program)
+                                .chain(command.args)
+                                .collect(),
+                        );
+                        command.program = wrapped.remove(0);
+                        command.args = wrapped;
+                    }
+                    command_over_ssh(command, ssh)
+                })
                 .collect(),
         });
     }

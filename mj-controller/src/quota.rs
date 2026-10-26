@@ -19,7 +19,9 @@ use mj_core::credentials::{
     MAX_CREDENTIAL_BYTES, credential_expiry, credential_fingerprint, credential_freshness,
 };
 
-pub use mj_client::quota::{API_LABEL, ProfileQuota, QuotaWindow, projects_exhaustion};
+pub use mj_client::quota::{
+    API_LABEL, NOT_REPORTED_LABEL, ProfileQuota, QuotaWindow, projects_exhaustion,
+};
 
 #[derive(Debug, Clone)]
 pub struct QuotaRefreshRequest {
@@ -445,6 +447,12 @@ async fn refresh_profile_with_cache_root(
         refreshed_at_epoch_seconds,
         rate_limited_until_epoch_seconds: None,
     };
+    // A harness that never shares its quota has nothing to probe and nothing
+    // that failed, so it says `n/a` instead of reading as unavailable.
+    let not_reported = || ProfileQuota {
+        extra: Some(NOT_REPORTED_LABEL.to_owned()),
+        ..usage_priced()
+    };
     let result = match harness {
         // A Codex profile that authenticates with an API key against a custom
         // provider has no ChatGPT login to refresh and no ChatGPT rate-limit
@@ -656,14 +664,12 @@ async fn refresh_profile_with_cache_root(
                 refreshed_at_epoch_seconds,
                 rate_limited_until_epoch_seconds: None,
             }),
-        // OpenCode talks to many third-party providers through its own
-        // gateway; it publishes no quota endpoint of its own to poll.
-        HarnessKind::OpenCode => Err(anyhow::anyhow!(
-            "OpenCode does not publish a quota endpoint"
-        )),
-        HarnessKind::Mimo => Err(anyhow::anyhow!(
-            "MiMo Code does not publish a quota endpoint"
-        )),
+        // OpenCode reads no allowance from any provider: rate-limit headers
+        // reach it only on failed requests.
+        HarnessKind::OpenCode => Ok(not_reported()),
+        // MiMo Code reads no allowance from Xiaomi or any other provider;
+        // Xiaomi's Token Plan usage is only on its web console.
+        HarnessKind::Mimo => Ok(not_reported()),
         // dsh-acp talks to DeepSeek's API, which bills by usage.
         HarnessKind::Dsh => Ok(usage_priced()),
     };

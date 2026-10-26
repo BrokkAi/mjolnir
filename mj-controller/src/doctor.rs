@@ -854,7 +854,7 @@ fn harness_profile_check(
         // A harness without a login never creates its home itself.
         let remediation = if profile.kind.api_key_variable().is_some() {
             format!(
-                "Create {}. It needs no login; it holds the profile's optional {} and nothing else Mjolnir reads.",
+                "Create {}. It needs no login; it holds the profile's optional {} and, when DSH runs there, the key DSH saves.",
                 profile.home.display(),
                 profile.kind.agent_instructions_file()
             )
@@ -1301,6 +1301,16 @@ pub fn local_podman_runtime_check(
         );
     }
     match verify_local_podman(executor) {
+        Ok(preflight) if !preflight.warnings.is_empty() => DoctorCheck::warning(
+            "runtime.podman",
+            "Rootless Podman",
+            format!(
+                "Podman {} has a valid rootless UID map. {}",
+                preflight.version,
+                preflight_warning_details(&preflight.warnings)
+            ),
+            preflight_warning_remediations(&preflight.warnings),
+        ),
         Ok(preflight) => DoctorCheck::ready(
             "runtime.podman",
             "Rootless Podman",
@@ -1877,6 +1887,22 @@ fn ssh_podman_check(
     )
 }
 
+fn preflight_warning_details(warnings: &[crate::targets::PodmanPreflightWarning]) -> String {
+    warnings
+        .iter()
+        .map(|warning| warning.detail.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn preflight_warning_remediations(warnings: &[crate::targets::PodmanPreflightWarning]) -> String {
+    warnings
+        .iter()
+        .map(|warning| warning.remediation.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The Podman half of the target's checks, on a host already known reachable.
 fn ssh_podman_runtime_check(
     check_id: String,
@@ -1894,16 +1920,16 @@ fn ssh_podman_runtime_check(
             return DoctorCheck::fixable(check_id, title, detail, remediation);
         }
     };
-    let linger_warning = preflight.warnings.first();
-    if !smoke && let Some(warning) = linger_warning {
+    if !smoke && !preflight.warnings.is_empty() {
         return DoctorCheck::warning(
             check_id,
             title,
             format!(
                 "Remote rootless Podman {} is available via {destination}, but {}",
-                preflight.version, warning.detail
+                preflight.version,
+                preflight_warning_details(&preflight.warnings)
             ),
-            &warning.remediation,
+            preflight_warning_remediations(&preflight.warnings),
         );
     }
     if !smoke {
@@ -1928,24 +1954,22 @@ fn ssh_podman_runtime_check(
         },
     };
     match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
-        Ok(()) => match linger_warning {
-            Some(warning) => DoctorCheck::warning(
-                check_id,
-                title,
-                format!(
-                    "Disposable run/exec/remove smoke test passed for image {image} on {destination}, but {}",
-                    warning.detail
-                ),
-                &warning.remediation,
+        Ok(()) if !preflight.warnings.is_empty() => DoctorCheck::warning(
+            check_id,
+            title,
+            format!(
+                "Disposable run/exec/remove smoke test passed for image {image} on {destination}, but {}",
+                preflight_warning_details(&preflight.warnings)
             ),
-            None => DoctorCheck::ready(
-                check_id,
-                title,
-                format!(
-                    "Disposable run/exec/remove smoke test passed for image {image} on {destination}."
-                ),
+            preflight_warning_remediations(&preflight.warnings),
+        ),
+        Ok(()) => DoctorCheck::ready(
+            check_id,
+            title,
+            format!(
+                "Disposable run/exec/remove smoke test passed for image {image} on {destination}."
             ),
-        },
+        ),
         Err(error) => DoctorCheck::fixable(
             check_id,
             title,

@@ -4611,7 +4611,10 @@ fn cancellable_executor_enforces_its_inline_deadline() {
         )
         .unwrap_err();
 
-    assert!(error.to_string().contains("operation cancelled"));
+    assert_eq!(
+        error.to_string(),
+        "timed out after 0.05 s while test bounded process execution"
+    );
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 
@@ -4789,6 +4792,11 @@ fn ssh_apple_container_closes_the_container_and_snapshot_over_ssh() {
     assert_eq!(command.program, "ssh");
     let remote = command.args.last().unwrap();
     assert!(remote.contains("container rm --force"), "{remote}");
+    // Hard-won: 946dc3fc0: the close script called `container` inside `sh -c` without the Mac's system PATH.
+    assert!(
+        remote.starts_with("'/bin/sh' '-c' ") && remote.contains("path_helper"),
+        "the close script runs under the Mac's system PATH: {remote}"
+    );
     assert!(
         remote.contains("git/sessions/$2"),
         "removing the shared cache names the session snapshot: {remote}"
@@ -4814,7 +4822,12 @@ fn ssh_apple_container_absence_is_confirmed_on_the_remote_host() {
     assert_eq!(executor.seen.borrow()[0].program, "ssh");
     assert_eq!(
         executor.seen.borrow()[0].args.last().unwrap(),
-        "'container' 'list' '--all' '--quiet'"
+        &mj_core::targets::join_remote_command(&[
+            "container".into(),
+            "list".into(),
+            "--all".into(),
+            "--quiet".into(),
+        ])
     );
 
     let executor = PodmanPreflightExecutor::with_outputs([podman_output(format!(

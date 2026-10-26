@@ -68,7 +68,7 @@ pub(crate) fn capacity_table_rows(
         .values()
         .map(|detail| {
             let staleness = capacity_staleness(detail, now_epoch_seconds);
-            let (cpu, memory) = capacity_cpu_and_memory(dashboard, detail, staleness.is_some());
+            let (cpu, memory) = capacity_cpu_and_memory(detail, staleness.is_some());
             CapacityTableRow {
                 host: detail.target.host.clone(),
                 targets: capacity_target_labels(&detail.target.target_ids, dashboard),
@@ -83,11 +83,7 @@ pub(crate) fn capacity_table_rows(
 
 /// The CPU and RAM cells of one row. A host reports how much of each is in
 /// use; a fleet has no percentage of its own and reports what it is running.
-fn capacity_cpu_and_memory(
-    dashboard: &DashboardState,
-    detail: &CapacityDetail,
-    stale: bool,
-) -> (Line<'static>, Line<'static>) {
+fn capacity_cpu_and_memory(detail: &CapacityDetail, stale: bool) -> (Line<'static>, Line<'static>) {
     if detail.refreshing {
         return (
             Line::styled(
@@ -100,11 +96,6 @@ fn capacity_cpu_and_memory(
     let unavailable = || Line::styled("unavailable", theme::muted());
     match (&detail.target.kind, &detail.usage) {
         (DeploymentCapacityKind::Host, Some(usage)) => {
-            let container_capacity = detail
-                .target
-                .target_ids
-                .first()
-                .and_then(|target_id| dashboard.host_container_capacity(target_id));
             let reading = |used_percent: u8| {
                 Line::styled(
                     format!("{used_percent}%"),
@@ -115,28 +106,14 @@ fn capacity_cpu_and_memory(
                     }),
                 )
             };
-            let cpu = usage.cpu_percent.map_or_else(unavailable, |percent| {
-                let mut line = reading(percent);
-                if let Some(capacity) = container_capacity.filter(|capacity| capacity.complete) {
-                    line = Line::raw(format!("{percent}% · {} left", capacity.remaining.cpus));
-                }
-                line
-            });
+            let cpu = usage.cpu_percent.map_or_else(unavailable, reading);
             let memory = if usage.memory_total_bytes == 0 {
                 unavailable()
             } else {
                 let percent = (u128::from(usage.memory_used_bytes) * 100
                     / u128::from(usage.memory_total_bytes))
                 .min(100);
-                let percent = u8::try_from(percent).unwrap_or(100);
-                if let Some(capacity) = container_capacity.filter(|capacity| capacity.complete) {
-                    Line::raw(format!(
-                        "{percent}% · {} left",
-                        format_resource_bytes(capacity.remaining.memory_bytes)
-                    ))
-                } else {
-                    reading(percent)
-                }
+                reading(u8::try_from(percent).unwrap_or(100))
             };
             (cpu, memory)
         }

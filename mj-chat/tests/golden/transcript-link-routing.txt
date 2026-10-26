@@ -16,10 +16,10 @@
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -43,10 +43,10 @@ action: OpenLink("https://example.com/inline")
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -70,10 +70,10 @@ action: OpenLink("https://example.com/block")
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -97,10 +97,10 @@ action: None
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -124,10 +124,10 @@ action: OpenLink("https://example.com/1")
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -151,10 +151,10 @@ action: OpenLink("https://example.com/2")
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -178,11 +178,11 @@ action: None
 │                           ▐│
 │                           ▐│
 │                           ▐│
-│                           ▐│
 ╰────────────────────────────╯
 ╭  mic ──────────────────────╮
 │> Message the agent, or /   │
 │  for commands              │
+│                            │
 ╰────────────────────────────╯
 ctrl+b then : palette · ? keys
 action: OpenLink("https://example.com/1")
@@ -205,11 +205,11 @@ action: OpenLink("https://example.com/1")
 │                           ▐│
 │                           ▐│
 │                           ▐│
-│                           ▐│
 ╰────────────────────────────╯
 ╭  mic ──────────────────────╮
 │> Message the agent, or /   │
 │  for commands              │
+│                            │
 ╰────────────────────────────╯
 ctrl+b then : palette · ? keys
 action: None

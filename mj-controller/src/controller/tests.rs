@@ -884,24 +884,26 @@ fn registration_records_a_plain_local_directory_as_its_project() {
         config,
         state: State::default(),
     };
-    let mut options = launch_options(Vec::new());
-    options.project_directory = Some(workspace.path().to_owned());
-    let error = controller
-        .register_session_with_resources("codex", "project", "local", "plain", options)
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("cannot be reviewed"),
-        "{error:#}"
-    );
-
+    // A session that asked for review off already has it, so registration
+    // reports no change for the caller to announce.
     let mut options = launch_options(Vec::new());
     options.project_directory = Some(workspace.path().to_owned());
     options.review = Some(mj_core::config::SessionReview::Off);
-    let id = controller
-        .register_session_with_resources("codex", "project", "local", "plain", options)
+    let explicit = controller
+        .register_session_reporting_review("codex", "project", "local", "plain", options)
         .unwrap();
+    assert!(!explicit.review_turned_off);
+
+    let mut options = launch_options(Vec::new());
+    options.project_directory = Some(workspace.path().to_owned());
+    let registration = controller
+        .register_session_reporting_review("codex", "project", "local", "plain", options)
+        .unwrap();
+    assert!(registration.review_turned_off);
+    let id = registration.id;
 
     let stored = &controller.state.sessions[&id];
+    assert_eq!(stored.review, Some(mj_core::config::SessionReview::Off));
     assert_eq!(stored.project_directory.as_deref(), Some(workspace.path()));
     assert!(stored.managed_worktree.is_none());
     let project = stored.project.as_ref().expect("plain project was recorded");
@@ -1280,6 +1282,12 @@ fn configuration_id_rename_rewrites_durable_session_references() {
     controller
         .rename_profile_id("codex", "codex-renamed")
         .unwrap();
+    // Hard-won: #1370: a runtime switched off came back on under its new name.
+    let (_, ()) = Config::update(|config| {
+        config.disabled_targets.insert("podman".into());
+        Ok(())
+    })
+    .unwrap();
     controller
         .rename_target_id("podman", "podman-renamed")
         .unwrap();
@@ -1290,6 +1298,7 @@ fn configuration_id_rename_rewrites_durable_session_references() {
     assert_eq!(session.target_template_id, "podman-renamed");
     assert!(loaded.config.profiles.contains_key("codex-renamed"));
     assert!(loaded.config.targets.contains_key("podman-renamed"));
+    assert!(loaded.config.enabled_target("podman-renamed").is_none());
     assert!(!config_rename_journal_path().exists());
 }
 

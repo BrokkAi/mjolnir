@@ -17,8 +17,7 @@ fn target_step_choices<W: WizardDraft>(
 ) -> (Vec<PickerChoice>, Vec<Line<'static>>, usize) {
     let warning = Style::default().fg(theme::palette().warning);
     let mut help = Vec::new();
-    // A target whose runtime is not on this host is not listed at all; one
-    // whose host did not answer is, with its status.
+    // Only what is there is listed; what is not is named under the table.
     let offered = dashboard.offered_target_indices();
     let selected_row = dashboard.target_row(wizard.target());
     let rows = dashboard
@@ -30,9 +29,6 @@ fn target_step_choices<W: WizardDraft>(
         .map(|(index, (id, target))| {
             let selected = index == wizard.target();
             let rejection = wizard.target_rejection(dashboard, id);
-            let checking = rejection
-                .as_deref()
-                .is_some_and(|reason| reason.starts_with("checking"));
             let (cpu, memory) = match wizard.resource_allocation() {
                 Some(allocation) if selected && target_is_sized(target) => (
                     allocation_cpus(allocation).to_string(),
@@ -45,13 +41,12 @@ fn target_step_choices<W: WizardDraft>(
                     PickerCell::styled("sizing failed", warning)
                 }
                 None => PickerCell::blank(),
-                Some(_) if checking => PickerCell::styled("checking…", theme::muted()),
                 Some(_) => PickerCell::styled("unavailable", warning),
             };
-            // Unavailable rows cannot be selected, so each one's reason is
-            // listed under the table rather than only the selected row's.
-            if let Some(reason) = rejection.as_deref().filter(|_| !checking) {
-                let reason = reason.strip_prefix("unavailable: ").unwrap_or(reason);
+            // A row this draft cannot use cannot be selected, so each one's
+            // reason is listed under the table rather than only the selected
+            // row's.
+            if let Some(reason) = rejection.as_deref() {
                 help.push(Line::styled(format!("{id}: {reason}"), warning));
             }
             if selected {
@@ -101,21 +96,26 @@ fn target_step_choices<W: WizardDraft>(
             }
         })
         .collect();
-    // A machine no runtime runs on has no row, so it is named here with the
-    // reason, rather than missing from the list without a word.
-    for (id, _) in dashboard.config.machines_without_runtimes() {
-        let reason = dashboard
-            .machine_runtime_reason(id)
-            .unwrap_or_else(|| "checking what it can run…".to_owned());
-        help.push(Line::styled(
-            format!("Machine {id} has no runtime: {reason}"),
-            warning,
-        ));
-    }
-    if let Some(key) = dashboard.first_key_label(crate::CommandId::Refresh) {
-        help.push(picker_help(&format!("{key} recheck availability")));
-    }
+    // What is not there has no row, so it is named here with the reason,
+    // rather than missing from the list without a word.
+    help.extend(
+        dashboard
+            .missing_target_lines()
+            .into_iter()
+            .map(|line| Line::styled(line, warning)),
+    );
     (target_table(rows), help, selected_row)
+}
+
+/// The lines under a profile list naming each enabled profile it leaves
+/// out and why.
+fn missing_profile_help(dashboard: &DashboardState) -> Vec<Line<'static>> {
+    let warning = Style::default().fg(theme::palette().warning);
+    dashboard
+        .missing_profile_lines()
+        .into_iter()
+        .map(|line| Line::styled(line, warning))
+        .collect()
 }
 
 pub(crate) fn step_initial(step: WizardStep) -> WizardControl {
@@ -248,7 +248,9 @@ pub(crate) fn render_new_wizard(
                             .is_some_and(|options| options.available),
                     )
                 }),
-                profile_id: &nth_enabled_profile(&dashboard.config, wizard.profile),
+                profile_id: &dashboard
+                    .nth_offered_profile(wizard.profile)
+                    .unwrap_or_default(),
                 project_label: if raw_project {
                     "Project directory"
                 } else {
@@ -296,6 +298,8 @@ pub(crate) fn render_new_wizard(
                 remote_preflight_in_flight: wizard.remote_preflight_in_flight,
                 remote_preflight_error: wizard.remote_preflight_error.as_deref(),
                 local_changes_excluded: !raw_project,
+                review_notice: (raw_project && wizard.selected_review_turns_off(&dashboard.config))
+                    .then_some(mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF),
                 conversion: None,
             },
             &mut form,
@@ -324,8 +328,7 @@ pub(crate) fn render_new_wizard(
         let mut details = vec![Line::raw("")];
         if wizard.profile_step_skipped
             && dashboard
-                .config
-                .enabled_profiles()
+                .offered_profiles()
                 .nth(wizard.profile)
                 .is_some_and(|(_, profile)| needs_guardian_warning(profile.kind))
         {
@@ -486,8 +489,7 @@ pub(crate) fn render_new_wizard(
             ),
             profile_table(
                 dashboard
-                    .config
-                    .enabled_profiles()
+                    .offered_profiles()
                     .map(|(id, profile)| dashboard.profile_choice(id, profile.kind))
                     .collect(),
             ),
@@ -557,11 +559,13 @@ pub(crate) fn render_new_wizard(
     };
     if wizard.step == WizardStep::Profile
         && dashboard
-            .config
-            .enabled_profiles()
+            .offered_profiles()
             .any(|(_, profile)| needs_guardian_warning(profile.kind))
     {
         help.push(guardian_footnote());
+    }
+    if wizard.step == WizardStep::Profile {
+        help.extend(missing_profile_help(dashboard));
     }
     let bundle_actions = [
         (WizardControl::Add, "Add…", true),
@@ -726,6 +730,8 @@ pub(crate) struct ReviewWizardView<'a> {
     remote_preflight_in_flight: bool,
     remote_preflight_error: Option<&'a str>,
     local_changes_excluded: bool,
+    /// Why creating this session turns its review off, when it will.
+    review_notice: Option<&'a str>,
     /// Present only when a move converts a local checkout into an isolated
     /// workspace, so the review can say what travels before the confirmation.
     conversion: Option<&'a mj_core::state::RawConversionPreview>,
@@ -768,6 +774,7 @@ pub(crate) fn render_review_wizard(
         remote_preflight_in_flight,
         remote_preflight_error,
         local_changes_excluded,
+        review_notice,
         conversion,
     } = view;
     let target = &dashboard.config.targets[target_id];
@@ -934,6 +941,13 @@ pub(crate) fn render_review_wizard(
         ));
         row
     });
+    if let Some(notice) = review_notice {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            notice,
+            Style::default().fg(theme::palette().warning),
+        ));
+    }
     let queue_label = queue.map(|(count, _)| format!("Queued prompts: {count}"));
     if let Some(label) = &queue_label {
         lines.push(Line::raw(""));
@@ -1762,6 +1776,7 @@ pub(crate) fn render_resume_wizard(
                 remote_preflight_in_flight: false,
                 remote_preflight_error: None,
                 local_changes_excluded: false,
+                review_notice: None,
                 conversion: wizard
                     .preparation
                     .as_ref()
@@ -1827,6 +1842,7 @@ pub(crate) fn render_resume_wizard(
             {
                 help.push(guardian_footnote());
             }
+            help.extend(missing_profile_help(dashboard));
             let step = format!(
                 "{} profile (cross-harness supported)",
                 step_counter(1, 3, target_hidden, wizard)

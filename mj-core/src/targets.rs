@@ -995,7 +995,7 @@ fn stream_command_with_stdin(
 #[derive(Clone)]
 pub struct CancellableProcessExecutor {
     cancelled: Arc<AtomicBool>,
-    deadline: Option<Instant>,
+    deadline: Option<(Instant, Duration)>,
 }
 
 /// Cancels synchronous executor work when its supervising async wait is dropped.
@@ -1023,28 +1023,55 @@ impl CancellableProcessExecutor {
         self.cancelled.load(Ordering::Acquire)
             || self
                 .deadline
-                .is_some_and(|deadline| Instant::now() >= deadline)
+                .is_some_and(|(deadline, _)| Instant::now() >= deadline)
     }
 
     pub fn with_timeout(timeout: Duration) -> Self {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
-            deadline: Some(Instant::now() + timeout),
+            deadline: Some((Instant::now() + timeout, timeout)),
         }
     }
 
     /// Bounds an existing flag-based executor with a deadline, so a wedged
     /// child becomes a reported failure instead of running forever.
     pub fn with_deadline(mut self, timeout: Duration) -> Self {
-        self.deadline = Some(Instant::now() + timeout);
+        self.deadline = Some((Instant::now() + timeout, timeout));
         self
     }
 
-    fn check_cancelled(&self) -> Result<()> {
+    fn cancellation_message(&self, purpose: &str) -> String {
+        if !self.cancelled.load(Ordering::Acquire)
+            && let Some((deadline, timeout)) = self.deadline
+            && Instant::now() >= deadline
+        {
+            return format!(
+                "timed out after {} s while {purpose}",
+                timeout.as_secs_f64()
+            );
+        }
+        format!("operation cancelled while {purpose}")
+    }
+
+    fn check_cancelled(&self, purpose: &str) -> Result<()> {
         if self.is_cancelled() {
-            bail!("operation cancelled");
+            bail!("{}", self.cancellation_message(purpose));
         }
         Ok(())
+    }
+
+    fn describe_cancellation<T>(&self, command: &CommandSpec, result: Result<T>) -> Result<T> {
+        result.map_err(|error| {
+            if self.is_cancelled()
+                && error
+                    .chain()
+                    .any(|cause| cause.to_string().starts_with("operation cancelled"))
+            {
+                anyhow::anyhow!(self.cancellation_message(&command.purpose))
+            } else {
+                error
+            }
+        })
     }
 }
 
@@ -1231,7 +1258,7 @@ impl CancellableProcessExecutor {
             );
         }
         let started = Instant::now();
-        self.check_cancelled()?;
+        self.check_cancelled(&command.purpose)?;
         let mut child = cancellable_command(command)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -1255,7 +1282,7 @@ impl CancellableProcessExecutor {
                         tracing::warn!(stream, %error, "cancelled command reader failed");
                     }
                 }
-                bail!("operation cancelled while {}", command.purpose);
+                bail!("{}", self.cancellation_message(&command.purpose));
             }
             if status.is_none() {
                 status = child
@@ -1305,9 +1332,12 @@ impl CommandExecutor for CancellableProcessExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
-            with_ssh_admission(command, self, &|| self.is_cancelled(), |command| {
-                self.run_once(command)
-            })
+            self.describe_cancellation(
+                command,
+                with_ssh_admission(command, self, &|| self.is_cancelled(), |command| {
+                    self.run_once(command)
+                }),
+            )
         })
     }
 
@@ -1316,26 +1346,29 @@ impl CommandExecutor for CancellableProcessExecutor {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
-        crate::runtime::off_async_worker(|| {
-            let _running = BlockingOperation::command(command);
-            // A caller's stream cannot be replayed, so this path takes a
-            // session and a permit but never retries.
-            let session = command.open_ssh_session(self)?;
-            let _permit = command
-                .ssh_destination
-                .as_deref()
-                .map(|destination| {
-                    SshAdmission::acquire_unless(destination, &|| self.is_cancelled())
+        self.describe_cancellation(
+            command,
+            crate::runtime::off_async_worker(|| {
+                let _running = BlockingOperation::command(command);
+                // A caller's stream cannot be replayed, so this path takes a
+                // session and a permit but never retries.
+                let session = command.open_ssh_session(self)?;
+                let _permit = command
+                    .ssh_destination
+                    .as_deref()
+                    .map(|destination| {
+                        SshAdmission::acquire_unless(destination, &|| self.is_cancelled())
+                    })
+                    .transpose()?;
+                let command = session.command();
+                // The child runs in its own process group so cancellation can kill
+                // the whole group, which is what releases a writer blocked on a
+                // full pipe.
+                stream_command_with_stdin(cancellable_command(command), command, input, &|| {
+                    self.is_cancelled()
                 })
-                .transpose()?;
-            let command = session.command();
-            // The child runs in its own process group so cancellation can kill
-            // the whole group, which is what releases a writer blocked on a
-            // full pipe.
-            stream_command_with_stdin(cancellable_command(command), command, input, &|| {
-                self.is_cancelled()
-            })
-        })
+            }),
+        )
     }
 }
 
@@ -2554,8 +2587,32 @@ mod executor_tests {
         let error = CancellableProcessExecutor::with_timeout(Duration::from_millis(300))
             .execute_with_stdin(&command, &mut input)
             .unwrap_err();
-        assert!(error.to_string().contains("cancelled"), "{error:#}");
+        assert!(
+            error.to_string().contains("timed out after 0.3 s while"),
+            "{error:#}"
+        );
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn executor_deadlines_name_the_duration_and_purpose_without_relabelling_cancellation() {
+        let command = CommandSpec::new("sh", ["-c", "sleep 30"]).purpose("stage a worker");
+        let error = CancellableProcessExecutor::with_timeout(Duration::from_millis(50))
+            .execute(&command)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "timed out after 0.05 s while stage a worker"
+        );
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let error = CancellableProcessExecutor::new(cancelled)
+            .with_deadline(Duration::ZERO)
+            .execute(&command)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "operation cancelled while stage a worker"
+        );
     }
 
     #[test]

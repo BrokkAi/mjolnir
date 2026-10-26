@@ -69,7 +69,7 @@ marks models or counters that cannot be priced from the recorded information.
 | Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
 | OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db`, or a provider key in the environment | no |
 | MiMo Code | `mimo` | `MIMOCODE_HOME` | `~/.mimocode` (stock XDG config and login when unset) | `data/auth.json`, or `~/.local/share/mimocode/auth.json` for the stock install | no |
-| DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh` | `DEEPSEEK_API_KEY` in the environment (no file) | no |
+| DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh` | `DEEPSEEK_API_KEY` saved in DSH, or in the environment | no |
 
 There are eight harness kinds. Codex can use its built-in Amazon Bedrock
 providers; see [Codex on Amazon Bedrock](#codex-on-amazon-bedrock). It can also
@@ -390,6 +390,15 @@ A disabled profile is omitted from new, resume, move, review, login, import,
 Quota, and utility-model choices. Sessions already running under that profile
 continue to operate. Re-enable it before starting new work with it.
 
+The new-session and resume pickers also leave out a profile that is not there:
+one a harness cannot start from (for example, its API key is not set), or one
+whose agent is gone, meaning its home directory no longer exists and its
+command is not on `PATH`. The picker names it under the list with the reason
+and the fix. Mjolnir checks when the dashboard starts and each time a picker
+opens, and the profile returns as soon as a check finds it again. Each check
+also adds a profile for an agent installed since the configuration was
+written.
+
 Optional environment and compaction controls are useful for nonstandard target
 installs:
 
@@ -506,33 +515,41 @@ For DSH, configure `kind = "dsh"`, for example with
 `home = "/home/me/.dsh"`. Detection accepts DeepSeek's own `dsh` CLI, its
 `~/.dsh` home, or `DEEPSEEK_API_KEY` in the environment Mjolnir started with,
 so a key alone is enough to be offered a profile. DSH runs BrokkAi's
-[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.3.0, a DeepSeek coding agent
+[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.4.0, a DeepSeek coding agent
 that speaks ACP itself, so there is no separate bridge. It is not the DeepSeek
 harness earlier releases offered as `kind = "deepseek"`; that kind still fails
 to load. The home is a `DSH_ACP_DATA_DIR` root. It holds an optional
 `AGENTS.md` and dsh-acp's native session records, `sessions/<id>.json`; there
-is no configuration file, no login file, and no skills support. dsh-acp
-receives `AGENTS.md` in one environment variable, so the file must be UTF-8
-text of at most 131049 bytes, including the notes Mjolnir adds to describe a
-container or EC2 session's environment. Mjolnir refuses to start a session whose
-file breaks either rule and says which rule and by how much, and `mj doctor`
-reports the profile's own file the same way. Nothing creates the home
-automatically, and it is optional: a session stages its own home, which simply
-starts without an `AGENTS.md`. Create `~/.dsh` when you want to keep
-instructions there or move the profile; `mj doctor` reports it missing until
-you do. DSH reads no
-instruction file itself, so Mjolnir passes the staged `AGENTS.md` as dsh-acp's
-system prompt through `DSH_ACP_SYSTEM_PROMPT` on every launch. The staged file
-is the profile's own `AGENTS.md` plus any guidance Mjolnir adds for the
-session: a disposable-environment note on container and EC2 targets, container
-storage notes, and sub-agent instructions when sub-agent delegation applies. On
-a bare local or SSH target with none of these, it is the profile's file
-unchanged.
+is no configuration file, no login file, and no skills support. dsh-acp reads
+`AGENTS.md` itself from the data directory, the session working directory, and
+each additional workspace root. An existing `AGENTS.md` must be a regular
+UTF-8 file of at most 1 MiB. Mjolnir checks the staged data-directory file,
+including the notes it adds to describe a container or EC2 session's
+environment, and refuses to start a session whose file breaks any of those
+rules. The refusal says which rule and by how much, and `mj doctor` reports the
+profile's own file the same way. Nothing creates the home automatically, and
+it is optional: a session stages its own home, which simply starts without an
+`AGENTS.md`. Create `~/.dsh` when you want to keep instructions there or move
+the profile; `mj doctor` reports it missing until you do. Mjolnir stages its
+instructions as the data directory's `AGENTS.md` and clears
+`DSH_ACP_SYSTEM_PROMPT` so a target login shell cannot add a duplicate prompt.
+The staged file is the profile's own `AGENTS.md` plus any guidance Mjolnir adds
+for the session: a disposable-environment note on container and EC2 targets,
+container storage notes, and sub-agent instructions when sub-agent delegation
+applies. On a bare local or SSH target with none of these, it is the profile's
+file unchanged.
 
-DSH authenticates with an API key in `DEEPSEEK_API_KEY`. As with a
-[Codex custom provider](#codex-with-a-custom-provider), Mjolnir takes the key
-from the environment it started with unless the profile's `environment` sets
-it, for example from `secrets.toml`:
+DSH authenticates with a DeepSeek API key, `DEEPSEEK_API_KEY`. Mjolnir uses
+the first of these that holds one:
+
+1. The key saved in DSH itself, under `refs` in `.credentials.yaml` in the
+   profile home (DSH's own home, `~/.dsh` by default), as DSH's Models
+   settings write it. DSH refuses that file when any other user can read it,
+   so Mjolnir skips its key then, moves on to the next source, and names the
+   file (`chmod 600` it) when no source has a key.
+2. `DEEPSEEK_API_KEY` in the environment Mjolnir started with.
+3. `DEEPSEEK_API_KEY` in `.env` in the profile home.
+4. The profile's `environment`, for example from `secrets.toml`:
 
 ```toml
 [profiles.dsh]
@@ -545,6 +562,10 @@ DEEPSEEK_API_KEY = { from_secret = "DEEPSEEK_API_KEY" }
 
 When detection adds a DSH profile and `secrets.toml` beside `config.toml`
 defines `DEEPSEEK_API_KEY`, it writes that `environment` entry for you.
+
+The first three are the places DSH reads, so a session uses the key `dsh`
+itself uses. A DeepSeek account sign-in is not an API key: dsh-acp cannot send
+it, so a DSH that is signed in but holds no key is refused with that reason.
 
 There is no interactive login, and `mj login` refuses the profile. A profile
 without the key cannot start; the refused session and `mj doctor` say how to
@@ -700,9 +721,10 @@ Mjolnir then adds its own files to the staged home:
   setting in `opencode.json`;
 - for MiMo Code under an unconstrained policy,
   `MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS=1` in the launch environment;
-- for DSH, the staged `AGENTS.md` as `DSH_ACP_SYSTEM_PROMPT` in the launch
-  environment, and dsh-acp's `permission_mode` on every session open: `ask`
-  under configured approvals, `allow` under an unconstrained policy;
+- for DSH, the staged `AGENTS.md` in the session's `DSH_ACP_DATA_DIR` (with
+  `DSH_ACP_SYSTEM_PROMPT` cleared), and dsh-acp's `permission_mode` on every
+  session open: `ask` under configured approvals, `allow` under an
+  unconstrained policy;
 - in a container or on an EC2 instance, a note in the instruction file
   (`AGENTS.md` or `CLAUDE.md`) that the environment is disposable.
 
@@ -907,13 +929,16 @@ never replaces its own binary.
 MiMo Code installs from the pinned `@mimo-ai/cli` npm package. Its managed
 launch disables automatic updates so a running session never replaces its own
 binary.
-DSH is never installed. A launch resolves the target's own `dsh-acp` on
-`PATH`, or fetches the pinned `@brokkai/dsh-acp@0.3.0` package through `npx`,
-using the compatible system runtime or the managed Node described above; the
-npm package bundles the release binaries. Linux and macOS, on x86-64 and ARM64,
-are supported. Linux needs glibc 2.34 or newer, so musl distributions such as
-Alpine cannot run it. Mjolnir reports a missing prerequisite and leaves the
-existing worker alone; it does not invoke sudo or a system package manager.
+DSH is never installed. A launch uses the target's own `dsh-acp` on `PATH` when
+it is 0.4.0 or newer, or fetches the pinned `@brokkai/dsh-acp@0.4.0` package
+through `npx`, using the compatible system runtime or the managed Node
+described above; the npm package bundles the release binaries. An older
+`dsh-acp` on `PATH` is not used: Mjolnir falls back to `npx` when Node.js, npm,
+and npx are available, and otherwise refuses the launch with an upgrade
+instruction. Linux and macOS, on x86-64 and ARM64, are supported. Linux needs
+glibc 2.34 or newer, so musl distributions such as Alpine cannot run it.
+Mjolnir reports a missing prerequisite and leaves the existing worker alone; it
+does not invoke sudo or a system package manager.
 
 Installs are content-addressed and shared across sessions for the same remote
 user. A cache hit performs only local manifest and executable checks. Upgrades

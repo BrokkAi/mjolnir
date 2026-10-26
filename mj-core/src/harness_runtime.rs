@@ -118,14 +118,14 @@ pub const CODEX_ACP_VERSION: &str = "1.13.7";
 pub const CODEX_CLI_VERSION: &str = "0.160.1";
 pub const CLAUDE_ACP_VERSION: &str = "0.94.0";
 pub const CLAUDE_CLI_VERSION: &str = "2.1.306";
-pub const KIMI_VERSION: &str = "2.3.1";
+pub const KIMI_VERSION: &str = "2.3.2";
 pub const GROK_VERSION: &str = "1.0.40";
 pub const MUSE_ACP_PACKAGE: &str = "@brokkai/muse-acp";
 pub const MUSE_ACP_VERSION: &str = "0.16.0";
 pub const MUSE_VERSION: &str = "1.4.12-R6909.1";
 pub const OPENCODE_VERSION: &str = "2.1.2";
 pub const MIMO_CLI_VERSION: &str = "0.1.15";
-pub const DSH_ACP_VERSION: &str = "0.3.0";
+pub const DSH_ACP_VERSION: &str = "0.4.0";
 pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
 
 /// The shell commands that start OpenCode's ACP server with the executable
@@ -153,37 +153,31 @@ pub fn opencode_acp_script() -> String {
     )
 }
 
-/// The most bytes of staged instructions dsh-acp can be given. They travel
-/// in one environment variable, and Linux refuses to start a program with an
-/// environment string longer than 32 pages (131072 bytes), counting the
-/// `DSH_ACP_SYSTEM_PROMPT=` prefix and the terminating NUL. dsh-acp
-/// reads instructions from no file, and Mjolnir's ACP schema has no session
-/// system-prompt field, so there is no other channel. The ceiling applies on
-/// every target, so a session behaves the same wherever it runs.
-pub const DSH_ACP_INSTRUCTIONS_LIMIT: usize = 131_072 - "DSH_ACP_SYSTEM_PROMPT=".len() - 1;
+/// The most bytes dsh-acp reads from one instruction file.
+pub const DSH_ACP_INSTRUCTIONS_LIMIT: usize = 1024 * 1024;
 
-/// Why dsh-acp cannot receive an instruction file as its system prompt.
-/// The controller refuses a session for either before it launches anything
-/// ([`crate::config::HarnessProfile::ensure_ready`]), and [`dsh_acp_script`]
-/// refuses both again on the target, as the last check before dsh-acp starts.
+/// Why dsh-acp cannot load an instruction file.
+/// The controller refuses a session for any of these before it launches anything
+/// ([`crate::config::HarnessProfile::ensure_ready`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UndeliverableDshInstructions {
+    /// The path exists but is not a regular file.
+    NotRegularFile,
     /// The file has more bytes than [`DSH_ACP_INSTRUCTIONS_LIMIT`].
     TooLong { bytes: u64 },
-    /// The file is not UTF-8, and dsh-acp refuses an environment variable
-    /// that is not. `line` is the line with the first byte that is not.
+    /// The file is not UTF-8, and dsh-acp refuses instruction files that are
+    /// not. `line` is the line with the first byte that is not.
     NotUtf8 { line: usize },
 }
 
-/// Whether dsh-acp can receive the instruction file at `path`. Like
-/// [`dsh_acp_script`], this reads only a regular file; without one dsh-acp
-/// gets an empty system prompt.
+/// Whether dsh-acp can load the instruction file at `path`. Like dsh-acp,
+/// this reads only a regular file.
 pub fn undeliverable_dsh_instructions(
     path: &Path,
 ) -> std::io::Result<Option<UndeliverableDshInstructions>> {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) if metadata.is_file() => metadata,
-        Ok(_) => return Ok(None),
+        Ok(_) => return Ok(Some(UndeliverableDshInstructions::NotRegularFile)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
@@ -206,51 +200,86 @@ pub fn undeliverable_dsh_instructions(
     }))
 }
 
-/// A POSIX awk program that reads `od -bv` output and prints the line that
-/// holds the first byte that is not UTF-8, or nothing for UTF-8 text. It
-/// accepts exactly what Rust's `str::from_utf8` accepts: no overlong forms,
-/// no surrogates, nothing above U+10FFFF, and no sequence cut off at the
-/// end. busybox, Debian's slim images and macOS all have `od` and `awk`,
-/// where `iconv` is often missing. On a target without them the check
-/// prints nothing, and only the controller's check of the same file stands
-/// before dsh-acp's own error.
-const UTF8_CHECK_AWK: &str = "{for(i=2;i<=NF;i++){b=substr($i,1,1)*64+substr($i,2,1)*8+substr($i,3,1);if(n){if(b<l||b>h){print L+1;n=0;exit}n--;l=128;h=191}else if(b<128){if(b==10)L++}else{l=128;h=191;if(b>=194&&b<=223)n=1;else if(b>=224&&b<=239){n=2;if(b==224)l=160;if(b==237)h=159}else if(b>=240&&b<=244){n=3;if(b==240)l=144;if(b==244)h=143}else{print L+1;exit}}}}END{if(n)print L+1}";
-
 /// The shell commands that start dsh-acp, which the positional arguments
-/// name (`"$@"`), for the managed install and the container fallback alike.
+/// name (`"$@"`), for bare and container targets alike.
 ///
-/// dsh-acp reads no instruction file. It appends `DSH_ACP_SYSTEM_PROMPT` to
-/// its own system prompt, and rebuilds that prompt on every `session/load`,
-/// so the commands pass it the instruction file staged into the session
-/// home ([`HarnessKind::agent_instructions_file`]) on every launch. The
-/// variable is always set, empty without the file, so a value from the
-/// target's login shell never reaches the session. A file dsh-acp cannot
-/// receive ([`UndeliverableDshInstructions`]) is refused by name rather than
-/// dropped or left to fail as "Argument list too long" or as dsh-acp's own
-/// usage error. Without `DSH_ACP_DATA_DIR` dsh-acp would keep its sessions
-/// in a `.dsh-acp` directory inside the repository, so the commands refuse
-/// to start.
+/// dsh-acp reads [`HarnessKind::agent_instructions_file`] from its data
+/// directory, the session working directory and each additional workspace
+/// root, rebuilding that prompt whenever a session is opened. The command
+/// clears `DSH_ACP_SYSTEM_PROMPT` so a value from the target's login shell
+/// cannot add a second prompt beside the staged file. Without
+/// `DSH_ACP_DATA_DIR` dsh-acp would keep its sessions in a `.dsh-acp`
+/// directory inside the repository, so the command refuses to start.
 pub fn dsh_acp_script() -> String {
     let kind = HarnessKind::Dsh;
     format!(
-        "instructions=\"${{{data}:?}}/{instructions}\"; DSH_ACP_SYSTEM_PROMPT=; if [ -f \"$instructions\" ]; then size=$(($(wc -c < \"$instructions\"))) || exit; if [ \"$size\" -gt {limit} ]; then echo \"The staged copy of {instructions}, $instructions, is $size bytes, but dsh-acp receives its instructions in one environment variable, which holds at most {limit} bytes. Shorten {instructions} in the DSH profile home.\" >&2; exit 1; fi; line=$(od -bv \"$instructions\" | awk '{awk}'); if [ -n \"$line\" ]; then echo \"The staged copy of {instructions}, $instructions, is not UTF-8 text (line $line has the first byte that is not), and dsh-acp accepts its instructions only as UTF-8. Save {instructions} in the DSH profile home as UTF-8.\" >&2; exit 1; fi; DSH_ACP_SYSTEM_PROMPT=\"$(cat \"$instructions\")\" || exit; fi; export DSH_ACP_SYSTEM_PROMPT; exec \"$@\"",
+        "if [ -z \"${{{data}:-}}\" ]; then echo 'Mjolnir requires {data} to keep dsh-acp sessions outside the workspace' >&2; exit 1; fi; DSH_ACP_SYSTEM_PROMPT=; export DSH_ACP_SYSTEM_PROMPT; exec \"$@\"",
         data = kind.home_env(),
-        instructions = kind.agent_instructions_file(),
-        limit = DSH_ACP_INSTRUCTIONS_LIMIT,
-        awk = UTF8_CHECK_AWK,
+    )
+}
+
+fn dsh_acp_required_major_minor() -> (u64, u64) {
+    DSH_ACP_VERSION
+        .split_once('.')
+        .and_then(|(major, minor)| {
+            Some((
+                major.parse::<u64>().ok()?,
+                minor.split('.').next()?.parse::<u64>().ok()?,
+            ))
+        })
+        .expect("DSH_ACP_VERSION starts with numeric major and minor versions")
+}
+
+/// Whether `dsh-acp --version` output names a release that loads staged
+/// instructions from its data directory.
+pub fn dsh_acp_version_supports_native_instructions(version_output: &str) -> bool {
+    let Some(version) = version_output.strip_prefix("dsh-acp ") else {
+        return false;
+    };
+    let mut version = version.trim().split('.');
+    let Some(Ok(major)) = version.next().map(str::parse::<u64>) else {
+        return false;
+    };
+    let Some(Ok(minor)) = version.next().map(str::parse::<u64>) else {
+        return false;
+    };
+    let (required_major, required_minor) = dsh_acp_required_major_minor();
+    major > required_major || (major == required_major && minor >= required_minor)
+}
+
+/// A POSIX shell command that succeeds when the `dsh-acp` on `PATH` can load
+/// staged instructions from its data directory. The caller checks that the
+/// command exists first.
+pub fn dsh_acp_version_supported_script() -> String {
+    let (required_major, required_minor) = dsh_acp_required_major_minor();
+    format!(
+        "{{ reported=\"$(dsh-acp --version 2>/dev/null)\" || reported=; case \"$reported\" in 'dsh-acp '*) reported=\"${{reported#dsh-acp }}\" ;; *) reported= ;; esac; major=\"${{reported%%.*}}\"; rest=\"${{reported#*.}}\"; minor=\"${{rest%%.*}}\"; case \"$major\" in ''|*[!0-9]*) major= ;; esac; case \"$minor\" in ''|*[!0-9]*) minor= ;; esac; [ -n \"$major\" ] && [ -n \"$minor\" ] && {{ [ \"$major\" -gt {required_major} ] || {{ [ \"$major\" -eq {required_major} ] && [ \"$minor\" -ge {required_minor} ]; }}; }}; }}",
+        required_major = required_major,
+        required_minor = required_minor,
     )
 }
 
 /// The shell commands that start dsh-acp on any target: the target's own
-/// `dsh-acp` when one is on `PATH`, otherwise the pinned npm package through
-/// `npx`, running [`dsh_acp_script`] with the resolved command as its
-/// positional arguments. DSH has no managed installation — the npm package
-/// bundles the same release binaries — so this one script is the whole
-/// launch path for bare and container targets alike, and for the model
-/// discovery probe.
+/// `dsh-acp` when its version supports native instruction loading, otherwise
+/// the pinned npm package through `npx`, running [`dsh_acp_script`] with the
+/// resolved command as its positional arguments. DSH has no managed
+/// installation — the npm package bundles the same release binaries — so this
+/// one script is the whole launch path for bare and container targets alike,
+/// and for the model discovery probe.
 pub fn dsh_acp_launch_script() -> String {
     format!(
-        "if command -v dsh-acp >/dev/null 2>&1; then set -- dsh-acp; elif command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then set -- npx -y {package}@{version}; else echo 'Mjolnir needs dsh-acp or Node.js, npm, and npx on PATH; install one in the target environment' >&2; exit 127; fi; {script}",
+        concat!(
+            "if command -v dsh-acp >/dev/null 2>&1; then if {version_supported}; then ",
+            "set -- dsh-acp; ",
+            "elif command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then ",
+            "set -- npx -y {package}@{version}; ",
+            "else echo 'Mjolnir requires dsh-acp {version} or newer to load AGENTS.md; upgrade it or install Node.js 22+, npm, and npx to use the pinned release' >&2; exit 127; fi; ",
+            "elif command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then ",
+            "set -- npx -y {package}@{version}; ",
+            "else echo 'Mjolnir needs dsh-acp or Node.js, npm, and npx on PATH; install one in the target environment' >&2; exit 127; fi; ",
+            "{script}"
+        ),
+        version_supported = dsh_acp_version_supported_script(),
         package = DSH_ACP_PACKAGE,
         version = DSH_ACP_VERSION,
         script = dsh_acp_script(),
@@ -460,8 +489,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             cli_entrypoint: "node_modules/.bin/claude",
         },
         HarnessKind::Kimi => HarnessPin {
-            install_id: "kimi-2.3.1",
-            display_version: "Kimi Code 2.3.1",
+            install_id: "kimi-2.3.2",
+            display_version: "Kimi Code 2.3.2",
             entrypoint: "bin/kimi",
             cli_entrypoint: "bin/kimi",
         },
@@ -484,8 +513,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             cli_entrypoint: "node_modules/.bin/mimo",
         },
         HarnessKind::Dsh => HarnessPin {
-            install_id: "dsh-acp-0.3.0",
-            display_version: "dsh-acp 0.3.0",
+            install_id: "dsh-acp-0.4.0",
+            display_version: "dsh-acp 0.4.0",
             entrypoint: "dsh-acp",
             cli_entrypoint: "dsh-acp",
         },

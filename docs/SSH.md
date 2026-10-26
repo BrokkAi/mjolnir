@@ -148,10 +148,10 @@ to opening masters, and to every command when sharing is off.
   or newer, Apple silicon, and a running service**. Follow the [official
   installation instructions](https://github.com/apple/container#initial-install)
   on the Mac, run `container system start`, and check `container system status`.
-  The SSH account must also find `container` on its noninteractive `PATH`. For
-  zsh, put the directory containing it in `.zshenv`, which noninteractive
-  shells read. Verify the setup with `ssh <destination> container --version`.
-  Mjolnir checks these same commands before offering or launching the runtime.
+  Mjolnir runs `container` with the Mac's system `PATH` from `/etc/paths`,
+  which includes `/usr/local/bin` where the package installs it, so the SSH
+  account needs no shell configuration. Mjolnir checks these same commands
+  before offering or launching the runtime.
 
 ## Machine and runtime configuration
 
@@ -159,18 +159,24 @@ The SSH host is one `[machines.<id>]` entry, and every runtime on it names that
 machine. Sessions run on runtimes, so a machine with no runtime is not offered
 as a session target.
 
-You do not have to write the runtimes yourself. When you save a machine under
-Settings › Machines, Mjolnir probes it over SSH and adds every runtime it can
-run: a `bare` runtime named after the machine when the host is Linux or macOS
-on x86_64 or arm64, `<machine>-podman` and `<machine>-docker` for each engine
-that passes the same check a launch runs, and `<machine>-apple-container` when
-the machine is Apple-silicon macOS 26 or newer with a running Apple container
-service. A machine already in the file without a runtime gets the same
-treatment each time `mj` starts and when you run `mj setup`, and Settings ›
-Runtimes › Detect runtimes probes every machine. A machine that answers with
-nothing usable, or does not answer, keeps no runtime; Settings › Machines, the
-new-session picker and `mj doctor` say why, with the fix. Removing one runtime
-of a machine is kept; to stop using a host altogether, remove the machine.
+You do not have to write the runtimes yourself. Each time `mj` starts and each
+time you open the new-session or resume picker, Mjolnir asks every machine what
+it can run, with one SSH call per machine that runs every check and
+disconnects, and adds each runtime it newly runs: a `bare` runtime named after
+the machine when the host is Linux or macOS on x86_64 or arm64,
+`<machine>-podman` and `<machine>-docker` for each engine that passes the same
+check a launch runs, and `<machine>-apple-container` when the machine is
+Apple-silicon macOS 26 or newer with a running Apple container service. This
+covers machines that already have runtimes, so Docker installed later on a
+host you already use appears without any configuration. `mj setup` does the
+same, and Settings › Runtimes › Detect runtimes does it on demand. A runtime
+whose machine did not answer, or whose engine stopped working, is left out of
+the pickers and named under the list with the reason. A machine that answers
+with nothing usable, or does not answer, keeps no runtime; Settings ›
+Machines, the new-session picker and `mj doctor` say why, with the fix. To keep
+a runtime you do not want, set `enabled = false` on it (or clear Enabled in
+Settings › Runtimes): detection never adds a kind the machine already has
+configured. To stop using a host altogether, remove the machine.
 
 The machine's keys are:
 
@@ -221,10 +227,9 @@ Mjolnir checks the runtime through the account's login shell, so Homebrew's
 PATH setup belongs in that shell's login configuration, such as `.zprofile`
 for zsh. The worker uses the target account's login environment and then
 applies any configured profile environment overrides. Apple container commands
-run through noninteractive SSH, so `container` must also be on the PATH OpenSSH
-uses for a command session. For zsh, `.zshenv` covers both login and
-noninteractive shells; `.zprofile` alone does not. Verify the setup with
-`ssh <destination> container --version` before selecting the runtime.
+run through noninteractive SSH with the Mac's system `PATH` from `/etc/paths`,
+so the official package's `/usr/local/bin/container` is found without any
+shell configuration.
 
 ```toml
 [machines.mac]

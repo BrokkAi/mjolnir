@@ -82,7 +82,9 @@ pub(crate) use backend::backend_locator;
 pub(crate) use backend::controller_github_token;
 pub use backend::image_refresh_plan;
 pub(crate) use backend::validate_resource_allocation;
-pub(crate) use backend::{LocalEngineReadiness, is_missing_command, local_engine_readiness};
+pub(crate) use backend::{
+    LocalEngineReadiness, is_missing_command, local_engine_readiness, verify_target_before_launch,
+};
 pub use github_app::GithubBundleSelectionError;
 pub(crate) use github_app::{
     GithubAppTokenProvider, github_app_token_for_session, github_token_for_session,
@@ -571,6 +573,14 @@ fn unique_id(base: &str, mut is_used: impl FnMut(&str) -> bool) -> String {
     unreachable!("u32 repository/bundle id suffixes exhausted")
 }
 
+/// A newly registered session, and whether registration turned its review
+/// off because its folder has no Git commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRegistration {
+    pub id: String,
+    pub review_turned_off: bool,
+}
+
 pub struct SessionLaunchOptions {
     /// Allow this interactive launch to seed later new-session forms.
     pub remember_launch_choices: bool,
@@ -860,6 +870,21 @@ impl Controller {
         title: impl Into<String>,
         options: SessionLaunchOptions,
     ) -> Result<String> {
+        self.register_session_reporting_review(profile_id, bundle_id, target_id, title, options)
+            .map(|registration| registration.id)
+    }
+
+    /// Register a session and report what registration decided about its
+    /// review, so the caller tells the person instead of guessing from the
+    /// stored record.
+    pub fn register_session_reporting_review(
+        &mut self,
+        profile_id: &str,
+        bundle_id: &str,
+        target_id: &str,
+        title: impl Into<String>,
+        options: SessionLaunchOptions,
+    ) -> Result<SessionRegistration> {
         self.register_session_with_executor(
             profile_id,
             bundle_id,
@@ -878,7 +903,7 @@ impl Controller {
         title: impl Into<String>,
         options: SessionLaunchOptions,
         executor: &impl CommandExecutor,
-    ) -> Result<String> {
+    ) -> Result<SessionRegistration> {
         let SessionLaunchOptions {
             remember_launch_choices,
             remember_container_size,
@@ -888,7 +913,7 @@ impl Controller {
             base,
             no_later_history,
             subagents,
-            review,
+            mut review,
             no_project_memory,
             no_github_events,
             initial_prompt,
@@ -931,11 +956,7 @@ impl Controller {
             .get(profile_id)
             .with_context(|| format!("unknown profile {profile_id:?}"))?;
         ensure!(profile.enabled, "profile {profile_id:?} is disabled");
-        let template = self
-            .config
-            .targets
-            .get(target_id)
-            .with_context(|| format!("unknown target template {target_id:?}"))?;
+        let template = self.config.ensure_target_enabled(target_id)?;
         if create_managed_worktree == Some(true) && !is_bare_project_target(template) {
             bail!("managed worktree creation requires a bare Git project");
         }
@@ -1004,6 +1025,7 @@ impl Controller {
                 profile.kind.display_name()
             );
         }
+        let mut review_turned_off = false;
         let (bundle_id, project) = if let Some(bundle) = bundle {
             let project = crate::project_catalog::snapshot(bundle, executor, true)?;
             let canonical = crate::database::store_catalog_project(bundle_id, &project, true)?;
@@ -1016,13 +1038,15 @@ impl Controller {
             // validation has already refused anything else.
             let (host, resolved) =
                 crate::project_catalog::resolve_directory(template, directory, executor)?;
-            let review_requested = self.config.review.for_session(review.as_ref()).trigger
-                != mj_core::config::ReviewTrigger::Off
-                && mj_core::review::settings::can_review(&self.config, review.as_ref());
-            ensure!(
-                !resolved.plain_directory || !review_requested,
-                "a directory without a committed Git checkout cannot be reviewed; select a committed Git project or turn review off for this session"
-            );
+            if resolved.plain_directory
+                && mj_core::review::settings::plain_directory_turns_review_off(
+                    &self.config,
+                    review.as_ref(),
+                )
+            {
+                review = Some(mj_core::config::SessionReview::Off);
+                review_turned_off = true;
+            }
             let (id, project) =
                 crate::project_catalog::accept_resolved_directory(host, directory, resolved)?;
             (id, Some(project))
@@ -1116,7 +1140,10 @@ impl Controller {
                 ),
             }
         }
-        Ok(id)
+        Ok(SessionRegistration {
+            id,
+            review_turned_off,
+        })
     }
 
     pub fn rename_session(&mut self, session_id: &str, title: &str) -> Result<String> {
@@ -1277,6 +1304,10 @@ impl Controller {
                 .remove(old_id)
                 .expect("target was checked in the transaction");
             config.targets.insert(new_id.to_owned(), target);
+            // A runtime switched off stays off under its new name.
+            if config.disabled_targets.remove(old_id) {
+                config.disabled_targets.insert(new_id.to_owned());
+            }
             Ok(())
         }) {
             Ok(result) => result,

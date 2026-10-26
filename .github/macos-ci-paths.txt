@@ -72,3 +72,6 @@ mj-worker/src/worker_runtime/root_owner.rs
 
 # Container replacement preserves host paths and private CLI environment files.
 mj-controller/src/targets/container_upgrade.rs
+
+# Shared target worker installation uses Darwin checksum and filesystem tools.
+mj-controller/src/controller/worker_binary/store.rs

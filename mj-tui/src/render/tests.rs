@@ -11,7 +11,7 @@ use mj_core::state::{
 };
 
 use mj_chat::selection::SurfaceId;
-use mj_client::quota::{API_LABEL, ProfileQuota, QuotaWindow};
+use mj_client::quota::{API_LABEL, NOT_REPORTED_LABEL, ProfileQuota, QuotaWindow};
 use mj_core::targets::{DeploymentCapacityUsage, ProvisionStage};
 
 use super::*;
@@ -1549,26 +1549,14 @@ fn session_name_prefers_override_then_acp_title_then_created_title() {
 }
 
 /// The standard local container targets exist whether or not an engine is
-/// installed. The Targets pane checks each one in the background, the same
-/// check the new-session wizard uses, and marks one whose engine is missing
-/// rather than listing it as if it could run.
+/// installed. The Targets pane reads the same availability answer the
+/// pickers use, and marks one whose engine is missing rather than listing it
+/// as if it could run.
 // Hard-won: 0b408d01: Launch finding J-7 showed the Targets pane omitted whether a listed local container engine was unavailable.
 #[test]
 fn targets_pane_marks_a_local_container_target_whose_engine_is_missing() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
-    let Some(crate::DashboardAction::CheckTargetReadiness {
-        generation,
-        target_ids,
-    }) = dashboard.take_target_availability_check()
-    else {
-        panic!("the Targets pane must check its local container targets");
-    };
-    assert_eq!(target_ids, vec!["podman".to_owned()]);
-    assert!(
-        dashboard.take_target_availability_check().is_none(),
-        "a check in flight is not repeated"
-    );
     let render_text = |dashboard: &mut DashboardState| {
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
         terminal
@@ -1584,11 +1572,9 @@ fn targets_pane_marks_a_local_container_target_whose_engine_is_missing() {
     };
     assert!(!render_text(&mut dashboard).contains("podman (unavailable)"));
 
-    dashboard.apply_target_readiness(
-        generation,
-        "podman".into(),
-        Err("Podman preflight failed: podman: not found".into()),
-    );
+    crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+        crate::test_support::availability_answer(dashboard, &["podman"], &[])
+    });
 
     let rendered = render_text(&mut dashboard);
     assert!(rendered.contains("podman (unavailable)"), "{rendered}");
@@ -1629,19 +1615,9 @@ fn feed_installed_config_hides_default_docker_but_keeps_a_user_written_one() {
         let mut target = test_capacity_target();
         target.target_ids = vec!["docker".into(), "localhost".into()];
         dashboard.set_deployment_capacity_targets(vec![target]);
-        let Some(crate::DashboardAction::CheckTargetReadiness {
-            generation,
-            target_ids,
-        }) = dashboard.take_target_availability_check()
-        else {
-            panic!("the Targets pane must check its local container targets");
-        };
-        assert!(target_ids.contains(&"docker".to_owned()));
-        dashboard.apply_target_runtime_missing(
-            generation,
-            "docker".into(),
-            "docker: not found".into(),
-        );
+        crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+            crate::test_support::availability_answer(dashboard, &["docker"], &[])
+        });
         drawn_dashboard(&mut dashboard, 160)
     };
 
@@ -3170,22 +3146,9 @@ fn golden_dashboard_resource_panels() {
         "sandbox".into(),
     ];
     dashboard.set_deployment_capacity_targets(vec![target]);
-    let readiness = dashboard.take_target_availability_check();
-    append_golden_value(&mut output, "target readiness request", &readiness);
-    if let Some(crate::DashboardAction::CheckTargetReadiness {
-        generation,
-        target_ids,
-    }) = readiness
-    {
-        for id in ["docker", "sandbox"] {
-            dashboard.apply_target_runtime_missing(
-                generation,
-                id.into(),
-                "docker: not found".into(),
-            );
-        }
-        append_golden_value(&mut output, "checked target ids", target_ids);
-    }
+    crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+        crate::test_support::availability_answer(dashboard, &["docker", "sandbox"], &[])
+    });
     append_dashboard_golden(
         &mut output,
         "Targets hides unavailable defaults",
@@ -3294,6 +3257,26 @@ fn golden_dashboard_resource_panels() {
     append_dashboard_golden(
         &mut output,
         "usage-priced API quota",
+        120,
+        28,
+        &mut dashboard,
+    );
+
+    let mut mimo_config = config();
+    let mut mimo = mimo_config.profiles["codex-1"].clone();
+    mimo.kind = HarnessKind::Mimo;
+    mimo.home = std::path::PathBuf::from("/profiles/mimo");
+    mimo_config.profiles.insert("mimo-1".into(), mimo);
+    let mut dashboard = DashboardState::new(mimo_config, State::default(), BTreeMap::new());
+    dashboard.apply_quota(ProfileQuota {
+        harness: HarnessKind::Mimo,
+        extra: Some(NOT_REPORTED_LABEL.into()),
+        refreshed_at_epoch_seconds: 0,
+        ..api_quota("mimo-1")
+    });
+    append_dashboard_golden(
+        &mut output,
+        "quota a harness never shares",
         120,
         28,
         &mut dashboard,

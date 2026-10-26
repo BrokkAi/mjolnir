@@ -1747,6 +1747,7 @@ function freshDraft() {
     title: '',
     remoteRepositories: [],
     localChangesExcluded: false,
+    reviewNotice: '',
     preflightError: '',
     preflighted: false,
     worktreeOptions: null,
@@ -1946,7 +1947,7 @@ function renderNewForm() {
         ? snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories
         : newDraft.projectPicker.mode === 'home' ? [snapshot.bundles, [...recentProjectIds()].sort()] : null,
     ] : null,
-    remote: step.key === 'review' ? [newDraft.preflighted, newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.preflightError, newDraft.worktreeOptions, newDraft.createManagedWorktree, newDraft.subagents, newDraft.mountEditors[newDraft.targetId]?.mounts, snapshot.subagents_configured, subagentChoiceApplies(newDraft)] : null,
+    remote: step.key === 'review' ? [newDraft.preflighted, newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.reviewNotice, newDraft.preflightError, newDraft.worktreeOptions, newDraft.createManagedWorktree, newDraft.subagents, newDraft.mountEditors[newDraft.targetId]?.mounts, snapshot.subagents_configured, subagentChoiceApplies(newDraft)] : null,
     checking: pendingNewPreflight === newDraft,
     committing: Boolean(newDraft.committing),
     creating: newDraft.creatingBundle,
@@ -2095,6 +2096,7 @@ function renderNewForm() {
           ]);
         }
       }
+      if (newDraft.reviewNotice) rows.push(['Code review', newDraft.reviewNotice]);
       if (pendingNewPreflight === newDraft) rows.push(['Project preflight', 'Checking project…']);
       if (newDraft.preflightError) rows.push(['Project preflight', newDraft.preflightError]);
       for (const [term, value] of rows) {
@@ -2773,6 +2775,7 @@ async function preflightNew() {
   draft.preflightError = '';
   draft.remoteRepositories = [];
   draft.localChangesExcluded = false;
+  draft.reviewNotice = '';
   draft.worktreeOptions = null;
   const bare = targetIsBare(draft.targetId);
   const controller = new AbortController();
@@ -2821,6 +2824,7 @@ async function preflightNew() {
     if (!bare || !draft.worktreeOptions.available) draft.createManagedWorktree = false;
     draft.remoteRepositories = answer.remote_repositories || [];
     draft.localChangesExcluded = answer.local_changes_excluded === true;
+    draft.reviewNotice = answer.review_notice || '';
     draft.preflightError = '';
     draft.preflighted = true;
     return true;
@@ -4336,24 +4340,6 @@ function renderTargets() {
           `${percent}% of ${formatBytes(reading.memory_total_bytes)}`,
           band(100 - percent),
         ]);
-      }
-      if (reading.container_capacity) {
-        const capacity = reading.container_capacity;
-        if (capacity.complete) {
-          rows.push([
-            'RAM left',
-            `${capacityGiBText(capacity.remaining.memory_bytes)} GiB of ${capacityGiBText(capacity.total.memory_bytes)} GiB`,
-            capacity.remaining.memory_bytes > 0 ? '' : 'reading-low',
-          ]);
-          rows.push([
-            'CPU left',
-            `${capacity.remaining.cpus} of ${capacity.total.cpus}`,
-            capacity.remaining.cpus > 0 ? '' : 'reading-low',
-          ]);
-        } else {
-          rows.push(['RAM left', 'unavailable (live container sizing unknown)', 'reading-low']);
-          rows.push(['CPU left', 'unavailable (live container sizing unknown)', 'reading-low']);
-        }
       }
       if (reading.logical_cores) rows.push(['Cores', String(reading.logical_cores), '']);
       if (reading.disk_total_bytes) {
@@ -7005,7 +6991,7 @@ async function runLocalCommand(text) {
     case 'review': {
       const scope = argument.trim().toLowerCase();
       if (scope === 'status') {
-        error.textContent = reviewStatusLine(
+        error.textContent = session?.review_unavailable || reviewStatusLine(
           { ...snapshot?.review_config, trigger: session?.review_trigger ?? snapshot?.review_config?.trigger },
           Boolean(session?.turn_review),
         );

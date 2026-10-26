@@ -435,6 +435,7 @@ fn failed_worker_staging_leaves_no_partial_upload_and_sweeps_stale_ones() {
     .unwrap();
     assert!(!stale.exists(), "a stale partial upload survived staging");
     executor.fail.set(true);
+    std::fs::write(&source, stamped_worker(b"different-replacement-worker")).unwrap();
     let error = stage_worker_binary_for_upgrade(
         &executor,
         &locator,
@@ -612,9 +613,13 @@ fn node_preflight_explains_when_the_target_has_no_managed_runtime() {
 
 #[cfg(unix)]
 #[test]
-fn dsh_preflight_accepts_its_native_binary_without_node_or_curl() {
+fn dsh_preflight_accepts_only_its_native_binary_without_node_or_curl() {
     let directory = tempfile::tempdir().unwrap();
-    mj_core::test_hooks::install_fake_command(directory.path(), "dsh-acp", "#!/bin/sh\nexit 0\n");
+    let current = format!(
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'dsh-acp {}'; fi\n",
+        mj_core::harness_runtime::DSH_ACP_VERSION
+    );
+    mj_core::test_hooks::install_fake_command(directory.path(), "dsh-acp", &current);
     let profile = HarnessProfile {
         enabled: true,
         kind: HarnessKind::Dsh,
@@ -636,6 +641,26 @@ fn dsh_preflight_accepts_its_native_binary_without_node_or_curl() {
         &ProcessExecutor,
     )
     .unwrap();
+
+    mj_core::test_hooks::install_fake_command(
+        directory.path(),
+        "dsh-acp",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'dsh-acp 0.3.0'; fi\n",
+    );
+    let error = format!(
+        "{:#}",
+        preflight_harness(
+            &mj_core::config::TargetTemplate::LocalBare,
+            &profile,
+            &ProcessExecutor,
+        )
+        .unwrap_err()
+    );
+    assert!(
+        error.contains("provide Node.js 22+ with npm and npx")
+            && error.contains("managed Node.js has no artifact"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -1404,7 +1429,6 @@ struct PodmanInstallFixture {
     ownership: PathBuf,
     profile_stage: PathBuf,
     locator: targets::TargetLocator,
-    digest: String,
 }
 fn podman_install_fixture() -> PodmanInstallFixture {
     let root = tempfile::tempdir().unwrap();
@@ -1416,7 +1440,6 @@ fn podman_install_fixture() -> PodmanInstallFixture {
     std::fs::write(&ownership, b"{}").unwrap();
     let profile_stage = root.path().join("profile");
     std::fs::create_dir_all(&profile_stage).unwrap();
-    let digest = lower_hex(Sha256::digest(stamped_worker(b"worker-binary-bytes")));
     PodmanInstallFixture {
         _root: root,
         worker_binary,
@@ -1429,10 +1452,9 @@ fn podman_install_fixture() -> PodmanInstallFixture {
                 destination: "user@example.test".into(),
                 ssh_args: Vec::new(),
             },
-            container_id: "container-1".into(),
+            container_id: "a".repeat(64),
             workspace_storage: Default::default(),
         },
-        digest,
     }
 }
 fn rendered(commands: &[CommandSpec]) -> Vec<String> {
@@ -1442,10 +1464,8 @@ fn rendered(commands: &[CommandSpec]) -> Vec<String> {
         .collect()
 }
 
-/// An SSH host that remembers which files exist, so consecutive installs see
-/// the cache an earlier install left behind. A `test -f` succeeds only for a
-/// path the host holds, and an `mv` adds its destination, which is how a
-/// completed upload enters the cache.
+/// An SSH host that remembers published store paths and returns their
+/// digest on later probes, including a container's transport-cache lookup.
 #[derive(Default)]
 struct SshHostExecutor {
     commands: RefCell<Vec<CommandSpec>>,
@@ -1455,25 +1475,26 @@ impl CommandExecutor for SshHostExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.commands.borrow_mut().push(command.clone());
         let mut status = 0;
-        if command.program == "ssh" {
-            let remote = command.args.last().cloned().unwrap_or_default();
-            let words = remote
-                .split(' ')
-                .map(|word| word.trim_matches('\''))
-                .collect::<Vec<_>>();
-            match words.as_slice() {
-                ["test", "-f", path] if !self.host_files.borrow().contains(*path) => status = 1,
-                ["mv", _, destination] => {
-                    self.host_files
-                        .borrow_mut()
-                        .insert((*destination).to_owned());
-                }
-                _ => {}
+        let mut stdout = Vec::new();
+        let remote = command.args.last().cloned().unwrap_or_default();
+        if command.purpose == "publish shared Mjolnir worker" {
+            let words = remote.split_whitespace().collect::<Vec<_>>();
+            let directory = words[words.len() - 2].trim_matches('\'');
+            self.host_files
+                .borrow_mut()
+                .insert(format!("{directory}/hel"));
+        } else if command.purpose == "verify shared Mjolnir worker" {
+            let path = remote.split_whitespace().last().unwrap().trim_matches('\'');
+            if self.host_files.borrow().contains(path) {
+                let digest = path.rsplit('/').nth(1).unwrap();
+                stdout = format!("{digest}  {path}\n").into_bytes();
+            } else {
+                status = 1;
             }
         }
         Ok(CommandOutput {
             status,
-            stdout: Vec::new(),
+            stdout,
             stderr: Vec::new(),
         })
     }
@@ -1484,7 +1505,7 @@ fn install_on_ssh_host(
     locator: &targets::TargetLocator,
     session: &str,
 ) -> Vec<String> {
-    let root = session_worker_root(session);
+    let root = targets::worker_root(locator, session).unwrap();
     install_worker_files(
         executor,
         locator,
@@ -1527,81 +1548,43 @@ fn worker_uploads(lines: &[String], fixture: &PodmanInstallFixture) -> Vec<Strin
         .cloned()
         .collect()
 }
-fn position_of(lines: &[String], needle: &str) -> usize {
-    lines
-        .iter()
-        .position(|line| line.contains(needle))
-        .unwrap_or_else(|| panic!("expected {needle:?} in {lines:#?}"))
-}
 /// R3-4 (J-16): every SSH-bare session uploaded its own 139 MB worker, so ten
 /// parallel creates on one host each held a daemon action slot for minutes.
 /// The binary now crosses the network once per build and host; each session
-/// still gets its own copy in its own worker root.
+/// gets a link in its own worker root.
 // Hard-won: 62a232f: every SSH-bare session uploaded its full 139 MB worker and stalled creates
 #[test]
-fn ssh_bare_installs_upload_the_worker_once_per_host_and_copy_it_per_session() {
+fn ssh_bare_installs_upload_the_worker_once_per_host_and_link_it_per_session() {
     let fixture = podman_install_fixture();
     let executor = SshHostExecutor::default();
     let first = "0123456789abcdef0123456789abcdef";
     let second = "fedcba9876543210fedcba9876543210";
-    let cache_dir = format!(".cache/mjolnir/workers/{}", fixture.digest);
-    let cached = format!("{cache_dir}/hel");
-    assert_eq!(
-        targets::worker_root(&bare_locator_on_the_container_host(first), first).unwrap(),
-        session_worker_root(first)
-    );
-
     let lines = install_on_ssh_host(
         &executor,
         &fixture,
         &bare_locator_on_the_container_host(first),
         first,
     );
-    let partial = format!("{cache_dir}/hel.partial-{first}");
-    assert_eq!(
-        worker_uploads(&lines, &fixture),
-        [format!(
-            "scp {} user@example.test:{partial}",
-            fixture.worker_binary.display()
-        )],
-        "the first session on a host uploads the worker once, to its own \
-         partial name in the cache, got {lines:#?}"
-    );
-    let probe = position_of(&lines, &format!("'test' '-f' '{cached}'"));
-    let publish = position_of(&lines, &format!("'mv' '{partial}' '{cached}'"));
-    let root = session_worker_root(first);
-    let copy = position_of(&lines, &format!("'cp' '{cached}' '{root}/hel'"));
-    let executable = position_of(&lines, &format!("'chmod' '700' '{root}/hel'"));
-    assert!(
-        probe < publish && publish < copy && copy < executable,
-        "probe, publish, copy, then chmod, got {lines:#?}"
-    );
-
+    assert_eq!(worker_uploads(&lines, &fixture).len(), 1, "{lines:#?}");
+    assert!(lines.iter().any(|line| line.contains("worker-binaries/")));
     let lines = install_on_ssh_host(
         &executor,
         &fixture,
         &bare_locator_on_the_container_host(second),
         second,
     );
+    assert!(worker_uploads(&lines, &fixture).is_empty(), "{lines:#?}");
     assert!(
-        worker_uploads(&lines, &fixture).is_empty(),
-        "the second session on the host must not upload the worker again, got {lines:#?}"
+        lines
+            .iter()
+            .any(|line| line.contains("ln --") && line.contains("mv -f --"))
     );
-    assert!(
-        !lines.iter().any(|line| line.contains("'mv'")),
-        "a cache hit renames nothing, got {lines:#?}"
-    );
-    position_of(&lines, &format!("'test' '-f' '{cached}'"));
-    let root = session_worker_root(second);
-    let copy = position_of(&lines, &format!("'cp' '{cached}' '{root}/hel'"));
-    let executable = position_of(&lines, &format!("'chmod' '700' '{root}/hel'"));
-    assert!(copy < executable, "copy before chmod, got {lines:#?}");
     for name in ["launch.json", "ownership.json"] {
-        assert!(
-            lines.iter().any(|line| line.starts_with("scp ")
-                && line.ends_with(&format!("user@example.test:{root}/{name}"))),
-            "{name} is still uploaded per session, got {lines:#?}"
-        );
+        assert!(lines.iter().any(|line| line.starts_with("scp ")
+            && line.ends_with(&format!(
+                "user@example.test:{}/{name}",
+                session_worker_root(second)
+            ))));
     }
 }
 // Hard-won: 62a232f: SSH-bare and SSH-container installs duplicated the host worker cache
@@ -1960,6 +1943,12 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
             "cwd": "/tmp", "execution_policy": "configured_approvals", "run_mode": "checkpoint_only"
         }))?;
         launch.write(&fixture.launch_config)?;
+        let cache = mj_core::target_path::text(&store_root(&locator, &session)?);
+        let unused = format!("{cache}/{}/hel", "c".repeat(64));
+        as_root(&format!(
+            "mkdir -p {cache}/{} && cp /opt/mjolnir/mj-worker {unused} && chown -R hel:hel {cache} && touch -t 200001010000 {unused}",
+            "c".repeat(64)
+        ))?;
         install_worker_files(
             &ProcessExecutor,
             &locator,
@@ -1972,6 +1961,7 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
             &fixture.profile_stage,
             None,
         )?;
+        as_root(&format!("test ! -e {unused}"))?;
         execute_checked(
             &ProcessExecutor,
             CommandSpec::new(
@@ -2053,37 +2043,35 @@ fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
         commands: RefCell::new(Vec::new()),
     };
     let fixture = podman_install_fixture();
-    let owner =
-        crate::worker_lifecycle::WorkerPermit::try_acquire(session, "test binary replacement")
-            .unwrap()
-            .unwrap();
-    owner
-        .scope_blocking(|| {
-            replace_installed_worker_binary(
-                &executor,
-                &locator,
-                session,
-                &WorkerInstall::Host(fixture.worker_binary.clone()),
-            )
-        })
-        .unwrap();
+    super::upgrade::worker_binary_upload_plan(
+        &locator,
+        session,
+        &WorkerInstall::Host(fixture.worker_binary.clone()),
+        &format!("/var/lib/hel/workers/{session}/hel.private"),
+        None,
+    )
+    .unwrap()
+    .execute(&executor)
+    .unwrap();
 
     let mut lines = rendered(&executor.commands.borrow());
     let ownership = lines.remove(1);
     assert!(ownership.starts_with(&format!("podman exec --user 0:0 {container_id} sh -c")));
     assert!(ownership.contains("chown -R"));
-    assert!(ownership.ends_with(&format!("/var/lib/hel/workers/{session}/hel.next")));
+    assert!(ownership.ends_with(&format!("/var/lib/hel/workers/{session}/hel.private.next")));
     assert_eq!(
         lines,
         vec![
             format!(
-                "podman cp {} {container_id}:/var/lib/hel/workers/{session}/hel.next",
+                "podman cp {} {container_id}:/var/lib/hel/workers/{session}/hel.private.next",
                 fixture.worker_binary.display()
             ),
             format!(
-                "podman exec {container_id} mv -f /var/lib/hel/workers/{session}/hel.next /var/lib/hel/workers/{session}/hel"
+                "podman exec {container_id} mv -f /var/lib/hel/workers/{session}/hel.private.next /var/lib/hel/workers/{session}/hel.private"
             ),
-            format!("podman exec {container_id} chmod 700 /var/lib/hel/workers/{session}/hel"),
+            format!(
+                "podman exec {container_id} chmod 700 /var/lib/hel/workers/{session}/hel.private"
+            ),
         ]
     );
 }
@@ -2127,10 +2115,12 @@ fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
             "{kind} worker start must inherit the configured container user: {start_text}"
         );
 
-        let upgrade = installed_worker_binary_replacement_plan(
+        let upgrade = super::upgrade::worker_binary_upload_plan(
             &locator,
             session,
             &WorkerInstall::Host(source.path().to_path_buf()),
+            &format!("/var/lib/hel/workers/{session}/hel.private"),
+            None,
         )
         .unwrap();
         let commands = rendered(&upgrade.commands);
@@ -2289,27 +2279,23 @@ fn run_default_bridge(
     )
 }
 
-/// dsh-acp reads no instruction file, so its launch passes the staged one as
-/// the system prompt dsh-acp appends to its own, byte for byte, up to the one
-/// environment string the operating system allows, and only as UTF-8. A
-/// value the target's login
-/// shell exports never reaches the session, and a launch without a staged home
-/// refuses rather than let dsh-acp keep its sessions in the repository it runs
-/// in.
+/// dsh-acp reads the staged AGENTS.md from DSH_ACP_DATA_DIR itself. The launch
+/// clears DSH_ACP_SYSTEM_PROMPT so a value from the target's login shell cannot
+/// deliver the same instructions a second time, and a launch without a staged
+/// home refuses rather than let dsh-acp keep its sessions in the repository it
+/// runs in.
 #[cfg(unix)]
 #[test]
-fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
-    use std::os::unix::fs::PermissionsExt;
+fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
+    use mj_core::harness_runtime::DSH_ACP_VERSION;
+
     let root = tempfile::tempdir().unwrap();
     let bin = root.path().join("fake-bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let dsh = bin.join("dsh-acp");
-    std::fs::write(
-        &dsh,
-        "#!/bin/sh\nprintf '%s|%s' \"$*\" \"$DSH_ACP_SYSTEM_PROMPT\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&dsh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'dsh-acp {DSH_ACP_VERSION}\\n'; exit 0; fi\nprintf '%s|%s|%s' \"$*\" \"$DSH_ACP_SYSTEM_PROMPT\" \"$DSH_ACP_DATA_DIR\"\n"
+    );
+    mj_core::test_hooks::install_fake_command(&bin, "dsh-acp", &script);
     let staged = root.path().join("staged");
     std::fs::create_dir_all(&staged).unwrap();
     let instructions =
@@ -2335,13 +2321,12 @@ fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        format!("|{instructions}")
+        format!("||{}", staged.display())
     );
 
-    // The variable holds at most one environment string, and dsh-acp takes
-    // only UTF-8 from it. The controller refuses anything else before a
-    // session launches, as the reason the client is shown, naming the
-    // profile's own file; the launch refuses it again on the target.
+    // The native loader accepts instruction files up to 1 MiB. Mjolnir checks
+    // the staged file first so an oversized file names the profile's own file
+    // before a session launches rather than failing later in dsh-acp.
     let home = root.path().join("profile");
     std::fs::create_dir_all(&home).unwrap();
     let own = home.join("AGENTS.md");
@@ -2367,22 +2352,11 @@ fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
         );
         message
     };
-    let refused_on_target = |expected: &[&str]| {
-        let output = launch(Some(&staged));
-        assert!(!output.status.success(), "{:?}", output.status);
-        assert!(output.stdout.is_empty());
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        assert!(
-            expected.iter().all(|part| stderr.contains(part)),
-            "{stderr}"
-        );
-    };
 
-    // The largest file starts, and one byte more is refused. The largest is
-    // mostly two-byte characters, so the target's UTF-8 check reads more
-    // than a pipe holds.
+    // The largest native instruction file starts, and one byte more is
+    // refused before the launch.
     let limit = mj_core::harness_runtime::DSH_ACP_INSTRUCTIONS_LIMIT;
-    let largest = format!("x{}", "é".repeat((limit - 1) / 2));
+    let largest = "é".repeat(limit / 2);
     assert_eq!(largest.len(), limit);
     std::fs::write(&own, &largest).unwrap();
     profile.ensure_ready("dsh").unwrap();
@@ -2394,7 +2368,7 @@ fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
     assert!(output.status.success(), "{:?}", output.status);
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        format!("|{largest}")
+        format!("||{}", staged.display())
     );
     std::fs::write(&own, format!("{largest}x")).unwrap();
     // Hard-won: DSH campaign 2026-10-23: one byte too many reached the user only as relay noise naming the staged copy
@@ -2406,14 +2380,19 @@ fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
         "{message}"
     );
     stage_profile(&profile, &staged).unwrap();
-    refused_on_target(&[
-        &format!("is {} bytes", limit + 1),
-        &format!("at most {limit} bytes"),
-    ]);
+    let message = refusal(
+        profile
+            .ensure_staged_instructions_deliverable("dsh", &staged)
+            .unwrap_err(),
+    );
+    assert!(
+        message.contains(&format!("is {} bytes", limit + 1))
+            && message.contains(&format!("at most {limit} bytes")),
+        "{message}"
+    );
 
     // Mjolnir's note about a container can take a file the profile alone
-    // could deliver over the limit; the staged file is refused before it
-    // travels.
+    // could load over the limit; the staged file is refused before it travels.
     let within = limit - 10;
     std::fs::write(&own, "x".repeat(within)).unwrap();
     profile.ensure_ready("dsh").unwrap();
@@ -2444,55 +2423,34 @@ fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
             && message.contains(&format!("at least {} bytes", total - limit)),
         "{message}"
     );
-    refused_on_target(&[&format!("is {total} bytes")]);
 
-    // Hard-won: DSH campaign 2026-10-23: instructions that were not UTF-8 failed as dsh-acp's usage error, naming neither the file nor the variable
+    // Hard-won: DSH campaign 2026-10-23: invalid instructions reached the user
+    // as relay noise instead of a refusal naming the profile's file.
     std::fs::write(&own, b"\xff\xfeK\0e\0e\0p\0\n\0").unwrap();
     let message = refusal(profile.ensure_ready("dsh").unwrap_err());
     assert!(
         message.contains("is not UTF-8 text (line 1 has"),
         "{message}"
     );
-    // The target's check accepts exactly what Rust's UTF-8 check accepts and
-    // names the same line.
-    for bytes in [
-        &b"Keep this.\n\xff\xfe\n"[..],
-        "U+0080 \u{80}, U+07FF \u{7ff}, U+0800 \u{800}, U+D7FF \u{d7ff}, U+E000 \u{e000}, U+FFFF \u{ffff}, U+10000 \u{10000}, U+10FFFF \u{10ffff}".as_bytes(),
-        b"overlong\n\xc0\xaf",
-        b"overlong\n\xe0\x9f\xbf",
-        b"overlong\n\xf0\x8f\xbf\xbf",
-        b"surrogate\n\n\xed\xa0\x80",
-        b"above U+10FFFF\n\xf4\x90\x80\x80",
-        b"\xf5\x80\x80\x80",
-        b"continuation alone \x80",
-        b"cut off\n\xe2\x80",
-        b"cut off before text \xe2\x80 here",
-    ] {
-        std::fs::write(staged.join("AGENTS.md"), bytes).unwrap();
-        match std::str::from_utf8(bytes) {
-            Ok(text) => {
-                let output = launch(Some(&staged));
-                assert!(output.status.success(), "{text:?}: {output:?}");
-                assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("|{text}"));
-            }
-            Err(error) => {
-                let line = bytes[..error.valid_up_to()]
-                    .iter()
-                    .filter(|&&byte| byte == b'\n')
-                    .count()
-                    + 1;
-                refused_on_target(&[
-                    &format!("is not UTF-8 text (line {line} has"),
-                    "Save AGENTS.md in the DSH profile home as UTF-8.",
-                ]);
-            }
-        }
-    }
+
+    // Hard-won: c330ea5f2: a directory AGENTS.md passed readiness but failed
+    // when dsh-acp opened the session.
+    std::fs::remove_file(&own).unwrap();
+    std::fs::create_dir(&own).unwrap();
+    let message = refusal(profile.ensure_ready("dsh").unwrap_err());
+    assert!(
+        message.contains("is not a regular file")
+            && message.contains("Replace it with a regular file."),
+        "{message}"
+    );
 
     std::fs::remove_file(staged.join("AGENTS.md")).unwrap();
     let output = launch(Some(&staged));
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), "|");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("||{}", staged.display())
+    );
 
     let output = launch(None);
     assert!(!output.status.success(), "{output:?}");
@@ -2500,6 +2458,71 @@ fn dsh_launch_passes_the_staged_instructions_as_its_system_prompt() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("DSH_ACP_DATA_DIR"),
         "{output:?}"
+    );
+}
+
+#[cfg(unix)]
+// Hard-won: c330ea5f2: a pre-0.4 dsh-acp on PATH silently received no staged instructions.
+#[test]
+fn dsh_launch_does_not_select_a_pre_native_loader() {
+    let root = tempfile::tempdir().unwrap();
+    let legacy_bin = root.path().join("legacy-bin");
+    let tools_bin = root.path().join("tools-bin");
+    std::fs::create_dir_all(&legacy_bin).unwrap();
+    std::fs::create_dir_all(&tools_bin).unwrap();
+    mj_core::test_hooks::install_fake_command(
+        &legacy_bin,
+        "dsh-acp",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'dsh-acp 0.3.0'; else echo legacy; fi\n",
+    );
+    for tool in ["node", "npm"] {
+        mj_core::test_hooks::install_fake_command(&tools_bin, tool, "#!/bin/sh\nexit 0\n");
+    }
+    mj_core::test_hooks::install_fake_command(
+        &tools_bin,
+        "npx",
+        "#!/bin/sh\nprintf 'npx|%s' \"$*\"\n",
+    );
+
+    let launch = |path: &Path| {
+        let staged = root.path().join("staged");
+        std::fs::create_dir_all(&staged).unwrap();
+        let (command, arguments) =
+            bridge_launch(HarnessKind::Dsh, ExecutionPolicy::ConfiguredApprovals);
+        assert_eq!(command, "sh");
+        let mut process = std::process::Command::new("/bin/sh");
+        process
+            .args(arguments)
+            .env_clear()
+            .env("HOME", root.path())
+            .env("PATH", path)
+            .env(HarnessKind::Dsh.home_env(), &staged);
+        mj_core::subprocess::run_with_input(&mut process, &[]).unwrap()
+    };
+
+    let fallback_path: PathBuf = std::env::join_paths([legacy_bin.as_path(), tools_bin.as_path()])
+        .unwrap()
+        .into();
+    let output = launch(&fallback_path);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "npx|-y {}@{}",
+            mj_core::harness_runtime::DSH_ACP_PACKAGE,
+            mj_core::harness_runtime::DSH_ACP_VERSION
+        )
+    );
+
+    let output = launch(&legacy_bin);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "requires dsh-acp {} or newer",
+            mj_core::harness_runtime::DSH_ACP_VERSION
+        )) && stderr.contains("upgrade it or install Node.js 22+, npm, and npx"),
+        "{stderr}"
     );
 }
 
@@ -4533,6 +4556,9 @@ fn ssh_bare_locator(session_id: &str) -> targets::TargetLocator {
 
 #[test]
 fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("hel");
+    std::fs::write(&source, stamped_worker(b"managed harness worker")).unwrap();
     let session = "session-remote";
     let executor = DigestExecutor {
         installed_line: String::new(),
@@ -4571,7 +4597,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         &executor,
         &ssh_bare_locator(session),
         session,
-        &WorkerInstall::Host("/controller/hel".into()),
+        &WorkerInstall::Host(source),
         &launch,
     )
     .unwrap();
@@ -4586,9 +4612,18 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         vec![
             "clear managed harness preparation staging",
             "create managed harness preparation staging",
-            "stage current worker for managed harness preparation",
+            "remove stale private worker staging",
+            "collect unused Mjolnir worker binaries",
+            "verify shared Mjolnir worker",
+            "create private worker store upload",
+            "stage replacement Mjolnir worker",
+            "replace installed Mjolnir worker",
+            "make replaced Mjolnir worker executable",
+            "verify uploaded Mjolnir worker",
+            "publish shared Mjolnir worker",
+            "discard private worker store upload",
+            "link shared Mjolnir worker into session",
             "stage managed harness launch configuration",
-            "make managed harness preparation worker executable",
             "prepare exact managed harness",
             "remove managed harness preparation staging",
         ]

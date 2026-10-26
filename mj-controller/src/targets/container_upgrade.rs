@@ -369,9 +369,18 @@ pub(crate) fn inspect_retained_container(
             )
             .purpose("verify control-state transfer support"),
         )?;
+        let help = String::from_utf8_lossy(&probe.stdout);
         ensure!(
             probe.status == 0
-                && String::from_utf8_lossy(&probe.stdout).contains("--one-file-system"),
+                && [
+                    "--one-file-system",
+                    "--unlink-first",
+                    "--strip-components",
+                    "--no-recursion",
+                    "--occurrence"
+                ]
+                .iter()
+                .all(|option| help.contains(option)),
             "this container lacks the tar support needed to preserve worker state; the source is unchanged"
         );
     }
@@ -515,7 +524,10 @@ impl RetainedContainer {
         // A disconnected engine client may leave its extractor alive. The
         // lock and durable completion marker make every later extractor wait
         // and then skip, even after the new worker starts accepted work.
-        let script = "set -eu; state=$1; root=$2; exec flock -x \"$state/restore.lock\" sh -c 'set -eu; [ ! -f \"$1/restore-complete\" ] || exit 0; mkdir -p -- \"$2\"; tar -C \"$2\" -xf \"$1/state.tar\"; touch \"$1/restore-complete\"' mj-control-restore \"$state\" \"$root\"";
+        // Capture prefixes every member with './'. Strip that component so
+        // --unlink-first never tries to unlink the root '.' directory, then
+        // restore just that directory's metadata without extracting files.
+        let script = "set -eu; state=$1; root=$2; exec flock -x \"$state/restore.lock\" sh -c 'set -eu; [ ! -f \"$1/restore-complete\" ] || exit 0; mkdir -p -- \"$2\"; tar --unlink-first --strip-components=1 -C \"$2\" -xf \"$1/state.tar\"; tar --no-recursion --occurrence=1 -C \"$2\" -xf \"$1/state.tar\" .; touch \"$1/restore-complete\"' mj-control-restore \"$state\" \"$root\"";
         let output = executor.execute(
             &locator_command(
                 &self.locator,
@@ -779,10 +791,48 @@ impl RetainedContainer {
         if !self.network_mode.is_empty() {
             args.extend(["--network".into(), self.network_mode.clone()]);
         }
-        if self.memory > 0 {
+        // The source's limits were enforceable when it was created; the host
+        // may have stopped delegating their controllers since.
+        let unenforceable = match &host {
+            ImageHost::LocalPodman | ImageHost::SshPodman(_)
+                if self.memory > 0 || self.nano_cpus > 0 =>
+            {
+                let ssh = match &host {
+                    ImageHost::SshPodman(ssh) => Some(ssh),
+                    _ => None,
+                };
+                match probe_podman_unenforceable_limits(ssh, executor) {
+                    Ok(limits) => limits,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = format!("{error:#}"),
+                            "could not read Podman's cgroup controllers; keeping container limits"
+                        );
+                        Vec::new()
+                    }
+                }
+            }
+            _ => Vec::new(),
+        };
+        let dropped = [
+            (CgroupLimit::Memory, self.memory > 0),
+            (CgroupLimit::Cpu, self.nano_cpus > 0),
+        ]
+        .into_iter()
+        .filter(|(limit, set)| *set && unenforceable.contains(limit))
+        .map(|(limit, _)| limit)
+        .collect::<Vec<_>>();
+        if !dropped.is_empty() {
+            executor.notify_notice(&format!(
+                "{} {}",
+                unenforceable_limits_detail(&dropped),
+                CGROUP_DELEGATION_REMEDIATION
+            ));
+        }
+        if self.memory > 0 && !dropped.contains(&CgroupLimit::Memory) {
             args.extend(["--memory".into(), self.memory.to_string()]);
         }
-        if self.nano_cpus > 0 {
+        if self.nano_cpus > 0 && !dropped.contains(&CgroupLimit::Cpu) {
             args.extend(["--cpus".into(), (self.nano_cpus as f64 / 1e9).to_string()]);
         }
         args.extend(["--pids-limit".into(), self.pids_limit.to_string()]);
@@ -1079,6 +1129,48 @@ pub(crate) fn recover_removed_container(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    // Runs the Linux container's tar/flock protocol on a real filesystem.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn control_state_archive_stores_hard_link_bytes_and_restore_never_writes_through_links() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("control");
+        let stage = directory.path().join("stage");
+        std::fs::create_dir(&root).unwrap();
+        let old_store = directory.path().join("old-store");
+        let new_store = directory.path().join("new-store");
+        let old = vec![b'o'; 256 * 1024];
+        let new = vec![b'n'; 256 * 1024];
+        std::fs::write(&old_store, &old).unwrap();
+        std::fs::write(&new_store, &new).unwrap();
+        std::fs::hard_link(&old_store, root.join("hel")).unwrap();
+        std::fs::hard_link(&old_store, root.join("second-hel")).unwrap();
+        let mut plan = container_upgrade_test_plan("55555555555555555555555555555555");
+        plan.locator = TargetLocator::LocalBare {
+            worker_root: root.to_string_lossy().into_owned(),
+        };
+        plan.control_state = Some(ControlState {
+            root: root.to_string_lossy().into_owned(),
+            staging_directory: stage.to_string_lossy().into_owned(),
+            excludes: Vec::new(),
+        });
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        plan.capture_control_state(&ProcessExecutor).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_file(root.join("hel")).unwrap();
+        std::fs::hard_link(&new_store, root.join("hel")).unwrap();
+        plan.restore_control_state(&ProcessExecutor).unwrap();
+        assert_eq!(std::fs::read(root.join("hel")).unwrap(), old);
+        assert_eq!(std::fs::read(&new_store).unwrap(), new);
+        assert_eq!(std::fs::read(&old_store).unwrap(), old);
+        assert_eq!(root.metadata().unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            root.join("hel").metadata().unwrap().ino(),
+            root.join("second-hel").metadata().unwrap().ino()
+        );
+    }
 
     struct Resources {
         containers: Vec<String>,

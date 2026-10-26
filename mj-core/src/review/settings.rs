@@ -138,6 +138,21 @@ pub fn can_review(
     })
 }
 
+/// What every surface says about a session whose folder has no Git commits.
+pub const PLAIN_DIRECTORY_REVIEW_OFF: &str = "Code review is off for this session: its folder has no Git commits, and review finds changes through Git history.";
+
+/// Whether a session created in a folder without a committed Git checkout
+/// gets review turned off. Review cannot run there, so the session is created
+/// with review off rather than refused. The answer is no when review would
+/// not have run anyway.
+pub fn plain_directory_turns_review_off(
+    config: &crate::config::Config,
+    session: Option<&crate::config::SessionReview>,
+) -> bool {
+    config.review.for_session(session).trigger != crate::config::ReviewTrigger::Off
+        && can_review(config, session)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

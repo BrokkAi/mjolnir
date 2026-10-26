@@ -282,12 +282,7 @@ impl DashboardState {
             return None;
         }
         let profile = match &self.mode {
-            Mode::New(wizard) => self
-                .config
-                .enabled_profiles()
-                .nth(wizard.profile)?
-                .0
-                .to_owned(),
+            Mode::New(wizard) => self.offered_profiles().nth(wizard.profile)?.0.to_owned(),
             Mode::Resume(wizard) => wizard.destination_profile(self),
             _ => unreachable!("checked above"),
         };

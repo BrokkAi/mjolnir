@@ -700,62 +700,13 @@ test('unknown live-container sizing is never rendered as zero capacity', async (
       complete: false,
     },
   };
-  const state = await mount(page, { containerTarget });
+  await mount(page, { containerTarget });
   await page.locator('#new-next').click();
   await expect(page.locator('#new-step')).toContainText('no recorded sizing');
   await expect(page.locator('#new-step')).not.toContainText('RAM left: 0');
   await expect(page.locator('#new-step')).not.toContainText('CPU left: 0');
   await expect(page.locator('#new-resource-error')).toContainText('no recorded sizing');
   await expect(page.locator('#new-next')).toBeDisabled();
-  state.snapshot.capacity = [{
-    id: 'local',
-    label: 'local',
-    target_ids: ['container'],
-    cpu_percent: 40,
-    memory_used_bytes: 32 * 1024 ** 3,
-    memory_total_bytes: 64 * 1024 ** 3,
-    logical_cores: 24,
-    container_capacity: containerTarget.container_capacity,
-    refreshing: false,
-    stale: false,
-    has_error: false,
-    storage: [],
-  }];
-  await refresh(page, state);
-  await page.locator('#menu-button').click();
-  await page.getByRole('menuitem', { name: 'Targets', exact: true }).click();
-  await expect(page.locator('#targets')).toContainText('unavailable (live container sizing unknown)');
-  await expect(page.locator('#targets')).not.toContainText('0 of 8');
-});
-
-test('target capacity shows hard RAM left for a host with container sessions', async ({ page }) => {
-  const state = await mount(page);
-  state.snapshot.capacity = [{
-    id: 'local',
-    label: 'local',
-    target_ids: ['container'],
-    cpu_percent: 40,
-    memory_used_bytes: 32 * 1024 ** 3,
-    memory_total_bytes: 64 * 1024 ** 3,
-    logical_cores: 24,
-    container_capacity: {
-      total: { cpus: 24, memory_bytes: 64 * 1024 ** 3 },
-      reserved: { cpus: 0, memory_bytes: 13743895348 },
-      committed: { cpus: 8, memory_bytes: 24 * 1024 ** 3 },
-      remaining: { cpus: 16, memory_bytes: 29205777612 },
-      complete: true,
-    },
-    refreshing: false,
-    stale: false,
-    has_error: false,
-    storage: [],
-  }];
-  await refresh(page, state);
-  await page.locator('#menu-button').click();
-  await page.getByRole('menuitem', { name: 'Targets', exact: true }).click();
-  await expect(page.locator('#targets')).toContainText('RAM left');
-  await expect(page.locator('#targets')).toContainText('27.1 GiB of 64 GiB');
-  await expect(page.locator('#targets')).toContainText('16 of 24');
 });
 
 test('whole-row taps and in-progress gestures survive unrelated live updates', async ({ page }) => {

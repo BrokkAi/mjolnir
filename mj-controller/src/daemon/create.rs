@@ -10,6 +10,7 @@ impl RuntimeState {
     ) -> Result<RegisteredSession> {
         self.start_create_session_inner(request, LifecycleControl::default(), None)
             .await
+            .map(|(registered, _)| registered)
     }
 
     /// Register and start a child worker on its parent's existing target.
@@ -226,7 +227,7 @@ impl RuntimeState {
         request: CreateSessionRequest,
         control: LifecycleControl,
         publication: tokio::sync::oneshot::Receiver<std::result::Result<(), String>>,
-    ) -> Result<RegisteredSession> {
+    ) -> Result<(RegisteredSession, bool)> {
         self.start_create_session_inner(request, control, Some(publication))
             .await
     }
@@ -236,7 +237,7 @@ impl RuntimeState {
         request: CreateSessionRequest,
         control: LifecycleControl,
         publication: Option<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>>,
-    ) -> Result<RegisteredSession> {
+    ) -> Result<(RegisteredSession, bool)> {
         let mut request = request;
         let parent = request.profile_id.clone();
         let supplied = request.subagents.clone();
@@ -312,7 +313,7 @@ impl RuntimeState {
         let remember_launch_choices = request.remember_launch_choices;
         let preferences_owner = self.clone();
         let admission_state = self.clone();
-        let registered = blocking(move || {
+        let (registered, review_turned_off) = blocking(move || {
             let mut controller = Controller::load()?;
             if let (Some(input), Some(allocation)) =
                 (container_capacity, request.resource_allocation.as_ref())
@@ -338,7 +339,7 @@ impl RuntimeState {
                     )
                 })
                 .transpose()?;
-            let session_id = controller.register_session_with_resources(
+            let registration = controller.register_session_reporting_review(
                 &request.profile_id,
                 &request.bundle_id,
                 &request.target_template_id,
@@ -363,6 +364,7 @@ impl RuntimeState {
                     session_title_override: request.session_title_override,
                 },
             )?;
+            let session_id = registration.id;
             // Only interactive launches seed defaults. A failed preference write
             // does not undo a session that was created.
             if request.remember_launch_choices
@@ -415,10 +417,13 @@ impl RuntimeState {
                         .copied()
                         .map(|size| (host.to_owned(), size))
                 });
-            Ok(RegisteredSession {
-                session,
-                remembered_container_size,
-            })
+            Ok((
+                RegisteredSession {
+                    session,
+                    remembered_container_size,
+                },
+                registration.review_turned_off,
+            ))
         })
         .await?;
         drop(_container_admission);
@@ -482,7 +487,7 @@ impl RuntimeState {
             },
         )?;
         self.reload_controller().await?;
-        Ok(registered)
+        Ok((registered, review_turned_off))
     }
 
     pub async fn wait_create_session(&self, session_id: &str) -> Result<()> {
@@ -707,7 +712,7 @@ mod delegation_replay_tests {
             };
             let (publish, publication) = tokio::sync::oneshot::channel();
             let control = super::LifecycleControl::default();
-            let registered = runtime
+            let (registered, _) = runtime
                 .start_create_session_controlled(request, control.clone(), publication)
                 .await
                 .unwrap();

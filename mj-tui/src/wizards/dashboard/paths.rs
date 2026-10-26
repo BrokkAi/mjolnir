@@ -242,18 +242,25 @@ impl DashboardState {
         &mut self,
         context: &str,
         directory: &str,
-        result: Result<(std::path::PathBuf, mj_core::state::ManagedWorktreeOptions), String>,
+        result: Result<
+            (
+                std::path::PathBuf,
+                mj_core::state::ManagedWorktreeOptions,
+                bool,
+            ),
+            String,
+        >,
     ) {
         if self.path_input_context() != context {
             return;
         }
         match result {
-            Ok((resolved, options)) => {
+            Ok((resolved, options, review_turns_off)) => {
                 let value = resolved.to_string_lossy().into_owned();
                 if let Mode::New(wizard) = &mut self.mode {
                     let target = nth_key(&self.config.targets, wizard.target);
                     if wizard.worktree_options.as_ref().is_none_or(
-                        |(old_target, old_directory, _)| {
+                        |(old_target, old_directory, _, _)| {
                             old_target != &target || old_directory != &value
                         },
                     ) {
@@ -268,7 +275,8 @@ impl DashboardState {
                     if !options.available {
                         wizard.create_managed_worktree = false;
                     }
-                    wizard.worktree_options = Some((target, value.clone(), options));
+                    wizard.worktree_options =
+                        Some((target, value.clone(), options, review_turns_off));
                     wizard.remote_preflight_in_flight = false;
                     wizard.remote_preflight_error = None;
                     wizard.project_directory.set_value(&value);

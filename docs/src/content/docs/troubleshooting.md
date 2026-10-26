@@ -98,8 +98,9 @@ authentication:
 - resolve any executable or `PATH` failure before repeating login.
 
 A DSH profile has no login, and `mj login` refuses it. It authenticates with
-`DEEPSEEK_API_KEY`, taken from the environment Mjolnir started with unless the
-profile's `environment` sets it; `mj doctor` and the refused session say how to
+`DEEPSEEK_API_KEY`: the key saved in DSH's own `.credentials.yaml`, then the
+environment Mjolnir started with, then `.env` in the DSH home, then the
+profile's `environment`; `mj doctor` and the refused session say how to
 supply it. Export the key before running `mj`, or run `mj daemon restart` after
 exporting it in a new shell.
 
@@ -237,10 +238,12 @@ Then follow the target-specific result:
   newer. The daemon starts an installed service automatically; if doctor still
   reports it stopped, run `container system start` and review its output. See
   [Apple container](/apple-container/).
-- **Apple container over SSH:** run `ssh <destination> container --version`
-  and `ssh <destination> container system status` as the configured user.
-  Install the signed package, start the service, use macOS 26 or newer on Apple
-  silicon, and make sure noninteractive SSH can find `container` on `PATH`. See
+- **Apple container over SSH:** run
+  `ssh <destination> /usr/local/bin/container --version` and
+  `ssh <destination> /usr/local/bin/container system status` as the configured
+  user. Install the signed package, start the service, and use macOS 26 or
+  newer on Apple silicon. Mjolnir finds `container` through the Mac's system
+  `PATH`, so no shell configuration is needed. See
   [Apple container](/apple-container/).
 - **SSH Podman:** run the Podman prerequisite and image checks on the remote
   host as the same user selected by SSH. See [SSH and SSH Podman](/ssh/).

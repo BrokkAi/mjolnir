@@ -16,11 +16,11 @@
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Raw transcript source enabled
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> inspect renderer                                                                                │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 render mode: Raw
@@ -43,11 +43,11 @@ render mode: Raw
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Rich transcript rendering enabled
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> inspect renderer                                                                                │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 action: None
@@ -71,11 +71,11 @@ render mode: Rich
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Rich transcript rendering enabled
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> inspect renderer                                                                                │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 action: None
@@ -99,11 +99,11 @@ render mode: Rich
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Rich transcript rendering enabled
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> inspect renderer                                                                                │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 action: None
@@ -127,10 +127,10 @@ render mode: Rich
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────── ●··········· ╮
 │> Add a follow-up while the agent works…                                                          │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Esc interrupts──────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -153,10 +153,10 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────── ●··········· ╮
 │> Add a follow-up while the agent works…                                                          │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Esc interrupts──────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -179,10 +179,10 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                                            │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -205,10 +205,10 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                                            │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -232,10 +232,10 @@ entry text: "grep config"
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                                            │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -260,10 +260,10 @@ completed: false
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                                            │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys

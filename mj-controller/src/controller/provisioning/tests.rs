@@ -821,7 +821,8 @@ fn failed_node_preflight_retains_error_before_provisioning() {
             },
             &RawRegistrationExecutor,
         )
-        .unwrap();
+        .unwrap()
+        .id;
     assert!(
         crate::database::load_state()
             .unwrap()
@@ -1032,7 +1033,8 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
             },
             &RawRegistrationExecutor,
         )
-        .unwrap();
+        .unwrap()
+        .id;
     // Provisioning has finished: the record names its target, and the worker
     // has not attached yet.
     apply_new_session_provisioning_result(
@@ -1706,4 +1708,80 @@ fn provisioning_reports_the_pull_stage_only_while_waiting() {
         "{notices:?}"
     );
     downloader.join().expect("the download thread finishes");
+}
+
+/// Answers `podman info --format '{{json .Host}}'` with a fixed host object.
+struct CgroupExecutor(serde_json::Value);
+
+impl CommandExecutor for CgroupExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        assert_eq!(command.purpose, "check Podman cgroup controllers");
+        Ok(CommandOutput {
+            status: 0,
+            stdout: self.0.to_string().into_bytes(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
+fn limited_podman_target() -> targets::TargetTemplate {
+    targets::TargetTemplate::LocalPodman(ContainerTemplate {
+        build_cache: None,
+        image: "ubuntu:24.04".into(),
+        pull_policy: Default::default(),
+        extra_run_args: vec!["--cpus=4".into(), "--memory=8589934592".into()],
+        workspace_storage: Default::default(),
+    })
+}
+
+fn container_run_args(target: &targets::TargetTemplate) -> Vec<String> {
+    targets::provision_plan(
+        target,
+        "0123456789abcdef0123456789abcdef",
+        &probe_bundle(),
+        &[],
+        None,
+    )
+    .unwrap()
+    .commands[0]
+        .args
+        .clone()
+}
+
+// The `host` object of `podman info` on a default openSUSE Tumbleweed, whose
+// `user@.service` drop-in sets `Delegate=`: runc failed every session
+// container with `openat2 .../memory.swap.max: no such file or directory`.
+#[test]
+fn limits_a_rootless_podman_host_cannot_enforce_are_dropped_and_reported() {
+    let mut target = limited_podman_target();
+    let executor = CgroupExecutor(serde_json::json!({
+        "cgroupManager": "systemd",
+        "cgroupVersion": "v2",
+        "cgroupControllers": ["pids"],
+    }));
+
+    let notices = enforce_cgroup_capable_limits(&mut target, &executor);
+
+    let args = container_run_args(&target);
+    assert!(
+        !args
+            .iter()
+            .any(|arg| arg.starts_with("--cpus") || arg.starts_with("--memory")),
+        "{args:?}"
+    );
+    assert!(args.iter().any(|arg| arg.starts_with("--pids-limit=")));
+    assert_eq!(notices.len(), 1);
+    assert!(
+        notices[0].contains("cannot enforce session cpu and memory limits")
+            && notices[0].contains("Delegate=pids memory cpu"),
+        "{notices:?}"
+    );
+
+    // A host that does not report its controllers is unknown, not empty.
+    let mut target = limited_podman_target();
+    let executor = CgroupExecutor(serde_json::json!({ "cgroupVersion": "v2" }));
+    assert!(enforce_cgroup_capable_limits(&mut target, &executor).is_empty());
+    let args = container_run_args(&target);
+    assert!(args.contains(&"--cpus=4".to_owned()), "{args:?}");
+    assert!(args.contains(&"--memory=8589934592".to_owned()), "{args:?}");
 }

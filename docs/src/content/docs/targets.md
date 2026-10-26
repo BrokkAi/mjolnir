@@ -11,15 +11,38 @@ project directory. The target decides where work runs, what isolation
 contains unrestricted agent actions, how the workspace is created, and what is
 removed after a verified stop.
 
-Local target choices are supplied automatically and checked live when you open
-the target picker. Add SSH and AWS connections or customize runtime defaults in
-**prefix+s Settings → Machines** and **prefix+s Settings → Runtimes**. No setup
-command is required. Saving an SSH or EC2 machine adds the runtimes it can run:
-Mjolnir probes an SSH host for its platform, Podman and Docker, and a machine
-that still has no runtime says why in Settings, in the picker and in
-`mj doctor`. A target that is checking or unavailable cannot advance;
-**prefix+shift+r** in the picker rechecks all targets. Dashboard
-**prefix+shift+r** refreshes host capacity. So does **Refresh** in the menu
+Local target choices are supplied automatically. Add SSH and AWS connections
+or customize runtime defaults in **prefix+s Settings → Machines** and
+**prefix+s Settings → Runtimes**. No setup command is required.
+
+Mjolnir checks what is there when the dashboard starts and each time you open
+the new-session or resume picker, in the background. It looks at this
+computer directly and at each SSH machine with one SSH call, and adds what is
+new: a runtime for every engine a machine newly runs (Podman, Docker, Apple
+container, or a bare worker), on every machine. The pickers list only what the
+latest check found there. Nothing is shown as "checking": until an answer
+arrives the picker shows the last one, and the list changes only when an
+answer does. A runtime that is gone, such as Docker that stopped or a host that
+did not answer, is left out and named under the list with the reason and the
+fix; a standard local runtime whose engine was never installed is left out
+without a word. A machine that still has no runtime says why in Settings, in
+the picker and in `mj doctor`. Launching still checks the runtime, so one that
+disappears after the last check is refused with its reason.
+
+A runtime you do not want stays off with `enabled = false`; detection never
+adds back a kind the machine already has configured, enabled or not:
+
+```toml
+[targets.builder-docker]
+enabled = false
+kind = "docker"
+machine = "builder"
+```
+
+Settings → Runtimes has the same Enabled checkbox. A disabled runtime is left
+out of every picker and refused by launch, resume and move; sessions already
+on it keep running. Dashboard **prefix+shift+r** refreshes host capacity and
+checks again what is there. So does **Refresh** in the menu
 under the dashboard's Targets title (click the title, or press `.` while the
 pane has focus). The same menu's **Runtimes…** opens Settings → Runtimes, and
 its **Machines…** opens Settings → Machines. The optional `mj doctor --smoke`
@@ -106,10 +129,11 @@ committed Git checkout is still required wherever Mjolnir has to clone or move
 the project into a bundle workspace, and on SSH and EC2 targets, which address a
 project by the repository it shares with its sessions.
 
-Review captures changes from Git history, so a local directory without a
-committed checkout must be created with `--review off`. A review-enabled launch
-is refused with that remedy, and `/review` reports that it has no Git changes to
-capture.
+Review captures changes from Git history, so a session in a local directory
+without a committed checkout is created with review off. The New Session
+review page says so before you create it, `mj new` prints the same notice, and
+`/review status` in the session gives the reason. `/review` reports that it has
+no Git changes to capture.
 
 ### Bare on this machine
 
@@ -167,14 +191,15 @@ path, not the selected project or its linked-worktree location.
 
 The host does not need a preinstalled harness bridge, except DSH. Its worker
 installs and reuses the exact harness version pinned by Mjolnir in the remote
-user's cache; DSH instead runs the host's own `dsh-acp` or the pinned npm
-package. Node-based harnesses reuse Node.js 22 or newer with npm and npx when
-already on the host; otherwise the worker downloads a checksum-verified pinned
-Node.js into the user cache. Kimi, Grok, Muse, and OpenCode also install from
-checksum-verified artifacts downloaded by Mjolnir; they do not require `curl`,
-`tar`, or a shell-based vendor installer. DSH needs its own `dsh-acp` on `PATH`
-or the managed Node fallback. Mjolnir never uses sudo to add these prerequisites
-and does not fall back to another harness executable from the remote `PATH`.
+user's cache; DSH instead runs the host's own `dsh-acp` when it is 0.4.0 or
+newer, or the pinned npm package. Node-based harnesses reuse Node.js 22 or newer
+with npm and npx when already on the host; otherwise the worker downloads a
+checksum-verified pinned Node.js into the user cache. Kimi, Grok, Muse, and
+OpenCode also install from checksum-verified artifacts downloaded by Mjolnir;
+they do not require `curl`, `tar`, or a shell-based vendor installer. DSH needs
+a current `dsh-acp` on `PATH` or the managed Node fallback. Mjolnir never uses
+sudo to add these prerequisites and does not fall back to another harness
+executable from the remote `PATH`.
 
 `permissions` accepts `guardian` or `yolo` and defaults to `guardian`. The
 machine's SSH connection fields include `identity_file` and `extra_args`. See

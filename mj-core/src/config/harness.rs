@@ -222,6 +222,13 @@ fn xdg_home(name: &str, fallback: &str) -> Option<PathBuf> {
         .or_else(|| crate::path_input::user_home().map(|home| home.join(fallback)))
 }
 
+/// MiMo Code's stock directory in the XDG tree `name` names, such as
+/// `~/.local/share/mimocode`. The stock install names these trees after its
+/// program, `mimocode`, not after Mjolnir's `mimo` harness id.
+fn mimo_stock_xdg_dir(name: &str, fallback: &str) -> Option<PathBuf> {
+    xdg_home(name, fallback).map(|base| base.join("mimocode"))
+}
+
 /// Whether a MiMo Code profile's own `config/` tree carries a configuration
 /// file, which makes it authoritative over the stock XDG configuration.
 fn mimo_config_is_seeded(config: &Path) -> bool {
@@ -354,10 +361,10 @@ impl HarnessKind {
         if self == Self::Mimo && self.is_default_home(home) {
             if home.join("data/auth.json").is_file() {
                 environment.insert(self.home_env().into(), crate::target_path::text(home));
-                if let Some(stock) = xdg_home("XDG_CONFIG_HOME", ".config") {
+                if let Some(stock) = mimo_stock_xdg_dir("XDG_CONFIG_HOME", ".config") {
                     environment.insert(
                         "MIMOCODE_CONFIG_DIR".into(),
-                        crate::target_path::text(&stock.join(self.id())),
+                        crate::target_path::text(&stock),
                     );
                 }
                 environment.insert("MIMOCODE_DISABLE_AUTOUPDATE".into(), "1".into());
@@ -408,7 +415,7 @@ impl HarnessKind {
         if self != Self::Mimo {
             return vec![home.to_path_buf()];
         }
-        let stock = xdg_home("XDG_CONFIG_HOME", ".config").map(|base| base.join(self.id()));
+        let stock = mimo_stock_xdg_dir("XDG_CONFIG_HOME", ".config");
         mimo_configuration_sources(home, self.is_default_home(home), stock.as_deref())
     }
 
@@ -425,7 +432,7 @@ impl HarnessKind {
         if self != Self::Mimo {
             return home.to_path_buf();
         }
-        let stock = xdg_home("XDG_DATA_HOME", ".local/share").map(|base| base.join(self.id()));
+        let stock = mimo_stock_xdg_dir("XDG_DATA_HOME", ".local/share");
         mimo_data_source(home, self.is_default_home(home), stock.as_deref())
     }
 
@@ -651,9 +658,8 @@ impl HarnessKind {
     pub const fn agent_instructions_file(self) -> &'static str {
         match self {
             Self::Claude => "CLAUDE.md",
-            // dsh-acp reads no instruction file of its own; its launch passes
-            // the staged one as its system prompt
-            // ([`crate::harness_runtime::dsh_acp_script`]).
+            // dsh-acp reads AGENTS.md from its data directory and workspace
+            // roots ([`crate::harness_runtime::dsh_acp_script`]).
             Self::Codex
             | Self::Kimi
             | Self::Grok
@@ -1522,6 +1528,10 @@ impl HarnessProfile {
         if !super::secrets::resolves_values() {
             return;
         }
+        if self.kind == HarnessKind::Dsh {
+            self.resolve_dsh_key();
+            return;
+        }
         if let Some(env_key) = self.kind.api_key_variable() {
             self.environment.inherit(env_key);
             return;
@@ -1539,6 +1549,54 @@ impl HarnessProfile {
                 .and_then(|custom| custom.env_key.as_deref())
         {
             self.environment.inherit(env_key);
+        }
+    }
+
+    /// Decide the key a DSH profile authenticates with, first found wins: the
+    /// key saved in DSH itself (its home's `.credentials.yaml`), the one in
+    /// the environment Mjolnir started with, the one in the DSH home's
+    /// `.env`, and last the profile's own `environment` entry, such as a
+    /// secret from `secrets.toml`. The first three are DSH's own order, so a
+    /// session uses the key the person's `dsh` uses.
+    fn resolve_dsh_key(&mut self) {
+        let Some(env_key) = self.kind.api_key_variable() else {
+            return;
+        };
+        let home = self.home.clone();
+        // A DSH file Mjolnir cannot use keeps a lower source usable: the
+        // session sends only the key, so DSH's own refusal of the file does
+        // not stop it. It is the reason when no source has a key.
+        let mut problems = Vec::new();
+        let mut usable = |found: Result<Option<String>>| match found {
+            Ok(key) => key.filter(|key| !key.trim().is_empty()),
+            Err(error) => {
+                problems.push(format!("{error:#}"));
+                None
+            }
+        };
+        let stored = super::dsh_credentials::stored(&home, env_key);
+        let account_signed_in = stored.as_ref().is_ok_and(|stored| stored.account_signed_in);
+        let key = usable(stored.map(|stored| stored.api_key))
+            .or_else(|| usable(Ok(super::secrets::Environment::from_process(env_key))))
+            .or_else(|| usable(super::dsh_credentials::dotenv(&home, env_key)));
+        if !problems.is_empty() {
+            tracing::warn!(home = %home.display(), "DSH credentials: {}", problems.join("; "));
+        }
+        if let Some(key) = key {
+            self.environment.supply(env_key, key);
+            return;
+        }
+        if self.supplies_api_key(env_key) {
+            return;
+        }
+        if account_signed_in {
+            problems.push(format!(
+                "DSH in {} is signed in to a DeepSeek account but holds no API key; dsh-acp authenticates only with an API key, so save one in DSH's Models settings, or export {env_key} and run `mj daemon restart`",
+                home.display()
+            ));
+        }
+        if !problems.is_empty() {
+            self.environment.refuse(env_key, problems.join("; "));
         }
     }
 
@@ -1598,6 +1656,17 @@ impl HarnessProfile {
             if let Some((source, env_key)) = api_key
                 && !self.supplies_api_key(env_key)
             {
+                if self.kind == HarnessKind::Dsh {
+                    bail!(
+                        "DSH authenticates with {env_key}, which is found neither in DSH's own credentials ({}), the environment Mjolnir started with, {}, nor under [profiles.{id}.environment]; save a key in DSH, export {env_key} and run `mj daemon restart`, or put it in secrets.toml and add `{env_key} = {{ from_secret = \"{env_key}\" }}` under [profiles.{id}.environment]",
+                        self.home
+                            .join(super::dsh_credentials::CREDENTIALS_FILE)
+                            .display(),
+                        self.home
+                            .join(super::dsh_credentials::DOTENV_FILE)
+                            .display(),
+                    );
+                }
                 bail!(
                     "{source} authenticates with {env_key}, which is set neither in the environment Mjolnir started with nor under [profiles.{id}.environment]; export {env_key} and run `mj daemon restart`, or put it in secrets.toml and add `{env_key} = {{ from_secret = \"{env_key}\" }}` under [profiles.{id}.environment]"
                 );
@@ -1629,9 +1698,9 @@ impl HarnessProfile {
             .map_err(|error| profile_refusal(id, &error))
     }
 
-    /// dsh-acp receives its instructions in one environment variable
+    /// dsh-acp limits each instruction file it reads
     /// ([`crate::harness_runtime::UndeliverableDshInstructions`]); every
-    /// other harness reads its instruction file itself.
+    /// other harness owns its instruction-file validation.
     fn ensure_instructions_deliverable(&self, staged: Option<&Path>) -> Result<()> {
         use crate::harness_runtime::{DSH_ACP_INSTRUCTIONS_LIMIT, UndeliverableDshInstructions};
         if self.kind != HarnessKind::Dsh {
@@ -1645,6 +1714,9 @@ impl HarnessProfile {
         let own_text = own.display();
         match problem {
             None => Ok(()),
+            Some(UndeliverableDshInstructions::NotRegularFile) => bail!(
+                "{own_text} is not a regular file, but dsh-acp accepts instructions only from a regular AGENTS.md. Replace it with a regular file."
+            ),
             Some(UndeliverableDshInstructions::NotUtf8 { line }) => bail!(
                 "{own_text} is not UTF-8 text (line {line} has the first byte that is not), but dsh-acp accepts only UTF-8 instructions. Save the file as UTF-8."
             ),
@@ -1662,7 +1734,7 @@ impl HarnessProfile {
                     excess => format!("{excess} bytes"),
                 };
                 bail!(
-                    "{size}, but DSH can receive at most {limit} bytes of instructions, because dsh-acp takes them in one environment variable. Shorten the file by at least {excess}."
+                    "{size}, but dsh-acp loads at most {limit} bytes from each instruction file. Shorten the file by at least {excess}."
                 )
             }
         }
@@ -2017,6 +2089,22 @@ mod tests {
             home.join("data"),
             "a login Mjolnir created in the profile root wins over the stock one"
         );
+
+        // Hard-won: MiMo sessions staged no login because the stock trees were
+        // looked up under the harness id, `~/.local/share/mimo`.
+        for (variable, fallback) in [
+            ("XDG_CONFIG_HOME", ".config"),
+            ("XDG_DATA_HOME", ".local/share"),
+        ] {
+            assert_eq!(
+                mimo_stock_xdg_dir(variable, fallback)
+                    .unwrap()
+                    .file_name()
+                    .unwrap(),
+                "mimocode",
+                "MiMo Code 0.1.15 names its {variable} tree `mimocode`"
+            );
+        }
 
         assert_eq!(
             HarnessKind::Mimo.configuration_sources(&home),

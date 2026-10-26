@@ -66,7 +66,7 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 18
+version = 19
 ```
 
 The top-level keys are listed below. The legacy `[mailbox] enabled` switch is
@@ -100,7 +100,7 @@ and `theme` under **Interface**. This is a presentation grouping: the prefix
 remains at `keys.prefix`, while the other three fields remain at the top level
 in `config.toml`.
 
-A missing or empty file is treated as an empty version 18 configuration. Older
+A missing or empty file is treated as an empty version 19 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -589,7 +589,7 @@ home = "/home/me/.codex-work"
 | `enabled` | boolean | no | `true` | Disabled profiles stay configured but cannot be selected for new work, login, import, review, quota reporting, or utility-model inference. Existing running sessions continue. |
 | `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, `muse`, `opencode`, `mimo`, or `dsh`. `deepseek`, the removed DeepSeek harness, fails to load. |
 | `home` | path string | yes | none | Non-empty controller-side harness home. An absolute path is strongly recommended. |
-| `environment` | table of strings or references | no | empty | Environment passed to harness/profile commands. Each value is a string, `{ from_env = "NAME" }`, or `{ from_secret = "NAME" }`; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` reads that variable from the environment Mjolnir started with unless it is set here; when it is set in neither, the profile cannot start, the configuration still loads, and `mj doctor` says how to supply it. A DSH profile reads `DEEPSEEK_API_KEY` the same way. |
+| `environment` | table of strings or references | no | empty | Environment passed to harness/profile commands. Each value is a string, `{ from_env = "NAME" }`, or `{ from_secret = "NAME" }`; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` reads that variable from the environment Mjolnir started with unless it is set here; when it is set in neither, the profile cannot start, the configuration still loads, and `mj doctor` says how to supply it. A DSH profile takes `DEEPSEEK_API_KEY` from the key saved in DSH (`.credentials.yaml` in its home) first, then the environment Mjolnir started with, then `.env` in its home, and only then from this table. |
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
 | `guardian_review_model` | string | no | unset (`newest-flash`) | Which model reviews escalated actions in Codex's guardian mode: `newest-flash`, `session`, or a slug from the provider's model catalog. Only valid on a Codex profile whose `config.toml` names a custom model provider. See [Profiles](/profiles/#choose-the-guardian-review-model). |
 
@@ -611,10 +611,11 @@ that sets either fails to load. Other dsh-acp settings may go in
 
 Profiles do not select target-side executables. All bare workers, including
 localhost, SSH, and EC2, resolve an exact pinned runtime from their managed
-cache, except DSH, which has no managed runtime and runs the target's own
-`dsh-acp` or the pinned npm package. Containers use their image-provided
-runtime or the documented installer fallback. `mj login` invokes the harness's
-canonical controller-side command from `PATH`.
+cache, except DSH, which has no managed runtime and runs a target `dsh-acp`
+only when it is 0.4.0 or newer, otherwise the pinned npm package. Containers
+use their image-provided runtime or the documented installer fallback. The
+`mj login` command invokes the harness's canonical controller-side command from
+`PATH`.
 
 Profiles do not accept `model` or `reasoning_effort`. Use `/model` and `/effort`
 inside a session, or configure the harness's own defaults in its home. For
@@ -931,6 +932,13 @@ when it is `local`.
 | --- | --- | --- | --- | --- |
 | `kind` | string enum | yes | none | `bare`, `podman`, `docker`, or `apple-container`. |
 | `machine` | string | no | `"local"` | The id of a `[machines.<id>]` entry, or `local`. |
+| `enabled` | boolean | no | `true` | `false` keeps the runtime configured but out of every picker; launch, resume and move refuse it, and running sessions continue. Written only when `false`. Detection never adds a kind its machine already has configured, enabled or not. |
+
+Mjolnir checks what is there when the dashboard starts and whenever the
+new-session or resume picker opens: this computer directly, and each SSH
+machine with one SSH call. It adds each runtime kind a machine newly runs and
+leaves out of the pickers any runtime that is gone, naming it under the list.
+Version 19 added `enabled`; older builds refuse a version 19 file.
 
 `permissions` is valid only on `bare`; setting it on another runtime is an
 error. Build cache settings are valid only on a machine; setting them on a
@@ -965,9 +973,9 @@ the new checkout is created below the repository's own `.mj/clones/` tree. A
 bare runtime on an EC2 machine launches one instance per session. See
 [SSH and SSH Podman](/ssh/) and [AWS EC2](/aws/).
 
-Review needs a committed Git checkout to capture changes. Create a local
-directory session with `mj new --review off`; automatic review for a plain
-directory is refused, and `/review` explains that it cannot capture changes.
+Review needs a committed Git checkout to capture changes. A local directory
+session without one is created with review off for that session, and `mj new`
+prints a notice saying so; `/review` explains that it cannot capture changes.
 
 ### Common container fields
 
@@ -1103,7 +1111,7 @@ and runtime kinds from the examples above rather than mixing fields between
 variants.
 
 ```toml
-version = 18
+version = 19
 
 [phone]
 enabled = true

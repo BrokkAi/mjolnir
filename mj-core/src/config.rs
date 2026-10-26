@@ -17,6 +17,7 @@
 //! * `secrets` -- environment entries that name a secret held elsewhere.
 
 mod document;
+mod dsh_credentials;
 mod github;
 mod harness;
 mod keys;
@@ -574,8 +575,9 @@ impl Config {
     }
 }
 
-// Breaking: older writers cannot preserve the GitHub watcher switch in its new section.
-pub const CONFIG_VERSION: u32 = 18;
+// Breaking: older writers drop a runtime's `enabled = false`, and older readers
+// refuse it on a bare runtime.
+pub const CONFIG_VERSION: u32 = 19;
 /// The page that documents config.toml, schema version included.
 pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/configuration/";
 pub const PRODUCT_DIR: &str = "mjolnir";
@@ -675,6 +677,10 @@ pub struct Config {
     /// the user made, and they are never written to the file. The file is
     /// the only source of an origin: this set is not serialized.
     pub default_targets: BTreeSet<String>,
+    /// Ids in `targets` the user switched off with `enabled = false`. A
+    /// disabled runtime stays configured, so detection never adds its kind
+    /// again, but nothing new is launched on it.
+    pub disabled_targets: BTreeSet<String>,
 }
 
 /// The configuration file's own shape: hosts under `[machines.<id>]` and
@@ -745,7 +751,30 @@ struct StoredConfig {
 #[serde(untagged)]
 enum TargetEntry {
     Stored(Box<StoredTarget>),
+    Disabled(DisabledTarget),
     Raw(serde_json::Value),
+}
+
+/// A runtime written with `enabled = false`. Only a disabled runtime carries
+/// the key; an enabled one omits it, as profiles do.
+#[derive(Debug, Clone, Serialize)]
+struct DisabledTarget {
+    #[serde(flatten)]
+    target: Box<StoredTarget>,
+    enabled: bool,
+}
+
+/// Take `enabled` out of a raw `[targets.<id>]` table, so the runtime's own
+/// keys are interpreted without it. Absent means enabled.
+fn take_target_enabled(id: &str, value: &mut serde_json::Value) -> Result<bool> {
+    let Some(table) = value.as_object_mut() else {
+        return Ok(true);
+    };
+    match table.remove("enabled") {
+        None => Ok(true),
+        Some(serde_json::Value::Bool(enabled)) => Ok(enabled),
+        Some(other) => bail!("target {id:?} has enabled = {other}; write true or false"),
+    }
 }
 
 impl<'de> Deserialize<'de> for TargetEntry {
@@ -890,15 +919,29 @@ impl TryFrom<StoredConfig> for Config {
             profile.inherit_provider_key();
         }
         let mut runtimes: BTreeMap<String, StoredTarget> = BTreeMap::new();
+        let mut disabled_targets = BTreeSet::new();
         for (id, entry) in targets {
             let runtime = match entry {
                 TargetEntry::Stored(target) => *target,
-                TargetEntry::Raw(value) => match interpret_target(&id, &value, version)? {
-                    InterpretedTarget::Stored(target) => target,
-                    // Migration and saving are the same operation, so an old
-                    // file becomes exactly what the next save would write.
-                    InterpretedTarget::Legacy(target) => stored_target(&id, &target, &mut machines),
-                },
+                TargetEntry::Disabled(DisabledTarget { target, enabled }) => {
+                    if !enabled {
+                        disabled_targets.insert(id.clone());
+                    }
+                    *target
+                }
+                TargetEntry::Raw(mut value) => {
+                    if !take_target_enabled(&id, &mut value)? {
+                        disabled_targets.insert(id.clone());
+                    }
+                    match interpret_target(&id, &value, version)? {
+                        InterpretedTarget::Stored(target) => target,
+                        // Migration and saving are the same operation, so an
+                        // old file becomes exactly what the next save would write.
+                        InterpretedTarget::Legacy(target) => {
+                            stored_target(&id, &target, &mut machines)
+                        }
+                    }
+                }
             };
             runtimes.insert(id, runtime);
         }
@@ -941,8 +984,9 @@ impl TryFrom<StoredConfig> for Config {
             // 15 stops writing the default image into a container target;
             // 16 adds native tool cache storage; 17 replaces per-profile
             // delegation selectors with global task choices, without migrating them;
-            // 18 moves the GitHub event switch to github.watch.enabled.
-            version: if matches!(version, 1..=17) {
+            // 18 moves the GitHub event switch to github.watch.enabled; 19 adds
+            // `enabled` to runtimes.
+            version: if matches!(version, 1..=18) {
                 CONFIG_VERSION
             } else {
                 version
@@ -963,6 +1007,7 @@ impl TryFrom<StoredConfig> for Config {
             machines,
             targets: resolved,
             default_targets: BTreeSet::new(),
+            disabled_targets,
         })
     }
 }
@@ -972,8 +1017,16 @@ impl From<Config> for StoredConfig {
         let mut machines = config.machines;
         let mut targets = BTreeMap::new();
         for (id, target) in &config.targets {
-            let runtime = stored_target(id, target, &mut machines);
-            targets.insert(id.clone(), TargetEntry::Stored(Box::new(runtime)));
+            let runtime = Box::new(stored_target(id, target, &mut machines));
+            let entry = if config.disabled_targets.contains(id) {
+                TargetEntry::Disabled(DisabledTarget {
+                    target: runtime,
+                    enabled: false,
+                })
+            } else {
+                TargetEntry::Stored(runtime)
+            };
+            targets.insert(id.clone(), entry);
         }
         // This machine is implied, so a file only names it when it carries
         // settings of its own.
@@ -1030,6 +1083,7 @@ impl Default for Config {
             machines: BTreeMap::new(),
             targets: BTreeMap::new(),
             default_targets: BTreeSet::new(),
+            disabled_targets: BTreeSet::new(),
         }
     }
 }
@@ -1160,6 +1214,37 @@ impl Config {
     /// One profile when it exists and is available for new work.
     pub fn enabled_profile(&self, id: &str) -> Option<&HarnessProfile> {
         self.profiles.get(id).filter(|profile| profile.enabled)
+    }
+
+    /// Runtimes available for new work: every one not switched off.
+    pub fn enabled_targets(&self) -> impl Iterator<Item = (&str, &TargetTemplate)> {
+        self.targets
+            .iter()
+            .filter(|(id, _)| !self.disabled_targets.contains(*id))
+            .map(|(id, target)| (id.as_str(), target))
+    }
+
+    /// One runtime when it exists and is available for new work.
+    pub fn enabled_target(&self, id: &str) -> Option<&TargetTemplate> {
+        self.targets
+            .get(id)
+            .filter(|_| !self.disabled_targets.contains(id))
+    }
+
+    /// Refuse new work on runtime `id` when it is not configured or is
+    /// switched off. Every launch, resume and move asks this.
+    pub fn ensure_target_enabled(&self, id: &str) -> Result<&TargetTemplate> {
+        let target = self
+            .targets
+            .get(id)
+            .with_context(|| format!("unknown target template {id:?}"))?;
+        if self.disabled_targets.contains(id) {
+            return Err(crate::refusal::Refusal::precondition(format!(
+                "runtime {id:?} is turned off; turn it on in Settings › Runtimes or choose another"
+            ))
+            .into());
+        }
+        Ok(target)
     }
 
     /// Whether a session recorded under `source_profile_id`, running
@@ -1379,7 +1464,15 @@ impl Config {
     where
         F: FnOnce(&mut Self) -> Result<T>,
     {
-        Self::update_to(&config_path(), |config| {
+        Self::update_with_local_targets_at(&config_path(), edit)
+    }
+
+    /// As [`Self::update`], using an explicit config path.
+    pub fn update_with_local_targets_at<T, F>(path: &Path, edit: F) -> Result<(Self, T)>
+    where
+        F: FnOnce(&mut Self) -> Result<T>,
+    {
+        Self::update_to(path, |config| {
             // Edits see the same local candidates as reads, but unrelated
             // changes must not write implicit defaults into the user's file.
             let mut runtime = config.clone().with_local_targets();
@@ -1391,7 +1484,11 @@ impl Config {
                 .collect();
             let value = edit(&mut runtime)?;
             for (id, target) in implicit {
-                if runtime.targets.get(&id) == Some(&target) {
+                // A standard runtime switched off is the user's choice and
+                // is written with it.
+                if runtime.targets.get(&id) == Some(&target)
+                    && !runtime.disabled_targets.contains(&id)
+                {
                     runtime.targets.remove(&id);
                 }
             }

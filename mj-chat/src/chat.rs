@@ -541,6 +541,9 @@ pub struct ChatState {
     review_config: mj_core::config::ReviewConfig,
     /// This session's own review choice, applied over `review_config`.
     session_review: Option<mj_core::config::SessionReview>,
+    /// Why review cannot run for this session, which `/review status` says
+    /// instead of describing `[review]`.
+    review_unavailable: Option<&'static str>,
     /// Whether the dialog on screen belongs to the reviewer rather than the
     /// primary, so its answer is routed to the harness that asked.
     elicitation_is_reviewers: bool,
@@ -730,6 +733,7 @@ impl ChatState {
             turn_review_action_areas: Vec::new(),
             review_config: mj_core::config::ReviewConfig::default(),
             session_review: None,
+            review_unavailable: None,
             elicitation_is_reviewers: false,
             elicitation_role: None,
             goal_state: mj_core::goal::GoalState::from_configuration(&snapshot.config)
@@ -881,6 +885,8 @@ impl ChatState {
 
     /// Rows the composer wants at `width`: the wrapped input, up to three
     /// queued-prompt previews with a separating row, and the block's borders.
+    /// It never asks for fewer than three text rows, so a short draft still
+    /// leaves an easy mouse target.
     pub fn desired_prompt_height(&self, width: u16) -> u16 {
         let content_width = active::prompt_content_width(width);
         let input_rows =
@@ -890,7 +896,7 @@ impl ChatState {
             .saturating_add(queued)
             .saturating_add(u16::from(queued > 0))
             .saturating_add(2)
-            .max(4)
+            .max(5)
     }
 
     /// Draws only the composer band into `area`, for hosts that show the real

@@ -492,18 +492,9 @@ pub(crate) fn spawn_first_run_setup(
                     );
                 },
             )?;
+            // An existing installation picks up agents installed since its
+            // last launch through the startup availability check.
             let Some(summary) = result else {
-                // An existing installation still picks up agents installed
-                // since its last launch.
-                let added = setup::add_detected_profiles(&config_path, &executor, &|| {
-                    executor.is_cancelled()
-                })
-                .map_err(|error| format!("{error:#}"));
-                report(
-                    "detecting agent profiles",
-                    &progress,
-                    DashboardIoUpdate::StartupProfilesDetected(added),
-                );
                 return Ok(None);
             };
             report(
@@ -534,6 +525,7 @@ fn machine_runtime_probe(probe: mj_controller::setup::MachineProbe) -> mj_tui::M
             rejected: probe
                 .rejected()
                 .map(|runtime| RejectedRuntime {
+                    kind: runtime.kind.name().to_owned(),
                     label: runtime.kind.label().to_owned(),
                     detail: runtime.detail.clone(),
                     remediation: runtime.remediation.clone(),
@@ -555,34 +547,62 @@ fn machine_runtime_probe(probe: mj_controller::setup::MachineProbe) -> mj_tui::M
     }
 }
 
-/// Probe machines that no runtime runs on and write the runtimes they can
-/// run, off the event loop. Each machine is its own host, so they are probed
-/// at once, and quitting cancels the probes.
-pub(crate) fn spawn_machine_runtime_check(
+/// Check what is there and add what is new, off the event loop: this
+/// computer's agents and engines, and every machine at once, each with one
+/// SSH call. Quitting cancels the check.
+pub(crate) fn spawn_availability_check(
     generation: u64,
-    machines: Vec<(String, mj_core::config::Machine)>,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
     spawn_cancellable_io(
         tracker,
-        "detecting machine runtimes",
+        "checking what is available",
         updates,
         move |cancelled| {
-            use mj_controller::setup;
+            use mj_controller::setup::{self, DEFAULT_IMAGE};
+            // Only quitting stops the check. A host that runs out the
+            // deadline fails its own probe; every other answer still lands.
+            let quit = cancelled.clone();
             let executor =
                 CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(60));
-            let probes = setup::probe_machines(&machines, &executor);
-            let added =
-                setup::add_machine_runtimes(&mj_core::config::config_path(), &probes, &|| {
-                    executor.is_cancelled()
+            let report =
+                setup::check_availability(&mj_core::config::config_path(), &executor, &|| {
+                    quit.load(std::sync::atomic::Ordering::Acquire)
                 })?;
-            Ok(mj_tui::MachineRuntimesChecked {
-                probes: probes.into_iter().map(machine_runtime_probe).collect(),
-                added,
+            let path = std::env::var_os("PATH");
+            let local = report
+                .local
+                .into_iter()
+                .map(|runtime| {
+                    let (_, template) = setup::local_runtime_target(runtime.kind, DEFAULT_IMAGE);
+                    let installed = mj_controller::targets::local_engine_command(&template)
+                        .is_some_and(|engine| {
+                            mj_controller::targets::program_on_path(engine, path.as_deref())
+                        });
+                    let missing = (!runtime.usable()).then(|| match runtime.remediation {
+                        Some(fix) => format!("{} {fix}", runtime.detail.trim()),
+                        None => runtime.detail,
+                    });
+                    (
+                        runtime.kind.name().to_owned(),
+                        mj_tui::LocalEngine { missing, installed },
+                    )
+                })
+                .collect();
+            Ok(mj_tui::AvailabilityChecked {
+                profiles: report.profiles,
+                local,
+                machines: report
+                    .machines
+                    .into_iter()
+                    .map(machine_runtime_probe)
+                    .collect(),
+                added_profiles: report.added_profiles,
+                added_runtimes: report.added_runtimes,
             })
         },
-        move |result| DashboardIoUpdate::MachineRuntimesChecked { generation, result },
+        move |result| DashboardIoUpdate::AvailabilityChecked { generation, result },
     )
 }
 
@@ -649,6 +669,7 @@ pub(crate) fn spawn_setup_discovery(
                             config.targets.insert(id.to_owned(), target);
                         } else {
                             rejected_runtimes.push(RejectedRuntime {
+                                kind: runtime.kind.name().to_owned(),
                                 label: runtime.kind.label().to_owned(),
                                 detail: runtime.detail,
                                 remediation: runtime.remediation,
@@ -740,7 +761,8 @@ pub(crate) fn save_setup_at(
         // left as it was stays out of the file, as `Config::update` does, so
         // an unrelated save does not turn it into one the user configured.
         for (id, target) in implicit {
-            if next.targets.get(&id) == Some(&target) {
+            // A built-in runtime the edit switched off is written with it.
+            if next.targets.get(&id) == Some(&target) && !next.disabled_targets.contains(&id) {
                 next.targets.remove(&id);
             }
         }

@@ -180,7 +180,7 @@ impl RecordingExports {
 }
 
 /// The situation from the report that prompted profile selection: the parent
-/// runs on `parent`, nearly out of its 5-hour window; `codex-high` offers the
+/// runs on `parent`, out of its 5-hour window; `codex-high` offers the
 /// same models with plenty left; `deepseek` is pay-per-use, so it ranks as
 /// full, but offers a different model.
 async fn selection_backend(
@@ -204,10 +204,12 @@ async fn selection_backend_refusing(
             ("deepseek", HarnessKind::Codex),
         ]))
         .await;
+    // Spawns draw profiles weighted by quota left, so any quota at all would
+    // let `parent` win some draws; with none it always ranks behind `codex-high`.
     let quotas = BTreeMap::from([
         (
             "parent".to_owned(),
-            quota("parent", HarnessKind::Codex, &[80, 3]),
+            quota("parent", HarnessKind::Codex, &[80, 0]),
         ),
         (
             "codex-high".to_owned(),
@@ -277,7 +279,7 @@ async fn spawn_runs_the_child_on_the_profile_with_the_most_quota_that_offers_the
     let registered = exports.registered();
     assert_eq!(
         registered.profile_id, "codex-high",
-        "the parent's own profile has 3% left and the pay-per-use one lacks the model"
+        "the parent's own profile has no quota left and the pay-per-use one lacks the model"
     );
     assert_eq!(registered.model.as_deref(), Some("luna"));
     assert_eq!(registered.effort.as_deref(), Some("low"));

@@ -3,8 +3,9 @@
 //! A turn that fails because the provider will not serve this account now
 //! (rate limit, exhausted plan, provider outage) marks its profile and model
 //! unhealthy for a backoff, so the next spawn chooses another profile instead
-//! of failing the same way. A malformed request, a refused login (which
-//! `RejectedLogins` owns) and network trouble on our side are not marks.
+//! of failing the same way. A later successful turn clears a mark only when
+//! it completed after that mark was set. A malformed request, a refused login
+//! (which `RejectedLogins` owns) and network trouble on our side are not marks.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
@@ -16,8 +17,10 @@ use mj_core::diagnostic::TurnDiagnostic;
 /// after the previous mark ended.
 const BASE_BACKOFF: Duration = Duration::from_secs(60);
 const MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
+const PROVIDER_ERROR_BASE_BACKOFF: Duration = Duration::from_secs(8);
+const PROVIDER_ERROR_MAX_BACKOFF: Duration = Duration::from_secs(64);
 /// A failure this long after the previous mark ended starts over at
-/// `BASE_BACKOFF`.
+/// the base backoff for the new fault.
 const QUIET_RESET: Duration = Duration::from_secs(10 * 60);
 
 /// Why a provider will not serve a profile now.
@@ -59,6 +62,14 @@ impl ProfileFault {
     }
 }
 
+/// What a finished turn shows about its profile and model.
+#[derive(Debug, Clone)]
+pub enum TurnHealth {
+    Failed(ProfileFault, TurnDiagnostic),
+    /// A turn that completed at this time.
+    Succeeded(SystemTime),
+}
+
 /// A profile and model that should not take new work before `until`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unhealthy {
@@ -85,6 +96,7 @@ impl Unhealthy {
 struct Mark {
     unhealthy: Unhealthy,
     strikes: u32,
+    set_at: SystemTime,
 }
 
 /// The daemon's one record of profile health, keyed by profile and model.
@@ -105,7 +117,8 @@ impl ProfileHealth {
     /// arrive while the profile is already marked do not lengthen the mark:
     /// several sessions that started before the mark all fail together, and
     /// that is one event, not many. A failure soon after a mark ended doubles
-    /// the backoff. A provider reset time, when given, sets the end instead.
+    /// the backoff using the schedule for its fault. A provider reset time,
+    /// when given, sets the end instead.
     pub fn record(
         &mut self,
         profile_id: &str,
@@ -120,9 +133,13 @@ impl ProfileHealth {
             Some(mark) if mark.unhealthy.until + QUIET_RESET > now => mark.strikes + 1,
             _ => 1,
         };
-        let backoff = BASE_BACKOFF
-            .saturating_mul(1 << (strikes - 1).min(16))
-            .min(MAX_BACKOFF);
+        let (base, maximum) = match fault {
+            ProfileFault::ProviderError => {
+                (PROVIDER_ERROR_BASE_BACKOFF, PROVIDER_ERROR_MAX_BACKOFF)
+            }
+            ProfileFault::RateLimited | ProfileFault::QuotaExhausted => (BASE_BACKOFF, MAX_BACKOFF),
+        };
+        let backoff = base.saturating_mul(1 << (strikes - 1).min(16)).min(maximum);
         let until = provider_reset(diagnostic, now).unwrap_or(now + backoff);
         self.marks.insert(
             key,
@@ -133,8 +150,44 @@ impl ProfileHealth {
                     message: diagnostic.message.clone(),
                 },
                 strikes,
+                set_at: now,
             },
         );
+    }
+
+    /// Record what a finished turn of `profile_id` running `model` shows.
+    pub fn observe(&mut self, profile_id: &str, model: &str, turn: TurnHealth, now: SystemTime) {
+        match turn {
+            TurnHealth::Failed(fault, diagnostic) => {
+                self.record(profile_id, model, fault, &diagnostic, now)
+            }
+            TurnHealth::Succeeded(completed_at) => {
+                self.record_success(profile_id, model, completed_at)
+            }
+        }
+    }
+
+    /// Clear a mark, and its strikes, for a successful turn that completed
+    /// after the mark was set. An older success says nothing about the
+    /// failure that set the mark, for example when a session catches up on
+    /// events recorded before it.
+    pub fn record_success(&mut self, profile_id: &str, model: &str, completed_at: SystemTime) {
+        let key = (profile_id.to_owned(), model.to_owned());
+        if self
+            .marks
+            .get(&key)
+            .is_some_and(|mark| completed_at > mark.set_at)
+        {
+            self.marks.remove(&key);
+        }
+    }
+
+    /// Whether any mark still affects selection or the next failure's
+    /// backoff at `now`. A mark past its quiet reset is the same as none.
+    pub fn has_marks(&self, now: SystemTime) -> bool {
+        self.marks
+            .values()
+            .any(|mark| mark.unhealthy.until + QUIET_RESET > now)
     }
 
     /// The mark on `profile_id` and `model` that has not yet ended.
@@ -250,6 +303,87 @@ mod tests {
         assert_eq!(
             record(&mut health, after_quiet),
             Some(after_quiet + BASE_BACKOFF)
+        );
+    }
+
+    #[test]
+    fn provider_errors_use_short_capped_backoff_while_rate_limits_keep_their_schedule() {
+        let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let failure = diagnostic("provider unavailable", Some("service"), Some(503));
+        let mut health = ProfileHealth::default();
+        let mut at = start;
+        for expected in [8, 16, 32, 64, 64] {
+            health.record("codex2", "sol", ProfileFault::ProviderError, &failure, at);
+            let until = health.unhealthy("codex2", "sol", at).unwrap().until;
+            assert_eq!(until, at + Duration::from_secs(expected));
+            at = until + Duration::from_secs(1);
+        }
+
+        let rate_limit = diagnostic("429", Some("limit"), None);
+        let mut health = ProfileHealth::default();
+        let mut at = start;
+        for expected in [60, 120, 240, 480, 900, 900] {
+            health.record("codex2", "sol", ProfileFault::RateLimited, &rate_limit, at);
+            let until = health.unhealthy("codex2", "sol", at).unwrap().until;
+            assert_eq!(until, at + Duration::from_secs(expected));
+            at = until + Duration::from_secs(1);
+        }
+    }
+
+    #[test]
+    fn later_success_clears_mark_and_next_failure_starts_at_first_strike() {
+        let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let failure = diagnostic("429", Some("limit"), None);
+        let mut health = ProfileHealth::default();
+        health.record("codex2", "sol", ProfileFault::RateLimited, &failure, start);
+        health.record_success("codex2", "sol", start + Duration::from_secs(1));
+        assert!(health.unhealthy("codex2", "sol", start).is_none());
+        let next = start + Duration::from_secs(2);
+        health.record("codex2", "sol", ProfileFault::RateLimited, &failure, next);
+        assert_eq!(
+            health.unhealthy("codex2", "sol", next).unwrap().until,
+            next + BASE_BACKOFF
+        );
+    }
+
+    #[test]
+    fn a_success_after_a_mark_ends_still_resets_its_strikes() {
+        let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let failure = diagnostic("429", Some("limit"), None);
+        let mut health = ProfileHealth::default();
+        health.record("codex2", "sol", ProfileFault::RateLimited, &failure, start);
+        let ended = start + BASE_BACKOFF + Duration::from_secs(1);
+        assert!(health.unhealthy("codex2", "sol", ended).is_none());
+        assert!(
+            health.has_marks(ended),
+            "the strike still counts until the quiet reset"
+        );
+        assert!(!health.has_marks(start + BASE_BACKOFF + QUIET_RESET));
+
+        health.observe("codex2", "sol", TurnHealth::Succeeded(ended), ended);
+        let next = ended + Duration::from_secs(1);
+        health.observe(
+            "codex2",
+            "sol",
+            TurnHealth::Failed(ProfileFault::RateLimited, failure),
+            next,
+        );
+        assert_eq!(
+            health.unhealthy("codex2", "sol", next).unwrap().until,
+            next + BASE_BACKOFF
+        );
+    }
+
+    #[test]
+    fn old_success_does_not_clear_new_mark() {
+        let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let failure = diagnostic("429", Some("limit"), None);
+        let mut health = ProfileHealth::default();
+        health.record("codex2", "sol", ProfileFault::RateLimited, &failure, start);
+        health.record_success("codex2", "sol", start - Duration::from_secs(1));
+        assert_eq!(
+            health.unhealthy("codex2", "sol", start).unwrap().until,
+            start + BASE_BACKOFF
         );
     }
 }

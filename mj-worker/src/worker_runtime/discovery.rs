@@ -18,18 +18,19 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
     // and the cache root (`HOME` or `XDG_CACHE_HOME`) are visible to the
     // system-or-managed Node decision.
     let mut environment = mj_core::login_environment::with_overrides(&spec.environment).await?;
-    let managed_node = if super::harness_launch::needs_node_runtime(spec.harness, &environment)? {
-        super::harness::ensure_node_runtime(&mut environment)
-            .await
-            .with_context(|| {
-                format!(
-                    "prepare Node.js for {} discovery",
-                    spec.harness.display_name()
-                )
-            })?
-    } else {
-        None
-    };
+    let managed_node =
+        if super::harness_launch::needs_node_runtime(spec.harness, &environment).await? {
+            super::harness::ensure_node_runtime(&mut environment)
+                .await
+                .with_context(|| {
+                    format!(
+                        "prepare Node.js for {} discovery",
+                        spec.harness.display_name()
+                    )
+                })?
+        } else {
+            None
+        };
     // The probe runs from a staged copy of the profile, like a session.
     spec.harness
         .configure_home_environment(&spec.profile_home, &mut environment);
