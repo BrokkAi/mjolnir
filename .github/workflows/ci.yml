@@ -70,6 +70,9 @@ jobs:
     - name: Test release archive assembly and parallel npm publishing
       run: node --test scripts/release-workflow.test.mjs
 
+    - name: Test agent-dev image build invariants
+      run: node --test scripts/agent-dev-image.test.mjs
+
     - uses: ./.github/actions/cache-rust
       with:
         lane: licenses-musl

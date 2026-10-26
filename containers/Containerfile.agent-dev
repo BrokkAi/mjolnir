@@ -88,6 +88,7 @@ RUN set -eu \
 
 FROM ${RUST_IMAGE}
 ARG MJ_RUST_TOOLCHAIN
+ARG GO_VERSION
 
 # The Node image and Rust image share the Trixie base. Copying /usr/local
 # brings in Node, npm, npx, Corepack, and the headers needed by native modules.
