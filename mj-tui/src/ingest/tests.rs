@@ -451,6 +451,7 @@ fn stored_summary_restores_dashboard_messages_without_marking_transcript_ready()
     assert!(detail.transcript.is_none());
 }
 
+// Hard-won: e3e9d9fc21: the TUI named sessions from its own transcript copy, so its names disagreed with the web viewer's.
 #[test]
 fn dashboard_names_a_session_only_from_the_daemon_record() {
     let mut dashboard = dashboard_with_session(running_session());

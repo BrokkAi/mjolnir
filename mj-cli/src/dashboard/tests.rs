@@ -712,6 +712,7 @@ async fn the_dictation_chord_reports_why_it_cannot_run_in_the_shared_notices() {
 /// the poll leaves the name alone, and the daemon's record carries the new
 /// title to the row and the header together.
 // Hard-won: f2c36f6900: Harness title updates changed the session row but left the open conversation stale until the turn ended; the test checks the title reaches the header immediately.
+// Hard-won: e3e9d9fc21: the terminal titled sessions from its own copy of worker polls, so its names could disagree with the web viewer's.
 #[tokio::test]
 async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row() {
     let session_id = "title-lag";
