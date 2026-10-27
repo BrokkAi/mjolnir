@@ -17,6 +17,10 @@ pub(super) enum AirTaskState {
     Background(BackgroundCommand),
     /// Retain ended turn IDs as tombstones until the adapter restarts.
     Turn(Option<u64>),
+    /// Adapter started after its prompt response, which ACP has not relayed yet.
+    HeldTurn,
+    /// The task ended, but its preceding prompt response is still in transit.
+    HeldTurnEnded,
 }
 
 impl AirTaskEntry {
@@ -248,13 +252,23 @@ impl DurableRelay {
             | AirTaskUpdate::Finished { task_id, .. } => task_id,
         };
         let key = air_task_key(&session_id, task_id);
-        if let Some(AirTaskEntry {
-            state: AirTaskState::Turn(ordinal),
-            ..
-        }) = self.air_tasks.get_mut(&key)
+        if let Some(AirTaskEntry { state, .. }) = self.air_tasks.get_mut(&key)
+            && matches!(
+                state,
+                AirTaskState::Turn(_) | AirTaskState::HeldTurn | AirTaskState::HeldTurnEnded
+            )
         {
             if matches!(update, AirTaskUpdate::Finished { .. }) {
-                let ordinal = ordinal.take();
+                let ordinal = match state {
+                    AirTaskState::Turn(ordinal) => ordinal.take(),
+                    AirTaskState::HeldTurn | AirTaskState::HeldTurnEnded => {
+                        *state = AirTaskState::HeldTurnEnded;
+                        None
+                    }
+                    AirTaskState::Background(_) => {
+                        unreachable!("turn classification checked above")
+                    }
+                };
                 // A late idle may end the next turn's task (#1453). Only a
                 // silent turn trusts task end; output waits for its SDK result.
                 if let Some(ordinal) = ordinal
@@ -272,25 +286,27 @@ impl DurableRelay {
         }
         match update {
             AirTaskUpdate::TurnSpawned { task_id, replayed } => {
-                let ordinal = if !replayed
+                let live_root = !replayed
                     && self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
-                    && self.snapshot.native_session_id.as_deref() == Some(session_id.as_str())
-                {
-                    self.open_harness_turn_if_allowed()?;
-                    if self.snapshot.active_prompt.is_none() {
+                    && self.snapshot.native_session_id.as_deref() == Some(session_id.as_str());
+                let state = if live_root && self.snapshot.active_prompt.is_some() {
+                    AirTaskState::HeldTurn
+                } else {
+                    if live_root {
+                        self.open_harness_turn_if_allowed()?;
+                    }
+                    AirTaskState::Turn(if live_root {
                         self.snapshot.harness_turn.map(|turn| turn.first_ordinal)
                     } else {
                         None
-                    }
-                } else {
-                    None
+                    })
                 };
                 self.air_tasks.insert(
                     key,
                     AirTaskEntry {
                         session_id,
                         task_id,
-                        state: AirTaskState::Turn(ordinal),
+                        state,
                     },
                 );
             }
@@ -349,6 +365,42 @@ impl DurableRelay {
             }
         }
         self.persist_activity_transition()
+    }
+
+    pub(super) fn has_held_claude_turn(&self) -> bool {
+        self.air_tasks.values().any(|entry| {
+            matches!(
+                entry.state,
+                AirTaskState::HeldTurn | AirTaskState::HeldTurnEnded
+            )
+        })
+    }
+
+    /// Restore adapter order before queue promotion, under the relay's owner lock.
+    pub(super) fn promote_held_claude_turn(&mut self) -> Result<()> {
+        if self.snapshot.active_prompt.is_some() {
+            return Ok(());
+        }
+        for entry in self.air_tasks.values_mut() {
+            if matches!(entry.state, AirTaskState::HeldTurnEnded) {
+                entry.state = AirTaskState::Turn(None);
+            }
+        }
+        let key = self
+            .air_tasks
+            .iter()
+            .find(|(_, entry)| matches!(entry.state, AirTaskState::HeldTurn))
+            .map(|(key, _)| key.clone());
+        if let Some(key) = key {
+            self.open_harness_turn_if_allowed()?;
+            if let Some(turn) = self.snapshot.harness_turn {
+                self.air_tasks
+                    .get_mut(&key)
+                    .expect("held task exists")
+                    .state = AirTaskState::Turn(Some(turn.first_ordinal));
+            }
+        }
+        Ok(())
     }
 
     /// Replace Kimi's native task level and reconcile ACP launch or query

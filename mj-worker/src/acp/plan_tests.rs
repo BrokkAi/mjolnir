@@ -414,7 +414,7 @@ impl PlanProbe {
         assert_eq!(init["method"], "initialize");
         probe.result(&init, json!({
             "protocolVersion": 1,
-            "_meta": {"jetbrains": {"air": {"version": 1, "capabilities": ["nativeSubagentSessions"]}}}
+            "_meta": {"jetbrains": {"air": {"version": 1, "capabilities": ["nativeSubagentSessions", "backgroundSubagents"]}}}
         })).await;
         let enforcement = harness.execution_enforcement(policy);
         // Muse advertises its approval policy the way muse-acp does:
@@ -636,22 +636,6 @@ impl PlanProbe {
         }
     }
 
-    /// What the relay coordinator does with a result that would end the
-    /// running prompt: hand it to the prompt loop.
-    async fn release(&mut self, result: &mj_core::acp::ClaudeTurnResult) {
-        self.commands
-            .send(CommandRequest::ReleasePrompt {
-                request_id: "original-prompt".into(),
-                received: result.received,
-                stop_reason: result
-                    .prompt_stop_reason()
-                    .expect("the result would end a prompt"),
-                usage: Some(result.usage.token_usage()),
-            })
-            .await
-            .unwrap();
-    }
-
     async fn no_finish(&mut self) {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
         while let Ok(Some(event)) = tokio::time::timeout_at(deadline, self.events.recv()).await {
@@ -739,7 +723,7 @@ async fn approved_plan_waits_for_turn_and_mode_ack_then_continues_once_in_same_s
 /// Claude answers a cancelled plan review with "Tool use aborted", so the
 /// planning cycle can end with an ordinary result rather than an interruption
 /// report. Neither that result nor a late relay of it may end the prompt the
-/// approved plan continues; the implementation cycle's result ends it.
+/// approved plan continues; the implementation prompt's response ends it.
 #[tokio::test]
 async fn a_planning_result_never_ends_the_prompt_an_approved_plan_continues() {
     let result = json!({
@@ -752,9 +736,9 @@ async fn a_planning_result_never_ends_the_prompt_an_approved_plan_continues() {
         let mut probe = PlanProbe::new(ExecutionPolicy::Unconstrained).await;
         let (prompt, _, _) = probe.approve("Plan", &["exit-plan-auto", "reject"]).await;
         probe.sdk_result(result.clone()).await;
-        let planning = probe.claude_result().await;
+        probe.claude_result().await;
         if !relayed_late {
-            probe.release(&planning).await;
+            probe.sdk_result(result.clone()).await;
             probe.no_finish().await;
         }
         probe
@@ -766,7 +750,7 @@ async fn a_planning_result_never_ends_the_prompt_an_approved_plan_continues() {
         let continuation = probe.message().await;
         assert_eq!(continuation["method"], "session/prompt");
         if relayed_late {
-            probe.release(&planning).await;
+            probe.sdk_result(result.clone()).await;
             probe.no_finish().await;
         }
         probe
@@ -776,13 +760,13 @@ async fn a_planning_result_never_ends_the_prompt_an_approved_plan_continues() {
             }}))
             .await;
         probe.sdk_result(result.clone()).await;
-        let implementation = probe.claude_result().await;
-        probe.release(&implementation).await;
+        probe.claude_result().await;
+        probe.no_finish().await;
+        probe
+            .result(&continuation, json!({"stopReason":"end_turn"}))
+            .await;
         assert_eq!(probe.finished().await, "EndTurn", "{relayed_late}");
         probe.no_message().await;
-        probe
-            .result(&continuation, json!({"stopReason": "end_turn"}))
-            .await;
         probe.no_finish().await;
         probe.close().await;
     }

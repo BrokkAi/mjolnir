@@ -263,21 +263,6 @@ pub enum CommandRequest {
     Close {
         request_id: String,
     },
-    /// Claude Code reported the result of the cycle that answered this
-    /// prompt. The relay coordinator sends this when it records that result,
-    /// and the prompt loop ends the prompt with the given outcome unless its
-    /// own state says the result is not the end: a cancel is in flight, an
-    /// approved plan is being handed to a continuation prompt, or the result
-    /// arrived before the current `session/prompt` was sent. The loop keeps
-    /// the adapter's reply alive and discards it when it comes.
-    ReleasePrompt {
-        request_id: String,
-        /// The result's position among the results this ACP connection
-        /// received.
-        received: u64,
-        stop_reason: String,
-        usage: Option<mj_core::usage::TokenUsage>,
-    },
 }
 
 type ActivePrompt = Pin<

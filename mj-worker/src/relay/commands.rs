@@ -110,8 +110,12 @@ impl DurableRelay {
             controls.message = Some("Interrupting…".into());
             return controls;
         }
-        let interrupt = RelayCommand::CancelTurnFor {
-            active_prompt_id: active.command_id.clone(),
+        let interrupt = if self.has_held_claude_turn() {
+            RelayCommand::CancelTurn
+        } else {
+            RelayCommand::CancelTurnFor {
+                active_prompt_id: active.command_id.clone(),
+            }
         };
         controls.interrupt = Some(interrupt.clone());
         if let Some(steering) = self.snapshot.steering.as_ref().filter(|s| s.holds_queue()) {
@@ -132,6 +136,10 @@ impl DurableRelay {
             kind: TurnControlKind::Interrupt,
             command: interrupt,
         };
+        if self.has_held_claude_turn() {
+            controls.primary = Some(primary);
+            return controls;
+        }
         if let Some(head) = self.snapshot.queued_prompts.first() {
             let can_steer = match &head.payload {
                 StoredQueuedRelayPayload::Prompt { prompt } => {
@@ -1284,7 +1292,7 @@ impl DurableRelay {
     /// bridge advertises steering and nothing is waiting for the running turn
     /// to end. The bridge queues the steer to its next safe boundary.
     fn automatic_steer_target(&self) -> Option<(String, String)> {
-        if !self.automatic_steering || self.checkpoint_only {
+        if !self.automatic_steering || self.checkpoint_only || self.has_held_claude_turn() {
             return None;
         }
         if self.steering_delivery_mode == SteeringDeliveryMode::ClaudeTurnEnd {
@@ -1748,6 +1756,7 @@ impl DurableRelay {
         }
         if finishes_turn {
             self.return_boundary_steer_after_turn_end(command_id)?;
+            self.promote_held_claude_turn()?;
         }
         self.promote_next_queued_command()?;
         Ok(ordinal)
@@ -1773,6 +1782,7 @@ impl DurableRelay {
         if command == RelayCommandKind::Prompt {
             self.finish_turn_activity()?;
             self.return_boundary_steer_after_turn_end(command_id)?;
+            self.promote_held_claude_turn()?;
         }
         self.settle_held_writes()?;
         self.promote_next_queued_command()?;
@@ -1799,6 +1809,7 @@ impl DurableRelay {
         if command == RelayCommandKind::Prompt {
             self.finish_turn_activity()?;
             self.return_boundary_steer_after_turn_end(command_id)?;
+            self.promote_held_claude_turn()?;
         }
         self.settle_held_writes()?;
         self.promote_next_queued_command()?;

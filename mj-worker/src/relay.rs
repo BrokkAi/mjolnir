@@ -1144,6 +1144,7 @@ impl DurableRelay {
     /// is its boundary, whatever started the cycle.
     pub fn claude_turn_result(&mut self, result: &mj_core::acp::ClaudeTurnResult) -> Result<()> {
         if self.harness_turns != HarnessTurnPolicy::ClaudeAdapter
+            || self.snapshot.active_prompt.is_some()
             || self.snapshot.harness_turn.is_none()
         {
             return Ok(());
