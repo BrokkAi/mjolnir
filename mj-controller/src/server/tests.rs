@@ -4741,19 +4741,19 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
     let path = mj_core::config::config_path();
     let directory = path.parent().unwrap().to_path_buf();
     let home = directory.join("claude-home");
+    let home_toml = toml::Value::String(home.display().to_string()).to_string();
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(
         &path,
         format!(
             "version = {version}\n\n\
-             [profiles.claude]\nkind = \"claude\"\nhome = \"{home}\"\n\n\
+             [profiles.claude]\nkind = \"claude\"\nhome = {home_toml}\n\n\
              [profiles.claude.environment]\nANTHROPIC_API_KEY = \"{SECRET}\"\n\
              PROXY_TOKEN = {{ from_secret = \"PROXY_TOKEN\" }}\n\n\
              [targets.lab]\nkind = \"podman\"\nimage = \"example.test/lab:1\"\n\n\
              [targets.lab.environment]\nLAB_TOKEN = \"{RUNTIME_SECRET}\"\n\n\
              [targets.apple-container]\nkind = \"apple-container\"\nimage = \"example.test/apple:1\"\n",
             version = mj_core::config::CONFIG_VERSION,
-            home = home.display(),
         ),
     )
     .unwrap();
