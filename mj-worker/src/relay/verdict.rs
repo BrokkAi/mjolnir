@@ -506,7 +506,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = completed(temp.path());
         relay
-            .claude_async_task_control_changed("0".into(), true, false)
+            .claude_async_task_control_changed("0".into(), true, false, false, false)
             .unwrap();
         let before = relay.operational_state().background_commands;
         assert!(
@@ -654,7 +654,7 @@ mod settled_task_tests {
 
         // The adapter's edge update for a completed task.
         relay
-            .claude_async_task_control_changed("a".into(), false, true)
+            .claude_async_task_control_changed("a".into(), false, false, true, false)
             .unwrap();
         let facts = relay.activity_facts();
         let settled = facts.task_settled_at_ms.expect("settle recorded");
@@ -674,6 +674,51 @@ mod settled_task_tests {
             .unwrap();
         assert!(relay.activity_facts().task_settled_at_ms.is_none());
         assert!(relay.activity_facts().harness_turn_started_at_ms.is_some());
+    }
+
+    // Hard-won: agentclientprotocol/claude-agent-acp#1390: an autonomous turn's task end predicted a notification turn for 60 s.
+    #[test]
+    fn an_autonomous_turn_task_does_not_settle_or_offer_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
+        relay.acp_ready = true;
+
+        // claude-agent-acp 0.97.0's autonomousTurnStarted payload canStop=true although
+        // this synthetic turn is not background work.
+        relay
+            .claude_async_task_control_changed(
+                "autonomous-turn-uuid".into(),
+                true,
+                true,
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(
+            relay
+                .background_task_stop_target("claude:autonomous-turn-uuid")
+                .is_err()
+        );
+
+        // autonomousTurnEnded is an ordinary terminal update without taskType.
+        relay
+            .claude_async_task_control_changed(
+                "autonomous-turn-uuid".into(),
+                false,
+                false,
+                true,
+                false,
+            )
+            .unwrap();
+        let facts = relay.activity_facts();
+        assert!(facts.task_settled_at_ms.is_none());
+        assert!(relay.operational_state().is_quiet());
+        assert!(
+            relay
+                .background_task_stop_target("claude:autonomous-turn-uuid")
+                .is_err()
+        );
     }
 
     #[test]
@@ -943,7 +988,7 @@ mod settled_task_tests {
 
         // The build finishes and Claude Code answers it with its own turn.
         relay
-            .claude_async_task_control_changed("build".into(), false, true)
+            .claude_async_task_control_changed("build".into(), false, false, true, false)
             .unwrap();
         relay.claude_background_tasks_changed(Vec::new()).unwrap();
         relay
@@ -1069,7 +1114,7 @@ mod settled_task_tests {
             .unwrap();
         // A stop the user asked for is answered with a notice, not a turn.
         relay
-            .claude_async_task_control_changed("b".into(), false, false)
+            .claude_async_task_control_changed("b".into(), false, false, false, false)
             .unwrap();
         assert!(relay.activity_facts().task_settled_at_ms.is_none());
         // The level shrinking cannot tell a completed task from a stopped
@@ -1080,7 +1125,7 @@ mod settled_task_tests {
         assert!(relay.activity_facts().task_settled_at_ms.is_none());
         assert_eq!(relay.operational_state().background_commands.len(), 1);
         relay
-            .claude_async_task_control_changed("a".into(), false, true)
+            .claude_async_task_control_changed("a".into(), false, false, true, false)
             .unwrap();
         assert!(relay.activity_facts().task_settled_at_ms.is_some());
         // A restart forgets it with the rest of the harness's processes.

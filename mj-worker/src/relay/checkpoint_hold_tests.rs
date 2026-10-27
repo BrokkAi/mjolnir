@@ -150,36 +150,45 @@ fn a_cancelled_barrier_journals_what_waited() {
 /// the hold ends, what waited goes first, and then the turn.
 #[test]
 fn a_harness_turn_during_a_routine_barrier_ends_the_hold() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = configured(&temp);
-    relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
-    let cut = ready_checkpoint(&mut relay, "routine-barrier");
-    relay
-        .record_observation(RelayObservation::Notice {
-            message: "before the turn".into(),
-        })
-        .unwrap();
-    assert_eq!(relay.operational_state().latest_ordinal, cut.ordinal);
+    for announced in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = configured(&temp);
+        relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
+        relay.set_background_work_policy(BackgroundWorkPolicy::ClaudeTasks);
+        let cut = ready_checkpoint(&mut relay, "routine-barrier");
+        relay
+            .record_observation(RelayObservation::Notice {
+                message: "before the turn".into(),
+            })
+            .unwrap();
+        assert_eq!(relay.operational_state().latest_ordinal, cut.ordinal);
 
-    relay
-        .record_session_update(agent_output("working on my own"))
-        .unwrap();
+        if announced {
+            relay
+                .claude_async_task_control_changed("silent-turn".into(), true, true, false, false)
+                .unwrap();
+        } else {
+            relay
+                .record_session_update(agent_output("working on my own"))
+                .unwrap();
+        }
 
-    assert!(!relay.worker_writes_held());
-    let state = relay.operational_state();
-    let turn_started = state
-        .last_harness_turn_started_ordinal
-        .expect("the harness turn is journaled");
-    assert!(turn_started > cut.ordinal);
-    assert!(notice_ordinal(&relay, "before the turn").unwrap() < turn_started);
-    // Nothing waits for this barrier any more, so the turn's output is
-    // journaled as it arrives.
-    relay
-        .record_observation(RelayObservation::Notice {
-            message: "during the turn".into(),
-        })
-        .unwrap();
-    assert!(notice_ordinal(&relay, "during the turn").unwrap() > turn_started);
+        assert!(!relay.worker_writes_held());
+        let state = relay.operational_state();
+        let turn_started = state
+            .last_harness_turn_started_ordinal
+            .expect("the harness turn is journaled");
+        assert!(turn_started > cut.ordinal);
+        assert!(notice_ordinal(&relay, "before the turn").unwrap() < turn_started);
+        // Nothing waits for this barrier any more, so the turn's output is
+        // journaled as it arrives.
+        relay
+            .record_observation(RelayObservation::Notice {
+                message: "during the turn".into(),
+            })
+            .unwrap();
+        assert!(notice_ordinal(&relay, "during the turn").unwrap() > turn_started);
+    }
 }
 
 /// A question for a person cannot wait behind a barrier: nobody could see it

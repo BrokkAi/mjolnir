@@ -1222,8 +1222,8 @@ pub enum RelayObservation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         steering: Option<MailboxHookSteering>,
     },
-    /// The harness began working. Claude records this when output arrives
-    /// without a prompt in flight; Codex records native execution starts,
+    /// The harness began working. Claude records this on an autonomous turn
+    /// announcement or output without a prompt; Codex records native execution starts,
     /// including ordinary replies. Only starts outside a user turn add an
     /// autonomous-turn transcript marker.
     HarnessTurnStarted {

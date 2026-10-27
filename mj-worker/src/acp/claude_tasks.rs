@@ -41,8 +41,11 @@ pub(super) enum ClaudeAsyncTaskControlUpdate {
     Set {
         task_id: String,
         can_stop: bool,
-        /// `completed` or `failed`: Claude Code answers either with a
-        /// task-notification turn. `stopped` is answered with a plain notice.
+        autonomous_turn: bool,
+        /// `completed` or `failed`: Claude Code answers ordinary tasks with a
+        /// task-notification turn. Autonomous turns in claude-agent-acp 0.97.0
+        /// (`dist/async-tasks.js`) already ran and have no follow-up turn.
+        /// `stopped` is answered with a plain notice.
         settled: bool,
     },
     Ignore,
@@ -75,6 +78,8 @@ pub(super) fn claude_async_task_control_update(
                 .get("canStop")
                 .and_then(serde_json::Value::as_bool)
                 .ok_or_else(|| "async_task_spawned requires canStop".to_owned())?,
+            autonomous_turn: update.get("taskType").and_then(serde_json::Value::as_str)
+                == Some("turn"),
             settled: false,
         })),
         "async_task_state_update" => {
@@ -86,6 +91,7 @@ pub(super) fn claude_async_task_control_update(
                 Ok(Some(ClaudeAsyncTaskControlUpdate::Set {
                     task_id: task_id()?,
                     can_stop: false,
+                    autonomous_turn: false,
                     settled: state != "stopped",
                 }))
             } else if matches!(state, "running" | "paused") {
@@ -99,6 +105,34 @@ pub(super) fn claude_async_task_control_update(
             Ok(Some(ClaudeAsyncTaskControlUpdate::Ignore))
         }
         _ => Err(format!("unknown Claude async task update {kind:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_097_autonomous_turn_spawn_is_identified_by_task_type() {
+        let update = serde_json::json!({
+            "sessionUpdate": "async_task_spawned",
+            "asyncTaskId": "autonomous-turn-123",
+            "name": "Claude is working",
+            "taskType": "turn",
+            "showInTranscript": false,
+            "canStop": true,
+            "description": "Working autonomously"
+        });
+
+        assert_eq!(
+            claude_async_task_control_update(&update).unwrap(),
+            Some(ClaudeAsyncTaskControlUpdate::Set {
+                task_id: "autonomous-turn-123".into(),
+                can_stop: true,
+                autonomous_turn: true,
+                settled: false,
+            })
+        );
     }
 }
 

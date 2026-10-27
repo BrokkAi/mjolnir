@@ -1457,6 +1457,41 @@ fn a_harness_turn_runs_the_session_and_marks_where_it_began() {
     );
 }
 
+#[test]
+fn a_harness_turn_without_output_keeps_its_divider_and_stops_its_clock() {
+    let mut session = MaterializedSession::empty("session");
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted {
+            started_at_ms: 4200,
+        },
+    );
+    assert!(matches!(
+        session.execution,
+        MaterializedExecutionState::Running {
+            started_at_ms: 4200
+        }
+    ));
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            origin: Some("autonomous_task_ended".into()),
+            prompt_in_flight: false,
+        },
+    );
+    assert_eq!(session.execution, MaterializedExecutionState::Idle);
+    assert_eq!(session.transcript.len(), 1);
+    let marker = &session.transcript[0];
+    assert_eq!(marker.stable_id, "harness-turn:1");
+    assert!(
+        matches!(&marker.body, TranscriptBody::System { text } if text == crate::transcript::HARNESS_TURN_TEXT)
+    );
+    assert_eq!(
+        mj_core::state::latest_completed_turn_ordinal(&session),
+        Some(1)
+    );
+}
+
 // Hard-won: db2e99a5: a native turn settling beneath an accepted prompt incorrectly made the session idle.
 #[test]
 fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
