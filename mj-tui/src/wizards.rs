@@ -172,6 +172,8 @@ pub(crate) struct NewWizard {
     /// Removing a saved project rewrites the config, so the project list is
     /// frozen until the runtime feed shows it gone.
     pub(crate) bundle_removal_in_flight: bool,
+    /// The last removal refusal or failure, shown inside the project picker.
+    pub(crate) bundle_removal_outcome: Option<String>,
     pub(crate) project_directory: PathInput,
     pub(crate) project_directory_error: Option<String>,
     project_history: Vec<std::path::PathBuf>,
@@ -210,6 +212,7 @@ impl PartialEq for NewWizard {
             && self.new_bundle_source == other.new_bundle_source
             && self.bundle_creation_in_flight == other.bundle_creation_in_flight
             && self.bundle_removal_in_flight == other.bundle_removal_in_flight
+            && self.bundle_removal_outcome == other.bundle_removal_outcome
             && self.project_directory == other.project_directory
             && self.project_directory_error == other.project_directory_error
             && self.project_history == other.project_history

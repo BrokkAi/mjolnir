@@ -390,6 +390,110 @@ Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
 
+=== raw-output failure pending expanded (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ • Tool · waiting · 15:00                                                    ▐│
+│ │ contact_peer                                                              ▐│
+│ │ Input arguments                                                           ▐│
+│ │ peer:                                                                     ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Check parser                                                              ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+
+=== raw-output failure running expanded (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Tool · running · 15:00                                                    ▐│
+│ │ contact_peer                                                              ▐│
+│ │ Input arguments                                                           ▐│
+│ │ peer:                                                                     ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Check parser                                                              ▐│
+│ │ peer handshake started                                                    ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+
+=== raw-output failure failed expanded (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ × Tool · failed · 15:00                                                     ▐│
+│ │ contact_peer                                                              ▐│
+│ │ Input arguments                                                           ▐│
+│ │ peer:                                                                     ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Check parser                                                              ▐│
+│ │ peer handshake started                                                    ▐│
+│ │ Error                                                                     ▐│
+│ │ {                                                                         ▐│
+│ │   "message": "permission denied while contacting peer"                    ▐│
+│ │ }                                                                         ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+
+=== raw-output failure replayed and reopened (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ × Tool · failed · 15:00                                                     ▐│
+│ │ contact_peer                                                              ▐│
+│ │ Input arguments                                                           ▐│
+│ │ peer:                                                                     ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Check parser                                                              ▐│
+│ │ peer handshake started                                                    ▐│
+│ │ Error                                                                     ▐│
+│ │ {                                                                         ▐│
+│ │   "message": "permission denied while contacting peer"                    ▐│
+│ │ }                                                                         ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+
 === clean fallback terminal in rich mode (80x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
 │                                                                             ▐│

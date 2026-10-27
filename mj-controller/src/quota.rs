@@ -14,7 +14,7 @@ use crate::claude_usage;
 use crate::codex_usage::{self, CodexUsageClient, CodexUsageStatus};
 use crate::grok_usage;
 use mj_core::codex_provider::BuiltInCodexProvider;
-use mj_core::config::{HarnessKind, HarnessProfile, harness_authentication_marker};
+use mj_core::config::{AuthScheme, HarnessKind, HarnessProfile, harness_authentication_marker};
 use mj_core::credentials::{
     MAX_CREDENTIAL_BYTES, credential_expiry, credential_fingerprint, credential_freshness,
 };
@@ -42,6 +42,7 @@ pub(crate) fn surface_quota_report(report: &ProfileQuota) -> ProfileQuota {
 pub struct QuotaRefreshRequest {
     pub profile_id: String,
     pub harness: HarnessKind,
+    pub auth_scheme: AuthScheme,
     pub source_home: std::path::PathBuf,
     pub environment: BTreeMap<String, String>,
     pub cwd: std::path::PathBuf,
@@ -153,6 +154,7 @@ impl QuotaRefreshRequest {
         Self {
             profile_id: profile_id.to_owned(),
             harness: profile.kind,
+            auth_scheme: profile.auth_scheme(),
             source_home: profile.home.clone(),
             environment,
             cwd,
@@ -437,6 +439,7 @@ async fn refresh_profile_with_cache_root(
     let QuotaRefreshRequest {
         profile_id,
         harness,
+        auth_scheme,
         source_home,
         environment,
         cwd,
@@ -582,6 +585,8 @@ async fn refresh_profile_with_cache_root(
                 }
             }
         },
+        // Bedrock bills through AWS and has no Claude subscription allowance.
+        HarnessKind::Claude if auth_scheme == AuthScheme::AwsCredentialChain => Ok(usage_priced()),
         HarnessKind::Claude => claude_usage::query(source_home, environment)
             .await
             .map(|report| ProfileQuota {

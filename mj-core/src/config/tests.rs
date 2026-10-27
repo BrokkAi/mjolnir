@@ -652,7 +652,21 @@ fn saving_keeps_the_files_comments_and_order() {
 
     let saved = fs::read_to_string(&path).unwrap();
     assert_eq!(saved, original.replace("bell = true", "bell = false"));
+    assert_eq!(config.advanced.auto_afk_minutes, 0);
+    assert!(!saved.contains("auto_afk_minutes"));
     assert_eq!(Config::load_from(&path).unwrap(), config);
+
+    config.advanced.auto_afk_minutes = u32::MAX;
+    config.save_to(&path).unwrap();
+    assert!(
+        fs::read_to_string(&path)
+            .unwrap()
+            .contains("auto_afk_minutes = 4294967295")
+    );
+    assert_eq!(
+        Config::load_from(&path).unwrap().advanced.auto_afk_minutes,
+        u32::MAX
+    );
 
     // A version 12 file is marked as this build's, in place.
     fs::write(&path, "# keep me\nversion = 12 # the file format\n").unwrap();

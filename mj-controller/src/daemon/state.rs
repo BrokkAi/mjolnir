@@ -79,6 +79,7 @@ impl RuntimeState {
             Some(profile_catalog.clone()),
             reviewer_runtime.clone(),
         );
+        let inactivity = auto_afk::Inactivity::new(controller.config.advanced.auto_afk_minutes);
         Self {
             attachments: Mutex::new(BTreeMap::new()),
             phone_status: Mutex::new(WebViewerStatus::Starting),
@@ -101,7 +102,8 @@ impl RuntimeState {
             startup_prompts: Mutex::new(BTreeMap::new()),
             startup_enqueue: tokio::sync::Mutex::new(()),
             controller_loader,
-            config_mutation: tokio::sync::Mutex::new(()),
+            config_mutation: tokio::sync::Mutex::new(inactivity),
+            inactivity_changed: tokio::sync::Notify::new(),
             projects: Arc::new(crate::project_catalog::Catalog::default()),
             profile_catalog,
             recovery_observer,
@@ -692,6 +694,26 @@ impl RuntimeState {
                     "bundle creation task panicked: {error}"
                 ))
             })?
+    }
+
+    /// Remove a saved project under the daemon's config-mutation coordinator,
+    /// then publish the exact config returned by the persisted mutation.
+    pub async fn remove_project(&self, bundle_id: String) -> Result<()> {
+        let mut inactivity = self.config_mutation.lock().await;
+        let config =
+            tokio::task::spawn_blocking(move || crate::controller::remove_bundle(&bundle_id))
+                .await
+                .context("project removal task panicked")??;
+        self.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
+        {
+            self.owner().install_config(config.clone());
+            self.review_config
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone_from(&config.review);
+        }
+        self.publish_revision();
+        Ok(())
     }
 
     /// Hand a changed workspace list to the terminal clients and the web viewer.

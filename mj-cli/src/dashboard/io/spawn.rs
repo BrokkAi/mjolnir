@@ -1286,11 +1286,17 @@ pub(crate) fn spawn_remove_bundle(
     tracker: CriticalOperationTracker,
 ) {
     let removed = bundle_id.clone();
-    spawn_critical_io(
+    spawn_critical_async(
         tracker,
         "removing project",
         updates,
-        move || mj_controller::controller::remove_bundle(&bundle_id).map(|_| ()),
+        Duration::from_secs(60),
+        async move {
+            daemon::connect_or_start()
+                .await?
+                .remove_project(bundle_id)
+                .await
+        },
         move |result| DashboardIoUpdate::RemovedBundle {
             bundle_id: removed,
             result,
