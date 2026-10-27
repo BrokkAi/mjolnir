@@ -7,11 +7,13 @@ pub(super) fn prepare_attach_draft(
     dashboard: &mut DashboardState,
     session: &mj_core::state::SessionRecord,
 ) -> String {
-    if let Some(text) = dashboard.take_standby_prompt_draft(&session.id) {
+    if let Some(text) = dashboard.standby_prompt_draft(&session.id) {
         cache.capture(&session.id, text, &session.draft_input);
     }
     let draft = cache.open(&session.id, &session.draft_input).text;
-    dashboard.seed_standby_prompt(&session.id, draft.clone());
+    if !dashboard.has_standby_composer(&session.id) {
+        dashboard.seed_standby_prompt(&session.id, draft.clone());
+    }
     draft
 }
 
@@ -121,6 +123,7 @@ impl DashboardContext {
             .map(str::to_owned);
         if let Some(outgoing) = outgoing {
             self.selection.clear();
+            self.park_chat_composer(&outgoing);
             // The pane is changing session. Save what the conversation
             // leaving it holds, then drop it unless another pane shows it —
             // which it cannot, since a session is in at most one pane.
@@ -179,6 +182,12 @@ impl DashboardContext {
             .is_some_and(mj_chat::chat::ActiveChat::session_feed_open)
         {
             self.cancel_chat_open_in(pane);
+            if let Some(composer) = self.dashboard.take_standby_composer(session_id)
+                && let Some(chat) = self.chats.get_mut(session_id)
+            {
+                chat.adopt_live_composer(composer);
+                chat.keep_deferred_submission_as_draft();
+            }
             self.acknowledge_visible_chats();
             return;
         }
@@ -212,6 +221,12 @@ impl DashboardContext {
         let updates = self.dashboard_io_tx.clone();
         let session_id = session_id.to_owned();
         let bundle_id = session_record.bundle_id.clone();
+        if !self.dashboard.has_standby_composer(&session_id)
+            && let Some(chat) = self.chats.get_mut(&session_id)
+            && let Some(composer) = chat.take_live_composer()
+        {
+            self.dashboard.adopt_standby_composer(&session_id, composer);
+        }
         // A draft typed while the session's transition ran belongs to this
         // composer now; it wins over the warm chat's older captured text.
         let draft = prepare_attach_draft(

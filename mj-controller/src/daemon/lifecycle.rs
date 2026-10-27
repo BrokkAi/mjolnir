@@ -211,6 +211,7 @@ impl RuntimeState {
                 lifecycle.insert(
                     session_id.clone(),
                     ActiveLifecycle {
+                        move_operation_id: move_operation_id.clone(),
                         restart_intent: None,
                         upgrade_work: upgrade_work.clone(),
                         phase,
@@ -265,6 +266,26 @@ impl RuntimeState {
                                 .release_restart_intent(&operation_id, &intent_id)
                                 .await?;
                         }
+                        // Move was already published under the lifecycle owner.
+                        // Any earlier startup submit must settle before source
+                        // sealing; later startup submits see that same owner.
+                        let _startup_delivery = if kind == LifecycleKind::Move {
+                            let admission = operation_state
+                                .startup_delivery_gate(&operation_id)
+                                .lock_owned();
+                            tokio::pin!(admission);
+                            loop {
+                                if cancelled.load(Ordering::Acquire) {
+                                    return Ok(DaemonLifecycleResult::Done);
+                                }
+                                tokio::select! {
+                                    guard = &mut admission => break Some(guard),
+                                    () = tokio::time::sleep(Duration::from_millis(100)) => {}
+                                }
+                            }
+                        } else {
+                            None
+                        };
                         operation(operation_state, operation_id, cancelled).await
                     })
                     .await
@@ -411,6 +432,47 @@ impl RuntimeState {
                     if let Err(error) = &result {
                         tracing::warn!(session_id = %operation_session_id, ?kind, reference = %operation_reference, %error, "lifecycle operation failed");
                     }
+                    // Serialize final Move refusal disposition against any late
+                    // startup enqueue, including cancellation before source work.
+                    let _startup_enqueue = if kind == LifecycleKind::Move {
+                        Some(state.startup_enqueue.lock().await)
+                    } else {
+                        None
+                    };
+                    let restore_failed_move = kind == LifecycleKind::Move
+                        && state
+                            .owner()
+                            .lifecycle
+                            .get(&operation_session_id)
+                            .is_some_and(|active| {
+                                !active.control.stopped_for_shutdown()
+                                    && (result.is_err() || active.control.cancel_accepted())
+                            });
+                    if restore_failed_move && let Some(move_origin) = move_operation_id.clone() {
+                        let id = operation_session_id.clone();
+                        let reason = match &result {
+                            Err(error) => {
+                                format!("Move failed before destination delivery: {}", error.detail)
+                            }
+                            Ok(_) => "Move was cancelled before destination delivery".to_owned(),
+                        };
+                        let persisted = reason.clone();
+                        match blocking(move || {
+                            crate::database::reject_pending_move_startup_prompts(&id, &move_origin, &persisted)
+                        })
+                        .await
+                        {
+                            Ok(()) => state.push_notice(
+                                &operation_session_id,
+                                format!(
+                                    "Move did not deliver queued input; unsent prompts remain saved for draft recovery: {reason}"
+                                ),
+                            ),
+                            Err(error) => {
+                                tracing::error!(session_id = %operation_session_id, %error, "Move prompt disposition remains saved")
+                            }
+                        }
+                    }
                     {
                         let mut owner = state.owner();
                         owner.complete_lifecycle(
@@ -422,6 +484,7 @@ impl RuntimeState {
                         // boundary; the channel is notification, not ownership.
                         result_tx.send_replace(Some(result));
                     }
+                    drop(_startup_enqueue);
                     // Hand off under daemon ownership even if the requesting
                     // client disconnects. The completed close remains visible
                     // until the cleanup replaces it in the lifecycle map.

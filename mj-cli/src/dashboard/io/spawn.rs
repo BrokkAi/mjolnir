@@ -990,61 +990,6 @@ pub(crate) fn spawn_dashboard_change_workspace(
     );
 }
 
-pub(crate) fn spawn_startup_prompt(
-    session_id: String,
-    text: String,
-    inherited_draft: Option<String>,
-    updates: UnboundedSender<DashboardIoUpdate>,
-    tracker: CriticalOperationTracker,
-) {
-    let queued_session_id = session_id.clone();
-    let queued_text = text.clone();
-    spawn_critical_async(
-        tracker,
-        format!("queueing a prompt for session {}", short_id(&session_id)),
-        updates,
-        SAVE_ACK_TIMEOUT,
-        async move {
-            daemon::connect_or_start()
-                .await?
-                .queue_startup_prompt(queued_session_id, queued_text, inherited_draft)
-                .await
-        },
-        move |result| DashboardIoUpdate::StartupPromptQueued {
-            session_id,
-            text,
-            result,
-        },
-    );
-}
-
-pub(crate) fn spawn_withdraw_startup_prompt(
-    session_id: String,
-    text: String,
-    updates: UnboundedSender<DashboardIoUpdate>,
-    tracker: CriticalOperationTracker,
-) {
-    let withdrawn_session_id = session_id.clone();
-    let withdrawn_text = text.clone();
-    spawn_critical_async(
-        tracker,
-        format!("withdrawing a prompt for session {}", short_id(&session_id)),
-        updates,
-        SAVE_ACK_TIMEOUT,
-        async move {
-            daemon::connect_or_start()
-                .await?
-                .withdraw_startup_prompt(withdrawn_session_id, withdrawn_text)
-                .await
-        },
-        move |result| DashboardIoUpdate::StartupPromptWithdrawn {
-            session_id,
-            text,
-            result,
-        },
-    );
-}
-
 pub(crate) struct ConfigRenameRequest {
     pub(crate) what: String,
     pub(crate) old_id: String,
@@ -1234,12 +1179,15 @@ pub(crate) fn spawn_read_receipt_persist(
     );
 }
 
-pub(crate) fn spawn_clipboard_read(updates: UnboundedSender<DashboardIoUpdate>) -> JoinHandle<()> {
+pub(crate) fn spawn_clipboard_read(
+    target: mj_tui::DashboardPasteTarget,
+    updates: UnboundedSender<DashboardIoUpdate>,
+) -> JoinHandle<()> {
     spawn_io(
         "read clipboard",
         updates,
         mj_chat::clipboard::read_text,
-        DashboardIoUpdate::ClipboardText,
+        move |result| DashboardIoUpdate::ClipboardText { target, result },
     )
 }
 

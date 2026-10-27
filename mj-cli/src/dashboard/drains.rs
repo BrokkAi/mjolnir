@@ -63,11 +63,20 @@ impl DashboardContext {
         self.drain_import_profiles();
         self.drain_import_tasks();
         self.drain_lifecycle_updates();
+        for (session, id, terminal) in self.dashboard.move_prompt_origins() {
+            self.startup_prompts.observe_move(&session, id, terminal);
+        }
+        self.reconcile_composer_ownership();
+        self.startup_prompts
+            .flush_held(&self.dashboard_io_tx, &self.critical_operations);
+        let composer_completed = self.collect_prepared_startup_prompts();
+        self.startup_prompts.poll(&self.dashboard_io_tx);
         let pending_completed = self.drain_dashboard_io();
         // Collected rather than short-circuited: every feed's flag has to be
         // cleared for the next drain.
         [
             pending_completed,
+            composer_completed,
             self.quota.take_delivered(),
             self.profile_capabilities.take_delivered(),
             self.worker.take_delivered(),
@@ -85,6 +94,97 @@ impl DashboardContext {
         ]
         .into_iter()
         .any(|delivered| delivered)
+    }
+
+    /// Worker feeds may remain warm while one live composer belongs to standby.
+    fn reconcile_composer_ownership(&mut self) {
+        for (session_id, chat) in &mut self.chats {
+            let parked = self
+                .dashboard
+                .transition_kind(session_id)
+                .is_some_and(DashboardState::transition_accepts_prompts);
+            let has_standby = self.dashboard.has_standby_composer(session_id);
+            if parked
+                && !has_standby
+                && let Some(composer) = chat.take_live_composer()
+            {
+                self.dashboard.adopt_standby_composer(session_id, composer);
+            } else if !parked
+                && has_standby
+                && chat.session_feed_open()
+                && !self
+                    .opening_chat_sessions
+                    .values()
+                    .any(|opening| opening == session_id)
+                && let Some(composer) = self.dashboard.take_standby_composer(session_id)
+            {
+                chat.adopt_live_composer(composer);
+                chat.keep_deferred_submission_as_draft();
+            }
+        }
+        for (session_id, chat) in &mut self.chats {
+            if chat.has_live_composer()
+                && let Some((generation, id, succeeded)) =
+                    self.startup_prompts.terminal_move(session_id)
+            {
+                chat.settle_deferred_move_origin(generation, id.as_deref(), succeeded);
+            }
+        }
+        let mut sessions = self.dashboard.pane_session_ids();
+        sessions.extend(self.dashboard.standby_session_ids());
+        for session_id in sessions {
+            if self.dashboard.has_standby_composer(&session_id)
+                || self
+                    .dashboard
+                    .transition_kind(&session_id)
+                    .is_some_and(|kind| kind == mj_core::state::SessionTransitionKind::Moving)
+            {
+                let origin = self.startup_prompts.move_origin(&session_id);
+                self.dashboard.set_standby_move_origin(&session_id, origin);
+                if let Some((generation, id, succeeded)) =
+                    self.startup_prompts.terminal_move(&session_id)
+                {
+                    self.dashboard.settle_standby_move_origin(
+                        &session_id,
+                        generation,
+                        id.as_deref(),
+                        succeeded,
+                    );
+                }
+            }
+        }
+    }
+
+    pub(crate) fn collect_prepared_startup_prompts(&mut self) -> bool {
+        let (mut changed, actions) = self.dashboard.drain_standby_composers();
+        for action in actions {
+            if let DashboardAction::QueueStartupPrompt { session_id, prompt } = action {
+                self.startup_prompts.enqueue(
+                    session_id,
+                    prompt,
+                    None,
+                    self.dashboard_io_tx.clone(),
+                    self.critical_operations.clone(),
+                );
+            }
+        }
+        for (session_id, chat) in &mut self.chats {
+            let mut prepared = chat.take_prepared_startup_prompts();
+            if let Some(prompt) = chat.drain_composer() {
+                prepared.push(prompt);
+            }
+            changed |= !prepared.is_empty();
+            for prompt in prepared {
+                self.startup_prompts.enqueue(
+                    session_id.clone(),
+                    prompt,
+                    None,
+                    self.dashboard_io_tx.clone(),
+                    self.critical_operations.clone(),
+                );
+            }
+        }
+        changed
     }
 
     /// Whether the once-a-second clock has anything new to put on screen.
@@ -325,6 +425,10 @@ impl DashboardContext {
             self.remote_lifecycle_operations.remove(&session_id);
         }
         for lifecycle in lifecycles {
+            if let Some(id) = &lifecycle.move_operation_id {
+                self.startup_prompts
+                    .observe_move(&lifecycle.session_id, id.clone(), None);
+            }
             let kind = lifecycle_kind(lifecycle.kind);
             mark_active_chat_retiring_for_remote_lifecycle(
                 self.chats.get_mut(&lifecycle.session_id),

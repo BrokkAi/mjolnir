@@ -219,6 +219,8 @@ pub struct RuntimeState {
     /// carries. One ordered queue per session, each drained by one task.
     startup_prompts: Mutex<BTreeMap<String, StartupQueue>>,
     startup_enqueue: tokio::sync::Mutex<()>,
+    /// Orders worker admission against Move source sealing, independently per session.
+    startup_delivery_gates: Mutex<BTreeMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     controller_loader: fn() -> Result<Controller>,
     config_mutation: tokio::sync::Mutex<()>,
     projects: Arc<crate::project_catalog::Catalog>,
@@ -491,6 +493,13 @@ pub(crate) enum StartupStep {
     },
     Prompt {
         text: String,
+        /// None only for text rows persisted before structured startup prompts.
+        #[serde(default)]
+        prompt: Option<Vec<ContentBlock>>,
+        #[serde(default)]
+        encoded_draft: Option<String>,
+        #[serde(default)]
+        move_operation_id: Option<String>,
         inherited_draft: Option<String>,
     },
     Configure {
@@ -512,6 +521,7 @@ struct StartupQueue {
 }
 
 struct ActiveLifecycle {
+    move_operation_id: Option<String>,
     /// Durable intent bound by Restart admission; cleanup names this exact owner.
     restart_intent: Option<String>,
     upgrade_work: Arc<Mutex<Option<crate::upgrade::Work>>>,

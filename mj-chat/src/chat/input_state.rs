@@ -82,6 +82,7 @@ impl ChatState {
     }
 
     pub(crate) fn set_input_payload(&mut self, payload: PromptPayload) {
+        self.composer_runtime.submit_when_ready = None;
         self.pending_attachment_markers.clear();
         let mut payload = payload;
         for image in &mut payload.images {
@@ -314,11 +315,13 @@ impl ChatState {
     }
 
     pub(crate) fn clipboard_is_text_only(&self) -> bool {
-        !self.prompt_images_supported || self.clipboard_target() != ClipboardTarget::Composer
+        !(self.standby || self.prompt_images_supported)
+            || self.clipboard_target() != ClipboardTarget::Composer
     }
 
     fn allow_image_attachment(&mut self) -> bool {
-        if !self.prompt_images_supported {
+        if !(self.standby || self.composer_runtime.accepting_staged || self.prompt_images_supported)
+        {
             self.set_notice(IMAGE_CAPABILITY_NOTICE);
             return false;
         }
@@ -417,20 +420,6 @@ impl ChatState {
             .collect()
     }
 
-    /// Shows a prompt as queued again: the daemon could not confirm it was
-    /// withdrawn, so it may still be delivered.
-    pub fn restore_queued_prompt_text(&mut self, text: &str) {
-        let id = mj_client::session::new_command_id("standby")
-            .unwrap_or_else(|_| format!("standby-{}", self.queued_prompts.len()));
-        self.queued_prompts.push_back(QueuedPrompt {
-            id,
-            text: text.to_owned(),
-            kind: QueuedCommandKind::Prompt,
-            images: Vec::new(),
-            attachments_unsupported: false,
-        });
-    }
-
     /// Removes the oldest queued-prompt preview with this text and says
     /// whether one was there. Used when a queued prompt could not be handed
     /// to the daemon and its text goes back into the draft.
@@ -481,7 +470,33 @@ impl ChatState {
     }
 
     fn submit_draft(&mut self) -> ChatAction {
-        if !self.input_images.is_empty() && !self.prompt_images_supported {
+        if self.standby
+            && matches!(
+                self.composer_runtime.origin,
+                super::composer::PromptOrigin::PreparingMove(_)
+            )
+        {
+            self.defer_startup_submission();
+            self.set_notice("Preparing the move before queueing the prompt…");
+            return ChatAction::None;
+        }
+
+        if self.standby && self.composer_runtime.paste_in_flight {
+            self.defer_startup_submission();
+            self.set_notice("Reading clipboard before queueing the prompt…");
+            return ChatAction::None;
+        }
+        if self.standby
+            && self
+                .input_images
+                .iter()
+                .any(|image| image.image.is_pending())
+        {
+            self.defer_startup_submission();
+            self.set_notice("Preparing images before queueing the prompt…");
+            return ChatAction::None;
+        }
+        if !self.standby && !self.input_images.is_empty() && !self.prompt_images_supported {
             self.set_notice(IMAGE_CAPABILITY_NOTICE);
             return ChatAction::None;
         }
@@ -506,14 +521,35 @@ impl ChatState {
                 self.set_notice("Commands open when the session is live; the draft is kept.");
                 return ChatAction::None;
             }
-            let id = mj_client::session::new_command_id("standby")
-                .unwrap_or_else(|_| format!("standby-{}", self.queued_prompts.len()));
+            if self
+                .input_images
+                .iter()
+                .any(|image| image.image.is_placeholder())
+            {
+                self.set_notice("An image attachment failed; remove its marker or attach it again");
+                return ChatAction::None;
+            }
+            let id = match mj_client::session::new_command_id("standby") {
+                Ok(id) => id,
+                Err(error) => {
+                    self.set_notice(format!("Could not identify the prompt: {error:#}"));
+                    return ChatAction::None;
+                }
+            };
+            let origin = match &self.composer_runtime.origin {
+                super::composer::PromptOrigin::Move(id) => Some(id.clone()),
+                _ => None,
+            };
+            self.composer_runtime
+                .preview_origins
+                .insert(id.clone(), origin);
+            let payload = self.draft_payload().trimmed();
             self.clear_input();
             self.queued_prompts.push_back(QueuedPrompt {
                 id,
-                text: prompt.clone(),
+                text: payload.text,
                 kind: QueuedCommandKind::Prompt,
-                images: Vec::new(),
+                images: payload.images,
                 attachments_unsupported: false,
             });
             return ChatAction::Prompt(prompt);

@@ -164,3 +164,31 @@ queued prompts: ["alpha beta…\nsecond"]
 ╰────────────────────────────────────────────────────────────────────────── Enter  keeps the draft ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 autocomplete active: false
+
+=== image staged before capability discovery survives live handoff and queues with its marker (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│  queued image 1: describe [image 1]                                                              │
+│                                                                                                  │
+│> Type a draft · sending opens when the session is live                                           │
+╰ 1 queued───────────────────────────────────────────────────────────────── Enter  keeps the draft ╯
+Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
+action: Prompt("describe [image 1]")
+queued images: 1

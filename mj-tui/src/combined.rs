@@ -533,7 +533,7 @@ fn render_combined_themed(
     // With no conversation the prompt band holds the two-line guidance that
     // stands in for a composer, so it asks for the rows to show both. A
     // retiring transition uses only the compact status panel. A
-    // Starting/Resuming transition or an in-flight attach parks the real
+    // Starting/Resuming/Moving transition or an in-flight attach parks the real
     // composer in the band (the standby prompt), whose height grows with the
     // wrapped draft exactly like an attached chat's.
     let selected_session_id = dashboard.current_session_id().map(str::to_owned);
@@ -557,13 +557,7 @@ fn render_combined_themed(
         .unwrap_or(content_area.width);
     let focused_chat_session = focused_chat_on_screen(dashboard, chats, opening_panes);
     let standby_drawn = match &selected_transition {
-        Some((_, kind, failed)) => {
-            !failed
-                && matches!(
-                    kind,
-                    SessionTransitionKind::Starting | SessionTransitionKind::Resuming
-                )
-        }
+        Some((_, kind, failed)) => !failed && DashboardState::transition_accepts_prompts(*kind),
         None => {
             focused_chat_session.is_none()
                 && selected_session_id
@@ -599,19 +593,35 @@ fn render_combined_themed(
     };
     // The band has to hold the tallest composer the panes want, because every
     // pane's prompt is carved out of the one band.
-    let desired_prompt = dashboard
+    let other_panes = dashboard
         .navigation
         .sessions()
         .iter()
         .filter(|(pane, _)| **pane != focused_pane)
-        .filter_map(|(pane, session_id)| {
-            Some(
-                chats
-                    .get(session_id)?
-                    .desired_prompt_height(*pane_widths.get(pane)?),
-            )
-        })
-        .fold(focused_desired_prompt, u16::max);
+        .map(|(pane, id)| (*pane, id.clone()))
+        .collect::<Vec<_>>();
+    let mut desired_prompt = focused_desired_prompt;
+    let mut desired_by_pane = BTreeMap::from([(focused_pane, focused_desired_prompt)]);
+    for (pane, session_id) in other_panes {
+        let Some(width) = pane_widths.get(&pane) else {
+            continue;
+        };
+        let parked = dashboard
+            .transition_kind(&session_id)
+            .is_some_and(DashboardState::transition_accepts_prompts)
+            || opening_panes.get(&pane) == Some(&session_id);
+        let height = if parked {
+            dashboard
+                .standby_prompt_mut(&session_id)
+                .desired_prompt_height(*width)
+        } else {
+            chats.get(&session_id).map_or(EMPTY_PROMPT_HEIGHT, |chat| {
+                chat.desired_prompt_height(*width)
+            })
+        };
+        desired_prompt = desired_prompt.max(height);
+        desired_by_pane.insert(pane, height);
+    }
     let sizes = [
         (
             SupportPane::Sessions,
@@ -765,16 +775,10 @@ fn render_combined_themed(
                     .split(pane.rect);
                 return (pane.id, pane.rect, pane.is_focused, bands[0], bands[1]);
             }
-            let desired = if pane.is_focused {
-                focused_desired_prompt
-            } else {
-                dashboard
-                    .pane_session(pane.id)
-                    .and_then(|session_id| chats.get(session_id))
-                    .map_or(EMPTY_PROMPT_HEIGHT, |chat| {
-                        chat.desired_prompt_height(pane.rect.width)
-                    })
-            };
+            let desired = desired_by_pane
+                .get(&pane.id)
+                .copied()
+                .unwrap_or(EMPTY_PROMPT_HEIGHT);
             let (transcript, prompt) = leaf_bands(pane.rect, desired);
             (pane.id, pane.rect, pane.is_focused, transcript, prompt)
         })
@@ -951,7 +955,8 @@ fn render_combined_themed(
                 .filter(|session_id| {
                     pane_transition.is_none() && chat_shows_in_pane(opening, session_id)
                 })
-                .and_then(|session_id| chats.get_mut(session_id));
+                .and_then(|session_id| chats.get_mut(session_id))
+                .filter(|chat| chat.has_live_composer());
             let pane_failed = pane_session
                 .as_deref()
                 .filter(|session_id| opening.is_none() && dashboard.session_failed(session_id))
@@ -1220,7 +1225,14 @@ fn render_combined_themed(
                         // attach runs, so anything typed lands in the chat that
                         // opens.
                         if let Some(session_id) = selected_session_id.as_deref() {
-                            draw_standby_prompt(frame, prompt_area, dashboard, session_id, None);
+                            draw_standby_prompt(
+                                frame,
+                                prompt_area,
+                                dashboard,
+                                session_id,
+                                true,
+                                None,
+                            );
                         }
                     } else {
                         render_empty_prompt_advice(
@@ -1312,7 +1324,9 @@ fn focused_chat_on_screen(
     let pane = dashboard.focused_pane();
     let session_id = dashboard.pane_session(pane)?;
     let opening = opening_panes.get(&pane).map(String::as_str);
-    (chats.contains_key(session_id)
+    (chats
+        .get(session_id)
+        .is_some_and(|chat| chat.has_live_composer())
         && chat_shows_in_pane(opening, session_id)
         && dashboard.transition_kind(session_id).is_none()
         && dashboard.transition_failure_kind(session_id).is_none())
@@ -1533,9 +1547,10 @@ fn draw_standby_prompt(
     prompt_area: Rect,
     dashboard: &mut DashboardState,
     session_id: &str,
+    pane_focused: bool,
     note: Option<Line<'static>>,
 ) {
-    let focused = dashboard.prompt_has_focus();
+    let focused = pane_focused && dashboard.prompt_has_focus();
     let surfaces = {
         let standby = dashboard.standby_prompt_mut(session_id);
         draw_standby_band(frame, prompt_area, standby, focused, note)
@@ -1614,10 +1629,10 @@ fn render_launch_standby_surface(
 /// read cursor, and history survive the operation, but the transcript cannot
 /// be mistaken for a session that is being retired.
 ///
-/// Starting and Resuming keep the real composer on screen: the standby prompt
+/// Starting, Resuming, and Moving keep the real composer on screen: the standby prompt
 /// below the transition panel is the chat's own composer, so the first
 /// message can be drafted with the usual readline keys before the session is
-/// live (Enter holds the draft and explains), and the draft carries into the
+/// live (Enter queues it for the destination), and the draft carries into the
 /// conversation when the chat opens. Retiring and failed transitions have no
 /// conversation to type toward, so they keep the plain status panel.
 /// What one pane's transition panel reports: the operation under way, whether
@@ -1713,11 +1728,7 @@ fn render_transition_surface(
             .right_aligned(),
         );
     }
-    let type_ahead = !failed
-        && matches!(
-            transition,
-            SessionTransitionKind::Starting | SessionTransitionKind::Resuming
-        );
+    let type_ahead = !failed && DashboardState::transition_accepts_prompts(transition);
     let mut details = vec![
         Line::styled(
             format!("{} · {}", target, session.display_title()),
@@ -1759,7 +1770,14 @@ fn render_transition_surface(
                 )
                 .left_aligned()
             });
-        draw_standby_prompt(frame, prompt_area, dashboard, session_id, note);
+        draw_standby_prompt(
+            frame,
+            prompt_area,
+            dashboard,
+            session_id,
+            pane_focused,
+            note,
+        );
         return;
     }
     let cancel_line = if !failed && operation.is_some_and(|operation| operation.cancellable) {
@@ -2323,6 +2341,69 @@ mod tests {
         let lines = render_combined_golden(&mut standby, 100, 40);
         append_combined_golden(&mut output, "empty standby composer", 100, 40, &lines);
         append_pane_geometry(&mut output, &standby);
+
+        let mut split = dashboard_with_session(running_session());
+        let mut second = running_session();
+        second.id = "session-2".into();
+        let mut split_state = (*split.state).clone();
+        split_state.sessions.insert(second.id.clone(), second);
+        split.set_state(split_state);
+        render_combined_golden(&mut split, 160, 55);
+        let inactive = split.focused_pane();
+        let focused = split
+            .split_focused_pane(Direction::Horizontal, Some("session-2"))
+            .unwrap();
+        split.begin_session_operation("session-1".into(), SessionOperationKind::Moving, None);
+        split.begin_session_operation("session-2".into(), SessionOperationKind::Resuming, None);
+        for operation in split.session_operations.values_mut() {
+            operation.started_at_epoch_seconds = u64::MAX;
+        }
+        split.seed_standby_prompt("session-1", "queued before move".into());
+        split
+            .standby_prompt_mut("session-1")
+            .handle_key(key(KeyCode::Enter));
+        split.seed_standby_prompt(
+            "session-1",
+            "one\ntwo\nthree\nfour\nfive\nsix\nseven".into(),
+        );
+        split.seed_standby_prompt("session-2", "focused draft".into());
+        split.focus_prompt();
+        let mut terminal = Terminal::new(TestBackend::new(160, 55)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut split))
+            .unwrap();
+        let (inactive_transcript, inactive_prompt) = split.pane_bands(inactive).unwrap();
+        let focused_prompt = split.pane_bands(focused).unwrap().1;
+        let wanted = split
+            .standby_prompt_mut("session-1")
+            .desired_prompt_height(inactive_prompt.width);
+        assert!(
+            inactive_prompt.height
+                == prompt_target(wanted, inactive_prompt.height + inactive_transcript.height),
+            "inactive Moving composer must determine the shared band's height"
+        );
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert!(focused_prompt.contains(cursor));
+        let edge = &terminal.backend().buffer()[(inactive_prompt.x, inactive_prompt.y + 1)];
+        assert_eq!(
+            Some(edge.fg),
+            theme::border(false).fg,
+            "inactive composer must not draw a focused border or cursor"
+        );
+        let lines = render_combined_golden(&mut split, 160, 55);
+        append_combined_golden(
+            &mut output,
+            "split panes retain the inactive Moving draft and only focus the active composer",
+            160,
+            55,
+            &lines,
+        );
+        writeln!(
+            output,
+            "inactive prompt height: {}; desired: {wanted}; focused cursor: {cursor:?}",
+            inactive_prompt.height
+        )
+        .unwrap();
 
         let mut suspending = dashboard_with_session(running_session());
         suspending.begin_session_operation(

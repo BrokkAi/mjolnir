@@ -184,16 +184,27 @@ pub(crate) enum DashboardIoUpdate {
     },
     /// A prompt typed into a standby composer and handed to the daemon for
     /// delivery once the session is live.
+    MoveOriginPrepared {
+        session_id: String,
+        move_operation_id: String,
+        operation: Arc<AtomicBool>,
+    },
+    StartupPromptOutcomes {
+        session_id: String,
+        result:
+            std::result::Result<BTreeMap<String, mj_client::daemon::StartupPromptOutcome>, String>,
+    },
     StartupPromptQueued {
         session_id: String,
-        text: String,
+        prompt: mj_chat::chat::StartupPrompt,
         result: std::result::Result<(), String>,
+        definitely_unaccepted: bool,
     },
     /// The daemon's answer to taking a recalled prompt back: `Ok(true)` it is
     /// withdrawn, `Ok(false)` it had already been sent.
     StartupPromptWithdrawn {
         session_id: String,
-        text: String,
+        prompt: mj_chat::chat::StartupPrompt,
         result: std::result::Result<bool, String>,
     },
     ContainerSettings {
@@ -431,7 +442,10 @@ pub(crate) enum DashboardIoUpdate {
     },
     /// Clipboard providers may use a blocking desktop IPC call. The result
     /// is delivered here after that work finishes on a blocking task.
-    ClipboardText(std::result::Result<String, String>),
+    ClipboardText {
+        target: mj_tui::DashboardPasteTarget,
+        result: std::result::Result<String, String>,
+    },
     /// A copied selection reached the desktop clipboard, or did not. Only a
     /// failure needs reporting: the notice for a successful copy is already
     /// on screen.
@@ -925,20 +939,18 @@ impl DashboardContext {
                         // Whatever the user typed into the standby composer
                         // while this attach ran is the newest draft, so it
                         // wins over the copy captured when the open started.
-                        let chat = if let Some(text) =
-                            self.dashboard.take_standby_prompt_draft(&session_id)
-                        {
-                            chat.with_draft(text)
-                        } else if let Some(draft) = self.composer_drafts.get(&session_id) {
-                            chat.with_draft(draft.text.clone())
-                        } else {
-                            chat
-                        };
-                        let mut chat = chat.open_replacing(self.chats.get(&session_id));
+                        let composer = self.dashboard.take_standby_composer(&session_id)
+                            .or_else(|| self.chats.get_mut(&session_id).and_then(|chat| chat.take_live_composer()));
+                        let chat = if composer.is_none() {
+                            if let Some(draft) = self.composer_drafts.get(&session_id) { chat.with_draft(draft.text.clone()) } else { chat }
+                        } else { chat };
+                        let mut chat = chat.open();
+                        if let Some(composer) = composer { chat.adopt_live_composer(composer); }
                         if let Some(position) = self.transcript_positions.get(&session_id) {
                             chat.restore_transcript_position(position.clone());
                         }
                         self.restore_question_draft(&session_id, &mut chat);
+                        for (prompt,inherited_draft) in chat.startup_retry_prompts() {self.startup_prompts.resume(session_id.clone(),prompt,inherited_draft,self.dashboard_io_tx.clone(),self.critical_operations.clone());}
                         self.chats.insert(session_id.clone(), chat);
                         // The context travelled with the attach, which is
                         // asynchronous; anything the surface learned while it
@@ -1050,48 +1062,48 @@ impl DashboardContext {
                     }
                 }
             }
-            DashboardIoUpdate::StartupPromptQueued {
-                session_id,
-                text,
-                result,
-            } => {
-                // A queued prompt shows as a preview already, so success needs
-                // no notice. A refusal puts the text back in the composer.
-                if let Err(error) = result {
-                    self.dashboard.restore_standby_prompt(&session_id, &text);
-                    self.dashboard.set_failure_notice(format!(
-                        "Could not queue the prompt for session {}: {error}",
-                        self.session_notice_name(&session_id)
-                    ));
+            DashboardIoUpdate::MoveOriginPrepared {session_id,move_operation_id,operation} => {
+                if self.lifecycle_operations.get(&session_id).is_some_and(|current|Arc::ptr_eq(&current.cancelled,&operation)) {
+                    self.startup_prompts.prepare_move(&session_id,Some(move_operation_id));
+                    let origin=self.startup_prompts.move_origin(&session_id);
+                    self.dashboard.set_standby_move_origin(&session_id,origin);
                 }
             }
-            DashboardIoUpdate::StartupPromptWithdrawn {
-                session_id,
-                text,
-                result,
-            } => {
-                let name = self.session_notice_name(&session_id);
+            DashboardIoUpdate::StartupPromptOutcomes {session_id, result} => {
+                self.startup_prompts.outcomes(&session_id, result.is_ok());
                 match result {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        let dropped = self.dashboard.standby_prompt_was_sent(&session_id, &text);
-                        self.dashboard.set_notice(if dropped {
-                            format!(
-                                "That prompt had already been sent to session {name}, so it is not in the composer any more."
-                            )
-                        } else {
-                            format!(
-                                "That prompt had already been sent to session {name}; the composer still holds your edit, and Enter sends it as a new prompt."
-                            )
-                        });
+                    Err(error) => { tracing::warn!(%session_id, %error, "could not check startup prompt outcomes; retrying with backoff"); }
+                    Ok(outcomes) => self.startup_prompts.apply_outcomes(&session_id, outcomes, &mut self.dashboard, &mut self.chats),
+                }
+            }
+            DashboardIoUpdate::StartupPromptQueued { session_id, prompt, result, definitely_unaccepted } => {
+                if self.startup_prompts.is_settled(&session_id, &prompt.command_id) {return;}
+                if let Err(error) = result {
+                    if !self.startup_prompts.admission_failed(&session_id, &prompt.command_id, &error, definitely_unaccepted) {
+                        self.dashboard.set_failure_notice(if definitely_unaccepted {
+                            format!("The prompt was not queued: {error}; the recalled draft is kept.")
+                        } else {format!("Could not confirm whether the prompt was queued: {error}; checking its status.")});
+                        return;
                     }
-                    Err(error) => {
-                        self.dashboard
-                            .standby_prompt_withdrawal_unconfirmed(&session_id, &text);
-                        self.dashboard.set_failure_notice(format!(
-                            "Could not take the prompt back from session {name} ({error}); it is still queued and will be sent when the session is live."
-                        ));
-                    }
+                    let restored = if let Some(chat) = self.chats.get_mut(&session_id).filter(|_| !self.dashboard.has_standby_composer(&session_id)) {
+                        chat.restore_startup_prompt(prompt)
+                    } else { self.dashboard.restore_startup_prompt(&session_id, prompt) };
+                    let recovery = restored.err().map(|error| format!("; restoring the draft failed: {error:#}")).unwrap_or_default();
+                    self.dashboard.set_failure_notice(format!("Could not queue the prompt for session {}: {error}{recovery}", self.session_notice_name(&session_id)));
+                }
+            }
+            DashboardIoUpdate::StartupPromptWithdrawn { session_id, prompt, result } => {
+                if self.startup_prompts.withdrawal_needs_receipt(&session_id, &prompt.command_id) { return; }
+                let already_sent = matches!(&result, Ok(false));
+                let applied = if let Some(chat) = self.chats.get_mut(&session_id).filter(|_| !self.dashboard.has_standby_composer(&session_id)) {
+                    chat.startup_prompt_withdrawn(prompt, result)
+                } else { self.dashboard.startup_prompt_withdrawn(&session_id, prompt, result) };
+                match applied {
+                    Ok(dropped) if already_sent => self.dashboard.set_notice(if dropped {
+                        "That prompt had already been sent, so its unchanged copy was removed from the composer."
+                    } else { "That prompt had already been sent; Enter sends your edited draft as a new prompt." }),
+                    Ok(_) => {},
+                    Err(error) => self.dashboard.set_failure_notice(format!("Could not take the prompt back ({error:#}); it is still queued.")),
                 }
             }
             DashboardIoUpdate::RenameSession { title, result } => match result {
@@ -1422,10 +1434,10 @@ impl DashboardContext {
                     ));
                 }
             }
-            DashboardIoUpdate::ClipboardText(result) => {
+            DashboardIoUpdate::ClipboardText {target, result} => {
                 self.clipboard_read_in_flight = false;
                 match result {
-                    Ok(text) => self.dashboard.handle_paste(&text),
+                    Ok(text) => { self.dashboard.apply_clipboard_text(&target, &text); },
                     Err(error) => self.dashboard.set_notice(format!("Paste failed: {error}")),
                 }
             }
@@ -1761,10 +1773,11 @@ impl DashboardContext {
                 // this session now: its composer becomes the session's standby,
                 // and each prompt already entered there goes to the daemon to
                 // be delivered when the harness is ready.
-                for text in self.dashboard.adopt_launch_standby(&session_id) {
-                    spawn_startup_prompt(
+                self.dashboard.adopt_launch_standby(&session_id);
+                for prompt in self.dashboard.standby_startup_prompts(&session_id) {
+                    self.startup_prompts.enqueue(
                         session_id.clone(),
-                        text,
+                        prompt,
                         None,
                         self.dashboard_io_tx.clone(),
                         self.critical_operations.clone(),
@@ -1825,6 +1838,23 @@ impl DashboardContext {
                 .as_ref()
                 .map(|operation| operation.notice_name.as_str()),
         );
+        if operation
+            .as_ref()
+            .is_some_and(|operation| operation.kind == SessionOperationKind::Moving)
+        {
+            let completed = match &update.result {
+                Ok(LifecycleSuccess::Moved(outcome))
+                    if outcome.outcome != "failed" && outcome.outcome != "cancelled" =>
+                {
+                    Some(outcome.operation_id.clone())
+                }
+                _ => None,
+            };
+            self.startup_prompts.finish_move(&session_id, completed);
+            if update.result.is_err() {
+                self.dashboard.keep_standby_submission_as_draft(&session_id);
+            }
+        }
         let loaded = match reloaded.result {
             Ok(loaded) => loaded,
             Err(error) => {

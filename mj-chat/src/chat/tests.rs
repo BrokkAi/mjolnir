@@ -1796,6 +1796,32 @@ mod golden_cases {
             },
         );
 
+        chat.set_input("describe ".into());
+        chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
+        let composer = chat.take_live_composer().unwrap();
+        let mut adopted = ChatState::standby(
+            "session-1",
+            &config,
+            SessionHeaderIdentity::default(),
+            Notices::default(),
+        );
+        adopted.adopt_live_composer(composer);
+        let action = adopted.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "image staged before capability discovery survives live handoff and queues with its marker",
+            &mut adopted,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |chat| {
+                details(&[&format!(
+                    "queued images: {}",
+                    chat.latest_startup_prompt().unwrap().payload.images.len()
+                )])
+            },
+        );
+
         save("chat-composer-draft-lifecycle", &output);
     }
 

@@ -78,6 +78,9 @@ impl DashboardState {
     /// whether the notice on screen has been readable long enough for this
     /// key press to dismiss it.
     pub fn handle_key_at(&mut self, key: KeyEvent, now: Instant) -> DashboardAction {
+        if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
+            self.paste_revision = self.paste_revision.wrapping_add(1);
+        }
         if self.away_dialog().is_some() {
             return self.handle_away_event(Event::Key(key));
         }
@@ -92,6 +95,11 @@ impl DashboardState {
             return self.handle_pane_menu_event(Event::Key(key));
         }
         if is_paste_shortcut(key) {
+            if !self.component_modal_open()
+                && let Some(action) = self.handle_standby_prompt_key(key)
+            {
+                return action;
+            }
             self.record_event_handled();
             return DashboardAction::PasteFromClipboard;
         }
@@ -131,7 +139,25 @@ impl DashboardState {
             .is_some_and(|modal| modal.text_input_focused())
     }
 
+    pub fn paste_target(&self) -> DashboardPasteTarget {
+        DashboardPasteTarget {
+            revision: self.paste_revision,
+            mode: std::mem::discriminant(&self.mode),
+            session: self.current_session_id().map(str::to_owned),
+            pane: self.focused_pane(),
+            focus: self.focus,
+        }
+    }
+    /// A modal clipboard read cannot follow focus into another field or session.
+    pub fn apply_clipboard_text(&mut self, target: &DashboardPasteTarget, text: &str) -> bool {
+        if &self.paste_target() != target {
+            return false;
+        }
+        self.handle_paste(text);
+        true
+    }
     pub fn handle_paste(&mut self, pasted: &str) {
+        self.paste_revision = self.paste_revision.wrapping_add(1);
         if self.away_dialog().is_some() {
             self.handle_away_event(Event::Paste(pasted.to_owned()));
             return;
@@ -150,11 +176,12 @@ impl DashboardState {
         let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
         if let Some(session_id) = self.standby_prompt_session() {
             let session_id = session_id.to_owned();
-            self.standby_prompt_mut(&session_id).paste(&normalized);
+            self.standby_prompt_mut(&session_id)
+                .handle_composer_paste(&normalized);
         } else if self.launch_standby_capturing()
             && let Some(standby) = self.launch_standby.as_mut()
         {
-            standby.paste(&normalized);
+            standby.handle_composer_paste(&normalized);
         }
     }
 
@@ -164,6 +191,7 @@ impl DashboardState {
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> DashboardAction {
+        self.paste_revision = self.paste_revision.wrapping_add(1);
         if self.away_dialog().is_some() {
             return self.handle_away_event(Event::Mouse(mouse));
         }
