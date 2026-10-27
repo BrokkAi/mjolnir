@@ -5360,7 +5360,15 @@ fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
                 "expires_at": format!("2026-10-{:02}T09:00:00Z", 10 + generation),
             }
         }),
-        HarnessKind::Muse => serde_json::json!({ "token": format!("token-{generation}") }),
+        HarnessKind::Muse => serde_json::json!({
+            "schema_version": 1,
+            "providers": {"meta": {
+                "access_token": format!("access-{generation}"),
+                "refresh_token": format!("refresh-{generation}"),
+                "expires_at": 1_790_000_000_i64 + generation,
+                "mechanism": "oauth",
+            }}
+        }),
         // A staged OpenCode home carries its logins as `auth export` prints
         // them.
         HarnessKind::OpenCode => serde_json::json!([{
@@ -5478,10 +5486,9 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             "{kind:?}"
         );
         // Muse's staged root lies under the data directory; the rest of the
-        // exchange is the same for it, except that Muse stores no refresh
-        // time, so the sync never orders two different Muse copies. DSH has
-        // no login to rotate: its key comes from its environment.
-        if kind == HarnessKind::Muse || kind.api_key_variable().is_some() {
+        // exchange is the same for it. DSH has no login to rotate: its key
+        // comes from its environment.
+        if kind.api_key_variable().is_some() {
             continue;
         }
         // OpenCode's logins live in its database: the sync pushes its export

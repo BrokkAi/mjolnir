@@ -181,18 +181,7 @@ impl ElicitationDialog {
             let Some(custom) = display.custom else {
                 continue;
             };
-            // An optional question whose text goes beside a pick starts with
-            // nothing picked, so the text alone can be the whole answer.
             let owner = &request.fields[display.field];
-            if display.alongside
-                && !owner.required
-                && matches!(
-                    owner.kind,
-                    ElicitationFieldKind::SingleSelect { default: None, .. }
-                )
-            {
-                values[display.field] = FieldValue::Single(None);
-            }
             if active_custom_fields.contains(&custom)
                 && !display.alongside
                 && let Some(option_count) = select_option_count(owner)

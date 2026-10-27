@@ -675,6 +675,7 @@ fn parse_field(field_id: &str, value: &Value, required: bool) -> Result<Elicitat
                 let default = optional_text(schema, "default")?.or_else(|| {
                     recommended_options(&options)
                         .next()
+                        .or(options.first())
                         .map(|option| option.value.clone())
                 });
                 ElicitationFieldKind::SingleSelect { options, default }
@@ -730,7 +731,8 @@ fn parse_field(field_id: &str, value: &Value, required: bool) -> Result<Elicitat
 
 /// Options labelled "(Recommended)", the way Claude's AskUserQuestion marks
 /// the answer it suggests. A select with no default of its own starts with
-/// these picked, rather than with the first one only under the cursor.
+/// these picked. A single-select with none of them starts with its first
+/// option picked, so every question of a form starts the same way.
 fn recommended_options(options: &[ElicitationOption]) -> impl Iterator<Item = &ElicitationOption> {
     options.iter().filter(|option| {
         option
@@ -989,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn a_select_without_a_default_defaults_to_its_recommended_options() {
+    fn a_select_without_a_default_defaults_to_its_recommended_or_first_option() {
         let request = ElicitationRequest::from_acp_params(
             "elicit-recommended",
             json!({
@@ -1002,8 +1004,8 @@ mod tests {
                         "recommended": {
                             "type": "string",
                             "oneOf": [
-                                {"const": "keep", "title": "Keep it (Recommended)"},
-                                {"const": "drop", "title": "Drop it"}
+                                {"const": "drop", "title": "Drop it"},
+                                {"const": "keep", "title": "Keep it (Recommended)"}
                             ]
                         },
                         "own_default": {
@@ -1016,7 +1018,10 @@ mod tests {
                         },
                         "unmarked": {
                             "type": "string",
-                            "oneOf": [{"const": "keep", "title": "Keep it"}]
+                            "oneOf": [
+                                {"const": "keep", "title": "Keep it"},
+                                {"const": "drop", "title": "Drop it"}
+                            ]
                         },
                         "targets": {
                             "type": "array",
@@ -1039,7 +1044,7 @@ mod tests {
         };
         assert_eq!(single_default("recommended").as_deref(), Some("keep"));
         assert_eq!(single_default("own_default").as_deref(), Some("drop"));
-        assert_eq!(single_default("unmarked"), None);
+        assert_eq!(single_default("unmarked").as_deref(), Some("keep"));
         let targets = request.fields.iter().find(|field| field.id == "targets");
         let Some(ElicitationField {
             kind: ElicitationFieldKind::MultiSelect { default, .. },

@@ -224,12 +224,21 @@ pub fn credential_freshness(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
 /// This is not [`credential_freshness`]. Freshness orders two copies of the
 /// same grant; expiry says when the grant runs out. Claude states the same
 /// number for both, but Codex orders copies by `last_refresh` and expires by
-/// the `exp` claim of the access token in `tokens.access_token`. Grok and Muse
-/// have no proactive-refresh path, so they report nothing here.
+/// the `exp` claim of the access token in `tokens.access_token`. Grok has no
+/// proactive-refresh path, so it reports nothing here.
 ///
 /// Anything unparseable is `None` rather than a guess.
 pub fn credential_expiry(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
     kind.credential_expiry_ms(&serde_json::from_slice(bytes).ok()?)
+}
+
+/// Muse's Meta login records its access-token expiry in epoch seconds. A
+/// refresh moves it forward, so it both orders copies and says when the login
+/// runs out. A stored API key has none.
+fn muse_login_expiry_ms(json: &serde_json::Value) -> Option<i64> {
+    json.pointer("/providers/meta/expires_at")?
+        .as_i64()?
+        .checked_mul(1000)
 }
 
 impl HarnessKind {
@@ -247,6 +256,7 @@ impl HarnessKind {
                 .get("expires_at")?
                 .as_i64()
                 .and_then(|seconds| seconds.checked_mul(1000)),
+            Self::Muse => muse_login_expiry_ms(json),
             Self::Grok => json
                 .as_object()?
                 .values()
@@ -265,10 +275,9 @@ impl HarnessKind {
                 .filter_map(|grant| grant.get("expires")?.as_i64())
                 .filter(|expires| *expires > 0)
                 .max(),
-            // Muse stores no timestamp Hel can order two copies by,
             // OpenCode's logins live in its database, which no copy orders,
             // and DSH has no login.
-            Self::Muse | Self::OpenCode | Self::Dsh => None,
+            Self::OpenCode | Self::Dsh => None,
         }
     }
 
@@ -281,9 +290,10 @@ impl HarnessKind {
                 .get("expires_at")?
                 .as_i64()
                 .and_then(|seconds| seconds.checked_mul(1000)),
+            Self::Muse => muse_login_expiry_ms(json),
             // None of these has a proactive-refresh path, so none reports an
             // expiry Hel would act on: each refreshes its own tokens on demand.
-            Self::Grok | Self::Muse | Self::OpenCode | Self::Mimo | Self::Dsh => None,
+            Self::Grok | Self::OpenCode | Self::Mimo | Self::Dsh => None,
         }
     }
 

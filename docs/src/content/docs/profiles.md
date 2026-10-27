@@ -783,9 +783,9 @@ session, that copy can become canonical and then propagate to sibling sessions.
 Several sessions of one profile therefore hold copies of one rotating grant,
 just as container sessions do.
 
-Codex logins are refreshed ahead of expiry when possible. For Claude, prefer the
-long-lived setup token above. A reconciliation failure is surfaced rather than
-silently discarded.
+Codex, Kimi Code, and Muse Code logins are refreshed ahead of expiry when
+possible. For Claude, prefer the long-lived setup token above. A
+reconciliation failure is surfaced rather than silently discarded.
 
 GitHub authentication is separate from harness authentication. Mjolnir reads
 `GH_TOKEN`, then `GITHUB_TOKEN`, then `gh auth token --hostname github.com`. It
@@ -963,7 +963,7 @@ while the pane has focus. **Refresh** runs the same refresh as
 | Claude Code | Five-hour and weekly subscription windows when reported. |
 | Kimi Code | Usage windows returned by the configured Kimi service. |
 | Grok Build | The harness's ACP billing extension. |
-| Muse Code | Native subscription usage windows and reset times, when reported. |
+| Muse Code | Native subscription usage windows and reset times, when reported. The daemon refreshes the Muse login itself, so the reading does not depend on Muse having run. |
 | OpenCode | No published quota endpoint; the profile shows an unavailable reading. |
 | MiMo Code | No published quota endpoint; the profile shows an unavailable reading. |
 | DSH | No quota endpoint; DeepSeek bills by usage, so the profile shows `API`. |

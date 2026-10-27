@@ -3,6 +3,10 @@
 //! Muse keeps the access token in each profile's `auth.json`. The endpoint is
 //! intentionally queried directly here so each profile stays isolated and no
 //! minted API key is persisted or passed through the rest of the controller.
+//!
+//! The daemon keeps that login fresh itself, as it does for Kimi: a token near
+//! its expiry, or one the endpoint rejects, is refreshed under the lock Muse
+//! takes for `auth.json`, so the quota does not depend on Muse having run.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -20,6 +24,27 @@ const MINT_BASE_URL_ENV: &str = "TBH_MINT_BASE_URL";
 const DEFAULT_MINT_BASE_URL: &str = "https://api.meta.ai";
 const MINT_PATH: &str = "/muse-code/key";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Muse's own override for its OAuth host, honoured the same way as the mint
+/// override so a profile's environment points both at one deployment.
+const AUTH_BASE_URL_ENV: &str = "TBH_AUTH_BASE_URL";
+const DEFAULT_AUTH_BASE_URL: &str = "https://auth.meta.com";
+/// The token endpoint and public client id `muse login` uses (observed on the
+/// wire from Muse 1.4.12). A refresh is the standard `refresh_token` grant
+/// against the same endpoint.
+const TOKEN_PATH: &str = "/oidc/device/token/";
+const OAUTH_CLIENT_ID: &str = "1031625952748946";
+/// Muse serializes every `auth.json` write with an exclusive lock on this
+/// file, and gives up after waiting 5 seconds for it.
+const AUTH_LOCK_FILE: &str = ".auth.json.lock";
+const AUTH_LOCK_WAIT: Duration = Duration::from_secs(10);
+const AUTH_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+/// Refresh this long before the recorded expiry. It spans two quota polls, so
+/// the credential sync hands the new login to running sessions before their
+/// copies run out and have to spend the same refresh token themselves.
+const REFRESH_AHEAD: Duration = Duration::from_secs(20 * 60);
+/// The dashboard's marker for a rejected login; it renders this text as is.
+const LOGIN_EXPIRED: &str = "login expired";
 
 /// The mint endpoint is the only source of Muse usage and it is rate limited
 /// per account, so every caller in this process shares one reading rather than
@@ -80,10 +105,9 @@ fn shared_gate() -> &'static Gate {
 
 /// Query the Muse subscription usage for one profile.
 pub async fn query(home: &Path, environment: &HashMap<String, String>) -> Result<MuseUsageReport> {
-    let base_url = mint_base_url(environment);
     query_gated(
         home,
-        &base_url,
+        &Endpoints::of(environment),
         REQUEST_TIMEOUT,
         shared_gate(),
         SystemTime::now(),
@@ -91,11 +115,34 @@ pub async fn query(home: &Path, environment: &HashMap<String, String>) -> Result
     .await
 }
 
+/// Where one profile's Muse reaches Meta: the mint endpoint that reports
+/// usage, and the OAuth host that refreshes the login.
+struct Endpoints {
+    mint: String,
+    auth: String,
+}
+
+impl Endpoints {
+    fn of(environment: &HashMap<String, String>) -> Self {
+        let configured = |name: &str, default: &str| {
+            environment
+                .get(name)
+                .cloned()
+                .or_else(|| std::env::var(name).ok())
+                .unwrap_or_else(|| default.to_owned())
+        };
+        Self {
+            mint: configured(MINT_BASE_URL_ENV, DEFAULT_MINT_BASE_URL),
+            auth: configured(AUTH_BASE_URL_ENV, DEFAULT_AUTH_BASE_URL),
+        }
+    }
+}
+
 /// The rate-limit and minimum-interval gate above the network step. `now` is
 /// supplied by the caller so tests can drive the clock without sleeping.
 async fn query_gated(
     home: &Path,
-    base_url: &str,
+    endpoints: &Endpoints,
     timeout: Duration,
     gate: &Gate,
     now: SystemTime,
@@ -104,7 +151,7 @@ async fn query_gated(
     if let Some(report) = cached_report(gate, &key, now)? {
         return Ok(report);
     }
-    match query_with_timeout(home, base_url, timeout).await {
+    match query_with_timeout(home, endpoints, timeout).await {
         Ok(windows) => {
             let mut entries = gate.lock().unwrap_or_else(|error| error.into_inner());
             let entry = entries.entry(key).or_default();
@@ -203,24 +250,53 @@ fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
     (at.with_timezone(&chrono::Utc) - now).to_std().ok()
 }
 
-fn mint_base_url(environment: &HashMap<String, String>) -> String {
-    if let Some(value) = environment.get(MINT_BASE_URL_ENV) {
-        return value.clone();
-    }
-    std::env::var(MINT_BASE_URL_ENV).unwrap_or_else(|_| DEFAULT_MINT_BASE_URL.to_owned())
-}
-
 async fn query_with_timeout(
     home: &Path,
-    base_url: &str,
+    endpoints: &Endpoints,
     timeout: Duration,
 ) -> Result<Vec<MuseUsageWindow>> {
-    let token = read_access_token(home).await?;
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("build Muse usage client")?;
+    let token = fresh_access_token(&client, home, &endpoints.auth, None).await?;
+    match mint(&client, &endpoints.mint, &token).await {
+        // The endpoint, not the recorded expiry, is the judge of a token.
+        Err(error) if error.is::<LoginRejected>() => {
+            let refreshed =
+                fresh_access_token(&client, home, &endpoints.auth, Some(&token)).await?;
+            mint(&client, &endpoints.mint, &refreshed).await
+        }
+        result => result,
+    }
+    .map_err(|error| {
+        if error.is::<LoginRejected>() {
+            anyhow::anyhow!(LOGIN_EXPIRED)
+        } else {
+            error
+        }
+    })
+}
+
+/// Meta refused the login: the mint endpoint rejected the access token, or
+/// the OAuth host rejected the refresh token.
+#[derive(Debug)]
+struct LoginRejected;
+
+impl std::fmt::Display for LoginRejected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(LOGIN_EXPIRED)
+    }
+}
+
+impl std::error::Error for LoginRejected {}
+
+async fn mint(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+) -> Result<Vec<MuseUsageWindow>> {
     let url = format!("{}{}", base_url.trim_end_matches('/'), MINT_PATH);
     let response = client
         .post(url)
@@ -239,7 +315,7 @@ async fn query_with_timeout(
         })?;
     let status = response.status();
     if matches!(status.as_u16(), 401 | 403) {
-        bail!("Muse login expired")
+        return Err(anyhow::Error::new(LoginRejected));
     }
     if status.as_u16() == 429 {
         let retry_after = response
@@ -257,7 +333,199 @@ async fn query_with_timeout(
     parse(&payload)
 }
 
-async fn read_access_token(home: &Path) -> Result<String> {
+/// The Meta login in a profile's `auth.json`, with the document it came from
+/// so a refresh rewrites only the token fields.
+struct MuseLogin {
+    document: Value,
+    access_token: String,
+    refresh_token: Option<String>,
+    /// Epoch seconds; absent for a stored API key.
+    expires_at: Option<i64>,
+}
+
+impl MuseLogin {
+    fn refresh_due(&self, now: i64) -> bool {
+        self.expires_at.is_some_and(|expires_at| {
+            expires_at.saturating_sub(now) < REFRESH_AHEAD.as_secs() as i64
+        })
+    }
+}
+
+/// Hand back an access token to query with, refreshing the stored login when
+/// it is near expiry or when `rejected` names the token the endpoint just
+/// refused. The refresh runs under Muse's own `auth.json` lock and re-reads
+/// the login once the lock is held, so a refresh Muse finished meanwhile is
+/// used instead of spending its refresh token a second time.
+async fn fresh_access_token(
+    client: &reqwest::Client,
+    home: &Path,
+    auth_base_url: &str,
+    rejected: Option<&str>,
+) -> Result<String> {
+    let initial = read_login(home).await?;
+    let now = mj_core::clock::epoch_seconds() as i64;
+    if rejected.is_none() && !initial.refresh_due(now) {
+        return Ok(initial.access_token);
+    }
+    if initial.refresh_token.is_none() {
+        // A stored API key, or a login without a refresh grant: nothing here
+        // can renew it.
+        return match rejected {
+            Some(_) => Err(anyhow::Error::new(LoginRejected)),
+            None => Ok(initial.access_token),
+        };
+    }
+
+    // Held until this function returns, released on drop.
+    let _lock = acquire_auth_lock(home).await?;
+    let active = read_login(home).await?;
+    let renewed_meanwhile = match rejected {
+        Some(rejected) => active.access_token != rejected,
+        None => !active.refresh_due(now),
+    };
+    if renewed_meanwhile {
+        return Ok(active.access_token);
+    }
+    let Some(refresh_token) = active.refresh_token.as_deref() else {
+        return Err(anyhow::Error::new(LoginRejected));
+    };
+    let grant = match refresh_grant(client, auth_base_url, refresh_token).await {
+        Ok(grant) => grant,
+        // Ahead of expiry the current token still works; the failure is
+        // logged and the refresh is tried again on the next poll.
+        Err(error) if rejected.is_none() && !error.is::<LoginRejected>() => {
+            tracing::warn!(home = %home.display(), %error, "could not refresh the Muse login ahead of expiry");
+            return Ok(active.access_token);
+        }
+        Err(error) => return Err(error),
+    };
+    save_login(home, active.document, &grant, now)?;
+    Ok(grant.access_token)
+}
+
+struct TokenGrant {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: Option<i64>,
+}
+
+async fn refresh_grant(
+    client: &reqwest::Client,
+    auth_base_url: &str,
+    refresh_token: &str,
+) -> Result<TokenGrant> {
+    let url = format!("{}{}", auth_base_url.trim_end_matches('/'), TOKEN_PATH);
+    let response = client
+        .post(url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", OAUTH_CLIENT_ID),
+        ])
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                anyhow::anyhow!("Muse login refresh timed out")
+            } else {
+                anyhow::anyhow!("Muse login refresh failed")
+            }
+        })?;
+    let status = response.status();
+    let body = read_bounded_body(response).await?;
+    let payload: Option<Value> = serde_json::from_slice(&body).ok();
+    if !status.is_success() {
+        let code = payload
+            .as_ref()
+            .and_then(|payload| payload.get("error"))
+            .and_then(Value::as_str);
+        if code == Some("invalid_grant") {
+            return Err(anyhow::Error::new(LoginRejected));
+        }
+        // Anything else is reported as it is: it may mean the request itself
+        // is wrong, which "login expired" would hide.
+        match code {
+            Some(code) => bail!("Muse login refresh returned HTTP {status} ({code})"),
+            None => bail!("Muse login refresh returned HTTP {status}"),
+        }
+    }
+    let payload = payload.context("Muse login refresh returned invalid JSON")?;
+    let access_token = payload
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
+        .context("Muse login refresh returned no access token")?;
+    Ok(TokenGrant {
+        access_token: access_token.to_owned(),
+        refresh_token: payload
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned),
+        expires_in: payload
+            .get("expires_in")
+            .and_then(Value::as_i64)
+            .filter(|seconds| *seconds > 0),
+    })
+}
+
+/// Write the refreshed grant into `auth.json`, keeping every other field Muse
+/// stored. The caller holds Muse's lock.
+fn save_login(home: &Path, mut document: Value, grant: &TokenGrant, now: i64) -> Result<()> {
+    let meta = document
+        .pointer_mut("/providers/meta")
+        .and_then(Value::as_object_mut)
+        .context("Muse credentials have no Meta login")?;
+    meta.insert("access_token".into(), grant.access_token.clone().into());
+    if let Some(refresh_token) = &grant.refresh_token {
+        meta.insert("refresh_token".into(), refresh_token.clone().into());
+    }
+    match grant.expires_in {
+        Some(expires_in) => {
+            meta.insert("expires_at".into(), now.saturating_add(expires_in).into());
+        }
+        // A stale expiry would ask for a refresh on every poll.
+        None => {
+            meta.remove("expires_at");
+        }
+    }
+    let mut body = serde_json::to_vec_pretty(&document)?;
+    body.push(b'\n');
+    mj_core::config::atomic_write(&home.join("auth.json"), &body)
+        .context("save the refreshed Muse login")
+}
+
+/// Take the exclusive lock Muse holds while it writes `auth.json`.
+async fn acquire_auth_lock(home: &Path) -> Result<std::fs::File> {
+    let path = home.join(AUTH_LOCK_FILE);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open the Muse login lock {}", path.display()))?;
+    let deadline = tokio::time::Instant::now() + AUTH_LOCK_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(AUTH_LOCK_RETRY_INTERVAL).await;
+            }
+            Err(std::fs::TryLockError::WouldBlock) => bail!(
+                "another Muse process held the login lock {} for {} seconds",
+                path.display(),
+                AUTH_LOCK_WAIT.as_secs()
+            ),
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(error)
+                    .with_context(|| format!("lock the Muse login {}", path.display()));
+            }
+        }
+    }
+}
+
+async fn read_login(home: &Path) -> Result<MuseLogin> {
     let path = home.join("auth.json");
     let file = tokio::fs::File::open(&path).await.map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
@@ -274,17 +542,27 @@ async fn read_access_token(home: &Path) -> Result<String> {
     if bytes.len() > MAX_CREDENTIAL_BYTES {
         bail!("Muse credentials exceed the {MAX_CREDENTIAL_BYTES} byte limit")
     }
-    let payload: Value = serde_json::from_slice(&bytes)
+    let document: Value = serde_json::from_slice(&bytes)
         .map_err(|_| anyhow::anyhow!("Muse credentials are invalid; sign in to Muse"))?;
-    let token = payload
-        .pointer("/providers/meta/access_token")
-        .and_then(Value::as_str)
-        .filter(|token| !token.trim().is_empty())
+    let meta = document.pointer("/providers/meta");
+    let field = |name: &str| {
+        meta.and_then(|meta| meta.get(name))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+    };
+    let access_token = field("access_token")
         .ok_or_else(|| anyhow::anyhow!("Muse access token is missing; sign in to Muse"))?;
-    if token.chars().any(char::is_whitespace) {
+    if access_token.chars().any(char::is_whitespace) {
         bail!("Muse access token is invalid; sign in to Muse")
     }
-    Ok(token.to_owned())
+    Ok(MuseLogin {
+        access_token: access_token.to_owned(),
+        refresh_token: field("refresh_token").map(str::to_owned),
+        expires_at: meta
+            .and_then(|meta| meta.get("expires_at"))
+            .and_then(Value::as_i64),
+        document: document.clone(),
+    })
 }
 
 async fn read_bounded_body(response: reqwest::Response) -> Result<Vec<u8>> {
@@ -450,6 +728,13 @@ mod tests {
         (format!("http://{address}"), server)
     }
 
+    fn endpoints(base_url: &str) -> Endpoints {
+        Endpoints {
+            mint: base_url.to_owned(),
+            auth: base_url.to_owned(),
+        }
+    }
+
     fn write_credentials(home: &Path, token: &str) {
         std::fs::write(
             home.join("auth.json"),
@@ -496,9 +781,10 @@ mod tests {
     async fn rejects_missing_invalid_and_oversized_credentials() {
         let home = tempfile::tempdir().unwrap();
         assert!(
-            read_access_token(home.path())
+            read_login(home.path())
                 .await
-                .unwrap_err()
+                .err()
+                .unwrap()
                 .to_string()
                 .contains("login required")
         );
@@ -508,7 +794,7 @@ mod tests {
             vec![b' '; MAX_CREDENTIAL_BYTES + 1],
         ] {
             std::fs::write(home.path().join("auth.json"), bytes).unwrap();
-            assert!(read_access_token(home.path()).await.is_err());
+            assert!(read_login(home.path()).await.is_err());
         }
     }
 
@@ -578,16 +864,22 @@ mod tests {
         let gate = Gate::default();
         let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
 
-        let report = query_gated(home.path(), &base_url, REQUEST_TIMEOUT, &gate, start)
-            .await
-            .unwrap();
+        let report = query_gated(
+            home.path(),
+            &endpoints(&base_url),
+            REQUEST_TIMEOUT,
+            &gate,
+            start,
+        )
+        .await
+        .unwrap();
         assert_eq!(report.windows[0].remaining_percent, 99);
         assert_eq!(report.note, None);
 
         // A second caller inside the minimum interval reuses the reading.
         let report = query_gated(
             home.path(),
-            &base_url,
+            &endpoints(&base_url),
             REQUEST_TIMEOUT,
             &gate,
             start + Duration::from_secs(60),
@@ -600,9 +892,15 @@ mod tests {
         // After the interval a 429 keeps the last windows and marks the note.
         *state.response.lock().unwrap() = (StatusCode::TOO_MANY_REQUESTS, "{}".into());
         let limited = start + MIN_REFRESH_INTERVAL + Duration::from_secs(1);
-        let report = query_gated(home.path(), &base_url, REQUEST_TIMEOUT, &gate, limited)
-            .await
-            .unwrap();
+        let report = query_gated(
+            home.path(),
+            &endpoints(&base_url),
+            REQUEST_TIMEOUT,
+            &gate,
+            limited,
+        )
+        .await
+        .unwrap();
         assert_eq!(report.windows[0].remaining_percent, 99);
         assert_eq!(report.note.as_deref(), Some("rate limited"));
         assert_eq!(state.requests.lock().unwrap().len(), 2);
@@ -610,7 +908,7 @@ mod tests {
         // No further network call until the backoff elapses.
         let report = query_gated(
             home.path(),
-            &base_url,
+            &endpoints(&base_url),
             REQUEST_TIMEOUT,
             &gate,
             limited + INITIAL_RATE_LIMIT_BACKOFF - Duration::from_secs(1),
@@ -624,9 +922,15 @@ mod tests {
         // both the note and the consecutive-429 count.
         *state.response.lock().unwrap() = (StatusCode::OK, usage_body());
         let recovered = limited + INITIAL_RATE_LIMIT_BACKOFF;
-        let report = query_gated(home.path(), &base_url, REQUEST_TIMEOUT, &gate, recovered)
-            .await
-            .unwrap();
+        let report = query_gated(
+            home.path(),
+            &endpoints(&base_url),
+            REQUEST_TIMEOUT,
+            &gate,
+            recovered,
+        )
+        .await
+        .unwrap();
         assert_eq!(report.note, None);
         assert_eq!(state.requests.lock().unwrap().len(), 3);
         assert_eq!(
@@ -651,14 +955,20 @@ mod tests {
         let gate = Gate::default();
         let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
 
-        let error = query_gated(home.path(), &base_url, REQUEST_TIMEOUT, &gate, start)
-            .await
-            .unwrap_err()
-            .to_string();
+        let error = query_gated(
+            home.path(),
+            &endpoints(&base_url),
+            REQUEST_TIMEOUT,
+            &gate,
+            start,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(error.starts_with("rate limited"), "{error}");
         let error = query_gated(
             home.path(),
-            &base_url,
+            &endpoints(&base_url),
             REQUEST_TIMEOUT,
             &gate,
             start + Duration::from_secs(60),
@@ -696,9 +1006,15 @@ mod tests {
         let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
 
         assert!(
-            query_gated(home.path(), &base_url, REQUEST_TIMEOUT, &gate, start)
-                .await
-                .is_err()
+            query_gated(
+                home.path(),
+                &endpoints(&base_url),
+                REQUEST_TIMEOUT,
+                &gate,
+                start
+            )
+            .await
+            .is_err()
         );
         assert_eq!(
             gate.lock().unwrap()[&gate_key(home.path())].next_allowed_at,
@@ -736,11 +1052,11 @@ mod tests {
             ..ServerState::default()
         };
         let (base_url, server) = spawn_server(state).await;
-        let error = query_with_timeout(home.path(), &base_url, Duration::from_secs(1))
+        let error = query_with_timeout(home.path(), &endpoints(&base_url), Duration::from_secs(1))
             .await
             .unwrap_err()
             .to_string();
-        assert_eq!(error, "Muse login expired");
+        assert_eq!(error, LOGIN_EXPIRED);
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
 
@@ -750,11 +1066,153 @@ mod tests {
             ..ServerState::default()
         };
         let (base_url, server) = spawn_server(delayed).await;
-        let error = query_with_timeout(home.path(), &base_url, Duration::from_millis(20))
-            .await
-            .unwrap_err()
-            .to_string();
+        let error = query_with_timeout(
+            home.path(),
+            &endpoints(&base_url),
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert_eq!(error, "Muse usage request timed out");
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    /// A Meta endpoint pair: the mint accepts only `fresh-access`, and the
+    /// token endpoint records each refresh it is asked for.
+    async fn spawn_meta(
+        refreshes: Arc<Mutex<Vec<String>>>,
+        minted_with: Arc<Mutex<Vec<String>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let mint = {
+            let minted_with = minted_with.clone();
+            move |headers: HeaderMap| async move {
+                let authorization = headers
+                    .get(reqwest::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned();
+                minted_with.lock().unwrap().push(authorization.clone());
+                let status = if authorization.ends_with("-access")
+                    && authorization != "Bearer stale-access"
+                {
+                    StatusCode::OK
+                } else {
+                    StatusCode::UNAUTHORIZED
+                };
+                Response::builder()
+                    .status(status)
+                    .body(usage_body())
+                    .unwrap()
+            }
+        };
+        let token = move |body: String| async move {
+            refreshes.lock().unwrap().push(body);
+            Response::builder()
+                .status(StatusCode::OK)
+                .body(
+                    json!({
+                        "access_token": "fresh-access",
+                        "refresh_token": "fresh-refresh",
+                        "expires_in": 3600,
+                        "token_type": "Bearer"
+                    })
+                    .to_string(),
+                )
+                .unwrap()
+        };
+        let app = Router::new()
+            .route("/muse-code/key", post(mint))
+            .route("/oidc/device/token/", post(token));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), server)
+    }
+
+    /// The `auth.json` shape `muse login` writes (Muse 1.4.12).
+    fn write_login(home: &Path, access_token: &str, expires_at: i64) {
+        std::fs::write(
+            home.join("auth.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schema_version": 1,
+                "providers": {"meta": {
+                    "access_token": access_token,
+                    "api_base_url": "https://api.meta.ai",
+                    "api_key": "minted-key",
+                    "expires_at": expires_at,
+                    "mechanism": "oauth",
+                    "obtained_via": "device_code",
+                    "refresh_token": "old-refresh"
+                }}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_rejected_login_is_refreshed_once_under_muses_lock_and_the_query_retried() {
+        let refreshes = Arc::new(Mutex::new(Vec::new()));
+        let minted_with = Arc::new(Mutex::new(Vec::new()));
+        let (base_url, server) = spawn_meta(refreshes.clone(), minted_with.clone()).await;
+        let far_future = mj_core::clock::epoch_seconds() as i64 + 24 * 60 * 60;
+
+        // The recorded expiry says the token is good; the endpoint disagrees.
+        let home = tempfile::tempdir().unwrap();
+        write_login(home.path(), "stale-access", far_future);
+        let windows = query_with_timeout(home.path(), &endpoints(&base_url), REQUEST_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(windows[0].remaining_percent, 99);
+        assert_eq!(
+            *minted_with.lock().unwrap(),
+            ["Bearer stale-access", "Bearer fresh-access"]
+        );
+        assert_eq!(
+            *refreshes.lock().unwrap(),
+            [format!(
+                "grant_type=refresh_token&refresh_token=old-refresh&client_id={OAUTH_CLIENT_ID}"
+            )]
+        );
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(home.path().join("auth.json")).unwrap()).unwrap();
+        let meta = &saved["providers"]["meta"];
+        assert_eq!(meta["access_token"], "fresh-access");
+        assert_eq!(meta["refresh_token"], "fresh-refresh");
+        assert_eq!(meta["api_key"], "minted-key");
+        assert_eq!(meta["mechanism"], "oauth");
+        assert_eq!(saved["schema_version"], 1);
+        assert!(meta["expires_at"].as_i64().unwrap() > mj_core::clock::epoch_seconds() as i64);
+
+        // Muse renews the login while the daemon waits for its lock: the
+        // daemon uses that login and never spends the refresh token Muse
+        // already spent.
+        refreshes.lock().unwrap().clear();
+        minted_with.lock().unwrap().clear();
+        let raced = tempfile::tempdir().unwrap();
+        write_login(raced.path(), "stale-access", 1_700_000_000);
+        let muse = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(raced.path().join(AUTH_LOCK_FILE))
+            .unwrap();
+        muse.lock().unwrap();
+        let query = tokio::spawn({
+            let home = raced.path().to_owned();
+            let endpoints = endpoints(&base_url);
+            async move { query_with_timeout(&home, &endpoints, REQUEST_TIMEOUT).await }
+        });
+        sleep(Duration::from_millis(300)).await;
+        assert!(!query.is_finished(), "the daemon must wait for Muse's lock");
+        write_login(raced.path(), "muse-renewed-access", far_future);
+        drop(muse);
+        query.await.unwrap().unwrap();
+        assert!(refreshes.lock().unwrap().is_empty());
+        assert_eq!(*minted_with.lock().unwrap(), ["Bearer muse-renewed-access"]);
+
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
     }
