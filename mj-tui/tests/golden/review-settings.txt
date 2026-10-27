@@ -35,7 +35,7 @@ selected session: None
 === command palette exposes Setup without a selected session (100x30) ===
 ╭ Workspaces                                                                            ── ◇   ⋯───╮
 │ default                                                                                          │
-╰───────────  ╭ × ✦ Commands ─────────────────────────────────────────── 49 commands ╮             │
+╰───────────  ╭ × ✦ Commands ─────────────────────────────────────────── 50 commands ╮             │
 ╭ Sessions ─  │Search commands…                                                      │             │
 │ Create   O  │  Sessions pane  ───────────────────────────────────────────────────  │             │
 │No sessions  │› Create session                                    n / N / ctrl+b c ▐│             │

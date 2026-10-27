@@ -102,6 +102,9 @@ where
     let session_elicitations = pending_elicitations.clone();
     let next_elicitation_id = Arc::new(AtomicU64::new(1));
     let managed_subagent = spec.managed_subagent;
+    let permission_away = spec.operator_away.clone();
+    let elicitation_away = spec.operator_away.clone();
+    let ext_away = spec.operator_away.clone();
     let permission_policy = spec.execution_policy;
     let permission_harness = spec.harness;
     let permission_owned_mcp = OwnedMcpApprovals::for_launch(&spec);
@@ -425,6 +428,10 @@ where
                         record_delegated_question(&permission_events, review).await?;
                         return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
                     }
+                    if permission_away.refuse(String::new(), AwayRequest::Plan) {
+                        record_away_question(&permission_events, review).await?;
+                        return responder.respond(permission_plan_response(&request, ElicitationResponse::Decline));
+                    }
                     let approved_plan = plan_review_proposal(&review).unwrap_or_default().to_owned();
                     let implementation = permission_implementation_slot
                         .lock().expect("plan implementation lock poisoned").clone();
@@ -585,6 +592,22 @@ where
                 if managed_subagent {
                     record_delegated_question(&permission_events, form).await?;
                     return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
+                }
+                let identity = if plan_permission || claude_plan_approval {
+                    AwayRequest::Plan
+                } else {
+                    away_permission_identity(&request, permission_tool_input(&request.tool_call, &permission_tool_content))
+                };
+                if permission_away.refuse(if native_child { request.session_id.to_string() } else { String::new() }, identity) {
+                    record_away_question(&permission_events, form).await?;
+                    let response = if plan_permission || claude_plan_approval {
+                        permission_plan_response(&request, ElicitationResponse::Decline)
+                    } else {
+                        let outcome = skip.map_or(RequestPermissionOutcome::Cancelled, |option_id|
+                            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)));
+                        RequestPermissionResponse::new(outcome)
+                    };
+                    return responder.respond(response);
                 }
                 let (answer, answer_rx) = oneshot::channel();
                 permission_elicitations.lock().expect("pending elicitation lock poisoned")
@@ -822,12 +845,17 @@ where
                             );
                         }
                     };
+                    let requesting_agent = child.clone().unwrap_or_default();
                     if let Some(child) = child {
                         request.message = format!("Native agent {child}: {}", request.message);
                     }
                     if managed_subagent {
                         record_delegated_question(&elicitation_events, request).await?;
                         return responder.respond(serde_json::json!({"action":"cancel"}));
+                    }
+                    if elicitation_away.refuse(requesting_agent, AwayRequest::Question) {
+                        record_away_question(&elicitation_events, request).await?;
+                        return responder.respond(serde_json::json!({"action":"decline"}));
                     }
                     let (answer, answer_rx) = oneshot::channel();
                     handler_elicitations
@@ -931,6 +959,14 @@ where
                     let review = normalized_plan_review(id.clone(), request.params());
                     if managed_subagent {
                         record_delegated_question(&ext_events, review).await?;
+                        return responder.respond(serde_json::json!({"outcome":"cancelled"}));
+                    }
+                    let requesting_agent = request.params().get("sessionId")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|id| ext_parent_router.lock().expect("native agent router poisoned").is_child(id))
+                        .unwrap_or_default().to_owned();
+                    if ext_away.refuse(requesting_agent, AwayRequest::Plan) {
+                        record_away_question(&ext_events, review).await?;
                         return responder.respond(serde_json::json!({"outcome":"cancelled"}));
                     }
                     let (answer, answer_rx) = oneshot::channel();
@@ -2018,6 +2054,21 @@ async fn record_delegated_question(
     events: &mpsc::Sender<RuntimeEvent>,
     request: ElicitationRequest,
 ) -> std::result::Result<(), agent_client_protocol::Error> {
+    record_refused_question(events, request, "cancel").await
+}
+
+async fn record_away_question(
+    events: &mpsc::Sender<RuntimeEvent>,
+    request: ElicitationRequest,
+) -> std::result::Result<(), agent_client_protocol::Error> {
+    record_refused_question(events, request, mj_core::elicitation::OPERATOR_AWAY_ACTION).await
+}
+
+async fn record_refused_question(
+    events: &mpsc::Sender<RuntimeEvent>,
+    request: ElicitationRequest,
+    action: &str,
+) -> std::result::Result<(), agent_client_protocol::Error> {
     let elicitation_id = request.id.clone();
     events
         .send(RuntimeEvent::ElicitationRequested { request })
@@ -2026,7 +2077,7 @@ async fn record_delegated_question(
     events
         .send(RuntimeEvent::ElicitationResolved {
             elicitation_id,
-            action: "cancel".into(),
+            action: action.into(),
             reply: None,
         })
         .await

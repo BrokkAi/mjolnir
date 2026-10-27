@@ -118,9 +118,25 @@ pub(super) fn project_observation(
         RelayObservation::ElicitationResolved {
             elicitation_id,
             reply,
-            ..
+            action,
         } => {
-            if let Some(reply) = reply {
+            if action == mj_core::elicitation::OPERATOR_AWAY_ACTION {
+                if let Some(request) = current
+                    .pending_elicitations
+                    .iter()
+                    .find(|request| request.id == *elicitation_id)
+                {
+                    push_system(
+                        mutation,
+                        event,
+                        format!(
+                            "Not shown because you were away: {}",
+                            mj_core::state::normalize_session_title(&request.message)
+                                .unwrap_or_default()
+                        ),
+                    );
+                }
+            } else if let Some(reply) = reply {
                 close_streams(index, mutation, event.recorded_at_ms);
                 upsert(
                     mutation,
@@ -883,7 +899,13 @@ fn delivered_external_events(
     }
     let lines = events
         .iter()
-        .filter(|event| event.message_text().is_none())
+        .filter(|event| {
+            event.message_text().is_none()
+                && !matches!(
+                    event.body,
+                    mj_core::mailbox::MailboxEventBody::OperatorAway { .. }
+                )
+        })
         .map(|event| {
             let description = mj_core::mailbox::describe_mailbox_event(event);
             // A child report is the parent's only record of the child's
@@ -897,6 +919,9 @@ fn delivered_external_events(
             }
         })
         .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return;
+    }
     close_streams(index, mutation, delivery.recorded_at_ms);
     push_system_with_id(
         mutation,

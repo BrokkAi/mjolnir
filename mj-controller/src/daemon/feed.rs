@@ -287,6 +287,7 @@ impl RuntimeState {
                     session_cpu: self.session_manager.session_cpu.borrow().clone(),
                     moves,
                     metadata: RuntimeMetadata {
+                        operator_presence: controller.state.operator_presence,
                         config: controller.config.clone(),
                         default_targets: controller.config.default_targets.clone(),
                         last_subagent_policy: controller.state.last_subagent_policy.clone(),

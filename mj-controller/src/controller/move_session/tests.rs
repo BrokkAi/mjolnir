@@ -186,7 +186,17 @@ fn move_queue_relay_child() {
                     ..
                 }
             );
-        let response = relay.handle(request);
+        let response = if matches!(request.request, RelayRequest::SetOperatorAway { .. }) {
+            RelayResponseEnvelope {
+                request_id: request.request_id,
+                protocol_version: request.protocol_version,
+                body: RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::Status(relay.operational_state()),
+                },
+            }
+        } else {
+            relay.handle(request)
+        };
         write_relay_frame(&mut output, &response).expect("write relay response");
         if should_crash {
             fs::write(&marker, b"accepted then crashed").expect("record relay crash");

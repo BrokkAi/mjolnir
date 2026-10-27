@@ -19,8 +19,8 @@ use mj_core::config::data_dir;
 use mj_core::state::{
     CheckpointMetadata, HostContainerSize, ManagedWorktree, MaterializedExecutionState,
     MaterializedQueuedPrompt, MaterializedSession, MaterializedSessionSummary, MaterializedTurn,
-    MaterializedTurnOutcome, ProjectionWindow, SessionRecord, SessionResourceAllocation,
-    SessionState, State, TargetLocator, TranscriptBody, TranscriptItem,
+    MaterializedTurnOutcome, OperatorPresence, ProjectionWindow, SessionRecord,
+    SessionResourceAllocation, SessionState, State, TargetLocator, TranscriptBody, TranscriptItem,
     validate_relay_event_digest, validate_relay_event_frontier,
 };
 use mj_core::subagent::SubagentRecord;
@@ -31,7 +31,7 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 98;
+const SCHEMA_VERSION: i64 = 99;
 
 mod session_move;
 pub use session_move::*;
@@ -68,6 +68,7 @@ mod workspaces;
 pub use workspaces::*;
 mod client_state;
 pub use client_state::*;
+mod operator_away;
 mod state_io;
 pub use state_io::*;
 mod sessions;

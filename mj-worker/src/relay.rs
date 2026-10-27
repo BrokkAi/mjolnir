@@ -106,6 +106,7 @@ pub enum BackgroundWorkPolicy {
 /// observations newer than the last frontier covered by both a durable
 /// controller acknowledgement and a verified checkpoint.
 pub struct DurableRelay {
+    pub(crate) operator_away: crate::acp::OperatorAway,
     root: PathBuf,
     relay_version: String,
     /// Content address of the executable serving this relay, reported in
@@ -474,6 +475,7 @@ impl DurableRelay {
         )?;
 
         let mut relay = Self {
+            operator_away: Default::default(),
             root,
             relay_version: relay_version.into(),
             worker_build: Some(mj_core::worker_build::WORKER_BUILD_ID.to_owned()),

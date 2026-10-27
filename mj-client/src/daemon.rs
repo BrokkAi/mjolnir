@@ -426,6 +426,9 @@ pub struct DraftPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
+    SetOperatorAway {
+        away: bool,
+    },
     NativeAgentHistory {
         owner: String,
         child: String,
@@ -2418,7 +2421,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Creation and runtime metadata carry interactive launch-choice provenance.
 // New-session creation independently controls whether its container size
 // becomes the host's saved default.
-pub const PROTOCOL_VERSION: u32 = 62;
+// Operator-away action and runtime metadata.
+pub const PROTOCOL_VERSION: u32 = 63;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

@@ -28,6 +28,8 @@ impl ReviewerMcpServer {
 
 #[derive(Debug, Clone)]
 pub struct LaunchSpec {
+    /// Live availability shared with the worker control connection.
+    pub operator_away: OperatorAway,
     pub clear_context_request: Option<ContextReset>,
     /// Settings to restore when a failed clear reloads the old conversation.
     pub context_restore: Option<ContextReset>,

@@ -961,6 +961,24 @@ details.mailbox-event[open] > summary::before {
   white-space: nowrap;
 }
 
+.operator-away {
+  flex: 0 0 auto;
+  min-width: var(--touch);
+  min-height: var(--touch);
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  color: var(--accent);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.operator-away-error {
+  margin: 0 0 8px;
+  color: var(--failed);
+}
+
 .icon-button {
   background: var(--surface-raised);
   color: var(--text);

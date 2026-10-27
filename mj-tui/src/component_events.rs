@@ -11,7 +11,8 @@ impl DashboardState {
             .map(|modal| modal.layer_detail())
             .unwrap_or_default();
         format!(
-            "{:?}/{detail}/{}",
+            "{}/{:?}/{detail}/{}",
+            self.away_dialog().is_some(),
             std::mem::discriminant(&self.mode),
             self.dialog_confirmation_open()
         )
@@ -44,11 +45,14 @@ impl DashboardState {
     /// pointer surface but not an event-routing modal: it draws over the mode
     /// it opened on and keeps that mode's key handling.
     pub(crate) fn component_modal_open(&self) -> bool {
-        !matches!(self.mode, Mode::Dashboard | Mode::Help(_))
+        self.away_dialog().is_some() || !matches!(self.mode, Mode::Dashboard | Mode::Help(_))
     }
 
     /// Whether a form owns this pointer event, ahead of selectable body text.
     pub fn component_handles_mouse(&self, mouse: MouseEvent) -> bool {
+        if self.away_dialog().is_some() {
+            return true;
+        }
         if self.resume_scrollbar_handles_mouse(mouse) {
             return true;
         }
@@ -96,6 +100,9 @@ impl DashboardState {
     }
 
     pub(crate) fn handle_component_event(&mut self, event: Event) -> DashboardAction {
+        if self.away_dialog().is_some() {
+            return self.handle_away_event(event);
+        }
         self.prepare_dialog_state();
         if matches!(self.mode, Mode::Palette(_)) {
             return self.handle_palette_event(event);

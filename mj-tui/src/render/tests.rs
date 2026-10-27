@@ -1078,6 +1078,7 @@ fn minimized_sessions_dashboard(projects: usize, per_project: usize) -> Dashboar
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            operator_presence: Default::default(),
             last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
@@ -3460,4 +3461,59 @@ fn a_long_disks_dropdown_keeps_the_target_row_one_line_and_scrolls() {
     let rendered = drawn_dashboard(&mut dashboard, 160);
     assert!(rendered.contains("/srv/volume-29 40.0G free"), "{rendered}");
     assert_eq!(capacity_table_lines(&dashboard), 1);
+}
+
+#[test]
+fn golden_operator_away_dialog() {
+    let mut output = String::new();
+    for (symbols, label, width, height) in [
+        (mj_core::config::SymbolSet::Unicode, "AFK", 100, 32),
+        (mj_core::config::SymbolSet::Ascii, "AFK ASCII", 100, 32),
+        (mj_core::config::SymbolSet::Unicode, "AFK small", 32, 12),
+        (mj_core::config::SymbolSet::Unicode, "AFK tiny", 10, 5),
+    ] {
+        let mut config = config();
+        config.advanced.symbols = Some(symbols);
+        let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+        for index in 0..4 {
+            let mut session = running_session();
+            session.id = format!("waiting-{index}");
+            session.title = format!("Waiting session {index}");
+            session.acp_session_title = None;
+            dashboard.session_details.insert(
+                session.id.clone(),
+                SessionDetail {
+                    pending_elicitations: vec![question(&session.id)],
+                    ..Default::default()
+                },
+            );
+            dashboard.state.sessions.insert(session.id.clone(), session);
+        }
+        dashboard.set_operator_presence(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 1,
+        });
+        append_dashboard_golden(&mut output, label, width, height, &mut dashboard);
+        if label == "AFK" {
+            dashboard.session_details.clear();
+            append_dashboard_golden(
+                &mut output,
+                "AFK waiting requests cleared",
+                width,
+                height,
+                &mut dashboard,
+            );
+        }
+        if label == "AFK small" {
+            dashboard.handle_key(key(KeyCode::End));
+            append_dashboard_golden(
+                &mut output,
+                "AFK small scrolled",
+                width,
+                height,
+                &mut dashboard,
+            );
+        }
+    }
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "operator-away-dialog", &output);
 }

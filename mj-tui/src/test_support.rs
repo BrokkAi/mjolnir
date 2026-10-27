@@ -474,6 +474,7 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            operator_presence: Default::default(),
             last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,

@@ -192,6 +192,25 @@ impl RelayClient {
         }
     }
 
+    pub async fn set_operator_away(
+        &mut self,
+        presence: mj_core::state::OperatorPresence,
+    ) -> Result<()> {
+        if self.protocol_version < mj_core::relay::RELAY_OPERATOR_AWAY_PROTOCOL {
+            return Ok(());
+        }
+        match self
+            .call(RelayRequest::SetOperatorAway {
+                away: presence.away,
+                revision: presence.revision,
+            })
+            .await?
+        {
+            RelayResponsePayload::Status(_) => Ok(()),
+            _ => bail!("relay returned an unexpected operator away response"),
+        }
+    }
+
     pub async fn set_subagent_admission(&mut self, open: bool) -> Result<()> {
         let request = RelayRequest::SetSubagentAdmission { open };
         if !request.supported_at(self.protocol_version) {

@@ -52,6 +52,7 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
         ("session_checkpoints", "session", "session_id"),
         ("subagent_sessions", "relation", "child_session_id"),
         ("subagent_preference", "preference", "singleton"),
+        ("operator_away", "operator_away", "singleton"),
         ("mount_history", "mount_history", "host"),
         ("project_locations", "mount_history", "host"),
         ("host_container_sizes", "container_size", "host"),
@@ -374,6 +375,22 @@ pub(super) fn finish_operation(
                         .query_map([key], |row| row.get::<_, String>(0))?
                         .collect::<rusqlite::Result<Vec<_>>>()?,
                 );
+            }
+            "operator_away" => {
+                let presence = transaction.query_row(
+                    "SELECT away,revision FROM operator_away WHERE singleton=1",
+                    [],
+                    |row| {
+                        Ok(OperatorPresence {
+                            away: row.get(0)?,
+                            revision: row.get(1)?,
+                        })
+                    },
+                )?;
+                if state.operator_presence != presence {
+                    state.operator_presence = presence;
+                    changed = true;
+                }
             }
             "preference" => {
                 let json: Option<String> = transaction

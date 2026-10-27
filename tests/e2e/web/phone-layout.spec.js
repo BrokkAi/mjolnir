@@ -135,6 +135,7 @@ function fixture(taskCount = 1, options = {}) {
       targets: [],
       bundles: [],
       review_config: { trigger: "off", profile: null },
+      operator_away: options.operatorAway === true,
     },
     actions: [],
     snapshots: 0,
@@ -179,7 +180,9 @@ async function mount(page, taskCount = 1, options = {}) {
       });
     }
     if (pathname === '/api/actions') {
-      state.actions.push(route.request().postDataJSON());
+      const action = route.request().postDataJSON();
+      state.actions.push(action);
+      if (action.action === 'set-operator-away') state.snapshot.operator_away = action.away;
       return route.fulfill({ status: 202, body: '' });
     }
     if (pathname.startsWith('/api/conversations/')) {
@@ -206,6 +209,49 @@ async function mount(page, taskCount = 1, options = {}) {
   await expect(page.locator('#conversation-feed')).toContainText('Conversation entry 16');
   return state;
 }
+
+test('phone header menu toggles AFK and the snapshot indicator ends it', async ({ page }) => {
+  const state = await mount(page);
+  const indicator = page.locator('#operator-away-indicator');
+  await expect(indicator).toBeHidden();
+
+  await page.locator('#menu-button').tap();
+  await page.getByRole('menuitem', { name: 'Go AFK' }).tap();
+  await expect(indicator).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: 'End AFK' })).toBeVisible();
+  expect(state.actions[0]).toEqual({ action: 'set-operator-away', away: true });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+
+  await indicator.tap();
+  await expect(indicator).toBeHidden();
+  expect(state.actions[1]).toEqual({ action: 'set-operator-away', away: false });
+});
+
+test('phone AFK action shows its pending state and reports a failure', async ({ page }) => {
+  await mount(page);
+  let releaseAction;
+  let actionReached;
+  const blockedAction = new Promise(resolve => { releaseAction = resolve; });
+  const reachedAction = new Promise(resolve => { actionReached = resolve; });
+  await page.route('**/api/actions', async route => {
+    actionReached();
+    await blockedAction;
+    await route.fulfill({
+      status: 500,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'operator action failed' }),
+    });
+  });
+
+  await page.locator('#menu-button').tap();
+  await page.getByRole('menuitem', { name: 'Go AFK' }).tap();
+  await reachedAction;
+  await expect(page.locator('#operator-away-indicator')).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: 'Going AFK…' })).toBeDisabled();
+  releaseAction();
+  await expect(page.locator('#operator-away-error')).toHaveText('Could not go AFK: operator action failed');
+  await expect(page.locator('#operator-away-indicator')).toBeHidden();
+});
 
 async function settleLayout(page) {
   await page.evaluate(() => new Promise(resolve => {

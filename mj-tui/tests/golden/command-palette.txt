@@ -8,10 +8,9 @@
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                                                                              │
+│  │                                                                                                                   │
 │                                                                                                                      │
-│                                                                                                                      │
-│                ╭ × ✦ Commands ───────────────────────────────────────────────────────── 66 commands ╮                │
+│                ╭ × ✦ Commands ───────────────────────────────────────────────────────── 67 commands ╮                │
 │                │Search commands…                                                                    │                │
 │                │  ACP pretty name  ───────────────────────────────────────────────────────────────  │                │
 │                │› Pin session…                                                                      │                │
@@ -65,6 +64,7 @@
 │                │  Open settings                                                           ctrl+b s  │                │
 │                │  Next spinner style                                                                │                │
 │                │  Anywhere  ──────────────────────────────────────────────────────────────────────  │                │
+│                │  Go AFK                                                                            │                │
 │                │  Rename workspace…                                                 ctrl+b shift+w  │                │
 │                │  Delete workspace…                                                 ctrl+b shift+d  │                │
 │                │  Sessions                                                                ctrl+b g  │                │
@@ -104,13 +104,12 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                                                                              │
+│ Create   Open                                                                                                        │
 │hel ──────────                                                                                                        │
-│› · ACP pretty                                                                                                        │
-│  Idle  podman  ╭ × ✦ Commands ───────────────────────────────────────────────────────── 66 commands ╮                │
-│  │ No message  │Search commands…                                                                    │                │
-│  │             │  ACP pretty name  ───────────────────────────────────────────────────────────────  │                │
-│                │› Pin session…                                                                      │                │
+│› · ACP pretty  ╭ × ✦ Commands ───────────────────────────────────────────────────────── 67 commands ╮                │
+│  Idle  podman  │Search commands…                                                                    │                │
+│  │ No message  │  ACP pretty name  ───────────────────────────────────────────────────────────────  │                │
+│  │             │› Pin session…                                                                      │                │
 │                │  Unpin session — This session is not pinned.                                       │                │
 │                │  Suspend session…                                                  ctrl+b shift+x  │                │
 │                │  Restart agent                                                                     │                │
@@ -161,6 +160,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  Open settings                                                           ctrl+b s  │                │
 │                │  Next spinner style                                                                │                │
 │                │  Anywhere  ──────────────────────────────────────────────────────────────────────  │                │
+│                │  Go AFK                                                                            │                │
 │                │  Rename workspace…                                                 ctrl+b shift+w  │                │
 │                │  Delete workspace…                                                 ctrl+b shift+d  │                │
 │                │  Sessions                                                                ctrl+b g  │                │
@@ -347,7 +347,7 @@ Enter open                                                                      
 === non-container session commands (120x44) ===
 ╭ Workspaces ──                                                                                          ───── ◇   ⋯───╮
 │ default                                                                                                              │
-╰──────────────  ╭ × ✦ Commands ───────────────────────────────────────────────────────── 63 commands ╮                │
+╰──────────────  ╭ × ✦ Commands ───────────────────────────────────────────────────────── 64 commands ╮                │
 ╭ Sessions ────  │Search commands…                                                                    │                │
 │ Create   Open  │  ACP pretty name  ───────────────────────────────────────────────────────────────  │                │
 │hel ──────────  │› Pin session…                                                                     ▐│                │

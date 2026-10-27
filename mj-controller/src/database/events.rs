@@ -83,6 +83,7 @@ pub(super) fn insert_api_event(
         params![session_id, recorded_at_ms, serde_json::to_string(event)?],
     )?;
     let seq = tx.last_insert_rowid() as u64;
+    super::operator_away::project_event(tx, session_id, seq, recorded_at_ms, event)?;
     if let ApiEventData::InputRequired {
         request: Some(request),
         ..
@@ -438,8 +439,17 @@ mod tests {
     use mj_transcript::projection::{apply_committed_projection_event, project_relay_event};
 
     fn page(path: &Path, observations: Vec<RelayObservation>, fail: bool) -> Result<()> {
-        let mut current = load_materialized_session_from(path, "session-1")?.unwrap();
-        apply_projection_page_to(path, "session-1", |page| {
+        page_for(path, "session-1", observations, fail)
+    }
+
+    fn page_for(
+        path: &Path,
+        session: &str,
+        observations: Vec<RelayObservation>,
+        fail: bool,
+    ) -> Result<()> {
+        let mut current = load_materialized_session_from(path, session)?.unwrap();
+        apply_projection_page_to(path, session, |page| {
             for observation in observations {
                 let mut event = RelayEvent {
                     format: mj_core::relay::RELAY_EVENT_FORMAT_V1,
@@ -582,6 +592,144 @@ mod tests {
             load_api_events_from(&path, &ApiEventFilter::default(), Some(2), 100).unwrap();
         assert!(deleted.events.is_empty());
         assert_eq!(deleted.latest_seq, 2);
+    }
+
+    #[test]
+    fn operator_away_mail_is_atomic_and_return_notice_skips_later_blocking_requests() {
+        use mj_core::elicitation::OPERATOR_AWAY_ACTION;
+        use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("away.sqlite");
+        for id in ["session-1", "session-2", "legacy", "late"] {
+            let mut record = super::super::tests::session(id, "project");
+            record.state = SessionState::Running;
+            save_session_to(&path, &record).unwrap();
+        }
+        let question = ElicitationRequest::from_acp_params("reused-id", serde_json::json!({
+            "mode":"form", "sessionId":"session-1", "message":"Which architecture?",
+            "requestedSchema":{"type":"object", "properties":{"choice":{"type":"string", "enum":["thin","thick"]}}}
+        })).unwrap();
+        let requested = || RelayObservation::ElicitationRequested {
+            request: question.clone(),
+        };
+        let resolved = || RelayObservation::ElicitationResolved {
+            elicitation_id: question.id.clone(),
+            action: OPERATOR_AWAY_ACTION.into(),
+            // Even a historical worker carrying a reply must not manufacture a user answer.
+            reply: Some("not a user answer".into()),
+        };
+        let mut connection = open(&path).unwrap();
+        assert!(super::super::operator_away::set_with(&mut connection, true).unwrap());
+        assert!(!super::super::operator_away::set_with(&mut connection, true).unwrap());
+        assert_eq!(
+            load_state_from(&path).unwrap().operator_presence,
+            OperatorPresence {
+                away: true,
+                revision: 1
+            }
+        );
+        connection.execute_batch("CREATE TRIGGER fail_away BEFORE INSERT ON mailbox_outbox BEGIN SELECT RAISE(ABORT,'away rollback'); END;").unwrap();
+        assert!(page(&path, vec![requested(), resolved()], false).is_err());
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM api_events", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+        connection.execute_batch("DROP TRIGGER fail_away").unwrap();
+        drop(connection);
+        for id in ["session-1", "session-2", "legacy"] {
+            // Capture and resolution cross a transaction/restart boundary.
+            page_for(&path, id, vec![requested()], false).unwrap();
+            page_for(&path, id, vec![resolved()], false).unwrap();
+        }
+        open(&path)
+            .unwrap()
+            .execute(
+                "INSERT INTO operator_away_workers(session_id,protocol) VALUES('legacy',44)",
+                [],
+            )
+            .unwrap();
+        // A later request with the same runtime-local id waits for the operator.
+        page(&path, vec![requested()], false).unwrap();
+        // A later autoreply resets the blocking cutoff for the other session.
+        page_for(&path, "session-2", vec![requested(), resolved()], false).unwrap();
+        let current = load_materialized_session_from(&path, "session-2")
+            .unwrap()
+            .unwrap();
+        assert!(current.pending_elicitations.is_empty());
+        let transcript = current
+            .transcript
+            .iter()
+            .map(|item| mj_transcript::transcript::transcript_item_text(item))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(transcript.contains("Not shown because you were away: Which architecture?"));
+        assert!(!transcript.contains("not a user answer"));
+        // This request was refused before AFK-off, but its resolution arrives later.
+        page_for(&path, "late", vec![requested()], false).unwrap();
+        let mut connection = open(&path).unwrap();
+        connection
+            .execute("DELETE FROM api_events WHERE session_id='late'", [])
+            .unwrap();
+        assert!(super::super::operator_away::set_with(&mut connection, false).unwrap());
+        // Repeating the same write and rebuilding a projection emit nothing twice.
+        assert!(!super::super::operator_away::set_with(&mut connection, false).unwrap());
+        assert_eq!(
+            load_state_from(&path).unwrap().operator_presence,
+            OperatorPresence {
+                away: false,
+                revision: 2
+            }
+        );
+        drop(connection);
+        page_for(&path, "late", vec![resolved()], false).unwrap();
+        save_materialized_session_to(&path, &MaterializedSession::empty("late")).unwrap();
+        page_for(&path, "late", vec![requested(), resolved()], false).unwrap();
+        save_materialized_session_to(&path, &MaterializedSession::empty("session-2")).unwrap();
+        page_for(
+            &path,
+            "session-2",
+            vec![requested(), resolved(), requested(), resolved()],
+            false,
+        )
+        .unwrap();
+        let connection = open(&path).unwrap();
+        let messages = connection
+            .prepare(
+                "SELECT target_session_id,event_json,wake FROM mailbox_outbox ORDER BY event_key",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, bool>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let mut away_count = 0;
+        let mut back_count = 0;
+        for (target, json, wake) in messages {
+            assert!(wake);
+            match serde_json::from_str::<MailboxEvent>(&json).unwrap().body {
+                MailboxEventBody::OperatorAway { request } => {
+                    away_count += 1;
+                    assert!(request.contains("Which architecture?"));
+                }
+                MailboxEventBody::OperatorBack { requests } => {
+                    back_count += 1;
+                    assert!(target == "session-2" || target == "late");
+                    assert_eq!(requests.len(), if target == "session-2" { 2 } else { 1 });
+                }
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+        assert_eq!(away_count, 4);
+        assert_eq!(back_count, 2);
     }
 
     #[test]

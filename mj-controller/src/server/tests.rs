@@ -134,6 +134,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         ]),
     };
     let state = AppState {
+        operator_presence: Default::default(),
         last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
@@ -1472,6 +1473,25 @@ async fn actions_are_refused_when_their_capability_is_false() {
             "{capability} reached the controller while false"
         );
     }
+}
+
+#[tokio::test]
+async fn operator_away_action_is_sessionless_and_reaches_controller() {
+    let (app, mut actions, _, _, _) =
+        app_with_snapshot(|snapshot| snapshot.sessions = Default::default());
+    let cookie = login_cookie(&app).await;
+    let posted = tokio::spawn(post_action(
+        app,
+        cookie,
+        r#"{"action":"set-operator-away","away":true}"#.into(),
+    ));
+    let request = actions.recv().await.unwrap();
+    assert_eq!(
+        request.action,
+        ControllerAction::SetOperatorAway { away: true }
+    );
+    request.reply.send(ActionOutcome::accepted()).unwrap();
+    assert_eq!(posted.await.unwrap().status(), StatusCode::ACCEPTED);
 }
 
 /// A setting the harness never advertised is not a setting. Forwarding one
@@ -3265,6 +3285,7 @@ async fn snapshot_wire_cursor_and_detail_route_share_revision_and_resolve_intern
             .to_bytes(),
     )
     .unwrap();
+    assert_eq!(snapshot["operator_away"], false);
     assert_eq!(snapshot["cursor"]["sequence"], 1);
     assert!(snapshot["cursor"]["incarnation"].as_str().is_some());
     let snapshot_row = &snapshot["sessions"][0];

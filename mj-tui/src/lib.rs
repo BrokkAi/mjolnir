@@ -45,6 +45,7 @@ use crate::workspaces::{WorkspaceControlFocus, WorkspaceManager};
 mod actions;
 mod combined;
 mod conversation_navigation;
+mod operator_away;
 pub use conversation_navigation::PaneAssignment;
 mod availability;
 mod component_events;
@@ -224,6 +225,9 @@ const TEST_VERSION_LABEL: &str = "vX.Y.Z";
 /// A side effect requested by the dashboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DashboardAction {
+    SetOperatorAway {
+        away: bool,
+    },
     None,
     GoLaunch {
         recipe: mj_core::go::GoRecipe,
@@ -870,6 +874,7 @@ pub(crate) fn cycle_control<T: Copy + PartialEq>(current: T, order: &[T], revers
 /// the Sessions pane's order are derived from (see [`session_view`]).
 pub struct DashboardState {
     pending_welcome: Option<welcome::WelcomeDialog>,
+    operator_presence: operator_away::OperatorPresence,
     #[cfg(test)]
     pub(crate) reconciliation_visits: Cell<usize>,
     pub(crate) row_index: RefCell<row_index::RowIndex>,
@@ -1207,6 +1212,7 @@ impl DashboardState {
     }
 
     pub fn new(config: Config, state: State, quotas: BTreeMap<String, ProfileQuota>) -> Self {
+        let operator_presence = state.operator_presence;
         let launch_recency = mj_client::runtime_feed::launch_recency(&state.sessions);
         let mut dashboard = Self {
             #[cfg(test)]
@@ -1312,6 +1318,7 @@ impl DashboardState {
             last_row_click: None,
             mode: Mode::Dashboard,
             pending_welcome: None,
+            operator_presence: Default::default(),
             help_request_generation: 0,
             usage_request_generation: 0,
             modal_click_transition: None,
@@ -1355,6 +1362,7 @@ impl DashboardState {
             .map(|id| (id.clone(), SessionDetail::default()))
             .collect();
         dashboard.clamp_selections();
+        dashboard.set_operator_presence(operator_presence);
         dashboard
     }
 }

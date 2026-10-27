@@ -15,9 +15,10 @@ const INTERNED_FIELDS: [&str; 5] = [
     "incompatible_resume_targets",
 ];
 
-pub(super) const METADATA_FIELDS: [&str; 14] = [
+pub(super) const METADATA_FIELDS: [&str; 15] = [
     "profile_capabilities",
     "last_subagent_policy",
+    "operator_away",
     "subagents_configured",
     "revision",
     "generated_at",
@@ -94,6 +95,7 @@ pub(crate) struct WireRow {
 
 #[derive(Serialize)]
 struct SnapshotMetadata<'a> {
+    operator_away: bool,
     profile_capabilities: &'a mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
     last_subagent_policy: &'a mj_core::subagent::SubagentPolicy,
     subagents_configured: bool,
@@ -142,6 +144,7 @@ pub(super) fn metadata(
     server_time_ms: i64,
 ) -> Result<Map<String, Value>> {
     let metadata = SnapshotMetadata {
+        operator_away: snapshot.operator_away,
         profile_capabilities: &snapshot.profile_capabilities,
         last_subagent_policy: &snapshot.last_subagent_policy,
         subagents_configured: snapshot.subagents_configured,

@@ -28,6 +28,9 @@ const bootStatus = document.querySelector('#boot-status'),
   menuButton = document.querySelector('#menu-button'),
   menu = document.querySelector('#menu'),
   menuVersion = document.querySelector('#menu-version'),
+  operatorAwayIndicator = document.querySelector('#operator-away-indicator'),
+  operatorAwayToggle = document.querySelector('#operator-away-toggle'),
+  operatorAwayError = document.querySelector('#operator-away-error'),
   announcer = document.querySelector('#announcer'),
   workspaceStrip = document.querySelector('#workspaces'),
   workspaceSelect = document.querySelector('#workspace-select'),
@@ -5849,6 +5852,7 @@ function presentSnapshot(detailChangedIds = []) {
   snapshotReceivedAtMs = Date.now();
   reconcileLifecycleActions();
   renderMenuVersion();
+  renderOperatorAway();
   bootStatus.classList.add('hidden');
   login.classList.add('hidden');
   app.classList.remove('hidden');
@@ -8346,6 +8350,38 @@ function renderMenuVersion() {
     : 'Mjolnir';
 }
 
+let operatorAwayPending = null;
+
+function renderOperatorAway() {
+  const away = operatorAwayPending ?? snapshot?.operator_away === true;
+  operatorAwayIndicator.classList.toggle('hidden', !away);
+  operatorAwayToggle.textContent = operatorAwayPending === null
+    ? (away ? 'End AFK' : 'Go AFK')
+    : (operatorAwayPending ? 'Going AFK…' : 'Ending AFK…');
+  operatorAwayToggle.disabled = operatorAwayPending !== null;
+}
+
+async function setOperatorAway(away) {
+  if (operatorAwayPending !== null) return;
+  operatorAwayPending = away;
+  operatorAwayError.textContent = '';
+  operatorAwayError.classList.add('hidden');
+  renderOperatorAway();
+  try {
+    await request('/api/actions', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'set-operator-away', away }),
+    });
+    await refresh();
+  } catch (err) {
+    operatorAwayError.textContent = `Could not ${away ? 'go' : 'end'} AFK: ${err.message}`;
+    operatorAwayError.classList.remove('hidden');
+  } finally {
+    operatorAwayPending = null;
+    renderOperatorAway();
+  }
+}
+
 menuButton.onclick = () => {
   const open = menu.classList.toggle('hidden');
   menuButton.setAttribute('aria-expanded', String(!open));
@@ -8371,11 +8407,17 @@ document.addEventListener('keydown', event => {
 });
 
 menu.onclick = event => {
+  if (event.target.closest('#operator-away-toggle')) {
+    void setOperatorAway(!(operatorAwayPending ?? snapshot?.operator_away === true));
+    return;
+  }
   const target = event.target.closest('button[data-route]');
   if (!target) return;
   closeMenu();
   navigate({ name: target.dataset.route });
 };
+
+operatorAwayIndicator.onclick = () => void setOperatorAway(false);
 
 logout.onclick = async () => {
   await request('/auth/session', { method: 'DELETE' });

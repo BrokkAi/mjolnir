@@ -23,6 +23,9 @@ pub(crate) fn is_turn_control_command(command: &mj_core::relay::RelayCommand) ->
 // this public action's Rust construction shape inline; boxing would change it.
 #[allow(clippy::large_enum_variant)]
 pub enum ControllerAction {
+    SetOperatorAway {
+        away: bool,
+    },
     TurnControl {
         session_id: String,
         command: mj_core::relay::RelayCommand,
