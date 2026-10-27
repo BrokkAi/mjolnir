@@ -106,6 +106,8 @@ pub enum BackgroundWorkPolicy {
 /// observations newer than the last frontier covered by both a durable
 /// controller acknowledgement and a verified checkpoint.
 pub struct DurableRelay {
+    // Only the Unix worker runtime updates this from SetOperatorAway.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) operator_away: crate::acp::OperatorAway,
     root: PathBuf,
     relay_version: String,

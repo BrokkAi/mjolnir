@@ -336,10 +336,8 @@ enum BuildCachePreviewResult {
 
 impl SetupDialog {
     fn new(config: &Config) -> Self {
-        let mut draft = serde_json::to_value(config).expect("configuration serializes");
-        let original = draft.to_string();
-        ensure_local_machine(&mut draft);
-        schema::expand(&mut draft, &mut Vec::new());
+        let (original, draft) = mj_client::settings::draft::open(config);
+        let original = original.to_string();
         let saved_profile_values = draft
             .get("profiles")
             .and_then(Value::as_object)
