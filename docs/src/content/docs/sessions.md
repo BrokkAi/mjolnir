@@ -559,10 +559,10 @@ a transcript, and a title or project the index knows, so a session you remember
 only by something said inside it is findable.
 
 The box is closed while the index cannot answer. It reads **Indexing…** during
-the first build, and names a version mismatch when the index file on disk was
-written by another SessionWiki version (see [Match the `sessionwiki`
-version](#match-the-sessionwiki-version)). Either way the tabs and row
-navigation keep working.
+the first build and while Mjolnir rebuilds an index an older SessionWiki wrote.
+It names a version mismatch when a newer SessionWiki wrote the index file on
+disk (see [Match the `sessionwiki` version](#match-the-sessionwiki-version)).
+Either way the tabs and row navigation keep working.
 
 ### The Archived tab
 
@@ -604,17 +604,24 @@ sub-agent child that is not ready to be archived waits for the next pass. Leave
 
 Mjolnir links SessionWiki as a library and writes into your ordinary SessionWiki
 index. The `sessionwiki` command-line tool you install must be the same version.
-SessionWiki drops and rebuilds its whole index when the file's schema version
-differs from the one the program expects, so two programs at different versions
-re-index everything each time you alternate between them — on a large corpus
-that is tens of minutes per switch.
+SessionWiki rebuilds its search cache when the file's schema version differs
+from the one the program expects. Your tags, notes, summaries and archived
+sessions survive a rebuild, but re-indexing takes tens of minutes on a large
+corpus.
 
-This build links the `sessionwiki` crate, version 0.33.1. Install the matching
+When an older SessionWiki wrote the index, Mjolnir rebuilds it at its own
+version and the box reads **Indexing…** until that finishes. A `sessionwiki`
+command older than 0.34.1 rebuilds it back the next time it runs, so the two
+take turns re-indexing everything until you upgrade the command. When a newer
+SessionWiki wrote the index, Mjolnir leaves it alone and search stays closed
+until you upgrade Mjolnir.
+
+This build links the `sessionwiki` crate, version 0.34.5. Install the matching
 tool with either:
 
 ```sh
-cargo install --locked sessionwiki@0.33.1
-npm install --global @youdie006/sessionwiki@0.33.1
+cargo install --locked sessionwiki@0.34.5
+npm install --global @youdie006/sessionwiki@0.34.5
 ```
 
 If you installed `brokk-sessionwiki` for an earlier Mjolnir build, run

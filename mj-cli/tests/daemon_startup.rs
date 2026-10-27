@@ -171,8 +171,33 @@ exit 64
         "unexpected container CLI sequence:\n{calls}"
     );
 
+    let stopped = common::own_test_daemons(&mut Command::new(env!("CARGO_BIN_EXE_mj")))
+        .args(["daemon", "stop"])
+        .env("MJ_DATA_DIR", &data)
+        .env("MJ_CONFIG_DIR", &config)
+        .env("MJOLNIR_NO_UPDATE_CHECK", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        stopped.status.success(),
+        "daemon stop failed: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let exit_deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = daemon.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= exit_deadline {
+            let _ = daemon.kill();
+            let _ = daemon.wait();
+            panic!("the daemon did not exit after daemon stop");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert!(status.success(), "daemon exited with {status}");
     drop(storage);
-    assert!(daemon.wait().unwrap().success());
 }
 
 /// Run one concurrent upgrade client with its output in a file and a deadline.

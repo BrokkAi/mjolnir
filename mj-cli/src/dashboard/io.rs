@@ -8,7 +8,7 @@
 mod spawn;
 pub(crate) use spawn::*;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -797,9 +797,6 @@ impl DashboardContext {
             }
             DashboardIoUpdate::WorkerRecordPersistence { operation, result } => {
                 match (operation, result) {
-                    (WorkerRecordPersistence::AcpTitle { .. }, Err(error)) => self
-                        .dashboard
-                        .set_notice(format!("Could not save harness title: {error}")),
                     (
                         WorkerRecordPersistence::TargetMissing {
                             session_id,
@@ -825,16 +822,9 @@ impl DashboardContext {
                         ))
                     }
                     (
-                        WorkerRecordPersistence::AcpTitle { .. },
-                        Ok(WorkerRecordPersistenceOutcome::Saved),
-                    )
-                    | (
                         WorkerRecordPersistence::TargetMissing { .. },
                         Ok(WorkerRecordPersistenceOutcome::Unchanged),
                     ) => {}
-                    (operation, Ok(outcome)) => {
-                        unreachable!("persistence operation {operation:?} returned {outcome:?}")
-                    }
                 }
             }
             DashboardIoUpdate::MaterializedSessionProjection { session_id, result } => {

@@ -16,6 +16,8 @@ pub struct ViewerSnapshot {
     #[serde(default)]
     pub operator_away: bool,
     #[serde(default)]
+    pub auto_afk_minutes: u32,
+    #[serde(default)]
     pub profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
     #[serde(
         default,
@@ -400,6 +402,7 @@ impl ViewerSnapshot {
             profile_capabilities: Default::default(),
             last_subagent_policy: state.last_subagent_policy.clone(),
             operator_away: state.operator_presence.away,
+            auto_afk_minutes: config.advanced.auto_afk_minutes,
             subagents_configured: config.subagents.is_configured(),
             revision,
             generated_at: now_unix().to_string(),
@@ -963,6 +966,10 @@ pub struct ViewerQuotaWindow {
     pub banked_resets: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percent_used: Option<u8>,
+    /// Claude's remaining Fable allowance, attached only to the master weekly
+    /// window so surfaces can show both readings without another meter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fable_remaining_percent: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<String>,
     /// Whether this window is on course to run out before it resets. The

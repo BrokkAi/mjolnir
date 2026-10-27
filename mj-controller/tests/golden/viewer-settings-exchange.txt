@@ -1,0 +1,1182 @@
+[
+  {
+    "uri": "/api/settings",
+    "request": null,
+    "status": 200,
+    "response": {
+      "original_environments": {
+        "profiles.claude": {
+          "ANTHROPIC_API_KEY": {
+            "mj_hidden_value": true
+          },
+          "PROXY_TOKEN": {
+            "from_secret": "PROXY_TOKEN"
+          }
+        },
+        "targets.lab": {
+          "LAB_TOKEN": {
+            "mj_hidden_value": true
+          }
+        }
+      },
+      "draft_environments": {
+        "profiles.claude": {
+          "ANTHROPIC_API_KEY": {
+            "mj_hidden_value": true
+          },
+          "PROXY_TOKEN": {
+            "from_secret": "PROXY_TOKEN"
+          }
+        },
+        "targets.lab": {
+          "LAB_TOKEN": {
+            "mj_hidden_value": true
+          }
+        }
+      },
+      "page": {
+        "path": [],
+        "breadcrumb": [
+          "Settings"
+        ],
+        "help": "Changes stay in this draft until you save.",
+        "groups": [
+          {
+            "heading": "Setup",
+            "rows": [
+              {
+                "path": [
+                  "profiles"
+                ],
+                "label": "Agent Profiles",
+                "help": "Add a profile, then choose Sign in. Detect profiles finds installed agents.",
+                "control": "page",
+                "summary": "claude"
+              },
+              {
+                "path": [
+                  "bundles"
+                ],
+                "label": "Projects",
+                "help": "Projects can contain one or more repositories. Choose the main repository where the agent starts.",
+                "control": "page",
+                "summary": "None yet"
+              },
+              {
+                "path": [
+                  "targets"
+                ],
+                "label": "Runtimes",
+                "help": "Add a runtime and choose its machine, or use Detect runtimes to find what every machine can run.",
+                "control": "page",
+                "summary": "apple-container, docker, +3 more"
+              },
+              {
+                "path": [
+                  "machines"
+                ],
+                "label": "Machines",
+                "help": "Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its build cache settings.",
+                "control": "page",
+                "summary": "local"
+              }
+            ]
+          },
+          {
+            "heading": "Sessions",
+            "rows": [
+              {
+                "path": [
+                  "review"
+                ],
+                "label": "Code Review",
+                "help": "Used by turn review. Auto picks another provider with quota.",
+                "control": "page",
+                "summary": "Off"
+              },
+              {
+                "path": [
+                  "continuation"
+                ],
+                "label": "Continuation",
+                "help": "Continue an unfinished request up to three times per message, and resume a session after its quota resets.",
+                "control": "page",
+                "summary": "On · 3 continuations plus quota recovery"
+              },
+              {
+                "path": [
+                  "subagents"
+                ],
+                "label": "Sub-agents",
+                "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+                "control": "page",
+                "summary": "Up to 6 at once"
+              },
+              {
+                "path": [
+                  "sessionwiki"
+                ],
+                "label": "SessionWiki",
+                "help": "Sessions are always indexed into SessionWiki. This page sets archiving; the row below shows what it frees.",
+                "control": "page",
+                "summary": "Keeps every session"
+              },
+              {
+                "path": [
+                  "phone"
+                ],
+                "label": "Web Access",
+                "help": "Web access changes take effect when the background server next starts. Remote access requires a certificate and key.",
+                "control": "page",
+                "summary": "On · 127.0.0.1:3765"
+              }
+            ]
+          },
+          {
+            "heading": "Display",
+            "rows": [
+              {
+                "path": [
+                  "interface"
+                ],
+                "label": "Interface",
+                "control": "page",
+                "summary": "Midnight · sidebar left"
+              },
+              {
+                "path": [
+                  "notify"
+                ],
+                "label": "Notifications",
+                "help": "How to be told when a session you are not looking at asks a question, fails, or finishes.",
+                "control": "page",
+                "summary": "Terminal"
+              },
+              {
+                "path": [
+                  "advanced"
+                ],
+                "label": "Advanced",
+                "help": "Display options, activity clocks, session order, symbols, tool calls, and automatic AFK.",
+                "control": "page",
+                "summary": "All off"
+              }
+            ]
+          },
+          {
+            "heading": "Privacy",
+            "rows": [
+              {
+                "path": [
+                  "jev"
+                ],
+                "label": "Jev (hosted service)",
+                "help": "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart.",
+                "control": "page",
+                "summary": "On · sends turn text for classification"
+              }
+            ]
+          },
+          {
+            "heading": "Other",
+            "rows": [
+              {
+                "path": [
+                  "github"
+                ],
+                "label": "GitHub events",
+                "help": "Receive GitHub activity selected by Jev. This switch controls only the GitHub event source. Mailbox hooks, peer messages and child reports remain available at tool boundaries and through idle wakes.",
+                "control": "page",
+                "summary": "On · GitHub activity"
+              }
+            ]
+          }
+        ],
+        "removable": false
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/page",
+    "request": {
+      "path": [
+        "profiles",
+        "claude"
+      ]
+    },
+    "status": 200,
+    "response": {
+      "page": {
+        "path": [
+          "profiles",
+          "claude"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Agent Profiles",
+          "claude"
+        ],
+        "help": "Changes stay in this draft until you save.",
+        "groups": [
+          {
+            "rows": [
+              {
+                "path": [
+                  "profiles",
+                  "claude",
+                  "enabled"
+                ],
+                "label": "Enabled",
+                "control": "checkbox",
+                "checked": true
+              },
+              {
+                "path": [
+                  "profiles",
+                  "claude",
+                  "kind"
+                ],
+                "label": "Type",
+                "control": "choice",
+                "value": "claude",
+                "choices": [
+                  {
+                    "value": "codex",
+                    "label": "Codex"
+                  },
+                  {
+                    "value": "claude",
+                    "label": "Claude Code"
+                  },
+                  {
+                    "value": "kimi",
+                    "label": "Kimi Code"
+                  },
+                  {
+                    "value": "grok",
+                    "label": "Grok Build"
+                  },
+                  {
+                    "value": "muse",
+                    "label": "Muse Code"
+                  },
+                  {
+                    "value": "opencode",
+                    "label": "opencode"
+                  },
+                  {
+                    "value": "mimo",
+                    "label": "MiMo Code"
+                  },
+                  {
+                    "value": "dsh",
+                    "label": "DSH"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "profiles",
+                  "claude",
+                  "home"
+                ],
+                "label": "Account directory",
+                "help": "The agent's account directory, such as ~/.codex. Save, then choose Sign in.",
+                "control": "text",
+                "value": "<home>",
+                "placeholder": "Not set",
+                "number": false
+              },
+              {
+                "path": [
+                  "profiles",
+                  "claude",
+                  "environment"
+                ],
+                "label": "Environment variables",
+                "control": "page",
+                "summary": "2 settings"
+              },
+              {
+                "path": [
+                  "profiles",
+                  "claude",
+                  "context_window_bytes"
+                ],
+                "label": "Context budget (bytes)",
+                "help": "Optional positive byte limit for transcript compaction. Leave blank for the default.",
+                "control": "text",
+                "value": "",
+                "placeholder": "262144 (256 KiB)",
+                "number": true
+              }
+            ]
+          }
+        ],
+        "removable": true,
+        "notices": [
+          "To sign this profile in, save it, then run `mj login --profile claude` in a terminal."
+        ]
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/page",
+    "request": {
+      "path": []
+    },
+    "status": 200,
+    "response": {
+      "page": {
+        "path": [],
+        "breadcrumb": [
+          "Settings"
+        ],
+        "help": "Changes stay in this draft until you save.",
+        "groups": [
+          {
+            "heading": "Setup",
+            "rows": [
+              {
+                "path": [
+                  "profiles"
+                ],
+                "label": "Agent Profiles",
+                "help": "Add a profile, then choose Sign in. Detect profiles finds installed agents.",
+                "control": "page",
+                "summary": "claude"
+              },
+              {
+                "path": [
+                  "bundles"
+                ],
+                "label": "Projects",
+                "help": "Projects can contain one or more repositories. Choose the main repository where the agent starts.",
+                "control": "page",
+                "summary": "None yet"
+              },
+              {
+                "path": [
+                  "targets"
+                ],
+                "label": "Runtimes",
+                "help": "Add a runtime and choose its machine, or use Detect runtimes to find what every machine can run.",
+                "control": "page",
+                "summary": "apple-container, docker, +3 more"
+              },
+              {
+                "path": [
+                  "machines"
+                ],
+                "label": "Machines",
+                "help": "Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its build cache settings.",
+                "control": "page",
+                "summary": "local"
+              }
+            ]
+          },
+          {
+            "heading": "Sessions",
+            "rows": [
+              {
+                "path": [
+                  "review"
+                ],
+                "label": "Code Review",
+                "help": "Used by turn review. Auto picks another provider with quota.",
+                "control": "page",
+                "summary": "Off"
+              },
+              {
+                "path": [
+                  "continuation"
+                ],
+                "label": "Continuation",
+                "help": "Continue an unfinished request up to three times per message, and resume a session after its quota resets.",
+                "control": "page",
+                "summary": "On · 3 continuations plus quota recovery"
+              },
+              {
+                "path": [
+                  "subagents"
+                ],
+                "label": "Sub-agents",
+                "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+                "control": "page",
+                "summary": "Up to 6 at once"
+              },
+              {
+                "path": [
+                  "sessionwiki"
+                ],
+                "label": "SessionWiki",
+                "help": "Sessions are always indexed into SessionWiki. This page sets archiving; the row below shows what it frees.",
+                "control": "page",
+                "summary": "Keeps every session"
+              },
+              {
+                "path": [
+                  "phone"
+                ],
+                "label": "Web Access",
+                "help": "Web access changes take effect when the background server next starts. Remote access requires a certificate and key.",
+                "control": "page",
+                "summary": "On · 127.0.0.1:3765"
+              }
+            ]
+          },
+          {
+            "heading": "Display",
+            "rows": [
+              {
+                "path": [
+                  "interface"
+                ],
+                "label": "Interface",
+                "control": "page",
+                "summary": "Midnight · sidebar left"
+              },
+              {
+                "path": [
+                  "notify"
+                ],
+                "label": "Notifications",
+                "help": "How to be told when a session you are not looking at asks a question, fails, or finishes.",
+                "control": "page",
+                "summary": "Terminal"
+              },
+              {
+                "path": [
+                  "advanced"
+                ],
+                "label": "Advanced",
+                "help": "Display options, activity clocks, session order, symbols, tool calls, and automatic AFK.",
+                "control": "page",
+                "summary": "All off"
+              }
+            ]
+          },
+          {
+            "heading": "Privacy",
+            "rows": [
+              {
+                "path": [
+                  "jev"
+                ],
+                "label": "Jev (hosted service)",
+                "help": "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart.",
+                "control": "page",
+                "summary": "On · sends turn text for classification"
+              }
+            ]
+          },
+          {
+            "heading": "Other",
+            "rows": [
+              {
+                "path": [
+                  "github"
+                ],
+                "label": "GitHub events",
+                "help": "Receive GitHub activity selected by Jev. This switch controls only the GitHub event source. Mailbox hooks, peer messages and child reports remain available at tool boundaries and through idle wakes.",
+                "control": "page",
+                "summary": "On · GitHub activity"
+              }
+            ]
+          }
+        ],
+        "removable": false
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/page",
+    "request": {
+      "path": [
+        "continuation"
+      ]
+    },
+    "status": 200,
+    "response": {
+      "page": {
+        "path": [
+          "continuation"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Continuation"
+        ],
+        "help": "Continue an unfinished request up to three times per message, and resume a session after its quota resets.",
+        "groups": [
+          {
+            "rows": [
+              {
+                "path": [
+                  "continuation",
+                  "enabled"
+                ],
+                "label": "Enabled",
+                "control": "checkbox",
+                "checked": true
+              }
+            ]
+          }
+        ],
+        "removable": false
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/edit",
+    "request": {
+      "page": [
+        "continuation"
+      ],
+      "edit": {
+        "kind": "toggle",
+        "path": [
+          "continuation",
+          "enabled"
+        ]
+      }
+    },
+    "status": 200,
+    "response": {
+      "draft_environments": {
+        "profiles.claude": {
+          "ANTHROPIC_API_KEY": {
+            "mj_hidden_value": true
+          },
+          "PROXY_TOKEN": {
+            "from_secret": "PROXY_TOKEN"
+          }
+        },
+        "targets.lab": {
+          "LAB_TOKEN": {
+            "mj_hidden_value": true
+          }
+        }
+      },
+      "page": {
+        "path": [
+          "continuation"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Continuation"
+        ],
+        "help": "Continue an unfinished request up to three times per message, and resume a session after its quota resets.",
+        "groups": [
+          {
+            "rows": [
+              {
+                "path": [
+                  "continuation",
+                  "enabled"
+                ],
+                "label": "Enabled",
+                "control": "checkbox",
+                "checked": false
+              }
+            ]
+          }
+        ],
+        "removable": false
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/page",
+    "request": {
+      "path": []
+    },
+    "status": 200,
+    "response": {
+      "page": {
+        "path": [],
+        "breadcrumb": [
+          "Settings"
+        ],
+        "help": "Changes stay in this draft until you save.",
+        "groups": [
+          {
+            "heading": "Setup",
+            "rows": [
+              {
+                "path": [
+                  "profiles"
+                ],
+                "label": "Agent Profiles",
+                "help": "Add a profile, then choose Sign in. Detect profiles finds installed agents.",
+                "control": "page",
+                "summary": "claude"
+              },
+              {
+                "path": [
+                  "bundles"
+                ],
+                "label": "Projects",
+                "help": "Projects can contain one or more repositories. Choose the main repository where the agent starts.",
+                "control": "page",
+                "summary": "None yet"
+              },
+              {
+                "path": [
+                  "targets"
+                ],
+                "label": "Runtimes",
+                "help": "Add a runtime and choose its machine, or use Detect runtimes to find what every machine can run.",
+                "control": "page",
+                "summary": "apple-container, docker, +3 more"
+              },
+              {
+                "path": [
+                  "machines"
+                ],
+                "label": "Machines",
+                "help": "Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its build cache settings.",
+                "control": "page",
+                "summary": "local"
+              }
+            ]
+          },
+          {
+            "heading": "Sessions",
+            "rows": [
+              {
+                "path": [
+                  "review"
+                ],
+                "label": "Code Review",
+                "help": "Used by turn review. Auto picks another provider with quota.",
+                "control": "page",
+                "summary": "Off"
+              },
+              {
+                "path": [
+                  "continuation"
+                ],
+                "label": "Continuation",
+                "help": "Continue an unfinished request up to three times per message, and resume a session after its quota resets.",
+                "control": "page",
+                "summary": "Off"
+              },
+              {
+                "path": [
+                  "subagents"
+                ],
+                "label": "Sub-agents",
+                "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+                "control": "page",
+                "summary": "Up to 6 at once"
+              },
+              {
+                "path": [
+                  "sessionwiki"
+                ],
+                "label": "SessionWiki",
+                "help": "Sessions are always indexed into SessionWiki. This page sets archiving; the row below shows what it frees.",
+                "control": "page",
+                "summary": "Keeps every session"
+              },
+              {
+                "path": [
+                  "phone"
+                ],
+                "label": "Web Access",
+                "help": "Web access changes take effect when the background server next starts. Remote access requires a certificate and key.",
+                "control": "page",
+                "summary": "On · 127.0.0.1:3765"
+              }
+            ]
+          },
+          {
+            "heading": "Display",
+            "rows": [
+              {
+                "path": [
+                  "interface"
+                ],
+                "label": "Interface",
+                "control": "page",
+                "summary": "Midnight · sidebar left"
+              },
+              {
+                "path": [
+                  "notify"
+                ],
+                "label": "Notifications",
+                "help": "How to be told when a session you are not looking at asks a question, fails, or finishes.",
+                "control": "page",
+                "summary": "Terminal"
+              },
+              {
+                "path": [
+                  "advanced"
+                ],
+                "label": "Advanced",
+                "help": "Display options, activity clocks, session order, symbols, tool calls, and automatic AFK.",
+                "control": "page",
+                "summary": "All off"
+              }
+            ]
+          },
+          {
+            "heading": "Privacy",
+            "rows": [
+              {
+                "path": [
+                  "jev"
+                ],
+                "label": "Jev (hosted service)",
+                "help": "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart.",
+                "control": "page",
+                "summary": "On · sends turn text for classification"
+              }
+            ]
+          },
+          {
+            "heading": "Other",
+            "rows": [
+              {
+                "path": [
+                  "github"
+                ],
+                "label": "GitHub events",
+                "help": "Receive GitHub activity selected by Jev. This switch controls only the GitHub event source. Mailbox hooks, peer messages and child reports remain available at tool boundaries and through idle wakes.",
+                "control": "page",
+                "summary": "On · GitHub activity"
+              }
+            ]
+          }
+        ],
+        "removable": false
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/page",
+    "request": {
+      "path": [
+        "subagents"
+      ]
+    },
+    "status": 200,
+    "response": {
+      "page": {
+        "path": [
+          "subagents"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Sub-agents"
+        ],
+        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+        "groups": [
+          {
+            "rows": [
+              {
+                "path": [
+                  "subagents",
+                  "max_concurrent"
+                ],
+                "label": "Maximum concurrent children",
+                "control": "text",
+                "value": "6",
+                "placeholder": "6 (default)",
+                "number": true
+              },
+              {
+                "path": [
+                  "subagents",
+                  "straightforward"
+                ],
+                "label": "Straightforward",
+                "help": "Work with a clear method. Choose a model and its effort.",
+                "control": "page",
+                "summary": "2 settings"
+              },
+              {
+                "path": [
+                  "subagents",
+                  "subtle"
+                ],
+                "label": "Subtle",
+                "help": "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward.",
+                "control": "page",
+                "summary": "2 settings"
+              }
+            ]
+          }
+        ],
+        "removable": false
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/edit",
+    "request": {
+      "page": [
+        "subagents"
+      ],
+      "edit": {
+        "kind": "set",
+        "path": [
+          "subagents",
+          "max_concurrent"
+        ],
+        "text": "99"
+      }
+    },
+    "status": 200,
+    "response": {
+      "draft_environments": {
+        "profiles.claude": {
+          "ANTHROPIC_API_KEY": {
+            "mj_hidden_value": true
+          },
+          "PROXY_TOKEN": {
+            "from_secret": "PROXY_TOKEN"
+          }
+        },
+        "targets.lab": {
+          "LAB_TOKEN": {
+            "mj_hidden_value": true
+          }
+        }
+      },
+      "page": {
+        "path": [
+          "subagents"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Sub-agents"
+        ],
+        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+        "groups": [
+          {
+            "rows": [
+              {
+                "path": [
+                  "subagents",
+                  "max_concurrent"
+                ],
+                "label": "Maximum concurrent children",
+                "control": "text",
+                "value": "6",
+                "placeholder": "6 (default)",
+                "number": true
+              },
+              {
+                "path": [
+                  "subagents",
+                  "straightforward"
+                ],
+                "label": "Straightforward",
+                "help": "Work with a clear method. Choose a model and its effort.",
+                "control": "page",
+                "summary": "2 settings"
+              },
+              {
+                "path": [
+                  "subagents",
+                  "subtle"
+                ],
+                "label": "Subtle",
+                "help": "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward.",
+                "control": "page",
+                "summary": "2 settings"
+              }
+            ]
+          }
+        ],
+        "removable": false
+      },
+      "error": "Enter a whole number from 1 to 64."
+    }
+  },
+  {
+    "uri": "/api/settings/page",
+    "request": {
+      "path": [
+        "subagents",
+        "straightforward"
+      ]
+    },
+    "status": 200,
+    "response": {
+      "page": {
+        "path": [
+          "subagents",
+          "straightforward"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Sub-agents",
+          "Straightforward"
+        ],
+        "help": "Work with a clear method. Choose a model and its effort.",
+        "groups": [
+          {
+            "rows": [
+              {
+                "path": [
+                  "subagents",
+                  "straightforward",
+                  "model"
+                ],
+                "label": "Model",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "Default (Not set)"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "straightforward",
+                  "effort"
+                ],
+                "label": "Effort",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "Default (Harness default)"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "removable": false
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/edit",
+    "request": {
+      "page": [
+        "subagents",
+        "straightforward"
+      ],
+      "edit": {
+        "kind": "set",
+        "path": [
+          "subagents",
+          "straightforward",
+          "model"
+        ],
+        "choice": "opus"
+      }
+    },
+    "status": 200,
+    "response": {
+      "draft_environments": {
+        "profiles.claude": {
+          "ANTHROPIC_API_KEY": {
+            "mj_hidden_value": true
+          },
+          "PROXY_TOKEN": {
+            "from_secret": "PROXY_TOKEN"
+          }
+        },
+        "targets.lab": {
+          "LAB_TOKEN": {
+            "mj_hidden_value": true
+          }
+        }
+      },
+      "page": {
+        "path": [
+          "subagents",
+          "straightforward"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Sub-agents",
+          "Straightforward"
+        ],
+        "help": "Work with a clear method. Choose a model and its effort.",
+        "groups": [
+          {
+            "rows": [
+              {
+                "path": [
+                  "subagents",
+                  "straightforward",
+                  "model"
+                ],
+                "label": "Model",
+                "control": "choice",
+                "value": "opus",
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "Default (Not set)"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "straightforward",
+                  "effort"
+                ],
+                "label": "Effort",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "Default (Harness default)"
+                  },
+                  {
+                    "value": "high",
+                    "label": "high"
+                  },
+                  {
+                    "value": "max",
+                    "label": "max"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "removable": false
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/save",
+    "request": {
+      "page": [
+        "subagents",
+        "straightforward"
+      ]
+    },
+    "status": 200,
+    "response": {
+      "original_environments": {
+        "profiles.claude": {
+          "ANTHROPIC_API_KEY": {
+            "mj_hidden_value": true
+          },
+          "PROXY_TOKEN": {
+            "from_secret": "PROXY_TOKEN"
+          }
+        },
+        "targets.lab": {
+          "LAB_TOKEN": {
+            "mj_hidden_value": true
+          }
+        }
+      },
+      "draft_environments": {
+        "profiles.claude": {
+          "ANTHROPIC_API_KEY": {
+            "mj_hidden_value": true
+          },
+          "PROXY_TOKEN": {
+            "from_secret": "PROXY_TOKEN"
+          }
+        },
+        "targets.lab": {
+          "LAB_TOKEN": {
+            "mj_hidden_value": true
+          }
+        }
+      },
+      "page": {
+        "path": [
+          "subagents",
+          "straightforward"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Sub-agents",
+          "Straightforward"
+        ],
+        "help": "Work with a clear method. Choose a model and its effort.",
+        "groups": [
+          {
+            "rows": [
+              {
+                "path": [
+                  "subagents",
+                  "straightforward",
+                  "model"
+                ],
+                "label": "Model",
+                "control": "choice",
+                "value": "opus",
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "Default (Not set)"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "straightforward",
+                  "effort"
+                ],
+                "label": "Effort",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "Default (Harness default)"
+                  },
+                  {
+                    "value": "high",
+                    "label": "high"
+                  },
+                  {
+                    "value": "max",
+                    "label": "max"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "removable": false
+      }
+    }
+  }
+]

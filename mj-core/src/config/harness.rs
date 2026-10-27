@@ -50,8 +50,8 @@ impl HarnessHost {
 pub enum ExecutionPolicy {
     /// Preserve the harness and profile's configured approval behavior.
     ConfiguredApprovals,
-    /// Run without sandboxing. Most harnesses also skip approval checks;
-    /// Muse keeps its auto-review, with only the sandbox disabled.
+    /// Run without sandboxing. Most harnesses also skip approval checks,
+    /// including Muse unless its profile opts back into auto-review.
     Unconstrained,
 }
 
@@ -61,8 +61,8 @@ pub enum ExecutionPolicy {
 pub enum PermissionMode {
     /// Preserve the selected harness profile's approval behavior.
     Guardian,
-    /// Run without sandboxing. Most harnesses also skip approval checks;
-    /// Muse keeps its auto-review, with only the sandbox disabled.
+    /// Run without sandboxing. Most harnesses also skip approval checks,
+    /// including Muse unless its profile opts back into auto-review.
     Yolo,
 }
 
@@ -769,28 +769,32 @@ impl HarnessKind {
 
     /// How this harness realizes a target-level execution policy. Configured
     /// approvals preserve harness configuration, except that Codex, Claude,
-    /// and Muse select their guardian mode explicitly. Muse also reviews in
-    /// unconstrained targets, where only the sandbox is disabled.
+    /// and Muse select their guardian mode explicitly. Unconstrained targets
+    /// run every harness without approval checks; only the sandbox is
+    /// disabled for Muse, whose profile may opt back into auto-review.
     pub const fn execution_enforcement(
         self,
         policy: ExecutionPolicy,
     ) -> Option<ExecutionEnforcement> {
         match (self, policy) {
             (Self::Muse, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
-                // muse-acp's client-side auto-review only sees permission
-                // requests, and `allowAll` emits none ("giving up review
-                // entirely"). Unconstrained Muse keeps autonomy through the
-                // reviewer instead of blind approval; the container remains
-                // the isolation boundary, so only the sandbox is off.
-                label: "promptUnmatched / auto-review / sandbox-off / :ask-me",
+                // Isolated targets run Muse without permission checks, like
+                // OpenCode's `permission = "allow"`: `allowAll` emits no
+                // permission requests, so the adapter's client-side
+                // auto-review would have nothing to decide, and it stays
+                // off. The container remains the isolation boundary, so only
+                // the sandbox is off. A profile that sets `muse_auto_review
+                // = true` opts back into the reviewer (see
+                // `HarnessProfile::execution_enforcement`).
+                label: "allowAll / no-review / sandbox-off / :ask-me",
                 // muse-acp 0.10 puts Default, Read-only, and Plan on `mode`
                 // and the approval policy on `approval_mode`. Container images
                 // built before it keep the approval policy on `mode`.
-                acp_mode: Some("promptUnmatched"),
+                acp_mode: Some("allowAll"),
                 acp_mode_selector: Some("approval_mode"),
-                acp_setting: Some(("auto_review", "on")),
+                acp_setting: Some(("auto_review", "off")),
                 launch_flag: None,
-                launch_environment: Some(("MUSE_APPROVAL_MODE", "promptUnmatched")),
+                launch_environment: Some(("MUSE_APPROVAL_MODE", "allowAll")),
                 launch_argument: Some(LaunchArgument {
                     variable: "MUSE_SERVE_ARGS",
                     word: "--disable-sandbox",
@@ -961,6 +965,51 @@ impl HarnessKind {
                 staged_setting: None,
             }),
         }
+    }
+
+    /// The unconstrained Muse enforcement with auto-review on: the behavior
+    /// before isolated targets defaulted to no permission checks. A Muse
+    /// profile with `muse_auto_review = true` selects this instead of the
+    /// default `allowAll` / `off` enforcement above.
+    pub const fn muse_unconstrained_review_enforcement() -> ExecutionEnforcement {
+        ExecutionEnforcement {
+            label: "promptUnmatched / auto-review / sandbox-off / :ask-me",
+            acp_mode: Some("promptUnmatched"),
+            acp_mode_selector: Some("approval_mode"),
+            acp_setting: Some(("auto_review", "on")),
+            launch_flag: None,
+            launch_environment: Some(("MUSE_APPROVAL_MODE", "promptUnmatched")),
+            launch_argument: Some(LaunchArgument {
+                variable: "MUSE_SERVE_ARGS",
+                word: "--disable-sandbox",
+                present: true,
+            }),
+            session_sandbox: None,
+            staged_setting: Some(StagedSetting {
+                file: "settings.json",
+                path: &["permissions", "default_profile"],
+                value: ":ask-me",
+                object_version: Some(("schema_version", 1)),
+            }),
+        }
+    }
+
+    /// Execution enforcement for `policy`, honoring a Muse profile's
+    /// `muse_auto_review` choice. The worker carries that choice in its
+    /// launch config because it only knows the harness kind; the controller
+    /// resolves it from the profile. Guardian targets always review.
+    pub fn resolve_execution_enforcement(
+        self,
+        policy: ExecutionPolicy,
+        muse_auto_review: bool,
+    ) -> Option<ExecutionEnforcement> {
+        if self == Self::Muse
+            && policy == ExecutionPolicy::Unconstrained
+            && muse_auto_review
+        {
+            return Some(Self::muse_unconstrained_review_enforcement());
+        }
+        self.execution_enforcement(policy)
     }
 
     /// Apply the launch environment required to realize `policy`. The
@@ -1154,6 +1203,16 @@ pub struct HarnessProfile {
     /// [`crate::codex_provider::effective_config`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_profile: Option<String>,
+    /// Whether an unconstrained Muse session (containers, EC2, `yolo` SSH)
+    /// keeps muse-acp's auto-review on. Absent or `false` runs without
+    /// permission checks, like OpenCode's `permission = "allow"`: `allowAll`
+    /// approvals with auto-review off and only the sandbox disabled. `true`
+    /// restores the reviewer (`promptUnmatched` approvals with auto-review
+    /// on) inside the container boundary. Only valid on a Muse profile; the
+    /// guardian policy (raw local, guardian SSH) always reviews, so this
+    /// changes nothing there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muse_auto_review: Option<bool>,
     /// Consume legacy per-profile choices without migrating them to global settings.
     #[serde(default, rename = "subagents", skip_serializing)]
     pub legacy_subagents: Option<serde_json::Value>,
@@ -1268,7 +1327,65 @@ impl HarnessProfile {
     }
 
     pub fn execution_enforcement(&self, policy: ExecutionPolicy) -> Option<ExecutionEnforcement> {
-        self.kind.execution_enforcement(policy)
+        // A Muse profile that opts back into review keeps the previous
+        // unconstrained behavior: the reviewer answers each approval inside
+        // the container boundary, with only the sandbox disabled.
+        self.kind.resolve_execution_enforcement(
+            policy,
+            self.muse_auto_review.unwrap_or(false),
+        )
+    }
+
+    /// Whether this Muse profile keeps auto-review on in unconstrained
+    /// targets. Guardian targets always review; this only changes the
+    /// unconstrained enforcement above.
+    pub fn muse_auto_review_unconstrained(&self) -> bool {
+        self.kind == HarnessKind::Muse && self.muse_auto_review.unwrap_or(false)
+    }
+
+    /// Apply the launch environment for `policy`, honoring this profile's
+    /// `muse_auto_review` choice for Muse. The controller writes this into
+    /// new launch configs, and the worker repeats it so persisted configs
+    /// from older releases acquire the same enforcement after an upgrade.
+    pub fn configure_execution_environment(
+        &self,
+        policy: ExecutionPolicy,
+        environment: &mut BTreeMap<String, String>,
+    ) -> Result<()> {
+        let Some(enforcement) = self.execution_enforcement(policy) else {
+            return Ok(());
+        };
+        if let Some(argument) = enforcement.launch_argument() {
+            let args = environment
+                .get(argument.variable)
+                .map(String::as_str)
+                .unwrap_or_default();
+            let has_word = args.split_whitespace().any(|word| word == argument.word);
+            if argument.present && !has_word {
+                let args = environment.entry(argument.variable.to_owned()).or_default();
+                if !args.is_empty() {
+                    args.push(' ');
+                }
+                args.push_str(argument.word);
+            } else if !argument.present && has_word {
+                // The harness splits this variable on whitespace without
+                // quoting, so rejoining the other words keeps their meaning.
+                let rest = args
+                    .split_whitespace()
+                    .filter(|word| *word != argument.word)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if rest.is_empty() {
+                    environment.remove(argument.variable);
+                } else {
+                    environment.insert(argument.variable.to_owned(), rest);
+                }
+            }
+        }
+        if let Some((key, value)) = enforcement.launch_environment() {
+            environment.insert(key.to_owned(), value.to_owned());
+        }
+        Ok(())
     }
 
     /// The provider named in this profile's Codex configuration, if any.
@@ -1505,6 +1622,9 @@ impl HarnessProfile {
                     "profile {id:?}: `guardian_review_model` applies only to a Codex profile whose config.toml names a custom model provider, because Mjolnir generates the model catalog only for those"
                 );
             }
+        }
+        if self.muse_auto_review.is_some() && self.kind != HarnessKind::Muse {
+            bail!("profile {id:?}: `muse_auto_review` applies only to a Muse profile");
         }
         Ok(())
     }

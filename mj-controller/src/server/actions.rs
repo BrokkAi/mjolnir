@@ -11,7 +11,9 @@ pub(crate) fn is_turn_control_command(command: &mj_core::relay::RelayCommand) ->
 }
 
 /// The complete set of operations a phone may ask the controller to perform.
-/// Secret/config editing is intentionally not representable here, and the one
+/// Secret/config editing is intentionally not representable here: the
+/// signed-in viewer edits configuration through its own Settings routes
+/// (`settings.rs`), which never send a literal secret to the browser. The one
 /// destructive variant, `ForceClose`, is not representable on the wire: it is
 /// `#[serde(skip)]` so only in-process callers such as the HTTP API can build
 /// it.
@@ -21,6 +23,7 @@ pub(crate) fn is_turn_control_command(command: &mj_core::relay::RelayCommand) ->
 // this public action's Rust construction shape inline; boxing would change it.
 #[allow(clippy::large_enum_variant)]
 pub enum ControllerAction {
+    RecordOperatorActivity,
     SetOperatorAway {
         away: bool,
     },

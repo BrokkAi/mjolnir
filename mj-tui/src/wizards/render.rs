@@ -563,6 +563,25 @@ pub(crate) fn render_new_wizard(
     } else {
         Vec::new()
     };
+    if wizard.step == WizardStep::Bundle {
+        let removal_feedback = if wizard.bundle_removal_in_flight {
+            Some("Removing project…")
+        } else {
+            wizard.bundle_removal_outcome.as_deref()
+        };
+        if let Some(feedback) = removal_feedback {
+            // Put the outcome before repository details so a long project
+            // cannot push the reason for a refused removal out of view.
+            help.insert(0, Line::raw(""));
+            help.insert(
+                0,
+                Line::styled(
+                    feedback.to_owned(),
+                    Style::default().fg(theme::palette().warning),
+                ),
+            );
+        }
+    }
     if wizard.step == WizardStep::Profile
         && dashboard
             .offered_profiles()

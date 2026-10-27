@@ -307,7 +307,7 @@ async fn a_muse_host_that_could_not_start_reports_its_own_diagnostic() {
 }
 
 #[tokio::test]
-#[ignore = "requires MJ_MUSE_ACP_TEST_BINARY pointing to verified muse-acp 0.16.0"]
+#[ignore = "requires MJ_MUSE_ACP_TEST_BINARY pointing to verified muse-acp 0.17.0"]
 async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resume() {
     let adapter =
         PathBuf::from(std::env::var_os("MJ_MUSE_ACP_TEST_BINARY").expect("set adapter path"));
@@ -498,15 +498,20 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
         let trace = std::fs::read_to_string(log).unwrap();
         assert!(trace.contains("QUJDQUJD"));
         // muse-acp 0.10 keeps the approval policy on `approval_mode`, apart
-        // from its session modes. Both policies review: `allowAll` emits no
-        // permission requests, so the adapter's auto-review would never fire.
+        // from its session modes. Guardian sessions review
+        // (`promptUnmatched`); unconstrained sessions run `allowAll` without
+        // permission checks, so the adapter's auto-review would never fire.
         let approval_modes: Vec<serde_json::Value> = trace
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
             .filter(|message| message["method"] == "session/setApprovalMode")
             .map(|message| message["params"]["mode"].clone())
             .collect();
-        assert_eq!(approval_modes, [serde_json::json!("promptUnmatched")]);
+        let expected = match policy {
+            Unconstrained => "allowAll",
+            ConfiguredApprovals => "promptUnmatched",
+        };
+        assert_eq!(approval_modes, [serde_json::json!(expected)]);
         assert!(trace.contains("reasoningEffort"));
         if scenario == "question" {
             let method = if choice == "accept" {

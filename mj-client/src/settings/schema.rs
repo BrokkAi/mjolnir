@@ -1,0 +1,1000 @@
+//! Editable defaults and labels for every field in the user configuration.
+use mj_core::config::ThemeChoice;
+use serde_json::{Value, json};
+
+pub fn defaults(path: &[String], value: &Value) -> Value {
+    let key = path.last().map(String::as_str).unwrap_or("");
+    match path.first().map(String::as_str).unwrap_or("") {
+        "" => {
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "github":{}, "jev":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+        }
+        "phone" => {
+            json!({"enabled":true,"bind":mj_core::config::PhoneConfig::default().bind,"tailscale_detect":true,"tls_cert":null,"tls_key":null})
+        }
+        "advanced" => {
+            json!({"detailed_activity_clocks":false,"session_order":"project","symbols":null,
+                   "tool_output":"grouped",
+                   "tool_output_lines":mj_core::config::DEFAULT_TOOL_OUTPUT_LINES,
+                   "auto_afk_minutes":0})
+        }
+        "notify" => {
+            json!({"mode":"terminal","bell":true,"delay_seconds":2,"title":true})
+        }
+        "review" => {
+            json!({"trigger":"off","profile":null,"model":null,"effort":null})
+        }
+        "continuation" => json!({"enabled":true}),
+        "github" if path.len() == 1 => json!({"watch":{}}),
+        "github" if key == "watch" => {
+            let watch = mj_core::config::GithubWatchConfig::default();
+            json!({"enabled":watch.enabled,"interval_seconds":watch.interval_seconds,"api_base":watch.api_base})
+        }
+        "jev" => json!({"enabled":true}),
+        "sessionwiki" => {
+            json!({"archive_after_days":null})
+        }
+        "subagents" if path.len() == 1 => {
+            json!({"max_concurrent":6,"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null}})
+        }
+        "subagents" if path.len() == 2 && matches!(key, "straightforward" | "subtle") => {
+            json!({"model":null,"effort":null})
+        }
+        "profiles" if path.len() == 2 => {
+            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null,"codex_profile":null})
+        }
+        "machines" if path.len() == 2 => machine_defaults(value["kind"].as_str().unwrap_or("ssh")),
+        // The build cache is its own page, and the saved file keeps only the
+        // fields that are set, so the page needs these defaults in its own
+        // right: the machine's arm above never sees a section that is already
+        // there.
+        "machines" if path.len() == 3 && key == "build_cache" => build_cache_defaults(),
+        "machines" if path.len() == 4 && key == "scheduler" => scheduler_defaults(),
+        "targets" if path.len() == 2 => target_defaults(value["kind"].as_str().unwrap_or("podman")),
+        "targets" if key == "workspace_storage" => {
+            if value["kind"] == "host-helper" {
+                json!({"kind":"host-helper","root":"","helper":[]})
+            } else {
+                json!({"kind":"podman-volume"})
+            }
+        }
+        "bundles" if path.len() == 2 => json!({"primary_repo":"main","repositories":[]}),
+        "bundles" if path.len() == 4 => repository_default(),
+        _ => json!({}),
+    }
+}
+
+pub fn repository_default() -> Value {
+    json!({"id":"main","github":null,"local":null,"destination":"main"})
+}
+
+fn build_cache_defaults() -> Value {
+    json!({"enabled":null,"directory":null,"tools_directory":null,"max_total_size":null,"scheduler":scheduler_defaults()})
+}
+
+fn scheduler_defaults() -> Value {
+    json!({"cpus":null,"memory":null})
+}
+
+/// The fields one machine kind needs. A machine owns the host settings every
+/// runtime on it shares, which is why the build cache lives here.
+fn machine_defaults(kind: &str) -> Value {
+    let mut fields = json!({"kind":kind});
+    let object = fields.as_object_mut().unwrap();
+    match kind {
+        "ssh" => {
+            object.extend(
+                json!({"host":"","user":null,"identity_file":null,"extra_args":[],
+                       "workspace_prefix":mj_core::config::DEFAULT_WORKSPACE_PREFIX,
+                       "build_cache":build_cache_defaults()})
+                .as_object()
+                .unwrap()
+                .clone(),
+            );
+        }
+        "aws-ec2" => {
+            object.extend(json!({"aws_profile":null,"region":"","launch_template":"","launch_template_version":null,"ssh_user":"ubuntu","address_source":"public-dns","identity_file":null,"ssh_args":[]}).as_object().unwrap().clone());
+        }
+        // This machine, which has nothing to connect to.
+        _ => {
+            object.insert("build_cache".to_owned(), build_cache_defaults());
+        }
+    }
+    fields
+}
+
+/// The fields one runtime kind needs. Every runtime names the machine it runs
+/// on; the host settings are on that machine, not here.
+fn target_defaults(kind: &str) -> Value {
+    let mut fields =
+        json!({"enabled":true, "kind":kind, "machine":mj_core::config::LOCAL_MACHINE_ID});
+    if kind == "bare" {
+        fields
+            .as_object_mut()
+            .unwrap()
+            .insert("permissions".to_owned(), Value::Null);
+    } else {
+        fields.as_object_mut().unwrap().extend(json!({
+            "image":crate::target::DEFAULT_IMAGE,"pull_policy":"auto","platform":null,
+            "cpus":null,"memory":null,"environment":{},"workspace_storage":{"kind":"podman-volume"}
+        }).as_object().unwrap().clone());
+    }
+    fields
+}
+
+/// Insert omitted optional fields, preserving all stored values.
+///
+/// The fields a section always has come first, in the order listed above,
+/// so a page's rows keep their places whichever fields the file stores.
+/// Anything else, such as the entries of a collection, follows in its
+/// stored order.
+pub fn expand(value: &mut Value, path: &mut Vec<String>) {
+    let missing = defaults(path, value);
+    if let Some(object) = value.as_object_mut() {
+        let mut stored = std::mem::take(object);
+        for (key, default) in missing.as_object().unwrap() {
+            let value = stored.shift_remove(key).unwrap_or_else(|| default.clone());
+            object.insert(key.clone(), value);
+        }
+        object.append(&mut stored);
+        for (key, child) in object {
+            path.push(key.clone());
+            expand(child, path);
+            path.pop();
+        }
+    } else if let Some(array) = value.as_array_mut() {
+        for (index, child) in array.iter_mut().enumerate() {
+            path.push(index.to_string());
+            expand(child, path);
+            path.pop();
+        }
+    }
+}
+
+/// A setting the file stores as a whole number. The form edits every value
+/// as text, so this is the one place that text becomes a number again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WholeNumber {
+    pub min: u64,
+    pub max: u64,
+    /// What to say when the text is not a whole number in range.
+    pub message: &'static str,
+    /// Whether clearing the field removes it, so the setting's own default
+    /// applies. Otherwise a cleared field is an optional value set to none.
+    pub defaulted: bool,
+}
+
+pub fn whole_number(path: &[String]) -> Option<WholeNumber> {
+    let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
+    let (min, max, message, defaulted) = match parts.as_slice() {
+        ["notify", "delay_seconds"] => (0, u64::MAX, "Enter a whole number of seconds.", true),
+        ["subagents", "max_concurrent"] => (1, 64, "Enter a whole number from 1 to 64.", true),
+        ["advanced", "tool_output_lines"] => (0, 50, "Enter a whole number from 0 to 50.", true),
+        ["advanced", "auto_afk_minutes"] => (
+            0,
+            u64::from(u32::MAX),
+            "Enter a whole number of minutes from 0 to 4294967295.",
+            true,
+        ),
+        ["sessionwiki", "archive_after_days"] => (
+            1,
+            u64::from(u32::MAX),
+            "Enter a whole number of days, at least 1. Clear the field to keep every session.",
+            false,
+        ),
+        ["profiles", _, "context_window_bytes"] => (
+            0,
+            u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+            "Enter a whole number of bytes.",
+            false,
+        ),
+        ["machines", _, "build_cache", "scheduler", "cpus"] => (
+            1,
+            i64::MAX as u64,
+            "Enter a positive whole number of concurrent compile permits.",
+            true,
+        ),
+        _ => return None,
+    };
+    Some(WholeNumber {
+        min,
+        max,
+        message,
+        defaulted,
+    })
+}
+
+/// Converts the text typed into a whole-number field. Blank means unset.
+pub fn parse_whole_number(number: WholeNumber, text: &str) -> Result<Value, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(Value::Null);
+    }
+    match text.parse::<u64>() {
+        Ok(value) if (number.min..=number.max).contains(&value) => Ok(Value::from(value)),
+        _ => Err(number.message.to_owned()),
+    }
+}
+
+/// Whether a full path names the given field of a machine's build cache.
+pub fn is_build_cache_field(path: &[String], field: &str) -> bool {
+    match path {
+        [section, _, page, key] => section == "machines" && page == "build_cache" && key == field,
+        _ => false,
+    }
+}
+
+pub fn is_build_cache_budget(path: &[String]) -> bool {
+    is_build_cache_field(path, "max_total_size")
+}
+
+/// Whether the runtime `target` runs on this machine, which is what decides
+/// the settings the screen can resolve without asking another host.
+pub fn is_local_runtime(draft: &Value, target: &str) -> bool {
+    draft["targets"][target]["machine"]
+        .as_str()
+        .unwrap_or(mj_core::config::LOCAL_MACHINE_ID)
+        == mj_core::config::LOCAL_MACHINE_ID
+}
+
+pub fn label(key: &str) -> String {
+    match key {
+        "interface" => "Interface",
+        "prefix" => "Prefix key",
+        "sessions_side" => "Session sidebar position",
+        "spinner" => "Activity animation",
+        "advanced" => "Advanced",
+        "detailed_activity_clocks" => "Detailed activity clocks",
+        "session_order" => "Session order",
+        "symbols" => "Symbols",
+        "tool_output" => "Tool calls",
+        "tool_output_lines" => "Tool output lines",
+        "auto_afk_minutes" => "Auto-AFK after (minutes)",
+        "notify" => "Notifications",
+        "mode" => "Notify through",
+        "bell" => "Ring the terminal bell",
+        "delay_seconds" => "Delay before notifying (seconds)",
+        "title" => "Show counts in the terminal title",
+        "theme" => "Theme",
+        "phone" => "Web Access",
+        "review" => "Code Review",
+        "continuation" => "Continuation",
+        "watch" => "Watcher",
+        "jev" => "Jev (hosted service)",
+        "sessionwiki" => "SessionWiki",
+        "archive_after_days" => "Archive after (days)",
+        "subagents" => "Sub-agents",
+        "straightforward" => "Straightforward",
+        "subtle" => "Subtle",
+        "build_cache" => "Build caches",
+        "scheduler" => "Compile scheduling",
+        "directory" => "Cache directory",
+        "max_total_size" => "Total cache budget (GB)",
+        "max_concurrent" => "Maximum concurrent children",
+        "profiles" => "Agent Profiles",
+        "machines" => "Machines",
+        "targets" => "Runtimes",
+        "machine" => "Machine",
+        "bundles" => "Projects",
+        "enabled" => "Enabled",
+        "trigger" => "Trigger",
+        "profile" => "Agent profile",
+        "kind" => "Type",
+        "home" => "Account directory",
+        "environment" => "Environment variables",
+        "context_window_bytes" => "Context budget (bytes)",
+        "guardian_review_model" => "Guardian review model",
+        "codex_profile" => "Codex profile",
+        "bind" => "Listen address and port",
+        "tailscale_detect" => "Detect Tailscale",
+        "tls_cert" => "TLS certificate file",
+        "tls_key" => "TLS private key file",
+        "model" => "Model",
+        "effort" => "Effort",
+        "image" => "Container image",
+        "pull_policy" => "Download image policy",
+        "platform" => "CPU platform",
+        "cpus" => "CPU limit",
+        "memory" => "Memory limit",
+        "workspace_storage" => "Workspace storage",
+        "host" => "SSH host",
+        "user" | "ssh_user" => "SSH username",
+        "identity_file" => "SSH key file",
+        "extra_args" | "ssh_args" => "SSH arguments",
+        "permissions" => "Agent permissions",
+        "workspace_prefix" => "Workspace directory for bare runtimes",
+        "aws_profile" => "AWS account profile",
+        "region" => "AWS region",
+        "launch_template" => "EC2 launch template",
+        "launch_template_version" => "Template version",
+        "address_source" => "Connect using",
+        "primary_repo" => "Main repository",
+        "repositories" => "Repositories",
+        "id" => "Name",
+        "github" => "GitHub owner/repository",
+        "local" => "Local repository directory",
+        "destination" => "Checkout folder",
+        "tools_directory" => "Native tool cache directory",
+        "root" => "Storage directory",
+        "helper" => "Storage helper command",
+        _ => key,
+    }
+    .to_owned()
+}
+
+pub fn field_label(path: &[String]) -> String {
+    match path
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["github"] => "GitHub events".to_owned(),
+        ["machines", _, "build_cache", "scheduler", "cpus"] => {
+            "Concurrent compile permits".to_owned()
+        }
+        ["machines", _, "build_cache", "scheduler", "memory"] => {
+            "Compile admission budget".to_owned()
+        }
+        _ => label(path.last().map(String::as_str).unwrap_or("")),
+    }
+}
+
+/// What an empty (JSON null) value means for this setting: the effect the
+/// value actually has, never a placeholder. A value the runtime resolves from
+/// the host is filled in by the caller through `value_summary`'s `automatic`
+/// argument instead, because only the dialog can measure it.
+pub fn null_label(path: &[String], draft: &Value) -> String {
+    let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["machines", _, "build_cache", "tools_directory"] => {
+            "~/.cache/mjolnir/build on the machine".to_owned()
+        }
+        ["machines", _, "build_cache", "scheduler", "cpus"] => "Available logical CPUs".to_owned(),
+        ["machines", _, "build_cache", "scheduler", "memory"] => "85% of host memory".to_owned(),
+        // An empty archive window never archives; there is no hidden number.
+        ["sessionwiki", "archive_after_days"] => "Never".to_owned(),
+        // A cleared number takes the setting's own default.
+        ["notify", "delay_seconds"] => format!(
+            "{} (default)",
+            mj_core::config::NotifyConfig::default().delay_seconds
+        ),
+        ["subagents", task, "model"] if matches!(*task, "straightforward" | "subtle") => {
+            if draft["_subagent_options"][task].is_null() {
+                "Discovering models…".into()
+            } else {
+                "Not set".into()
+            }
+        }
+        ["subagents", task, "effort"] if matches!(*task, "straightforward" | "subtle") => {
+            "Harness default".into()
+        }
+        ["subagents", "max_concurrent"] => format!(
+            "{} (default)",
+            mj_core::config::SubagentConfig::default().max_concurrent
+        ),
+        ["advanced", "tool_output_lines"] => {
+            format!("{} (default)", mj_core::config::DEFAULT_TOOL_OUTPUT_LINES)
+        }
+        ["advanced", "auto_afk_minutes"] => "0 (disabled)".to_owned(),
+        // Unset symbols follow the terminal: ASCII on the Linux console or
+        // without a UTF-8 locale, Unicode otherwise.
+        ["advanced", "symbols"] => "Follows the terminal".to_owned(),
+        // The backend emits no CPU or memory flag, so the container competes
+        // for the whole machine.
+        ["targets", _, "cpus" | "memory"] => "No limit".to_owned(),
+        ["targets", target, "platform"] => {
+            // A runtime on this machine runs this machine's architecture; one
+            // on another machine runs whatever that host is, which setup
+            // cannot know.
+            if is_local_runtime(draft, target) {
+                format!("Engine default ({})", std::env::consts::ARCH)
+            } else {
+                "Engine default".to_owned()
+            }
+        }
+        // A bare runtime on an SSH machine takes the guardian default.
+        ["targets", _, "permissions"] => "Ask for approvals".to_owned(),
+        ["machines", _, "user"] => "From ~/.ssh/config, else current user".to_owned(),
+        ["machines", _, "identity_file"] => "OpenSSH default keys".to_owned(),
+        ["machines", _, "aws_profile"] => "AWS CLI default profile".to_owned(),
+        ["machines", _, "launch_template_version"] => "$Default".to_owned(),
+        // Until the machine has been inspected, all the screen can say is
+        // where the value comes from.
+        ["machines", _, "build_cache", _] => "From the machine's own mbx setup".to_owned(),
+        ["phone", "tls_cert" | "tls_key"] => "None (HTTP only)".to_owned(),
+        // A repository needs exactly one of these two, so a blank one is not
+        // a default but a choice not yet made.
+        ["bundles", _, "repositories", _, "github" | "local"] => "Not set".to_owned(),
+        ["profiles", _, "context_window_bytes"] => format!(
+            "{} ({} KiB)",
+            mj_core::config::DEFAULT_CONTEXT_BYTES,
+            mj_core::config::DEFAULT_CONTEXT_BYTES / 1024
+        ),
+        ["profiles", _, "guardian_review_model"] => {
+            mj_core::config::GUARDIAN_REVIEW_NEWEST_FLASH.to_owned()
+        }
+        ["profiles", _, "codex_profile"] => "None — config.toml only".to_owned(),
+        // Review needs a named reviewer profile; there is no fallback to a
+        // first enabled profile (`ReviewConfig::reviewer_profile`).
+        ["review", "profile"] => "Auto — choose by provider and quota".to_owned(),
+        ["review", "model" | "effort"] => match draft["review"]["profile"].as_str() {
+            Some(profile) => format!("{profile}'s default"),
+            None => "Not set".to_owned(),
+        },
+        _ => "Not set".to_owned(),
+    }
+}
+
+/// What a section of the first page is actually set to.
+///
+/// The first page lists sections rather than values, and a count of what is
+/// inside one answers no question anyone has: what a reader wants from
+/// "Web Access" is whether it is on and where it listens. `None` leaves a
+/// section to the ordinary value summary.
+///
+/// `theme` names the draft's theme value. What is actually on screen depends
+/// on the surface: the terminal resolves Auto against its own background and
+/// honours `NO_COLOR`, which a browser cannot see.
+pub fn section_summary(
+    key: &str,
+    draft: &Value,
+    theme: &dyn Fn(&Value, &Value) -> String,
+) -> Option<String> {
+    let section = &draft[key];
+    Some(match key {
+        "interface" => format!(
+            "{} · sidebar {}",
+            theme(&draft["theme"], draft),
+            choice_label(
+                &["sessions_side".to_owned()],
+                &draft["sessions_side"],
+                draft
+            )
+            .to_lowercase()
+        ),
+        "advanced" => {
+            let on = ["detailed_activity_clocks"]
+                .iter()
+                .filter(|field| section[*field] == Value::Bool(true))
+                .count();
+            let order = if section["session_order"] == Value::String("priority".to_owned()) {
+                " · priority order"
+            } else {
+                ""
+            };
+            let tools = if section["tool_output"] == Value::String("inline".to_owned()) {
+                " · inline tools"
+            } else {
+                ""
+            };
+            let auto_afk = section["auto_afk_minutes"]
+                .as_u64()
+                .filter(|minutes| *minutes > 0)
+                .map(|minutes| format!(" · auto-AFK after {minutes} min"))
+                .unwrap_or_default();
+            match on {
+                0 => format!("All off{order}{tools}{auto_afk}"),
+                count => format!("{count} on{order}{tools}{auto_afk}"),
+            }
+        }
+        "notify" => match section["mode"].as_str() {
+            Some("off") => "Off".to_owned(),
+            Some("system") => "Desktop and terminal".to_owned(),
+            _ => "Terminal".to_owned(),
+        },
+        "profiles" | "machines" | "targets" | "bundles" => named_entries(section),
+        "phone" => {
+            if section["enabled"] == Value::Bool(false) {
+                "Off".to_owned()
+            } else {
+                match section["bind"].as_str() {
+                    Some(bind) => format!("On · {bind}"),
+                    None => "On".to_owned(),
+                }
+            }
+        }
+        "review" => {
+            if section["trigger"].as_str() == Some("push") {
+                return Some("Before push".to_owned());
+            }
+            if section["trigger"].as_str().unwrap_or("off") == "off" {
+                "Off".to_owned()
+            } else {
+                match section["profile"].as_str() {
+                    Some(profile) => profile.to_owned(),
+                    None => "Auto · picks by quota".to_owned(),
+                }
+            }
+        }
+        "continuation" => {
+            if section["enabled"] == Value::Bool(false) {
+                "Off".to_owned()
+            } else if !jev_enabled(draft) {
+                // `Config::automatic_continuation_enabled`: the classifier
+                // that judges each reply is Jev, so without it nothing runs.
+                "Off · Jev is off (Privacy)".to_owned()
+            } else {
+                "On · 3 continuations plus quota recovery".to_owned()
+            }
+        }
+        "github" => {
+            if section["watch"]["enabled"] == Value::Bool(false) {
+                "Off".to_owned()
+            } else if !jev_enabled(draft) {
+                // `Config::github_events_enabled`: GitHub items are
+                // classified by Jev, so the GitHub watcher is off.
+                "Off · Jev is off (Privacy)".to_owned()
+            } else {
+                "On · GitHub activity".to_owned()
+            }
+        }
+        "jev" => {
+            if section["enabled"] == Value::Bool(false) {
+                "Off · new sessions send nothing".to_owned()
+            } else {
+                "On · sends turn text for classification".to_owned()
+            }
+        }
+        "subagents" => {
+            // A cleared limit is the default one, which still applies.
+            // The delegation policy is selected when creating or moving a session.
+            let limit = section["max_concurrent"].as_u64().unwrap_or(
+                u64::try_from(mj_core::config::SubagentConfig::default().max_concurrent)
+                    .unwrap_or(u64::MAX),
+            );
+            format!("Up to {limit} at once")
+        }
+        "sessionwiki" => match section["archive_after_days"].as_u64() {
+            Some(days) => format!("Archives after {days} days"),
+            None => "Keeps every session".to_owned(),
+        },
+        _ => return None,
+    })
+}
+
+/// The entries of a section the user names, listed rather than counted. Past
+/// three the tail becomes a count, so the column stays one line.
+fn named_entries(value: &Value) -> String {
+    let Some(entries) = value.as_object().filter(|entries| !entries.is_empty()) else {
+        return "None yet".to_owned();
+    };
+    let names = entries.keys().map(String::as_str).collect::<Vec<_>>();
+    if names.len() <= 3 {
+        return names.join(", ");
+    }
+    format!("{}, +{} more", names[..2].join(", "), names.len() - 2)
+}
+
+pub fn choice_label(path: &[String], value: &Value, draft: &Value) -> String {
+    let Some(value) = value.as_str() else {
+        return if value.is_null() {
+            null_label(path, draft)
+        } else {
+            value.to_string()
+        };
+    };
+    if path == ["review", "trigger"] {
+        return match value {
+            "off" => "Off",
+            "turn" => "End of turn",
+            "push" => "Before push",
+            _ => value,
+        }
+        .to_owned();
+    }
+    // Only the theme field: `auto` is also an image pull policy.
+    if super::draft::storage_path(path) == ["theme"]
+        && let Ok(choice) = serde_json::from_value::<ThemeChoice>(Value::String(value.into()))
+    {
+        return choice.label().into();
+    }
+    // A download policy is shown by what it does to this target's own image:
+    // `auto` is derived from the image reference, not an alias.
+    if let ["targets", target, "pull_policy"] = path
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+        && let Ok(policy) =
+            serde_json::from_value::<mj_core::config::ImagePullPolicy>(Value::String(value.into()))
+    {
+        let image = draft["targets"][target]["image"].as_str().unwrap_or("");
+        return policy.describe(image).to_owned();
+    }
+    // An agent kind is named once, by the harness itself.
+    if path.first().is_some_and(|key| key == "profiles")
+        && let Ok(kind) =
+            serde_json::from_value::<mj_core::config::HarnessKind>(Value::String(value.into()))
+    {
+        return kind.display_name().to_owned();
+    }
+    // A machine id is shown as the user named it.
+    if path.last().is_some_and(|key| key == "machine") {
+        return value.to_owned();
+    }
+    match value {
+        "native" => "Native",
+        "local" => "This machine",
+        "ssh" => "SSH host",
+        "aws-ec2" => "Amazon EC2",
+        "bare" => "Bare checkout",
+        "podman" => "Podman",
+        "docker" => "Docker",
+        "apple-container" => "Apple container",
+        "guardian" => "Ask for approvals",
+        "yolo" => "Allow all actions",
+        "left" => "Left",
+        "right" => "Right",
+        "grouped" => "Grouped",
+        "inline" => "Inline with output",
+        "podman-volume" => "Managed volume",
+        "container-layer" => "Inside the container",
+        "host-helper" => "Custom storage helper",
+        "public-dns" => "Public DNS name",
+        "public-ip" => "Public IP address",
+        "private-dns" => "Private DNS name",
+        "private-ip" => "Private IP address",
+        _ => value,
+    }
+    .to_owned()
+}
+
+/// How one of a setting's offered values reads in its list of choices. Unset
+/// says what it falls back to, and the build cache switch, whose unset value
+/// means on, says so.
+pub fn option_label(path: &[String], value: &Value, draft: &Value) -> String {
+    if is_build_cache_field(path, "enabled") {
+        match value {
+            Value::Null => "Default (on)",
+            Value::Bool(true) => "On",
+            _ => "Off",
+        }
+        .to_owned()
+    } else if value.is_null() {
+        format!(
+            "Default ({})",
+            null_label(&super::draft::storage_path(path), draft)
+        )
+    } else {
+        choice_label(path, value, draft)
+    }
+}
+
+/// The text a typed setting's field holds for `value`. A build cache budget
+/// is typed in whole GB, whatever unit the file spells it in.
+pub fn field_text(path: &[String], value: &Value) -> String {
+    if value.is_null() {
+        String::new()
+    } else if let Some(size) = value.as_str().filter(|_| is_build_cache_budget(path)) {
+        build_cache_gigabytes_label(size)
+    } else {
+        value
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| value.to_string())
+    }
+}
+
+/// A size string as the whole number of GB the field is measured in, or the
+/// string itself when it is not a size at all.
+pub fn build_cache_gigabytes_label(size: &str) -> String {
+    mj_core::config::build_cache_size_gigabytes(size)
+        .map_or_else(|| size.to_owned(), |gigabytes| gigabytes.to_string())
+}
+
+pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
+    let key = path.last().map(String::as_str).unwrap_or("");
+    if path.len() == 3 && path[0] == "subagents" && matches!(key, "model" | "effort") {
+        let mut choices = vec![Value::Null];
+        if let Some(values) = draft["_subagent_options"][&path[1]]
+            [if key == "model" { "models" } else { "efforts" }]
+        .as_array()
+        {
+            choices.extend(
+                values
+                    .iter()
+                    .filter_map(|v| v["value"].as_str())
+                    .filter(|v| *v != "adaptive")
+                    .map(|v| Value::String(v.into())),
+            );
+        }
+        return choices;
+    }
+    let values: &[&str] = match key {
+        "trigger" if path == ["review", "trigger"] => &["off", "turn", "push"],
+        "sessions_side" => &["left", "right"],
+        "session_order" => &["project", "priority"],
+        "symbols" => &["unicode", "ascii"],
+        "tool_output" => &["grouped", "inline"],
+        "mode" if path.first().is_some_and(|key| key == "notify") => &["off", "terminal", "system"],
+        "spinner" => &[], // Use the canonical animation list below.
+        "permissions" => &["guardian", "yolo"],
+        "pull_policy" => &["auto", "always", "newer", "missing", "never"],
+        "address_source" => &["public-dns", "public-ip", "private-dns", "private-ip"],
+        "kind" if path.iter().any(|key| key == "workspace_storage") => {
+            &["podman-volume", "host-helper", "container-layer"]
+        }
+        "kind" if path.first().is_some_and(|key| key == "profiles") => &[
+            "codex", "claude", "kimi", "grok", "muse", "opencode", "mimo", "dsh",
+        ],
+        "kind" if path.first().is_some_and(|key| key == "machines") => &["local", "ssh", "aws-ec2"],
+        "kind" => &["bare", "podman", "docker", "apple-container"],
+        _ => &[],
+    };
+    if path.len() == 1 && key == "theme" {
+        return ThemeChoice::all()
+            .map(|choice| serde_json::to_value(choice).expect("theme serializes"))
+            .collect();
+    }
+    if key == "spinner" {
+        let first = mj_core::config::SpinnerStyle::default();
+        let mut current = first;
+        let mut choices = Vec::new();
+        loop {
+            choices.push(serde_json::to_value(current).expect("spinner serializes"));
+            current = current.next();
+            if current == first {
+                return choices;
+            }
+        }
+    }
+    if key == "machine" {
+        let mut values = vec![Value::String(mj_core::config::LOCAL_MACHINE_ID.to_owned())];
+        if let Some(entries) = draft["machines"].as_object() {
+            values.extend(
+                entries
+                    .keys()
+                    .filter(|id| id.as_str() != mj_core::config::LOCAL_MACHINE_ID)
+                    .cloned()
+                    .map(Value::String),
+            );
+        }
+        return values;
+    }
+    // Unset is a choice of its own, so the setting can go back to following
+    // the terminal after ASCII or Unicode was picked.
+    if key == "symbols" && path.first().is_some_and(|key| key == "advanced") {
+        return vec![Value::Null, "unicode".into(), "ascii".into()];
+    }
+    if key == "profile" {
+        let mut values = vec![Value::Null];
+        if let Some(entries) = draft["profiles"].as_object() {
+            values.extend(entries.keys().cloned().map(Value::String));
+        }
+        return values;
+    }
+    values.iter().map(|v| Value::String((*v).into())).collect()
+}
+
+/// Whether the draft leaves the hosted Jev service on.
+fn jev_enabled(draft: &Value) -> bool {
+    draft["jev"]["enabled"] != Value::Bool(false)
+}
+
+/// The description drawn above the page `path`: its [`help`], except where
+/// another setting in the draft changes what the page does. Continuation
+/// cannot run while Jev is off, whatever its own box says.
+pub fn page_help(path: &[String], draft: &Value) -> &'static str {
+    page_specific_help(path, draft).unwrap_or_else(|| help(path))
+}
+
+/// [`page_help`] without the general hint every page without help of its
+/// own falls back to.
+pub fn page_specific_help(path: &[String], draft: &Value) -> Option<&'static str> {
+    Some(match path {
+        [section] if section == "continuation" && !jev_enabled(draft) => {
+            "Off because Jev is off: continuation needs Jev to judge each reply. Turn Jev on under Privacy to use it."
+        }
+        [section] | [section, _]
+            if section == "github"
+                && path
+                    .last()
+                    .is_some_and(|key| key == "github" || key == "watch")
+                && !jev_enabled(draft) =>
+        {
+            "Off because Jev is off: the GitHub watcher needs Jev to classify activity. Mailbox delivery and child reports remain available."
+        }
+        _ => return specific_help(path),
+    })
+}
+
+/// Alternate names for a page participate in the search's preferred matches.
+pub fn search_aliases(path: &[String]) -> &'static [&'static str] {
+    match path {
+        [section, _, page] if section == "machines" && page == "build_cache" => &[
+            "mbx",
+            "cache",
+            "build cache",
+            "Go",
+            "Gradle",
+            "Turbo",
+            "Nx",
+            "Bazel",
+        ],
+        _ => &[],
+    }
+}
+
+pub fn help(path: &[String]) -> &'static str {
+    specific_help(path).unwrap_or(if path.last().is_none_or(String::is_empty) {
+        // The first page has no parent setting to describe, so it says what
+        // the whole screen does instead.
+        "Changes stay in this draft until you save."
+    } else {
+        "Enter opens or edits a setting. Changes stay in this draft until you save."
+    })
+}
+
+/// What the setting at `path` does, when it has help of its own.
+pub fn specific_help(path: &[String]) -> Option<&'static str> {
+    match path
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["github"] | ["github", "watch"] => {
+            return Some(
+                "Receive GitHub activity selected by Jev. This switch controls only the GitHub event source. Mailbox hooks, peer messages and child reports remain available at tool boundaries and through idle wakes.",
+            );
+        }
+        ["machines", _, "build_cache", "scheduler"] => {
+            return Some(
+                "mbx shares this scheduler across all builds on the machine. Blank fields keep mbx's defaults.",
+            );
+        }
+        ["machines", _, "build_cache", "scheduler", "cpus"] => {
+            return Some(
+                "Machine-wide compile permit count shared by all mbx builds. Must be a positive integer; blank uses mbx's default.",
+            );
+        }
+        ["machines", _, "build_cache", "scheduler", "memory"] => {
+            return Some(
+                "Shared admission budget for compiles (e.g. 8GiB). `none` disables weighting; not a hard cap. Blank keeps mbx default.",
+            );
+        }
+        _ => {}
+    }
+    Some(match path.last().map(String::as_str).unwrap_or("") {
+        "prefix" if path.first().is_some_and(|key| key == "interface") => {
+            "Key pressed before global shortcuts. Use ctrl, alt, or cmd/super with a key, or use a function key."
+        }
+        "theme" => {
+            "Auto matches the terminal's background. Terminal Dark and Light use its own colors. Applies after saving."
+        }
+        "profiles" => "Add a profile, then choose Sign in. Detect profiles finds installed agents.",
+        "home" => "The agent's account directory, such as ~/.codex. Save, then choose Sign in.",
+        "machines" => {
+            "Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its build cache settings."
+        }
+        "targets" => {
+            "Add a runtime and choose its machine, or use Detect runtimes to find what every machine can run."
+        }
+        "machine" => "Which machine this runtime runs on.",
+        "phone" => {
+            "Web access changes take effect when the background server next starts. Remote access requires a certificate and key."
+        }
+        "advanced" => {
+            "Display options, activity clocks, session order, symbols, tool calls, and automatic AFK."
+        }
+        "notify" => {
+            "How to be told when a session you are not looking at asks a question, fails, or finishes."
+        }
+        "mode" if path.first().is_some_and(|key| key == "notify") => {
+            "Terminal rings the bell and works over SSH. System also posts a desktop notification."
+        }
+        "bell" => "Ring the terminal bell with each notification.",
+        "delay_seconds" => {
+            "Wait this long before notifying, so a question the agent answers itself stays quiet."
+        }
+        "title" => {
+            "Keep the terminal window title showing how many sessions are waiting or unread."
+        }
+        "detailed_activity_clocks" => "Show elapsed turn and tool clocks in session activity rows.",
+        "session_order" => {
+            "Group sessions by project, or list the ones that need you first without project headings."
+        }
+        "symbols" => {
+            "Draw marks and borders in Unicode or ASCII. Unset: ASCII on the Linux console or without UTF-8."
+        }
+        "tool_output" => {
+            "Grouped folds finished calls into one row of names. Inline shows each call with its command and output, like Codex."
+        }
+        "tool_output_lines" => {
+            "Output rows under each inline tool call: the first and last lines, with a count of the rest. 0 hides output."
+        }
+        "auto_afk_minutes" => {
+            "Enter AFK after this many minutes without input in the terminal or web UI. Input resets the timer. 0 disables automatic AFK. Use the AFK return action to come back."
+        }
+        "bundles" => {
+            "Projects can contain one or more repositories. Choose the main repository where the agent starts."
+        }
+        "repositories" => {
+            "Set either a local repository directory or a GitHub source for each repository."
+        }
+        "review" => "Used by turn review. Auto picks another provider with quota.",
+        "continuation" => {
+            "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
+        }
+        "jev" => {
+            "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart."
+        }
+        "sessionwiki" => {
+            "Sessions are always indexed into SessionWiki. This page sets archiving; the row below shows what it frees."
+        }
+        "archive_after_days" => {
+            "After this many days, indexed suspended sessions lose their checkpoint and attachments. Blank keeps all."
+        }
+        "subagents" => "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+        "straightforward" => "Work with a clear method. Choose a model and its effort.",
+        "subtle" => {
+            "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward."
+        }
+        "build_cache" => {
+            "Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and Bazel."
+        }
+        "tools_directory" => {
+            "Go, Gradle, Turbo and Bazel on local disk. Nx 23.2+ uses ~/.nx. Blank uses ~/.cache/mjolnir/build."
+        }
+        "directory" => {
+            "The cache directory reported by the machine's native mbx installation. Configure its location on that machine."
+        }
+        "max_total_size" => {
+            "Budget for compiler outputs, worktrees, and incremental state, in GB. Blank uses the initial automatic budget."
+        }
+        "memory" => "Examples: 8g or 4096m. Leave blank for no limit.",
+        "pull_policy" => {
+            "When Mjolnir downloads this image. The first choice follows the image and never delays a launch."
+        }
+        "context_window_bytes" => {
+            "Optional positive byte limit for transcript compaction. Leave blank for the default."
+        }
+        "guardian_review_model" => {
+            "Codex with a custom provider: newest-flash, session (the session's model), or a model name. Blank: newest-flash."
+        }
+        "codex_profile" => {
+            "Codex only: the name of a profile file in the account directory, such as ds for ds.config.toml, layered over config.toml like codex -p ds."
+        }
+        _ => return None,
+    })
+}
+
+/// Path ownership is explicit: a similarly named environment key is still text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathKind {
+    Local,
+    Target,
+    RelativeDestination,
+}
+
+/// What a local path setting accepts. Three settings name a file; every other
+/// path setting names a directory.
+pub fn completion_kind(path: &[String]) -> mj_core::path_completion::CompletionKind {
+    use mj_core::path_completion::CompletionKind;
+    let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["phone", "tls_cert" | "tls_key"] | ["machines", _, "identity_file"] => CompletionKind::Any,
+        _ => CompletionKind::Directories,
+    }
+}
+
+pub fn path_kind(path: &[String]) -> Option<PathKind> {
+    use PathKind::*;
+    let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["profiles", _, "home"]
+        | ["phone", "tls_cert" | "tls_key"]
+        | ["machines", _, "identity_file"]
+        | ["bundles", _, "repositories", _, "local"] => Some(Local),
+        ["machines", _, "workspace_prefix"]
+        | [
+            "machines",
+            _,
+            "build_cache",
+            "directory" | "tools_directory",
+        ]
+        | ["targets", _, "workspace_storage", "root"] => Some(Target),
+        ["bundles", _, "repositories", _, "destination"] => Some(RelativeDestination),
+        _ => None,
+    }
+}

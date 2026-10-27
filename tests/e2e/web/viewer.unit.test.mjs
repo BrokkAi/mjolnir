@@ -857,7 +857,7 @@ test('an index at another version is reported and never polled', async () => {
   await fire();
   assert.equal(
     vm.runInContext('wikiSearchPlaceholder()', context),
-    'SessionWiki index is at a different version',
+    'SessionWiki index is from a newer version',
   );
   assert.equal(timers.size, 0);
 });

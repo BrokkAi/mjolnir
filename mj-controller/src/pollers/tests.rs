@@ -394,6 +394,9 @@ fn probeless_request(id: &str) -> QuotaRefreshRequest {
     QuotaRefreshRequest {
         profile_id: id.into(),
         harness: mj_core::config::HarnessKind::Codex,
+        auth_scheme: mj_core::config::AuthScheme::ApiKey {
+            env_key: "PROVIDER_API_KEY".into(),
+        },
         source_home: PathBuf::from("/nonexistent-quota-home"),
         environment: Default::default(),
         cwd: PathBuf::from("."),

@@ -1,5 +1,6 @@
 //! Persistent per-user controller daemon and its authenticated local protocol.
 
+mod auto_afk;
 pub(crate) mod capacity;
 mod container_upgrade;
 mod feed;
@@ -220,7 +221,8 @@ pub struct RuntimeState {
     startup_prompts: Mutex<BTreeMap<String, StartupQueue>>,
     startup_enqueue: tokio::sync::Mutex<()>,
     controller_loader: fn() -> Result<Controller>,
-    config_mutation: tokio::sync::Mutex<()>,
+    config_mutation: tokio::sync::Mutex<auto_afk::Inactivity>,
+    inactivity_changed: tokio::sync::Notify,
     projects: Arc<crate::project_catalog::Catalog>,
     profile_catalog: crate::review_host::SharedProfileCatalog,
     recovery_observer: RecoveryObserver,

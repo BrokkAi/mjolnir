@@ -551,6 +551,8 @@ pub(super) async fn run_daemon_runtime(
     // Everything a client can use is initialized before this atomic
     // publication. From here on every exit, including an error from the test
     // hook or the event loop, flows through the same bounded epilogue.
+    let mut auto_afk = auto_afk::spawn(state.clone(), cancellation.clone());
+    let mut auto_afk_outcome = None;
     let mut outcome = async {
         write_metadata(&daemon_metadata_path, &metadata)?;
         reach_test_hook("daemon_metadata_before_listening").await?;
@@ -567,6 +569,11 @@ pub(super) async fn run_daemon_runtime(
                     if let Some(targets) = &phone_targets {
                         targets.send_replace(prepared_targets.borrow_and_update().clone());
                     }
+                }
+                result = &mut auto_afk => {
+                    auto_afk_outcome = Some(result.context("auto AFK task panicked").and_then(|result| result));
+                    if cancellation.is_cancelled() { break; }
+                    anyhow::bail!("auto AFK service stopped unexpectedly");
                 }
                 result = &mut cache_task => {
                     cache_outcome = Some(result.context("machine cache service failed").and_then(|result| result));
@@ -733,6 +740,17 @@ pub(super) async fn run_daemon_runtime(
     // Idle exit and fallible loop exits do not arrive through the termination
     // coordinator. Stop every daemon-owned task before closing the sole writer.
     cancellation.cancel();
+    epilogue.record(
+        &mut outcome,
+        "join auto AFK timer",
+        match auto_afk_outcome {
+            Some(result) => result,
+            None => auto_afk
+                .await
+                .context("auto AFK task panicked")
+                .and_then(|result| result),
+        },
+    );
     epilogue.record(
         &mut outcome,
         "join API activity cleanup",
@@ -1210,7 +1228,7 @@ pub(super) fn spawn_manager_target_refresher(
                     if changed.is_err() { return; }
                 }
                 _ = compatibility.tick() => {
-                    let _config_mutation = state.config_mutation.lock().await;
+                    let mut inactivity = state.config_mutation.lock().await;
                     let mut cache = auth.clone();
                     let staging = inputs.clone();
                     let preference_owner = state.clone();
@@ -1234,6 +1252,7 @@ pub(super) fn spawn_manager_target_refresher(
                     }).await;
                     match refreshed {
                         Ok(Ok((config, cache, staged, recent_changed))) => {
+                            state.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
                             staged_sources = Some((inputs.clone(), staged));
                             auth = cache;
                             auth_profiles = Some(config.profiles.clone());

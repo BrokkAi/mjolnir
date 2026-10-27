@@ -136,6 +136,7 @@ function fixture(taskCount = 1, options = {}) {
       bundles: [],
       review_config: { trigger: "off", profile: null },
       operator_away: options.operatorAway === true,
+      auto_afk_minutes: options.autoAfkMinutes ?? 0,
     },
     actions: [],
     snapshots: 0,
@@ -251,6 +252,55 @@ test('phone AFK action shows its pending state and reports a failure', async ({ 
   releaseAction();
   await expect(page.locator('#operator-away-error')).toHaveText('Could not go AFK: operator action failed');
   await expect(page.locator('#operator-away-indicator')).toBeHidden();
+});
+
+test('operator activity reporting stays off when disabled or already AFK', async ({ page }) => {
+  for (const options of [{ autoAfkMinutes: 0 }, { autoAfkMinutes: 5, operatorAway: true }]) {
+    const state = await mount(page, 1, options);
+    state.actions.length = 0;
+    await page.mouse.move(12, 12);
+    await page.keyboard.press('Tab');
+    await page.waitForTimeout(1100);
+    expect(state.actions).toEqual([]);
+  }
+});
+
+test('trusted global input signals activity immediately and coalesces while a request is pending', async ({ page }) => {
+  const state = await mount(page, 1, { autoAfkMinutes: 5 });
+  state.actions.length = 0;
+
+  await page.evaluate(() => {
+    for (const type of ['keydown', 'paste', 'input', 'pointermove', 'pointerdown', 'pointerup', 'pointercancel', 'wheel']) {
+      document.dispatchEvent(new Event(type, { bubbles: true }));
+    }
+  });
+  expect(state.actions).toEqual([]);
+
+  let releaseFirst;
+  let signalReached;
+  const blockedSignal = new Promise(resolve => { releaseFirst = resolve; });
+  const reachedSignal = new Promise(resolve => { signalReached = resolve; });
+  await page.route('**/api/actions', async route => {
+    const action = route.request().postDataJSON();
+    state.actions.push(action);
+    if (action.action === 'record-operator-activity' && state.actions.filter(item => item.action === action.action).length === 1) {
+      signalReached();
+      await blockedSignal;
+    }
+    await route.fulfill({ status: 202, body: '' });
+  });
+
+  await page.mouse.move(15, 15);
+  await reachedSignal;
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('ArrowDown');
+  await page.mouse.move(30, 30);
+  expect(state.actions).toEqual([{ action: 'record-operator-activity' }]);
+
+  releaseFirst();
+  await expect.poll(() => state.actions.filter(item => item.action === 'record-operator-activity').length).toBe(2);
+  await page.waitForTimeout(1100);
+  expect(state.actions.filter(item => item.action === 'record-operator-activity')).toHaveLength(2);
 });
 
 async function settleLayout(page) {
