@@ -100,6 +100,7 @@ mod tests {
             environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
+            muse_auto_review: None,
             codex_profile: None,
             legacy_subagents: Default::default(),
         };

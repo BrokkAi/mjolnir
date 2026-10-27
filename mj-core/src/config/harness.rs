@@ -1003,10 +1003,7 @@ impl HarnessKind {
         policy: ExecutionPolicy,
         muse_auto_review: bool,
     ) -> Option<ExecutionEnforcement> {
-        if self == Self::Muse
-            && policy == ExecutionPolicy::Unconstrained
-            && muse_auto_review
-        {
+        if self == Self::Muse && policy == ExecutionPolicy::Unconstrained && muse_auto_review {
             return Some(Self::muse_unconstrained_review_enforcement());
         }
         self.execution_enforcement(policy)
@@ -1330,10 +1327,8 @@ impl HarnessProfile {
         // A Muse profile that opts back into review keeps the previous
         // unconstrained behavior: the reviewer answers each approval inside
         // the container boundary, with only the sandbox disabled.
-        self.kind.resolve_execution_enforcement(
-            policy,
-            self.muse_auto_review.unwrap_or(false),
-        )
+        self.kind
+            .resolve_execution_enforcement(policy, self.muse_auto_review.unwrap_or(false))
     }
 
     /// Whether this Muse profile keeps auto-review on in unconstrained
@@ -2150,6 +2145,7 @@ mod tests {
             environment: Environment::default(),
             context_window_bytes: None,
             guardian_review_model: None,
+            muse_auto_review: None,
             codex_profile: None,
             legacy_subagents: None,
         };

@@ -835,6 +835,7 @@ pub(crate) fn test_config(profiles: &[(&str, HarnessKind)]) -> Config {
                         legacy_subagents: Default::default(),
                         guardian_review_model: None,
                         codex_profile: None,
+                        muse_auto_review: None,
                     },
                 )
             })

@@ -250,7 +250,8 @@ fn muse_session_enforcement_follows_the_launch_approval_mode() {
     assert_eq!(enforcement.acp_mode(), Some("allowAll"));
     assert_eq!(enforcement.acp_setting(), Some(("auto_review", "off")));
 
-    spec.environment.insert("MUSE_APPROVAL_MODE".into(), "allowAll".into());
+    spec.environment
+        .insert("MUSE_APPROVAL_MODE".into(), "allowAll".into());
     let enforcement = session_enforcement(&spec).expect("Muse enforces a policy");
     assert_eq!(enforcement.acp_mode(), Some("allowAll"));
     assert_eq!(enforcement.acp_setting(), Some(("auto_review", "off")));

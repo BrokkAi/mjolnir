@@ -82,6 +82,7 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                muse_auto_review: None,
                 codex_profile: None,
                 kind,
                 home: std::path::PathBuf::from("/profiles").join(id),

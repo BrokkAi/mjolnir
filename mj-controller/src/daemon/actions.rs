@@ -524,28 +524,88 @@ pub(super) async fn handle_action(
         }
         DaemonAction::QueueStartupPrompt {
             session_id,
+            command_id,
             text,
+            prompt,
+            encoded_draft,
+            move_operation_id,
             inherited_draft,
         } => {
             ensure!(
-                !text.trim().is_empty(),
-                "a queued startup prompt needs text to send"
+                !command_id.is_empty(),
+                "a queued startup prompt needs a command ID"
             );
-            state
-                .queue_startup_step(
+            ensure!(
+                !prompt.is_empty(),
+                "a queued startup prompt needs content to send"
+            );
+            // Validate references before persistence: raw image bytes never belong
+            // in a durable command, including while the destination is unknown.
+            mj_core::attachment::references(&prompt)?;
+            mj_core::draft::validate_reference_draft(&encoded_draft)?;
+            if let Some(draft) = &inherited_draft {
+                mj_core::draft::validate_reference_draft(draft)?;
+            }
+            for block in &prompt {
+                match block {
+                    ContentBlock::Text(_) => {}
+                    ContentBlock::Image(image) => {
+                        ensure!(
+                            mj_core::attachment::image_reference(image)?.is_some(),
+                            "queued images must be installed attachments"
+                        );
+                    }
+                    _ => bail!("startup prompts support text and installed images"),
+                }
+            }
+            match state
+                .queue_startup_steps_with_ids(
                     &session_id,
-                    StartupStep::Prompt {
-                        text,
-                        inherited_draft,
-                    },
+                    vec![(
+                        command_id,
+                        StartupStep::Prompt {
+                            text,
+                            prompt: Some(prompt),
+                            encoded_draft: Some(encoded_draft),
+                            move_operation_id,
+                            inherited_draft,
+                        },
+                    )],
+                    None,
                     cancellation,
                 )
-                .await?;
-            Ok(DaemonReply::Done)
+                .await
+            {
+                Ok(()) => Ok(DaemonReply::Done),
+                Err(error) if error.is::<mj_client::daemon::StartupPromptIdentityConflict>() => {
+                    Ok(DaemonReply::StartupPromptIdentityConflict)
+                }
+                Err(error) => Err(error),
+            }
         }
-        DaemonAction::WithdrawStartupPrompt { session_id, text } => Ok(
-            DaemonReply::PromptWithdrawn(state.withdraw_startup_prompt(&session_id, &text).await?),
-        ),
+        DaemonAction::WithdrawStartupPrompt {
+            session_id,
+            command_id,
+        } => Ok(DaemonReply::PromptWithdrawn(
+            state
+                .withdraw_startup_prompt(&session_id, &command_id)
+                .await?,
+        )),
+        DaemonAction::StartupPromptOutcomes {
+            session_id,
+            command_ids,
+        } => {
+            ensure!(
+                command_ids.len() <= 128,
+                "request at most 128 startup prompt outcomes"
+            );
+            Ok(DaemonReply::StartupPromptOutcomes(
+                blocking(move || {
+                    crate::database::startup_prompt_outcomes(&session_id, &command_ids)
+                })
+                .await?,
+            ))
+        }
         DaemonAction::StartTurnReview { session_id } => {
             state
                 .review_host()

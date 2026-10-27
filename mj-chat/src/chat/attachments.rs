@@ -19,7 +19,7 @@ use crate::clipboard::ClipboardImage;
 use mj_core::attachment::{AttachmentRef, AttachmentStore, MAX_IMAGES};
 
 /// Prefix used for drafts whose payload is encoded as JSON.
-pub const CHAT_DRAFT_PREFIX: &str = "mjolnir-chat-draft-v1:";
+pub use mj_core::draft::CHAT_DRAFT_PREFIX;
 
 /// The text and inline images currently in the composer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

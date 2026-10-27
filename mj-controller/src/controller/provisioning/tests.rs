@@ -100,6 +100,7 @@ fn ssh_docker_registration_config() -> Config {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     config.bundles.insert(

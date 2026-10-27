@@ -181,6 +181,7 @@ mod tests {
                     legacy_subagents: Default::default(),
                     guardian_review_model: None,
                     codex_profile: None,
+                    muse_auto_review: None,
                 },
             );
         }

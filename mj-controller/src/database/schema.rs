@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 99;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 100;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1827,6 +1827,21 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
     }
 
+    // Breaking: old daemons ignore structured Prompt content and encoded drafts,
+    // sending marker text and losing images. Preserve legacy text rows unchanged.
+    if version < 100 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TRIGGER IF NOT EXISTS startup_steps_session_deleted AFTER DELETE ON sessions
+                 BEGIN DELETE FROM startup_steps WHERE session_id=OLD.session_id
+                     AND group_id IS NULL AND json_type(step_json, '$.Prompt.prompt')='array'; END;
+             UPDATE schema_compatibility SET minimum_compatible_version = 100 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at) VALUES(100, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 100;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2322,7 +2337,7 @@ mod reader_tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        assert_eq!(revisions, [93, 94, 95, 96, 97, 98, 99]);
+        assert_eq!(revisions, [93, 94, 95, 96, 97, 98, 99, 100]);
         let fresh = Connection::open_in_memory().unwrap();
         migrate_schema(&fresh).unwrap();
         let schema = |database: &Connection| {
@@ -2871,6 +2886,10 @@ mod reader_tests {
             connection
                 .execute_batch("DROP TRIGGER stop_at_revision")
                 .unwrap();
+            if revision >= 59 {
+                connection.execute("INSERT INTO startup_steps(session_id, command_id, step_json, phase) VALUES('old-session','legacy-startup',?1,'pending')",
+                    [r#"{"Prompt":{"text":"Keep my queued prompt","inherited_draft":null}}"#]).unwrap();
+            }
             drop(connection);
 
             let writer =
@@ -2902,6 +2921,20 @@ mod reader_tests {
                 .query_row("SELECT text FROM prompt_history", [], |row| row.get(0))
                 .unwrap();
             assert_eq!(prompt, "Keep my prompt");
+            if revision >= 59 {
+                let pending: String = reader
+                    .query_row(
+                        "SELECT step_json FROM startup_steps WHERE command_id='legacy-startup'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert!(
+                    matches!(serde_json::from_str::<crate::daemon::StartupStep>(&pending).unwrap(),
+                    crate::daemon::StartupStep::Prompt { text, prompt: None, encoded_draft: None, .. }
+                        if text == "Keep my queued prompt")
+                );
+            }
             let state = load_state_from(&path).unwrap();
             assert_eq!(state.sessions["old-session"].title, "Keep my work");
             assert_eq!(
@@ -3603,10 +3636,10 @@ mod reader_tests {
         assert!(matches!(
             error.downcast_ref::<StoreSchemaMismatch>().unwrap().reason,
             StoreSchemaMismatchReason::Incompatible {
-                minimum_compatible: 99
+                minimum_compatible: 100
             }
         ));
-        assert_eq!(schema.minimum_compatible, Some(99));
+        assert_eq!(schema.minimum_compatible, Some(100));
         connection
             .execute("UPDATE operator_away SET away=1,revision=7", [])
             .unwrap();

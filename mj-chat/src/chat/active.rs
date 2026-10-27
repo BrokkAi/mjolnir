@@ -5,7 +5,6 @@
 mod render;
 pub(crate) use render::*;
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,11 +31,11 @@ use mj_client::session::{
 use mj_core::relay::WorkerPhase;
 use mj_core::transcript::ChatEntry;
 
-use super::attachments;
 use super::autocomplete::render_autocomplete;
 use super::elicitation::render_elicitation_in;
 use super::history::{highlighted_input_lines, history_scope_name, history_search_footer};
 use super::input::{input_cursor_visual_position, set_input_cursor};
+#[cfg(test)]
 use super::input_state::AttachmentFallback;
 use super::remote::{
     ChatRemoteOperation, ChatRemoteResult, ChatRemoteSupervisor, apply_chat_remote_result,
@@ -47,13 +46,19 @@ use super::rendering::{
     voice_button_glyph, voice_button_line, wrap_styled_line,
 };
 
+#[cfg(test)]
+use super::PromptPayload;
+use super::composer::ComposerIoUpdate;
+#[cfg(test)]
+use super::composer::{AttachmentResult, MAX_ATTACHMENT_TASKS};
 use super::transcript::{ToolDiffstatRequest, materialized_prefix_entries, render_transcript};
 use super::{
     BackgroundTaskControl, ChatAction, ChatElicitationDraft, ChatEventOutcome, ChatFooter,
     ChatRegions, ChatSessionContext, ChatState, MOUSE_SCROLL_ROWS, Notices, SessionHeaderIdentity,
     queued_prompt_preview,
 };
-use crate::clipboard::{ClipboardContent, ClipboardImage};
+#[cfg(test)]
+use crate::clipboard::ClipboardContent;
 
 /// Durable chat-side state that a host process must ask the daemon to store.
 #[derive(Debug, Clone)]
@@ -97,16 +102,6 @@ enum ChatIoUpdate {
         >,
     },
     ProjectHistoryPrefetched(std::result::Result<Vec<PromptHistoryEntry>, String>),
-    HistorySearchResults {
-        generation: u64,
-        result: std::result::Result<Vec<PromptHistoryEntry>, String>,
-    },
-    Clipboard {
-        generation: u64,
-        target: super::input_state::ClipboardTarget,
-        result: std::result::Result<ClipboardContent, String>,
-    },
-    AttachmentFinished(AttachmentResult),
     /// The history a large session did not convert when it opened, built off
     /// the event loop. `attempt` counts the tries so far, so a transcript that
     /// keeps changing under the conversion cannot retry for ever.
@@ -136,39 +131,21 @@ enum ChatIoUpdate {
     },
 }
 
-const MAX_ATTACHMENT_TASKS: usize = 2;
-
-#[derive(Debug)]
-struct AttachmentResult {
-    sequence: u64,
-    fallback: AttachmentFallback,
-    result: std::result::Result<ClipboardImage, String>,
-}
-
-#[derive(Debug)]
-enum AttachmentSource {
-    Clipboard(ClipboardImage),
-    Path(super::pasted_paths::PastedPath),
-}
-
 /// How many times a refused prefix is rebuilt before the view settles for its
 /// tail. Compaction rewriting the history under a pending conversion is rare,
 /// and one rebuild against the current snapshot normally lands.
 const MAX_PREFIX_CONVERSION_ATTEMPTS: u32 = 3;
 
-fn dispatch_history_search_request(
-    session: ManagedSessionHandle,
-    chat: &mut ChatState,
-    updates: &tokio::sync::mpsc::UnboundedSender<ChatIoUpdate>,
-) {
+fn dispatch_history_search_request(session: ManagedSessionHandle, chat: &mut ChatState) {
     let Some(request) = chat.take_history_search_request() else {
         return;
     };
     let generation = request.generation;
-    let updates = updates.clone();
+    let updates = chat.composer_runtime.tx.clone();
     tokio::spawn(async move {
         let result = ChatState::resolve_history_search_request(request, &session).await;
-        if let Err(error) = updates.send(ChatIoUpdate::HistorySearchResults { generation, result })
+        if let Err(error) =
+            updates.send(ComposerIoUpdate::HistorySearchResults { generation, result })
         {
             tracing::debug!(%error, "history search result dropped because the chat closed");
         }
@@ -306,24 +283,6 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
             tracing::warn!(%error, "project chat history prefetch failed");
             chat.set_project_history_unavailable(error);
         }
-        ChatIoUpdate::HistorySearchResults { generation, result } => {
-            chat.apply_history_search_results(generation, result);
-        }
-        ChatIoUpdate::Clipboard {
-            generation,
-            target,
-            result,
-        } => {
-            if generation == chat.input_generation() && target == chat.clipboard_target() {
-                match result {
-                    Ok(content) => chat.handle_clipboard_content(content),
-                    Err(error) => {
-                        tracing::warn!(%error, "clipboard read failed and was shown in the UI");
-                        chat.set_notice(format!("Paste failed: {error}"));
-                    }
-                }
-            }
-        }
         ChatIoUpdate::ToolDiffstats {
             tool_call_id,
             revision,
@@ -338,9 +297,6 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
         ChatIoUpdate::ReviewerStarted(_)
         | ChatIoUpdate::ReviewerNotice(_)
         | ChatIoUpdate::TurnReviewEvents { .. } => {}
-        ChatIoUpdate::AttachmentFinished(_) => {
-            unreachable!("attachment results are applied by ActiveChat")
-        }
         ChatIoUpdate::SessionReconnected(_) => {
             unreachable!("session reconnects are applied by ActiveChat")
         }
@@ -495,15 +451,6 @@ pub struct ActiveChat {
     /// ticks after the chat itself opens. Keep it here until that exact source
     /// form surfaces, instead of dropping it or applying it to the primary.
     deferred_elicitation_draft: Option<ChatElicitationDraft>,
-    /// At most one native clipboard operation may run for this chat. A second
-    /// paste is reported instead of starting an unbounded burst of readers.
-    paste_in_flight: bool,
-    /// Image codecs and session-store writes run in supervised blocking tasks.
-    /// Each result carries its marker sequence, so completion order cannot
-    /// reorder images already laid out in the composer.
-    attachment_queue: VecDeque<(u64, AttachmentSource, AttachmentFallback)>,
-    attachment_tasks_in_flight: usize,
-    next_attachment_sequence: u64,
     earlier_task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -749,6 +696,7 @@ impl ActiveChat {
         {
             state.set_notice(format!("Recovery copy failed: {detail}"));
         }
+        state.bind_composer_session(Some(session.session_id()));
         let mut chat = Self {
             instance: ChatInstance(Arc::new(())),
             state,
@@ -777,14 +725,22 @@ impl ActiveChat {
             reviewed_role: None,
             persistence,
             deferred_elicitation_draft: None,
-            paste_in_flight: false,
-            attachment_queue: VecDeque::new(),
-            attachment_tasks_in_flight: 0,
-            next_attachment_sequence: 0,
             earlier_task: None,
         };
         chat.refresh_voice_availability();
         chat
+    }
+
+    /// Transfer native result ownership together with its pending submission rows.
+    pub fn take_live_composer(&mut self) -> Option<super::LiveComposer> {
+        let mut composer = self.state.take_live_composer()?;
+        if let Some(stream) = self
+            .remote
+            .transfer_results(composer.composer_runtime.tx.clone())
+        {
+            composer.composer_runtime.remote_streams.push(stream);
+        }
+        Some(composer)
     }
 
     /// Identity of this owned view, independent of the session it displays.

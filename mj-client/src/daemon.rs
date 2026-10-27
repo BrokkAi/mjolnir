@@ -1,6 +1,7 @@
 //! Authenticated local daemon protocol and client transport.
 use crate::executable::describe_running_daemon_and_client_builds;
 use crate::session::{ManagedSessionView, ViewError};
+use agent_client_protocol::schema::v1::ContentBlock;
 use anyhow::{Context, Result, bail, ensure};
 use mj_core::config::{Config, data_dir};
 use mj_core::credentials::CredentialSyncSignal;
@@ -17,6 +18,18 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+/// Durable terminal results for caller-owned startup prompt identities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum StartupPromptOutcome {
+    Accepted,
+    Withdrawn,
+    Refused {
+        encoded_draft: String,
+        reason: String,
+    },
+}
+
 pub fn metadata_path() -> PathBuf {
     data_dir().join("daemon.json")
 }
@@ -316,6 +329,8 @@ pub enum RuntimeLifecycleKind {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeLifecycleView {
     pub operation_id: String,
+    #[serde(default)]
+    pub move_operation_id: Option<String>,
     pub cancellable: bool,
     pub session_id: String,
     pub kind: RuntimeLifecycleKind,
@@ -654,7 +669,12 @@ pub enum DaemonAction {
     /// running or still showing that session.
     QueueStartupPrompt {
         session_id: String,
+        command_id: String,
         text: String,
+        prompt: Vec<ContentBlock>,
+        encoded_draft: String,
+        #[serde(default)]
+        move_operation_id: Option<String>,
         /// The saved draft text this prompt was typed from, if the client
         /// also persisted it. Cleared after a successful submit so the
         /// delivered prompt does not reappear as a draft.
@@ -663,12 +683,16 @@ pub enum DaemonAction {
     },
     /// Take back a prompt queued with `QueueStartupPrompt` that the daemon has
     /// not started delivering, so the person can edit it. The daemon cancels
-    /// the newest queued prompt with this exact text and replies
+    /// the prompt with this caller-owned command ID and replies
     /// `PromptWithdrawn(true)`, or `PromptWithdrawn(false)` when none is
     /// waiting because delivery already started.
     WithdrawStartupPrompt {
         session_id: String,
-        text: String,
+        command_id: String,
+    },
+    StartupPromptOutcomes {
+        session_id: String,
+        command_ids: Vec<String>,
     },
     SyncSession {
         session_id: String,
@@ -767,6 +791,19 @@ impl std::fmt::Display for DaemonRefusal {
 
 impl std::error::Error for DaemonRefusal {}
 
+/// An existing startup ID belongs to another immutable request. Its original
+/// work may already be accepted, so this never proves that work was refused.
+#[derive(Debug)]
+pub struct StartupPromptIdentityConflict;
+
+impl std::fmt::Display for StartupPromptIdentityConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("startup command ID was reused with a different payload")
+    }
+}
+
+impl std::error::Error for StartupPromptIdentityConflict {}
+
 impl DaemonRefusal {
     /// Whether the daemon itself could not confirm delivery. Its message is
     /// then led by `session::DeliveryUnconfirmed`.
@@ -830,6 +867,8 @@ pub enum DaemonReply {
     WikiSession(Option<Box<WikiSessionInfo>>),
     /// Whether a queued startup prompt was withdrawn before delivery.
     PromptWithdrawn(bool),
+    StartupPromptIdentityConflict,
+    StartupPromptOutcomes(std::collections::BTreeMap<String, StartupPromptOutcome>),
     Done,
 }
 
@@ -2027,21 +2066,31 @@ impl DaemonClient {
     /// Hand the daemon a prompt for a session that is still starting. The
     /// daemon replies as soon as the prompt is queued, not when it is
     /// delivered; delivery failures come back as a session notice.
+    #[allow(clippy::too_many_arguments)] // Mirrors the structured durable startup action.
     pub async fn queue_startup_prompt(
         &mut self,
         session_id: String,
+        command_id: String,
         text: String,
+        prompt: Vec<ContentBlock>,
         inherited_draft: Option<String>,
+        encoded_draft: String,
+        move_operation_id: Option<String>,
     ) -> Result<()> {
         match self
             .request(DaemonAction::QueueStartupPrompt {
                 session_id,
+                command_id,
                 text,
+                prompt,
+                encoded_draft,
+                move_operation_id,
                 inherited_draft,
             })
             .await?
         {
             DaemonReply::Done => Ok(()),
+            DaemonReply::StartupPromptIdentityConflict => Err(StartupPromptIdentityConflict.into()),
             reply => bail!("unexpected startup prompt reply {reply:?}"),
         }
     }
@@ -2053,14 +2102,35 @@ impl DaemonClient {
     pub async fn withdraw_startup_prompt(
         &mut self,
         session_id: String,
-        text: String,
+        command_id: String,
     ) -> Result<bool> {
         match self
-            .request(DaemonAction::WithdrawStartupPrompt { session_id, text })
+            .request(DaemonAction::WithdrawStartupPrompt {
+                session_id,
+                command_id,
+            })
             .await?
         {
             DaemonReply::PromptWithdrawn(withdrawn) => Ok(withdrawn),
             reply => bail!("unexpected startup prompt withdrawal reply {reply:?}"),
+        }
+    }
+
+    /// Read only the requested durable terminal receipts (at most 128 IDs).
+    pub async fn startup_prompt_outcomes(
+        &mut self,
+        session_id: String,
+        command_ids: Vec<String>,
+    ) -> Result<std::collections::BTreeMap<String, StartupPromptOutcome>> {
+        match self
+            .request(DaemonAction::StartupPromptOutcomes {
+                session_id,
+                command_ids,
+            })
+            .await?
+        {
+            DaemonReply::StartupPromptOutcomes(outcomes) => Ok(outcomes),
+            reply => bail!("unexpected startup prompt outcomes reply {reply:?}"),
         }
     }
 
@@ -2419,10 +2489,11 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // New-session creation independently controls whether its container size
 // becomes the host's saved default.
 // Operator-away action and runtime metadata.
+// Structured startup prompts, caller-owned command IDs, and ID withdrawal.
 // Terminals no longer save harness titles; the daemon alone projects them.
 // Human interface activity can reset the daemon's automatic AFK clock.
 // Project removal runs through the daemon-owned database writer.
-pub const PROTOCOL_VERSION: u32 = 66;
+pub const PROTOCOL_VERSION: u32 = 67;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

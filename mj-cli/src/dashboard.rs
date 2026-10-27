@@ -17,6 +17,7 @@ mod composer_drafts;
 mod help_search;
 pub(crate) mod io;
 mod read_receipts;
+mod startup_prompts;
 mod usage_report;
 mod workspace_settings;
 
@@ -403,6 +404,7 @@ pub(crate) struct DashboardContext {
     /// request itself runs on a blocking worker; this flag keeps repeated
     /// Ctrl-V key repeats from creating an unbounded queue of reads.
     pub(crate) clipboard_read_in_flight: bool,
+    startup_prompts: startup_prompts::StartupPrompts,
     /// Pane-scoped text selection, driven by the mouse events this loop
     /// intercepts before the views see them.
     selection: SelectionState,
@@ -1201,6 +1203,16 @@ impl DashboardContext {
         self.record_detach(session_id, ordinal);
     }
 
+    /// Keep pending input jobs alive when navigation drops a worker-facing view.
+    pub(crate) fn park_chat_composer(&mut self, session_id: &str) {
+        if !self.dashboard.has_standby_composer(session_id)
+            && let Some(chat) = self.chats.get_mut(session_id)
+            && let Some(composer) = chat.take_live_composer()
+        {
+            self.dashboard.adopt_standby_composer(session_id, composer);
+        }
+    }
+
     /// Drops the warm chats no pane shows any more, saving each one first.
     pub(crate) fn retire_chats_outside_the_layout(&mut self) {
         let shown = self.dashboard.pane_session_ids();
@@ -1211,6 +1223,7 @@ impl DashboardContext {
             .cloned()
             .collect::<Vec<_>>()
         {
+            self.park_chat_composer(&session_id);
             self.save_question_draft(&session_id);
             self.record_chat_detach(&session_id);
             self.chats.remove(&session_id);
@@ -1316,6 +1329,7 @@ impl DashboardContext {
         self.opening_chat_sessions.remove(&pane);
         self.attachments.remove(&pane);
         if let Some(session_id) = self.dashboard.close_pane(pane) {
+            self.park_chat_composer(&session_id);
             self.record_chat_detach(&session_id);
             self.chats.remove(&session_id);
             self.selection.clear();
@@ -1453,6 +1467,22 @@ impl DashboardContext {
     fn begin_shutdown(&mut self, detached: bool) {
         if self.shutdown_requested {
             return;
+        }
+        self.collect_prepared_startup_prompts();
+        self.startup_prompts
+            .cancel_unadmitted(&mut self.dashboard, &mut self.chats);
+        self.startup_prompts
+            .retain_unconfirmed(&mut self.dashboard, &mut self.chats);
+        for session_id in self.dashboard.standby_session_ids() {
+            if !self.chats.contains_key(&session_id) {
+                let viewed = self
+                    .controller
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .map_or(0, |session| session.viewed_through_event_ordinal);
+                self.record_detach(&session_id, viewed);
+            }
         }
         // A warm chat may be hidden while another session opens. Every
         // shutdown path must save every one of them, including global quit
@@ -1787,6 +1817,7 @@ impl DashboardContext {
             next_import_task_id: 0,
             active_import: None,
             clipboard_read_in_flight: false,
+            startup_prompts: startup_prompts::StartupPrompts::default(),
             selection: SelectionState::new(),
             selection_text: None,
             dashboard_io_tx,

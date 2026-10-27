@@ -299,7 +299,7 @@ impl RuntimeState {
                     request_key: Some(key),
                     control: None,
                     phase,
-                    move_operation_id: None,
+                    move_operation_id: Some(operation.operation_id.clone()),
                     deferrable_admission: None,
                 },
                 move |state, session_id, cancelled| async move {

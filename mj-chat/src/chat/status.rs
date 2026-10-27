@@ -138,6 +138,7 @@ impl ChatState {
     /// id arrives.
     pub fn adopt_session_id(&mut self, session_id: &str) {
         self.session_id = session_id.to_owned();
+        self.bind_composer_session(Some(session_id));
     }
 
     /// Installs the stable session-list columns used by the conversation title.

@@ -294,14 +294,14 @@ pub enum DashboardAction {
     /// live; the dashboard only shows it as a queued preview.
     QueueStartupPrompt {
         session_id: String,
-        text: String,
+        prompt: mj_chat::chat::StartupPrompt,
     },
     /// The person recalled a queued startup prompt into the standby composer
     /// to edit it. The host asks the daemon to withdraw it, so the composer
     /// is the prompt's only owner.
     WithdrawStartupPrompt {
         session_id: String,
-        text: String,
+        prompt: mj_chat::chat::StartupPrompt,
     },
     CreateSession {
         remember_container_size: bool,
@@ -872,7 +872,18 @@ pub(crate) fn cycle_control<T: Copy + PartialEq>(current: T, order: &[T], revers
 ///
 /// The fields wrapped in [`Tracked`] are the inputs the session facts and
 /// the Sessions pane's order are derived from (see [`session_view`]).
+/// Identity of the dashboard input which requested a background text paste.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardPasteTarget {
+    revision: u64,
+    mode: std::mem::Discriminant<Mode>,
+    session: Option<String>,
+    pane: crate::tile_layout::PaneId,
+    focus: Focus,
+}
+
 pub struct DashboardState {
+    paste_revision: u64,
     pending_welcome: Option<welcome::WelcomeDialog>,
     operator_presence: operator_away::OperatorPresence,
     #[cfg(test)]
@@ -1229,6 +1240,7 @@ impl DashboardState {
             profile_capabilities: Default::default(),
             profile_login_statuses: Default::default(),
             profile_login_refresh: false,
+            paste_revision: 0,
             profile_login_generation: 0,
             pending_setup_login: None,
             profile_hydration_requests: Default::default(),

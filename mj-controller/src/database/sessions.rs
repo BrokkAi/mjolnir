@@ -1279,13 +1279,19 @@ pub fn append_session_draft_input(session_id: &str, text: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     let text = text.to_owned();
     submit_database_write("append_session_draft_input", move |connection| {
-        let updated = connection.execute(
-            "UPDATE sessions SET draft_input = CASE WHEN ?2 = '' THEN draft_input
-             WHEN draft_input = '' THEN ?2 ELSE draft_input || char(10) || char(10) || ?2 END
-             WHERE session_id = ?1",
-            params![session_id, text],
+        let tx = connection.transaction()?;
+        let existing: String = tx.query_row(
+            "SELECT draft_input FROM sessions WHERE session_id=?1",
+            [&session_id],
+            |row| row.get(0),
+        )?;
+        let merged = mj_core::draft::merge_drafts(&existing, &text)?;
+        let updated = tx.execute(
+            "UPDATE sessions SET draft_input=?2 WHERE session_id=?1",
+            params![session_id, merged],
         )?;
         ensure!(updated == 1, "unknown session {session_id}");
+        tx.commit()?;
         Ok(())
     })
 }

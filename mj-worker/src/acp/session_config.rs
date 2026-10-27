@@ -559,8 +559,7 @@ pub(super) async fn enforce_execution_mode(
 /// `allowAll` runs without permission checks. Guardian Muse always reviews,
 /// so the environment only matters while unconstrained.
 pub(super) fn session_enforcement(spec: &LaunchSpec) -> Option<ExecutionEnforcement> {
-    if spec.harness == HarnessKind::Muse
-        && spec.execution_policy == ExecutionPolicy::Unconstrained
+    if spec.harness == HarnessKind::Muse && spec.execution_policy == ExecutionPolicy::Unconstrained
     {
         let review = spec
             .environment

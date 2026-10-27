@@ -567,6 +567,7 @@ fn node_preflight_accepts_a_managed_runtime_when_node_is_missing() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     preflight_harness(
         &mj_core::config::TargetTemplate::LocalBare,
@@ -593,6 +594,7 @@ fn node_preflight_explains_when_the_target_has_no_managed_runtime() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     let error = format!(
         "{:#}",
@@ -635,6 +637,7 @@ fn dsh_preflight_accepts_only_its_native_binary_without_node_or_curl() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     preflight_harness(
@@ -750,6 +753,7 @@ fn blank_claude_auth_environment_values_do_not_count_as_logins() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     let mut environment = BTreeMap::from([
         (CLAUDE_OAUTH_TOKEN_ENV.to_owned(), " \n ".to_owned()),
@@ -2342,6 +2346,7 @@ fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     let refusal = |error: anyhow::Error| {
         let refusal = mj_core::refusal::Refusal::of(&error).expect("a refusal for the client");
@@ -2584,6 +2589,7 @@ fn a_session_without_project_memory_launches_without_memory() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         let launch = |no_project_memory: bool| {
             let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
@@ -2665,6 +2671,7 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
         session.harness_kind = kind;
@@ -2751,6 +2758,7 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     }
 }
 
@@ -2774,6 +2782,7 @@ fn staging_a_muse_profile_hands_its_saved_model_list_to_the_session_data_directo
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     let staged = tempfile::tempdir().unwrap();
     let staged_home = staged.path().join("muse");
@@ -3059,6 +3068,7 @@ fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     }
 }
 
@@ -3138,6 +3148,7 @@ fn an_inline_token_provider_stages_its_catalog_and_guardian_reviewer() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     let asked = std::cell::RefCell::new(Vec::new());
 
@@ -3204,6 +3215,7 @@ fn stage_grok_profile_copies_authentication_and_agent_identity() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3237,6 +3249,7 @@ fn stage_claude_profile_preserves_rollout_identity() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3283,6 +3296,7 @@ fn stage_claude_profile_follows_symlinked_entries() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3324,6 +3338,7 @@ fn staging_reproduces_the_skills_tree_the_sync_will_push() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3436,6 +3451,7 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -3516,6 +3532,7 @@ fn staging_and_sync_agree_on_linked_and_oversized_skills() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3579,6 +3596,7 @@ fn stage_claude_profile_skips_dangling_allowlist_symlinks() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3795,6 +3813,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     }
 }
 
@@ -3951,6 +3970,7 @@ fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() 
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     for (target, launch) in launches_on_every_target(&claude) {
         if target == "localhost" {
@@ -4086,6 +4106,7 @@ fn a_bedrock_codex_launch_passes_aws_settings_to_every_target() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     for (target, launch) in launches_on_every_target(&profile) {
@@ -4307,6 +4328,7 @@ fn raw_local_muse_launches_with_guardian_approvals() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     let (launch, _, _) = worker_launch_config(
@@ -4354,6 +4376,7 @@ fn stage_kimi_profile_preserves_device_identity() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -4388,6 +4411,7 @@ fn staged_kimi_profile_binds_history_tools_to_the_target_runtime() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     stage_profile(&profile, staged.path()).unwrap();
     let memory = ProjectMemoryLaunchConfig {
@@ -4484,6 +4508,7 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -5265,6 +5290,7 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -5429,6 +5455,7 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         let canonical = profile.authentication_marker();
         let database = home.join(".data/opencode/opencode.db");
@@ -5578,6 +5605,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         let marker = profile.authentication_marker();
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();

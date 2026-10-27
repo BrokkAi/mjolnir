@@ -23,10 +23,9 @@ use crate::dashboard::io::{
     spawn_cancellable_io_with_token, spawn_clipboard_read, spawn_config_rename,
     spawn_create_bundle, spawn_dashboard_change_workspace, spawn_dashboard_container_settings,
     spawn_dashboard_create_session, spawn_dashboard_rename, spawn_lifecycle_operation,
-    spawn_remove_bundle, spawn_review_settings_discovery, spawn_startup_prompt,
-    spawn_withdraw_startup_prompt, spawn_workspace_close, spawn_workspace_close_cancel,
-    spawn_workspace_create, spawn_workspace_draft_recovery, spawn_workspace_management_load,
-    spawn_workspace_rename,
+    spawn_remove_bundle, spawn_review_settings_discovery, spawn_workspace_close,
+    spawn_workspace_close_cancel, spawn_workspace_create, spawn_workspace_draft_recovery,
+    spawn_workspace_management_load, spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -762,7 +761,10 @@ pub(crate) async fn apply_dashboard_action(
             if !context.clipboard_read_in_flight {
                 context.clipboard_read_in_flight = true;
                 context.dashboard.set_notice("Reading clipboard…");
-                spawn_clipboard_read(context.dashboard_io_tx.clone());
+                spawn_clipboard_read(
+                    context.dashboard.paste_target(),
+                    context.dashboard_io_tx.clone(),
+                );
             }
         }
         DashboardAction::MarkAllRead { receipts } => {
@@ -883,7 +885,7 @@ pub(crate) async fn apply_dashboard_action(
                     .set_notice("Import cancelled; no Mjolnir files were changed.");
             }
         }
-        DashboardAction::QueueStartupPrompt { session_id, text } => {
+        DashboardAction::QueueStartupPrompt { session_id, prompt } => {
             // The daemon clears the saved draft only when it still holds the
             // text this prompt was typed from; anything else stays put.
             let inherited_draft = context
@@ -891,20 +893,20 @@ pub(crate) async fn apply_dashboard_action(
                 .state
                 .sessions
                 .get(&session_id)
-                .filter(|session| session.draft_input == text)
+                .filter(|session| session.draft_input == prompt.payload.encode_draft())
                 .map(|session| session.draft_input.clone());
-            spawn_startup_prompt(
+            context.startup_prompts.enqueue(
                 session_id,
-                text,
+                prompt,
                 inherited_draft,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );
         }
-        DashboardAction::WithdrawStartupPrompt { session_id, text } => {
-            spawn_withdraw_startup_prompt(
+        DashboardAction::WithdrawStartupPrompt { session_id, prompt } => {
+            context.startup_prompts.withdraw(
                 session_id,
-                text,
+                prompt,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );
@@ -1313,8 +1315,15 @@ pub(crate) async fn apply_dashboard_action(
                 "Moving {}…",
                 context.session_notice_name(&session_id)
             ));
+            context
+                .startup_prompts
+                .begin_move(&session_id, Some(preparation.operation_id.clone()));
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Moving);
+            context.dashboard.set_standby_move_origin(
+                &session_id,
+                context.startup_prompts.move_origin(&session_id),
+            );
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
@@ -1379,8 +1388,14 @@ pub(crate) async fn apply_dashboard_action(
                 "Retrying move for {}…",
                 context.session_notice_name(&session_id)
             ));
+            context.startup_prompts.begin_move(&session_id, None);
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Moving);
+            context.dashboard.set_standby_move_origin(
+                &session_id,
+                context.startup_prompts.move_origin(&session_id),
+            );
+            let prepared_updates = context.dashboard_io_tx.clone();
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
@@ -1392,6 +1407,15 @@ pub(crate) async fn apply_dashboard_action(
                     mj_core::runtime::block_on(async move {
                         let mut daemon = daemon::connect_or_start().await?;
                         let preparation = daemon.prepare_move_session(selection).await?;
+                        report(
+                            "binding move prompt origin",
+                            &prepared_updates,
+                            DashboardIoUpdate::MoveOriginPrepared {
+                                session_id: session_id.clone(),
+                                move_operation_id: preparation.operation_id.clone(),
+                                operation: cancelled.clone(),
+                            },
+                        );
                         let request = MoveSessionRequest {
                             preparation,
                             queue,
@@ -1908,11 +1932,19 @@ impl DashboardContext {
         // is lost, and put the keyboard where the typing happens.
         if matches!(
             kind,
-            SessionOperationKind::Launching | SessionOperationKind::Resuming
+            SessionOperationKind::Launching
+                | SessionOperationKind::Resuming
+                | SessionOperationKind::Moving
         ) {
             self.dashboard.select_active_session(session_id);
-            if let Some(text) = self.chats.get(session_id).map(|chat| chat.draft()) {
-                self.dashboard.seed_standby_prompt(session_id, text);
+            if !self.dashboard.has_standby_composer(session_id)
+                && let Some(chat) = self.chats.get_mut(session_id)
+                && let Some(composer) = chat.take_live_composer()
+            {
+                self.dashboard.adopt_standby_composer(session_id, composer);
+            }
+            if kind != SessionOperationKind::Moving {
+                self.dashboard.set_standby_move_origin(session_id, None);
             }
             self.dashboard.focus_prompt();
         }
