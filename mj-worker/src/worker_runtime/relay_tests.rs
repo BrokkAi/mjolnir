@@ -5667,7 +5667,9 @@ async fn acp_supervisor_holds_the_managed_node_lease_for_the_process_tree() {
     let mut parent = tokio::net::UnixStream::from_std(parent).unwrap();
     let parent_fd = parent.as_raw_fd();
     let unrelated = tokio::task::spawn_blocking(move || {
-        let mut command = std::process::Command::new("/bin/true");
+        // `/bin/true` does not exist on macOS; `/usr/bin/true` is on every
+        // Unix under test (Windows CI compiles tests without running them).
+        let mut command = std::process::Command::new("/usr/bin/true");
         let fd = forked.as_raw_fd();
         // SAFETY: only async-signal-safe close/read/write run in the child;
         // forked stays alive until spawn completes, and EOF also unblocks it.
