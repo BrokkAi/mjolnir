@@ -174,17 +174,18 @@ pub(crate) async fn background_task_stop_response(
             // The relay expects the adapter's acknowledgement once a Claude
             // stop is requested; forget it if the stop never gets there.
             let claude_task_id = match &target {
-                mj_core::relay::BackgroundTaskStopTarget::ClaudeAsyncTask { task_id } => {
-                    Some(task_id.clone())
-                }
+                mj_core::relay::BackgroundTaskStopTarget::AirAsyncTask {
+                    session_id,
+                    task_id,
+                } => Some((session_id.clone(), task_id.clone())),
                 _ => None,
             };
             let stop_not_sent = || {
-                if let Some(task_id) = &claude_task_id {
+                if let Some((session_id, task_id)) = &claude_task_id {
                     relay
                         .lock()
                         .expect("relay state lock poisoned")
-                        .claude_stop_not_sent(task_id);
+                        .claude_stop_not_sent(session_id, task_id);
                 }
             };
             let (resolved, resolution) = tokio::sync::oneshot::channel();

@@ -154,7 +154,7 @@ fn a_harness_turn_during_a_routine_barrier_ends_the_hold() {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = configured(&temp);
         relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
-        relay.set_background_work_policy(BackgroundWorkPolicy::ClaudeTasks);
+        relay.set_background_work_policy(BackgroundWorkPolicy::AirTasks);
         let cut = ready_checkpoint(&mut relay, "routine-barrier");
         relay
             .record_observation(RelayObservation::Notice {
@@ -165,7 +165,7 @@ fn a_harness_turn_during_a_routine_barrier_ends_the_hold() {
 
         if announced {
             relay
-                .claude_async_task_control_changed("silent-turn".into(), true, true, false, false)
+                .apply_claude_task_fixture("silent-turn".into(), true, true, false, false)
                 .unwrap();
         } else {
             relay

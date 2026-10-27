@@ -17,6 +17,8 @@
 
 pub use mj_core::relay::*;
 mod background;
+#[cfg(test)]
+pub(crate) use background::AirTaskFixture;
 mod checkpoint_hold;
 #[cfg(test)]
 mod checkpoint_hold_tests;
@@ -31,7 +33,7 @@ mod reviewer_admission;
 pub(crate) use reviewer_admission::ReviewerAdmission;
 mod serving;
 mod verdict;
-use background::{KimiProvisionalTask, KimiTaskEntry, is_agent_output};
+use background::{AirTaskEntry, KimiProvisionalTask, KimiTaskEntry, is_agent_output};
 use commands::validate_identifier;
 pub use replay::{DeferredRelayAttach, RelayReplayPlan};
 pub use serving::serve_relay_json_lines;
@@ -83,21 +85,16 @@ pub const HARNESS_TURN_STOP_GRACE: std::time::Duration = std::time::Duration::fr
 
 /// Where this relay learns about commands the agent left running.
 ///
-/// Claude reports its own background tasks. Kimi uses Hel's terminals for
-/// shells and its native task journal for detached agents. Codex runs shells
-/// itself and only reports them as tool cards, so for Codex the evidence is a
-/// card whose result carries no exit code.
+/// The authoritative source of agent-owned background commands.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BackgroundWorkPolicy {
     /// Live terminals Hel spawned for the agent.
     #[default]
     HostedTerminals,
-    /// Claude's live background-task set, together with hosted terminals.
-    ClaudeTasks,
+    /// AIR tasks announced by Claude or Codex, together with hosted terminals.
+    AirTasks,
     /// Kimi's native detached-agent set, together with hosted terminals.
     KimiTasks,
-    /// `exec_command` cards whose result has an explicitly null exit code.
-    CodexExecCards,
 }
 
 /// Durable, session-side ACP store-and-forward relay.
@@ -179,20 +176,13 @@ pub struct DurableRelay {
     turn_context: mj_transcript::turn_context::TurnContext,
     verdict_harness: Option<mj_core::config::HarnessKind>,
     replied_verdict: verdict::RepliedVerdictState,
-    /// Codex tool calls explicitly introduced as execute cards, with the
-    /// command needed if a later partial update says the process is detached.
-    codex_execute_tools: BTreeMap<String, String>,
-    /// Commands a Codex exec card reported without an exit code, keyed by the
-    /// tool call id so a later card for the same call clears it. In memory,
-    /// like the terminals: it describes processes that are alive now.
-    background_exec_cards: BTreeMap<String, BackgroundCommand>,
-    /// Claude's process-local background-task level, replaced on every update.
-    claude_background_tasks: BTreeMap<String, BackgroundCommand>,
+    /// Adapter-owned tasks, keyed by their owning session and task identity.
+    air_tasks: BTreeMap<String, AirTaskEntry>,
     /// Claude tasks whose stop this process requested and the adapter has not
     /// yet acknowledged. The adapter answers a stop with a plain agent chunk
     /// and no model cycle, so no result would settle a harness turn opened
     /// for that chunk.
-    claude_pending_stops: BTreeSet<String>,
+    claude_pending_stops: BTreeMap<String, BTreeSet<String>>,
     /// The first ordinal of the Claude harness turn a stop was applied to,
     /// while that turn is still open. Claude Code answers a stop of a running
     /// cycle with the cycle's result; a turn it never ran gets no answer, so
@@ -208,12 +198,6 @@ pub struct DurableRelay {
     /// Whether Kimi's provider-owned background work is synchronized. Other
     /// policies leave this absent.
     background_work_known: Option<bool>,
-    /// Claude AIR tasks that the adapter currently says can be stopped.
-    claude_stoppable_tasks: BTreeSet<String>,
-    /// Process-local autonomous task IDs and the harness-turn opening ordinal
-    /// they own. None means opening was gated or the task already ended;
-    /// retain ended IDs until bridge restart to recognize duplicate edges.
-    claude_autonomous_turn_tasks: BTreeMap<String, Option<u64>>,
     /// Agent output observed during the current process-local harness turn.
     harness_turn_output_seen: bool,
     /// Whether the daemon will act on a `Continue` verdict. Off when the
@@ -512,18 +496,14 @@ impl DurableRelay {
             turn_context: Default::default(),
             verdict_harness: None,
             replied_verdict: Default::default(),
-            codex_execute_tools: BTreeMap::new(),
-            background_exec_cards: BTreeMap::new(),
-            claude_background_tasks: BTreeMap::new(),
-            claude_pending_stops: BTreeSet::new(),
+            air_tasks: BTreeMap::new(),
+            claude_pending_stops: BTreeMap::new(),
             harness_turn_stop: None,
             kimi_background_tasks: BTreeMap::new(),
             kimi_provisional_tasks: BTreeMap::new(),
             kimi_observed_task_ids: BTreeSet::new(),
             kimi_observed_tool_ids: BTreeSet::new(),
             background_work_known: None,
-            claude_stoppable_tasks: BTreeSet::new(),
-            claude_autonomous_turn_tasks: BTreeMap::new(),
             harness_turn_output_seen: false,
             continuation_enabled: true,
             task_settled_at_ms: None,
@@ -1041,6 +1021,12 @@ impl DurableRelay {
         let Some(observation) = self.hold_observation(observation)? else {
             return Ok(self.snapshot.latest_ordinal);
         };
+        if let RelayObservation::NativeAgent {
+            event: mj_core::native_agent::NativeAgentEvent::Update { session_id, update },
+        } = &observation
+        {
+            self.consume_claude_stop_acknowledgement(Some(session_id), update);
+        }
         let acp_ready = match &observation {
             RelayObservation::SessionConfigured { .. } => Some(true),
             RelayObservation::AgentInitialized { .. }
@@ -1115,10 +1101,8 @@ impl DurableRelay {
         // A stop we requested is acknowledged with a plain chunk and nothing
         // else: no model cycle runs, so no result would ever settle a turn
         // opened for it. Consume the expectation and keep the line.
-        let ack = claude && self.is_claude_stop_acknowledgement(&update);
-        if ack {
-            self.claude_pending_stops.pop_first();
-        }
+        let owner = self.snapshot.native_session_id.clone();
+        let ack = claude && self.consume_claude_stop_acknowledgement(owner.as_deref(), &update);
         // The adapter publishes notices as agent text at times no model cycle
         // runs. Such text is a notice row of its own, so it neither opens a
         // turn that nothing would end nor joins the previous reply.
@@ -1138,9 +1122,6 @@ impl DurableRelay {
             &update,
             self.step_clock.started_at_ms().unwrap_or_else(epoch_millis),
         );
-        if self.background_work == BackgroundWorkPolicy::CodexExecCards {
-            self.track_codex_exec_card(&update);
-        }
         if self.background_work == BackgroundWorkPolicy::KimiTasks {
             self.track_agent_terminal_tool_call(&update);
             self.track_kimi_background_agent(&update);
@@ -1171,8 +1152,8 @@ impl DurableRelay {
         // successful zero-turn results precede the coalesced task follow-up.
         if result.num_turns == 0
             && !result.is_error
-            && self.claude_autonomous_turn_tasks.values().any(|ordinal| {
-                ordinal.is_some_and(|ordinal| {
+            && self.air_tasks.values().any(|entry| {
+                entry.turn_ordinal().is_some_and(|ordinal| {
                     self.snapshot
                         .harness_turn
                         .is_some_and(|turn| turn.first_ordinal == ordinal)
@@ -1260,8 +1241,6 @@ impl DurableRelay {
     /// confirmed. Independently tracked background work survives into idle.
     fn finish_turn_activity(&mut self) -> Result<()> {
         self.foreground_tools.clear();
-        self.codex_execute_tools
-            .retain(|tool_call_id, _| self.background_exec_cards.contains_key(tool_call_id));
         self.persist_activity_transition()
     }
 

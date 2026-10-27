@@ -94,7 +94,7 @@ fn classifier_input_handoff_preserves_running_children_and_stop_controls() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
     relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
-    relay.set_background_work_policy(BackgroundWorkPolicy::ClaudeTasks);
+    relay.set_background_work_policy(BackgroundWorkPolicy::AirTasks);
     submit_relay(
         &mut relay,
         "approval",
@@ -124,10 +124,17 @@ fn classifier_input_handoff_preserves_running_children_and_stop_controls() {
         })
         .unwrap();
     relay
-        .claude_background_tasks_changed(vec![claude_task("build", "Independent build")])
+        .set_air_tasks(vec![air_task("build", "Independent build")])
         .unwrap();
     relay
-        .claude_async_task_control_changed("build".into(), true, false, false, false)
+        .air_task_changed(
+            "root".into(),
+            crate::acp::AirTaskUpdate::Changed {
+                task_id: "build".into(),
+                description: None,
+                can_stop: Some(true),
+            },
+        )
         .unwrap();
     let before = relay.operational_state();
     assert_eq!(before.native_agent_count, 1);
@@ -151,7 +158,11 @@ fn classifier_input_handoff_preserves_running_children_and_stop_controls() {
             .background_task_stop_target("native-agent:heap")
             .is_ok()
     );
-    assert!(relay.background_task_stop_target("claude:build").is_ok());
+    assert!(
+        relay
+            .background_task_stop_target("air:4:root:build")
+            .is_ok()
+    );
     assert!(!after.is_quiet());
     assert!(relay.pending_replied_verdict().is_none());
     // Repeated child output must not undo the accepted parent handoff.
@@ -374,6 +385,7 @@ fn running_claude_turn(root: &std::path::Path, hook_available: bool) -> DurableR
     let mut relay =
         DurableRelay::open_for_harness(root, SESSION, "test", HarnessKind::Claude).unwrap();
     relay.set_turn_verdict_harness(HarnessKind::Claude);
+    relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
     relay.set_steering_delivery_mode(HarnessKind::Claude, hook_available);
     submit_relay(
         &mut relay,
@@ -2794,7 +2806,8 @@ fn codex_goal_turns_block_replacement_after_the_prompt_finishes() {
 fn claude_relay(root: &std::path::Path) -> DurableRelay {
     let mut relay = DurableRelay::open(root, SESSION, "1.0.0").unwrap();
     relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
-    relay.set_background_work_policy(BackgroundWorkPolicy::ClaudeTasks);
+    relay.set_background_work_policy(BackgroundWorkPolicy::AirTasks);
+    relay.snapshot.native_session_id = Some("root".into());
     relay
 }
 
@@ -2806,14 +2819,35 @@ fn autonomous_spawn_and_output_share_one_durable_turn_in_either_order() {
         if output_first {
             relay.record_session_update(tool_call_update()).unwrap();
         }
+        // Native children may reuse task IDs without owning the root turn.
         relay
-            .claude_async_task_control_changed("turn-a".into(), true, true, false, false)
+            .air_task_changed(
+                "child".into(),
+                crate::acp::AirTaskUpdate::TurnSpawned {
+                    task_id: "turn-a".into(),
+                    replayed: false,
+                },
+            )
+            .unwrap();
+        relay
+            .apply_claude_task_fixture("turn-a".into(), true, true, false, false)
             .unwrap();
         let turn = relay.snapshot.harness_turn.unwrap();
+        relay
+            .air_task_changed(
+                "child".into(),
+                crate::acp::AirTaskUpdate::Finished {
+                    task_id: "turn-a".into(),
+                    settled: true,
+                },
+            )
+            .unwrap();
         assert_eq!(
-            relay.claude_autonomous_turn_tasks["turn-a"],
-            Some(turn.first_ordinal)
+            relay.snapshot.harness_turn.unwrap().first_ordinal,
+            turn.first_ordinal
         );
+        assert!(relay.task_settled_at_ms.is_none());
+        assert_eq!(relay.turn_task_ordinal("turn-a"), Some(turn.first_ordinal));
         assert!(matches!(
             mj_core::activity::classify(&relay.activity_facts()),
             mj_core::activity::ActivityState::Turn { .. }
@@ -2826,7 +2860,7 @@ fn autonomous_spawn_and_output_share_one_durable_turn_in_either_order() {
             relay.record_session_update(tool_call_update()).unwrap();
         }
         relay
-            .claude_async_task_control_changed("turn-a".into(), true, true, false, false)
+            .apply_claude_task_fixture("turn-a".into(), true, true, false, false)
             .unwrap();
         assert_eq!(
             relay.snapshot.harness_turn.unwrap().first_ordinal,
@@ -2844,19 +2878,19 @@ fn autonomous_spawn_and_output_share_one_durable_turn_in_either_order() {
             .unwrap();
         // A later autonomous cycle starts before the old task end arrives.
         relay
-            .claude_async_task_control_changed("turn-b".into(), true, true, false, false)
+            .apply_claude_task_fixture("turn-b".into(), true, true, false, false)
             .unwrap();
         let next = relay.snapshot.harness_turn.unwrap().first_ordinal;
         relay
-            .claude_async_task_control_changed("turn-a".into(), true, true, false, false)
+            .apply_claude_task_fixture("turn-a".into(), true, true, false, false)
             .unwrap();
         relay
-            .claude_async_task_control_changed("turn-a".into(), false, false, true, false)
+            .apply_claude_task_fixture("turn-a".into(), false, false, true, false)
             .unwrap();
         assert_eq!(relay.snapshot.harness_turn.unwrap().first_ordinal, next);
         assert!(relay.task_settled_at_ms.is_none());
         relay
-            .claude_async_task_control_changed("turn-b".into(), false, false, true, false)
+            .apply_claude_task_fixture("turn-b".into(), false, false, true, false)
             .unwrap();
         assert!(relay.snapshot.harness_turn.is_none());
     }
@@ -2868,18 +2902,18 @@ fn a_silent_autonomous_task_end_releases_its_queued_prompt_once() {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(temp.path());
         relay
-            .claude_async_task_control_changed("silent-turn".into(), true, true, false, false)
+            .apply_claude_task_fixture("silent-turn".into(), true, true, false, false)
             .unwrap();
         submit_relay(&mut relay, "next-prompt", prompt("answer next"));
         assert!(relay.claim_pending_commands(true).unwrap().is_empty());
         // Both completed/failed and stopped are boundaries, without any output.
         relay
-            .claude_async_task_control_changed("silent-turn".into(), false, false, completed, false)
+            .apply_claude_task_fixture("silent-turn".into(), false, false, completed, false)
             .unwrap();
         // Repeated terminal edges still name an autonomous task, never a new
         // background-task completion or a second completion boundary.
         relay
-            .claude_async_task_control_changed("silent-turn".into(), false, false, true, false)
+            .apply_claude_task_fixture("silent-turn".into(), false, false, true, false)
             .unwrap();
         relay
             .claude_turn_result(&cycle_result("task-notification"))
@@ -2911,7 +2945,7 @@ fn autonomous_placeholder_keeps_the_turn_and_queued_prompt_until_the_real_result
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
     relay
-        .claude_async_task_control_changed("turn".into(), true, true, false, false)
+        .apply_claude_task_fixture("turn".into(), true, true, false, false)
         .unwrap();
     let ordinal = relay.snapshot.harness_turn.unwrap().first_ordinal;
     submit_relay(&mut relay, "queued-prompt", prompt("next"));
@@ -2951,14 +2985,14 @@ fn autonomous_placeholder_without_output_settles_on_task_end() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
     relay
-        .claude_async_task_control_changed("turn".into(), true, true, false, false)
+        .apply_claude_task_fixture("turn".into(), true, true, false, false)
         .unwrap();
     let mut placeholder = cycle_result("task-notification");
     placeholder.num_turns = 0;
     relay.claude_turn_result(&placeholder).unwrap();
     assert!(relay.snapshot.harness_turn.is_some());
     relay
-        .claude_async_task_control_changed("turn".into(), false, false, true, false)
+        .apply_claude_task_fixture("turn".into(), false, false, true, false)
         .unwrap();
     assert!(relay.snapshot.harness_turn.is_none());
     assert_eq!(
@@ -2976,7 +3010,7 @@ fn a_lagging_idle_task_end_cannot_settle_the_next_turn_after_output() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
     relay
-        .claude_async_task_control_changed("turn-a".into(), true, true, false, false)
+        .apply_claude_task_fixture("turn-a".into(), true, true, false, false)
         .unwrap();
     relay.record_session_update(tool_call_update()).unwrap();
     relay
@@ -2986,12 +3020,12 @@ fn a_lagging_idle_task_end_cannot_settle_the_next_turn_after_output() {
     relay.record_session_update(tool_call_update()).unwrap();
     let ordinal = relay.snapshot.harness_turn.unwrap().first_ordinal;
     relay
-        .claude_async_task_control_changed("turn-b".into(), true, true, false, false)
+        .apply_claude_task_fixture("turn-b".into(), true, true, false, false)
         .unwrap();
-    assert_eq!(relay.claude_autonomous_turn_tasks["turn-b"], Some(ordinal));
+    assert_eq!(relay.turn_task_ordinal("turn-b"), Some(ordinal));
     submit_relay(&mut relay, "queued-prompt", prompt("next"));
     relay
-        .claude_async_task_control_changed("turn-b".into(), false, false, true, false)
+        .apply_claude_task_fixture("turn-b".into(), false, false, true, false)
         .unwrap();
     assert_eq!(relay.snapshot.harness_turn.unwrap().first_ordinal, ordinal);
     assert!(relay.claim_pending_commands(true).unwrap().is_empty());
@@ -3014,11 +3048,11 @@ fn replayed_autonomous_spawn_and_untyped_end_leave_no_imminent_turn() {
     let mut relay = claude_relay(temp.path());
     relay.acp_ready = true;
     relay
-        .claude_async_task_control_changed("replayed".into(), true, true, false, true)
+        .apply_claude_task_fixture("replayed".into(), true, true, false, true)
         .unwrap();
-    assert_eq!(relay.claude_autonomous_turn_tasks["replayed"], None);
+    assert_eq!(relay.turn_task_ordinal("replayed"), None);
     relay
-        .claude_async_task_control_changed("replayed".into(), false, false, true, false)
+        .apply_claude_task_fixture("replayed".into(), false, false, true, false)
         .unwrap();
     assert!(relay.snapshot.harness_turn.is_none());
     assert!(relay.task_settled_at_ms.is_none());
@@ -3036,7 +3070,7 @@ fn zero_turn_results_still_settle_unbound_turns_and_autonomous_errors() {
         let mut relay = claude_relay(temp.path());
         if bound {
             relay
-                .claude_async_task_control_changed("turn".into(), true, true, false, false)
+                .apply_claude_task_fixture("turn".into(), true, true, false, false)
                 .unwrap();
         } else {
             relay.record_session_update(tool_call_update()).unwrap();
@@ -3054,7 +3088,7 @@ fn an_autonomous_task_end_leaves_a_prompt_that_took_ownership_running() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
     relay
-        .claude_async_task_control_changed("turn-a".into(), true, true, false, false)
+        .apply_claude_task_fixture("turn-a".into(), true, true, false, false)
         .unwrap();
     // Legacy overlap: a queued mj prompt has already reached the bridge.
     submit_relay(&mut relay, "owner-prompt", prompt("continue"));
@@ -3065,14 +3099,14 @@ fn an_autonomous_task_end_leaves_a_prompt_that_took_ownership_running() {
         })
         .unwrap();
     relay
-        .claude_async_task_control_changed("turn-b".into(), true, true, false, false)
+        .apply_claude_task_fixture("turn-b".into(), true, true, false, false)
         .unwrap();
-    assert_eq!(relay.claude_autonomous_turn_tasks["turn-b"], None);
+    assert_eq!(relay.turn_task_ordinal("turn-b"), None);
     relay
-        .claude_async_task_control_changed("turn-b".into(), false, false, true, false)
+        .apply_claude_task_fixture("turn-b".into(), false, false, true, false)
         .unwrap();
     relay
-        .claude_async_task_control_changed("turn-a".into(), false, false, true, false)
+        .apply_claude_task_fixture("turn-a".into(), false, false, true, false)
         .unwrap();
     assert_eq!(
         relay.snapshot.active_prompt.as_ref().unwrap().command_id,
@@ -3093,13 +3127,13 @@ fn restarting_a_silent_autonomous_turn_clears_its_process_local_binding() {
     let ordinal = {
         let mut relay = claude_relay(temp.path());
         relay
-            .claude_async_task_control_changed("old-turn".into(), true, true, false, false)
+            .apply_claude_task_fixture("old-turn".into(), true, true, false, false)
             .unwrap();
         relay.snapshot.harness_turn.unwrap().first_ordinal
     };
     let mut relay = claude_relay(temp.path());
     assert_eq!(relay.snapshot.harness_turn.unwrap().first_ordinal, ordinal);
-    assert!(relay.claude_autonomous_turn_tasks.is_empty());
+    assert!(relay.air_tasks.is_empty());
     relay
         .record_observation(RelayObservation::SessionRestarted)
         .unwrap();
@@ -3320,7 +3354,7 @@ fn stop_during_a_claude_harness_turn_is_dispatched_and_the_interrupted_result_en
     );
 
     relay
-        .claude_async_task_control_changed("silent-turn".into(), true, true, false, false)
+        .apply_claude_task_fixture("silent-turn".into(), true, true, false, false)
         .unwrap();
     assert!(relay.operational_state().harness_turn.is_some());
     submit_relay(&mut relay, "cancel-harness-turn", RelayCommand::Cancel);
@@ -3375,10 +3409,10 @@ fn text_that_answers_a_model_change_opens_no_harness_turn() {
     assert_eq!(claimed[0].command_id, "model-haiku");
 
     relay
-        .claude_async_task_control_changed("config-turn".into(), true, true, false, false)
+        .apply_claude_task_fixture("config-turn".into(), true, true, false, false)
         .unwrap();
     relay
-        .claude_async_task_control_changed("config-turn".into(), false, false, true, false)
+        .apply_claude_task_fixture("config-turn".into(), false, false, true, false)
         .unwrap();
     relay
         .record_session_update(agent_text_chunk(CLAUDE_AUTO_MODE_FALLBACK_TEXT))
@@ -3538,7 +3572,7 @@ fn a_prompt_queued_during_a_harness_turn_waits_then_dispatches_once() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
     relay
-        .claude_async_task_control_changed("autonomous-turn".into(), true, true, false, false)
+        .apply_claude_task_fixture("autonomous-turn".into(), true, true, false, false)
         .unwrap();
 
     submit_relay(&mut relay, "typed-mid-turn", prompt("answer this too"));
@@ -3633,7 +3667,7 @@ fn a_restart_clears_a_harness_turn() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
     relay
-        .claude_async_task_control_changed("autonomous-turn".into(), true, true, false, false)
+        .apply_claude_task_fixture("autonomous-turn".into(), true, true, false, false)
         .unwrap();
 
     relay
@@ -3661,20 +3695,6 @@ fn exec_card(
         "exit_code": exit_code,
     }));
     SessionUpdate::ToolCall(call)
-}
-
-fn exec_card_update(tool_call_id: &'static str, exit_code: Option<i64>) -> SessionUpdate {
-    use agent_client_protocol::schema::v1::{ToolCallUpdate, ToolCallUpdateFields};
-
-    SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-        tool_call_id,
-        ToolCallUpdateFields::new()
-            .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed)
-            .raw_output(serde_json::json!({
-                "output": "",
-                "exit_code": exit_code,
-            })),
-    ))
 }
 
 fn kimi_background_agent_card() -> SessionUpdate {
@@ -4097,15 +4117,15 @@ fn a_terminal_the_agent_left_running_is_background_work_once_the_turn_ends() {
     );
 }
 
-fn claude_task(task_id: &str, description: &str) -> crate::acp::ClaudeBackgroundTask {
-    crate::acp::ClaudeBackgroundTask {
+fn air_task(task_id: &str, description: &str) -> crate::relay::AirTaskFixture {
+    crate::relay::AirTaskFixture {
         task_id: task_id.into(),
         description: description.into(),
     }
 }
 
 #[test]
-fn claude_background_tasks_survive_prompt_boundaries_until_the_level_is_empty() {
+fn air_tasks_survive_prompt_boundaries_until_the_terminal_updates() {
     for outcome in ["completed", "rejected", "interrupted"] {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(temp.path());
@@ -4122,9 +4142,9 @@ fn claude_background_tasks_survive_prompt_boundaries_until_the_level_is_empty() 
         assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
         relay.record_session_update(tool_call_update()).unwrap();
         relay
-            .claude_background_tasks_changed(vec![
-                claude_task("design", "Design review"),
-                claude_task("refuter", "Refute findings"),
+            .set_air_tasks(vec![
+                air_task("design", "Design review"),
+                air_task("refuter", "Refute findings"),
             ])
             .unwrap();
         match outcome {
@@ -4159,26 +4179,27 @@ fn claude_background_tasks_survive_prompt_boundaries_until_the_level_is_empty() 
             "background agents must prevent worker replacement"
         );
 
-        // A replacement level clears missing tasks even without a completion
-        // bookend, and keeps the clock of a task that remains live.
+        // Terminal edges clear finished tasks while repeated announcements keep
+        // the clock of a task that remains live.
+        let background::AirTaskState::Background(command) =
+            &mut relay.air_tasks.get_mut("4:root:design").unwrap().state
+        else {
+            panic!("expected background task")
+        };
+        command.started_at_ms = 123;
         relay
-            .claude_background_tasks
-            .get_mut("design")
-            .unwrap()
-            .started_at_ms = 123;
-        relay
-            .claude_background_tasks_changed(vec![claude_task("design", "Design cleanup")])
+            .set_air_tasks(vec![air_task("design", "Design cleanup")])
             .unwrap();
         assert_eq!(
             relay.operational_state().background_commands,
             vec![BackgroundCommand {
-                id: "claude:design".into(),
+                id: "air:4:root:design".into(),
                 started_at_ms: 123,
                 command: "Design cleanup".into(),
                 can_stop: false,
             }]
         );
-        relay.claude_background_tasks_changed(Vec::new()).unwrap();
+        relay.set_air_tasks(Vec::new()).unwrap();
         assert!(relay.operational_state().is_quiet());
     }
 }
@@ -4195,7 +4216,7 @@ fn background_task_stop_targets_are_live_capability_checked_and_namespaced() {
         })
         .unwrap();
     relay
-        .claude_background_tasks_changed(vec![claude_task("shared-id", "Review tests")])
+        .set_air_tasks(vec![air_task("shared-id", "Review tests")])
         .unwrap();
 
     assert_eq!(
@@ -4208,19 +4229,27 @@ fn background_task_stop_targets_are_live_capability_checked_and_namespaced() {
     );
     assert!(
         relay
-            .background_task_stop_target("claude:shared-id")
+            .background_task_stop_target("air:4:root:shared-id")
             .is_err(),
         "Claude must not be stoppable until AIR grants the affordance"
     );
 
     relay
-        .claude_async_task_control_changed("shared-id".into(), true, false, false, false)
+        .air_task_changed(
+            "root".into(),
+            crate::acp::AirTaskUpdate::Changed {
+                task_id: "shared-id".into(),
+                description: None,
+                can_stop: Some(true),
+            },
+        )
         .unwrap();
     assert_eq!(
         relay
-            .background_task_stop_target("claude:shared-id")
+            .background_task_stop_target("air:4:root:shared-id")
             .unwrap(),
-        BackgroundTaskStopTarget::ClaudeAsyncTask {
+        BackgroundTaskStopTarget::AirAsyncTask {
+            session_id: "root".into(),
             task_id: "shared-id".into(),
         }
     );
@@ -4229,15 +4258,22 @@ fn background_task_stop_targets_are_live_capability_checked_and_namespaced() {
             .operational_state()
             .background_commands
             .iter()
-            .any(|command| command.id == "claude:shared-id" && command.can_stop)
+            .any(|command| command.id == "air:4:root:shared-id" && command.can_stop)
     );
 
     relay
-        .claude_async_task_control_changed("shared-id".into(), false, false, false, false)
+        .air_task_changed(
+            "root".into(),
+            crate::acp::AirTaskUpdate::Changed {
+                task_id: "shared-id".into(),
+                description: None,
+                can_stop: Some(false),
+            },
+        )
         .unwrap();
     assert!(
         relay
-            .background_task_stop_target("claude:shared-id")
+            .background_task_stop_target("air:4:root:shared-id")
             .is_err()
     );
     relay.agent_terminal_closed("shared-id").unwrap();
@@ -4266,10 +4302,17 @@ fn agent_text_chunk(text: &str) -> SessionUpdate {
 fn claude_relay_with_stoppable_task(root: &std::path::Path) -> DurableRelay {
     let mut relay = claude_relay(root);
     relay
-        .claude_background_tasks_changed(vec![claude_task("sleeper", "Sleep 600")])
+        .set_air_tasks(vec![air_task("sleeper", "Sleep 600")])
         .unwrap();
     relay
-        .claude_async_task_control_changed("sleeper".into(), true, false, false, false)
+        .air_task_changed(
+            "root".into(),
+            crate::acp::AirTaskUpdate::Changed {
+                task_id: "sleeper".into(),
+                description: None,
+                can_stop: Some(true),
+            },
+        )
         .unwrap();
     relay
 }
@@ -4293,8 +4336,11 @@ fn a_requested_stop_acknowledgement_does_not_open_a_harness_turn() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay_with_stoppable_task(temp.path());
     assert_eq!(
-        relay.background_task_stop_target("claude:sleeper").unwrap(),
-        BackgroundTaskStopTarget::ClaudeAsyncTask {
+        relay
+            .background_task_stop_target("air:4:root:sleeper")
+            .unwrap(),
+        BackgroundTaskStopTarget::AirAsyncTask {
+            session_id: "root".into(),
             task_id: "sleeper".into(),
         }
     );
@@ -4330,9 +4376,38 @@ fn a_requested_stop_acknowledgement_does_not_open_a_harness_turn() {
 fn a_stop_acknowledgement_matches_whatever_name_the_adapter_now_uses() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay_with_stoppable_task(temp.path());
-    relay.background_task_stop_target("claude:sleeper").unwrap();
+    relay
+        .background_task_stop_target("air:4:root:sleeper")
+        .unwrap();
 
-    // The level said "Sleep 600"; a later task_started renamed it to the
+    // A child with the same provider id must consume only its own pending stop.
+    relay
+        .air_task_changed(
+            "child".into(),
+            crate::acp::AirTaskUpdate::Spawned {
+                task_id: "sleeper".into(),
+                description: "child sleeper".into(),
+                can_stop: true,
+            },
+        )
+        .unwrap();
+    relay
+        .background_task_stop_target("air:5:child:sleeper")
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::NativeAgent {
+            event: mj_core::native_agent::NativeAgentEvent::Update {
+                session_id: "child".into(),
+                update: Box::new(agent_text_chunk(&claude_stop_acknowledgement(
+                    "child sleeper",
+                ))),
+            },
+        })
+        .unwrap();
+    assert!(!relay.claude_pending_stops.contains_key("child"));
+    assert!(relay.claude_pending_stops.contains_key("root"));
+
+    // The spawn said "Sleep 600"; later progress renamed it to the
     // command text, which is what the adapter quotes.
     relay
         .record_session_update(agent_text_chunk(&claude_stop_acknowledgement("sleep 900")))
@@ -4360,8 +4435,10 @@ fn an_unrequested_stop_text_still_opens_a_harness_turn() {
 fn a_failed_stop_clears_its_acknowledgement() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay_with_stoppable_task(temp.path());
-    relay.background_task_stop_target("claude:sleeper").unwrap();
-    relay.claude_stop_not_sent("sleeper");
+    relay
+        .background_task_stop_target("air:4:root:sleeper")
+        .unwrap();
+    relay.claude_stop_not_sent("root", "sleeper");
 
     relay
         .record_session_update(agent_text_chunk(&claude_stop_acknowledgement("Sleep 600")))
@@ -4374,7 +4451,9 @@ fn a_failed_stop_clears_its_acknowledgement() {
 fn stop_acknowledgements_clear_on_restart() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay_with_stoppable_task(temp.path());
-    relay.background_task_stop_target("claude:sleeper").unwrap();
+    relay
+        .background_task_stop_target("air:4:root:sleeper")
+        .unwrap();
     relay
         .record_observation(RelayObservation::SessionRestarted)
         .unwrap();
@@ -4397,7 +4476,7 @@ fn stop_acknowledgements_clear_on_restart() {
 }
 
 #[test]
-fn claude_background_tasks_are_process_local_and_clear_on_teardown() {
+fn air_tasks_are_process_local_and_clear_on_teardown() {
     for observation in [
         RelayObservation::SessionRestarted,
         RelayObservation::Closing,
@@ -4406,7 +4485,7 @@ fn claude_background_tasks_are_process_local_and_clear_on_teardown() {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(temp.path());
         relay
-            .claude_background_tasks_changed(vec![claude_task("design", "Design review")])
+            .set_air_tasks(vec![air_task("design", "Design review")])
             .unwrap();
         relay.record_observation(observation).unwrap();
         assert!(relay.operational_state().background_commands.is_empty());
@@ -4414,12 +4493,12 @@ fn claude_background_tasks_are_process_local_and_clear_on_teardown() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
     relay
-        .claude_background_tasks_changed(vec![claude_task("design", "Design review")])
+        .set_air_tasks(vec![air_task("design", "Design review")])
         .unwrap();
     relay.clear_agent_terminals().unwrap();
     assert!(relay.operational_state().background_commands.is_empty());
     relay
-        .claude_background_tasks_changed(vec![claude_task("design", "Design review")])
+        .set_air_tasks(vec![air_task("design", "Design review")])
         .unwrap();
     drop(relay);
     let relay = claude_relay(temp.path());
@@ -4427,53 +4506,75 @@ fn claude_background_tasks_are_process_local_and_clear_on_teardown() {
 }
 
 #[test]
-fn a_codex_exec_card_without_an_exit_code_is_background_work_until_one_arrives() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    relay.set_background_work_policy(BackgroundWorkPolicy::CodexExecCards);
-
-    let mut started = agent_client_protocol::schema::v1::ToolCall::new("call-1", "shell");
-    started.kind = agent_client_protocol::schema::v1::ToolKind::Execute;
-    started.status = agent_client_protocol::schema::v1::ToolCallStatus::InProgress;
-    started.raw_input = Some(serde_json::json!({
-        "command": ["bash", "-lc", "sleep 600"],
-    }));
-    relay
-        .record_session_update(SessionUpdate::ToolCall(started))
-        .unwrap();
-    assert!(
-        relay.operational_state().background_commands.is_empty(),
-        "an execute card is not background work before it reports a detached result"
-    );
-
-    relay
-        .record_session_update(exec_card_update("call-1", None))
-        .unwrap();
-
-    let commands = relay.operational_state().background_commands;
-    assert_eq!(commands.len(), 1);
-    assert_eq!(commands[0].id, "codex:call-1");
-    assert_eq!(commands[0].command, "bash -lc sleep 600");
-    assert!(commands[0].started_at_ms > 0);
-    assert!(!commands[0].can_stop);
-    assert!(relay.background_task_stop_target("codex:call-1").is_err());
-
-    // A card that does report an exit code says the process is done, even
-    // when it is the first card for that call.
-    relay
-        .record_session_update(exec_card("call-2", &["ls"], Some(0)))
-        .unwrap();
-    assert_eq!(
-        relay.operational_state().background_commands.len(),
-        1,
-        "a finished command is not background work"
-    );
-
-    // Codex polls the process it left running; the poll carries the exit.
-    relay
-        .record_session_update(exec_card_update("call-1", Some(0)))
-        .unwrap();
-    assert!(relay.operational_state().background_commands.is_empty());
+fn air_tasks_are_authoritative_and_replay_does_not_anticipate_a_turn() {
+    use mj_core::{acp::AirTaskUpdate, native_agent::NativeAgentEvent};
+    for policy in [
+        HarnessTurnPolicy::CodexAdapter,
+        HarnessTurnPolicy::ClaudeAdapter,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        relay.set_background_work_policy(BackgroundWorkPolicy::AirTasks);
+        relay
+            .record_session_update(exec_card("call-1", &["sleep", "600"], None))
+            .unwrap();
+        assert!(relay.operational_state().background_commands.is_empty());
+        relay.set_harness_turn_policy(policy);
+        relay
+            .record_observation(RelayObservation::NativeAgent {
+                event: NativeAgentEvent::ReplayBegin,
+            })
+            .unwrap();
+        relay
+            .set_air_tasks(vec![
+                air_task("historical", "old"),
+                air_task("live", "server"),
+            ])
+            .unwrap();
+        relay
+            .air_task_changed(
+                "root".into(),
+                AirTaskUpdate::Finished {
+                    task_id: "historical".into(),
+                    settled: true,
+                },
+            )
+            .unwrap();
+        relay
+            .record_observation(RelayObservation::NativeAgent {
+                event: NativeAgentEvent::ReplayCommit,
+            })
+            .unwrap();
+        assert!(relay.activity_facts().task_settled_at_ms.is_none());
+        assert_eq!(relay.operational_state().background_commands.len(), 1);
+        relay
+            .air_task_changed(
+                "root".into(),
+                AirTaskUpdate::Finished {
+                    task_id: "live".into(),
+                    settled: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            relay.activity_facts().task_settled_at_ms.is_some(),
+            policy == HarnessTurnPolicy::ClaudeAdapter
+        );
+        relay
+            .air_task_changed(
+                "root".into(),
+                AirTaskUpdate::Changed {
+                    task_id: "live".into(),
+                    description: Some("late progress".into()),
+                    can_stop: Some(true),
+                },
+            )
+            .unwrap();
+        assert!(
+            relay.operational_state().background_commands.is_empty(),
+            "late progress cannot resurrect a terminal task"
+        );
+    }
 }
 
 #[test]
@@ -4485,7 +4586,7 @@ fn completed_codex_mcp_execute_calls_do_not_leave_background_work() {
     for partial in [false, true] {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-        relay.set_background_work_policy(BackgroundWorkPolicy::CodexExecCards);
+        relay.set_background_work_policy(BackgroundWorkPolicy::AirTasks);
         relay
             .record_observation(RelayObservation::SessionConfigured {
                 config_options: Vec::new(),
@@ -4544,12 +4645,12 @@ fn prompt_boundaries_clear_stale_tools_but_preserve_detached_commands() {
     for outcome in ["completed", "rejected", "interrupted"] {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-        relay.set_background_work_policy(BackgroundWorkPolicy::CodexExecCards);
+        relay.set_background_work_policy(BackgroundWorkPolicy::AirTasks);
         submit_relay(&mut relay, "boundary-prompt", prompt("run work"));
         assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
         relay.record_session_update(tool_call_update()).unwrap();
         relay
-            .record_session_update(exec_card("detached", &["sleep", "600"], None))
+            .set_air_tasks(vec![air_task("detached", "sleep 600")])
             .unwrap();
         assert!(
             relay
@@ -4583,9 +4684,7 @@ fn prompt_boundaries_clear_stale_tools_but_preserve_detached_commands() {
         let state = relay.operational_state();
         assert_eq!(state.foreground_tool_started_at_ms, None, "{outcome}");
         assert_eq!(state.background_commands.len(), 1, "{outcome}");
-        relay
-            .record_session_update(exec_card_update("detached", Some(0)))
-            .unwrap();
+        relay.set_air_tasks(Vec::new()).unwrap();
         assert!(
             relay.operational_state().background_commands.is_empty(),
             "{outcome}"
@@ -4685,9 +4784,9 @@ fn completed_subagent_tool_update_keeps_a_parent_prompt_busy() {
 fn a_restart_forgets_the_commands_the_previous_harness_left_running() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    relay.set_background_work_policy(BackgroundWorkPolicy::CodexExecCards);
+    relay.set_background_work_policy(BackgroundWorkPolicy::AirTasks);
     relay
-        .record_session_update(exec_card("call-1", &["sleep", "600"], None))
+        .set_air_tasks(vec![air_task("call-1", "sleep 600")])
         .unwrap();
     assert_eq!(relay.operational_state().background_commands.len(), 1);
 
@@ -6023,11 +6122,11 @@ fn output_while_a_resumed_session_is_set_up_is_a_notice_and_opens_no_turn() {
         })
         .unwrap();
     relay
-        .claude_async_task_control_changed("setup-turn".into(), true, true, false, false)
+        .apply_claude_task_fixture("setup-turn".into(), true, true, false, false)
         .unwrap();
-    assert_eq!(relay.claude_autonomous_turn_tasks["setup-turn"], None);
+    assert_eq!(relay.turn_task_ordinal("setup-turn"), None);
     relay
-        .claude_async_task_control_changed("setup-turn".into(), false, false, true, false)
+        .apply_claude_task_fixture("setup-turn".into(), false, false, true, false)
         .unwrap();
     relay
         .record_session_update(agent_text_chunk(CLAUDE_AUTO_MODE_FALLBACK_TEXT))
@@ -6098,6 +6197,7 @@ fn late_claude_tool_status_preserves_the_transcript_without_opening_a_turn() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
     relay.set_turn_verdict_harness(HarnessKind::Claude);
+    relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
     relay
         .record_observation(RelayObservation::SessionConfigured {
             config_options: Vec::new(),

@@ -107,9 +107,8 @@ impl ClaudeProbe {
         );
         if !replay {
             assert_eq!(
-                new["params"]["_meta"]["claudeCode"]["emitRawSDKMessages"][1],
-                json!({"type": "result"}),
-                "the session must ask the adapter for SDK results"
+                new["params"]["_meta"]["claudeCode"]["emitRawSDKMessages"],
+                json!([{"type":"result"}])
             );
         }
         if replay {
@@ -637,14 +636,12 @@ async fn autonomous_turn_spawns_are_live_edges_and_not_replayed_history() {
     probe.autonomous_turn("live-turn").await;
     let mut replay_seen = false;
     loop {
-        if let RuntimeEvent::ClaudeAsyncTaskControlChanged {
-            task_id,
-            autonomous_turn,
-            replayed,
-            ..
+        if let RuntimeEvent::AirTaskChanged {
+            session_id,
+            update: AirTaskUpdate::TurnSpawned { task_id, replayed },
         } = probe.event().await
         {
-            assert!(autonomous_turn);
+            assert_eq!(session_id, "claude-session");
             if task_id == "replayed-turn" {
                 assert!(replayed);
                 replay_seen = true;

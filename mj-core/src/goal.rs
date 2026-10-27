@@ -91,17 +91,14 @@ pub struct GoalDecision {
 /// The goal entry of an adapter's `_meta`: goal controls in the `initialize`
 /// reply, or a goal snapshot in a `session_info_update`.
 ///
-/// Codex adapters and claude-agent-acp up to 0.81.0 put it at `_meta.goal`.
-/// From 0.84.0 claude-agent-acp puts it only under `_meta.jetbrains.air.goal`,
-/// for clients that declare the JetBrains AIR extension, as Mjolnir does.
 /// An explicit `null` is returned as `Some(Value::Null)`.
 #[must_use]
 pub fn goal_meta(meta: &serde_json::Map<String, Value>) -> Option<&Value> {
-    meta.get("goal").or_else(|| {
-        meta.get("jetbrains")
-            .and_then(|jetbrains| jetbrains.get("air"))
-            .and_then(|air| air.get("goal"))
-    })
+    meta.get("jetbrains")
+        .and_then(|jetbrains| jetbrains.get("air"))
+        .and_then(|air| air.get("goal"))
+        // Read records written by older adapters; current adapters send only AIR.
+        .or_else(|| meta.get("goal"))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,7 +327,7 @@ mod tests {
     #[test]
     fn goal_metadata_survives_prompt_boundaries_and_distinguishes_missing_from_clear() {
         let mut state = GoalState::default();
-        state.apply(&update(serde_json::json!({"goal":{"objective":"finish","status":"active","createdAt":12,"tokensUsed":42,"tokenBudget":100}}))).unwrap();
+        state.apply(&update(serde_json::json!({"jetbrains":{"air":{"goal":{"objective":"finish","status":"active","createdAt":12,"tokensUsed":42,"tokenBudget":100}}}}))).unwrap();
         assert!(state.active());
         state
             .apply(&update(
@@ -349,7 +346,9 @@ mod tests {
         assert!(!state.synchronized());
         assert_eq!(state.snapshot.as_ref().unwrap().details["tokensUsed"], 42);
         state
-            .apply(&update(serde_json::json!({"goal":null})))
+            .apply(&update(
+                serde_json::json!({"jetbrains":{"air":{"goal":null}}}),
+            ))
             .unwrap();
         assert!(state.snapshot.is_none());
     }
@@ -358,7 +357,7 @@ mod tests {
     fn reads_claude_goal_metadata_under_the_air_extension() {
         // claude-agent-acp 0.84.0 sends goal controls and snapshots only
         // under `_meta.jetbrains.air.goal`.
-        let controls = serde_json::json!({"jetbrains":{"air":{
+        let controls = serde_json::json!({"goal":null,"jetbrains":{"air":{
             "capabilities":["asyncTasks"],
             "goal":{"version":1,"controlMethod":"_session/goal","actions":["set","clear"]}
         }}});
@@ -389,12 +388,12 @@ mod tests {
             ..Default::default()
         };
         state.restart();
-        state.apply(&update(serde_json::json!({"goal":{"objective":"finish","status":"paused","createdAt":1,"updatedAt":10}}))).unwrap();
+        state.apply(&update(serde_json::json!({"jetbrains":{"air":{"goal":{"objective":"finish","status":"paused","createdAt":1,"updatedAt":10}}}}))).unwrap();
         assert!(
             state.decision.is_some(),
             "the original pre-resume pause retains the accepted decision"
         );
-        state.apply(&update(serde_json::json!({"goal":{"objective":"finish","status":"paused","createdAt":1,"updatedAt":11}}))).unwrap();
+        state.apply(&update(serde_json::json!({"jetbrains":{"air":{"goal":{"objective":"finish","status":"paused","createdAt":1,"updatedAt":11}}}}))).unwrap();
         assert!(
             state.decision.is_none(),
             "a newer pause must not be undone during recovery"
@@ -442,7 +441,9 @@ mod tests {
             assert_eq!(state.supports(GoalControlAction::Pause), pause);
             assert_eq!(state.supports(GoalControlAction::Resume), pause);
             state
-                .apply(&update(serde_json::json!({"goal":null})))
+                .apply(&update(
+                    serde_json::json!({"jetbrains":{"air":{"goal":null}}}),
+                ))
                 .unwrap();
             assert!(
                 state.supports(GoalControlAction::Clear),

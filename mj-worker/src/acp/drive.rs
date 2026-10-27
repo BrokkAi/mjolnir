@@ -159,6 +159,28 @@ where
             async move |notification: RawSessionNotification, _cx| {
                 notification_activity.mark();
                 if matches!(notification_harness, HarnessKind::Claude | HarnessKind::Codex) {
+                    match air_task_update(&notification.update) {
+                        Ok(Some(update)) => {
+                            if let Some(mut update) = update {
+                                if let AirTaskUpdate::TurnSpawned { replayed, .. } = &mut update {
+                                    *replayed = !notification_live_history_enabled.load(Ordering::Acquire);
+                                }
+                                notification_events.send(RuntimeEvent::AirTaskChanged {
+                                    session_id: notification.session_id.to_string(), update,
+                                }).await.map_err(|_| relay_event_channel_error())?;
+                            }
+                            return Ok(());
+                        }
+                        Ok(None) => {}
+                        Err(message) => {
+                            notification_events.send(RuntimeEvent::Warning {
+                                message: format!("ignored malformed AIR async task update: {message}"),
+                            }).await.map_err(|_| relay_event_channel_error())?;
+                            return Ok(());
+                        }
+                    }
+                }
+                if matches!(notification_harness, HarnessKind::Claude | HarnessKind::Codex) {
                     let routed = native_agents.lock().expect("native agent router poisoned")
                         .route(&notification.session_id.to_string(), &notification.update);
                     match routed {
@@ -167,51 +189,11 @@ where
                                 .map_err(|_| relay_event_channel_error())?;
                             return Ok(());
                         }
-                        Ok(native_agents::Routed::Ignored) => return Ok(()),
                         Ok(native_agents::Routed::Parent) => {}
                         Err(error) => {
                             notification_events.send(RuntimeEvent::Warning {
                                 message: format!("native agent update: {error:#}"),
                             }).await.map_err(|_| relay_event_channel_error())?;
-                            return Ok(());
-                        }
-                    }
-                }
-                if notification_harness == HarnessKind::Claude {
-                    match claude_async_task_control_update(&notification.update) {
-                        Ok(Some(ClaudeAsyncTaskControlUpdate::Set {
-                            task_id,
-                            can_stop,
-                            autonomous_turn,
-                            settled,
-                        })) => {
-                            // Preserve replayed IDs so their untyped terminal edges
-                            // cannot become ordinary background-task completions.
-                            let replayed =
-                                !notification_live_history_enabled.load(Ordering::Acquire);
-                            notification_events
-                                .send(RuntimeEvent::ClaudeAsyncTaskControlChanged {
-                                    task_id,
-                                    can_stop,
-                                    autonomous_turn,
-                                    replayed,
-                                    settled,
-                                })
-                                .await
-                                .map_err(|_| relay_event_channel_error())?;
-                            return Ok(());
-                        }
-                        Ok(Some(ClaudeAsyncTaskControlUpdate::Ignore)) => return Ok(()),
-                        Ok(None) => {}
-                        Err(message) => {
-                            notification_events
-                                .send(RuntimeEvent::Warning {
-                                    message: format!(
-                                        "ignored malformed Claude async task update: {message}"
-                                    ),
-                                })
-                                .await
-                                .map_err(|_| relay_event_channel_error())?;
                             return Ok(());
                         }
                     }
@@ -325,28 +307,6 @@ where
                         return Ok(());
                     }
                 }
-                let tasks = match claude_background_tasks(&notification.message) {
-                    Ok(Some(tasks)) => tasks,
-                    Ok(None) => return Ok(()),
-                    Err(error) => {
-                        claude_sdk_events
-                            .send(RuntimeEvent::Warning {
-                                message: format!(
-                                    "ignored malformed Claude background task level: {error}"
-                                ),
-                            })
-                            .await
-                            .map_err(|_| relay_event_channel_error())?;
-                        // A malformed level cannot establish which provider
-                        // tasks are still live, so keep the last known level
-                        // until a valid replacement arrives.
-                        return Ok(());
-                    }
-                };
-                claude_sdk_events
-                    .send(RuntimeEvent::ClaudeBackgroundTasksChanged { tasks })
-                    .await
-                    .map_err(|_| relay_event_channel_error())?;
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
@@ -1519,12 +1479,11 @@ fn failed_turn_stop_reason(
 }
 
 /// The stop reason and warning of a turn the bridge answered as an ordinary
-/// end of turn but with a typed failure record (codex-acp does this for every
-/// failed turn once Mjolnir asks for `sessionFailure`; issue 1217). The
+/// end of turn but with a typed failure record (Claude and Codex do this
+/// once Mjolnir asks for `sessionFailure`; issue 1217). The
 /// bridge no longer streams the error as agent text, so the warning line is
 /// the only place the conversation shows it.
 pub(super) fn session_failure_outcome(
-    harness: HarnessKind,
     diagnostic: &mj_core::diagnostic::TurnDiagnostic,
 ) -> (String, String) {
     let label = if diagnostic.is_usage_limit() {
@@ -1533,7 +1492,11 @@ pub(super) fn session_failure_outcome(
         "prompt failed"
     };
     (
-        failed_turn_stop_reason(harness, diagnostic),
+        if diagnostic.is_usage_limit() {
+            mj_core::diagnostic::QUOTA_STOP_REASON.to_owned()
+        } else {
+            PROMPT_ERROR_STOP_REASON.to_owned()
+        },
         format!("{label}: {}", single_spaced(&diagnostic.message)),
     )
 }

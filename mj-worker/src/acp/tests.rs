@@ -29,21 +29,21 @@ for line in sys.stdin:
     ident = request.get('id')
     if method == 'initialize':
         result = {'protocolVersion':1, 'agentCapabilities':{'loadSession':True, 'sessionCapabilities':{'resume':{}}},
-            '_meta':{'jetbrains':{'air':{'version':1,'capabilities':['nativeSubagentSessions']}},
-                'goal':{'version':1,'controlMethod':'_session/goal','actions':['pause','resume','clear']}}}
+            '_meta':{'jetbrains':{'air':{'version':1,'capabilities':['nativeSubagentSessions'],
+                'goal':{'version':1,'controlMethod':'_session/goal','actions':['pause','resume','clear']}}}}}
     elif method in ('session/new', 'session/resume', 'session/load'):
         assert method == 'session/load', request
         update({'sessionUpdate':'agent_message_chunk', 'content':{'type':'text','text':'old history ' * 12000}})
         update({'sessionUpdate':'available_commands_update', 'availableCommands':[{'name':'goal','description':'Set a goal'}]})
         update({'sessionUpdate':'tool_call','toolCallId':'old-tool','title':'old call','status':'in_progress'})
-        update({'sessionUpdate':'session_info_update','title':'Current title','_meta':{'goal':goal,'execution':execution}})
+        update({'sessionUpdate':'session_info_update','title':'Current title','_meta':{'jetbrains':{'air':{'goal':goal}},'execution':execution}})
         update({'sessionUpdate':'usage_update','used':100,'size':1000})
         update({'sessionUpdate':'config_option_update','configOptions':[
             {'id':'model','name':'Model','type':'select','currentValue':'astra','options':[{'value':'astra','name':'Astra'}]}]})
         update({'sessionUpdate':'current_mode_update','currentModeId':'agent'})
         update({'sessionUpdate':'plan','entries':[{'content':'old plan','priority':'medium','status':'completed'}]})
         result = {'sessionId':'native', 'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'}]},
-            '_meta':{'goal':goal,'execution':execution}}
+            '_meta':{'jetbrains':{'air':{'goal':goal}},'execution':execution}}
     elif method == 'session/prompt':
         update({'sessionUpdate':'tool_call_update','toolCallId':'old-tool','status':'completed'})
         update({'sessionUpdate':'tool_call','toolCallId':'new-tool','title':'new call','status':'in_progress'})
@@ -147,7 +147,7 @@ for line in sys.stdin:
     assert!(
         before_load_response
             .iter()
-            .any(|u| u["_meta"]["goal"]["tokensUsed"] == 42)
+            .any(|u| u["_meta"]["jetbrains"]["air"]["goal"]["tokensUsed"] == 42)
     );
     assert!(
         before_load_response
@@ -1021,110 +1021,86 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
     );
 }
 
+// Hard-won: a02d1c6: child task updates must not become warning rows in the parent transcript.
 #[tokio::test]
-async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_step() {
+async fn air_tasks_from_root_and_child_sessions_stop_through_the_owning_adapter() {
+    use mj_core::acp::AirTaskUpdate;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    for (resume_session, advertised_resume) in [
-        (None, false),
-        (None, true),
-        (Some("native"), false),
-        (Some("native"), true),
-    ] {
-        let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    for harness in [HarnessKind::Codex, HarnessKind::Claude] {
         let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
         let bridge = tokio::spawn(async move {
             let (read, mut write) = tokio::io::split(bridge_stream);
             let mut lines = BufReader::new(read).lines();
-            while let Some(line) = lines.next_line().await.expect("read fake adapter input") {
-                let request: serde_json::Value =
-                    serde_json::from_str(&line).expect("fake adapter input is JSON-RPC");
-                let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let Some(method) = request["method"].as_str() else {
                     continue;
                 };
-                let _ = observed_tx.send(request.clone());
-                let id = request
-                    .get("id")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                let response = match method {
-                    "initialize" => {
-                        let mut result = serde_json::json!({"protocolVersion": 1});
-                        if advertised_resume {
-                            result["agentCapabilities"] = serde_json::json!({
-                                "sessionCapabilities": {"resume": {}}
-                            });
+                let mut updates = Vec::new();
+                let result = match method {
+                    "initialize" => serde_json::json!({"protocolVersion":1}),
+                    "session/new" => {
+                        updates.push(("scripted", serde_json::json!({"sessionUpdate":"subagent_spawned", "subagentSessionId":"child", "name":"review", "task":"review source", "capabilities":{}})));
+                        for owner in ["scripted", "child"] {
+                            let id = if owner == "child" && harness == HarnessKind::Codex {
+                                "child:task"
+                            } else {
+                                "task"
+                            };
+                            let mut spawn = serde_json::json!({"sessionUpdate":"async_task_spawned", "asyncTaskId":id, "name":"sleep 600", "taskType":"shell", "showInTranscript":false, "canStop":true});
+                            if harness == HarnessKind::Claude {
+                                spawn["description"] = serde_json::json!("Background sleeper");
+                            }
+                            updates.push((owner, spawn));
+                            updates.push((owner, serde_json::json!({"sessionUpdate":"async_task_progress", "asyncTaskId":id, "description":format!("{owner} sleeper")})));
+                            updates.push((owner, serde_json::json!({"sessionUpdate":"async_task_state_update", "asyncTaskId":id, "state":"paused"})));
                         }
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": result,
-                        })
+                        updates.push(("scripted", serde_json::json!({"sessionUpdate":"async_task_spawned", "asyncTaskId":"turn", "name":"autonomous turn", "taskType":"turn", "canStop":true})));
+                        updates.push(("scripted", serde_json::json!({"sessionUpdate":"async_task_state_update", "asyncTaskId":"turn", "state":"completed"})));
+                        serde_json::json!({"sessionId":"scripted", "modes":{"currentModeId":"default", "availableModes":[{"id":"default", "name":"Default"},{"id":"auto", "name":"Auto"},{"id":"agent", "name":"Agent"}]}})
                     }
-                    "session/new" | "session/load" | "session/resume" => serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {"sessionId": "scripted", "modes": {
-                            "currentModeId": "default",
-                            "availableModes": [
-                                {"id": "default", "name": "Default"},
-                                {"id": "auto", "name": "Auto"}
-                            ]
-                        }},
-                    }),
-                    "session/set_mode" => {
-                        serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}})
+                    "session/set_mode" => serde_json::json!({}),
+                    "_session/async_task/stop" => {
+                        let owner = request["params"]["sessionId"].as_str().unwrap();
+                        let task = request["params"]["asyncTaskId"].as_str().unwrap();
+                        assert!(matches!(owner, "scripted" | "child"));
+                        assert_eq!(
+                            task,
+                            if owner == "child" && harness == HarnessKind::Codex {
+                                "child:task"
+                            } else {
+                                "task"
+                            }
+                        );
+                        let update = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":owner, "update":{"sessionUpdate":"async_task_state_update", "asyncTaskId":task, "state":"stopped"}}});
+                        write
+                            .write_all(format!("{update}\n").as_bytes())
+                            .await
+                            .unwrap();
+                        serde_json::json!({"stopped":true})
                     }
                     _ => continue,
                 };
-                if matches!(method, "session/new" | "session/load" | "session/resume") {
-                    for message in [
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "method": "_claude/sdkMessage",
-                            "params": {
-                                "sessionId": "scripted",
-                                "message": {
-                                    "type": "system",
-                                    "subtype": "task_started",
-                                    "task_id": "foreground",
-                                },
-                            },
-                        }),
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "method": "_claude/sdkMessage",
-                            "params": {
-                                "sessionId": "scripted",
-                                "message": {
-                                    "type": "system",
-                                    "subtype": CLAUDE_BACKGROUND_TASKS_CHANGED_SUBTYPE,
-                                    "tasks": [{
-                                        "task_id": "server",
-                                        "task_type": "shell",
-                                        "description": "npm run dev",
-                                    }],
-                                },
-                            },
-                        }),
-                    ] {
-                        write
-                            .write_all(format!("{message}\n").as_bytes())
-                            .await
-                            .expect("write fake adapter extension notification");
-                    }
+                for (owner, update) in updates {
+                    let notification = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":owner,"update":update}});
+                    write
+                        .write_all(format!("{notification}\n").as_bytes())
+                        .await
+                        .unwrap();
                 }
+                let response =
+                    serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result":result});
                 write
                     .write_all(format!("{response}\n").as_bytes())
                     .await
-                    .expect("write fake adapter response");
+                    .unwrap();
             }
         });
         let (client_read, client_write) = tokio::io::split(client_stream);
         let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
-        let (request_tx, mut request_rx) = mpsc::channel(1);
+        let (request_tx, mut request_rx) = mpsc::channel(4);
         let (event_tx, mut event_rx) = mpsc::channel(32);
-        let step_clock = crate::acp::StepClock::default();
+        let step_clock = StepClock::default();
         let observed_step_clock = step_clock.clone();
         let spec = LaunchSpec {
             operator_away: Default::default(),
@@ -1150,11 +1126,11 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
             additional_directories: Vec::new(),
             extra_mcp_servers: Vec::new(),
             project_memory: None,
-            resume_session: resume_session.map(str::to_owned),
+            resume_session: None,
             native_session_may_have_history: false,
             accepted_config: Default::default(),
             initial_model: None,
-            harness: HarnessKind::Claude,
+            harness,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             acp_activity: AcpActivityClock::default(),
             step_clock,
@@ -1170,57 +1146,103 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
             )
             .await
         });
-
-        let event = wait_for_runtime_event(&mut event_rx, |event| {
-            matches!(event, RuntimeEvent::ClaudeBackgroundTasksChanged { .. })
-        })
-        .await;
-        let RuntimeEvent::ClaudeBackgroundTasksChanged { tasks } = event else {
-            unreachable!("wait_for_runtime_event matched the Claude level event");
-        };
-        assert_eq!(
-            tasks,
-            vec![ClaudeBackgroundTask {
-                task_id: "server".into(),
-                description: "npm run dev".into(),
-            }]
-        );
-        assert_eq!(
-            observed_step_clock.started_at_ms(),
-            None,
-            "a provider background level must not advance the step clock"
-        );
-
+        let root = tempfile::tempdir().unwrap();
+        let mut relay = crate::relay::DurableRelay::open(root.path(), "air-test", "test").unwrap();
+        relay.set_background_work_policy(crate::relay::BackgroundWorkPolicy::AirTasks);
+        relay.set_harness_turn_policy(if harness == HarnessKind::Claude {
+            crate::relay::HarnessTurnPolicy::ClaudeAdapter
+        } else {
+            crate::relay::HarnessTurnPolicy::CodexAdapter
+        });
+        let mut paused = 0;
+        while paused < 2 {
+            let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            match event {
+                RuntimeEvent::AirTaskChanged { session_id, update } => {
+                    if matches!(&update, AirTaskUpdate::Spawned { .. }) {
+                        let AirTaskUpdate::Spawned { description, .. } = &update else {
+                            unreachable!()
+                        };
+                        assert_eq!(
+                            description,
+                            if harness == HarnessKind::Claude {
+                                "Background sleeper"
+                            } else {
+                                "sleep 600"
+                            }
+                        );
+                    }
+                    if matches!(
+                        &update,
+                        AirTaskUpdate::Changed {
+                            description: None,
+                            ..
+                        }
+                    ) {
+                        paused += 1;
+                    }
+                    relay.air_task_changed(session_id, update).unwrap();
+                }
+                RuntimeEvent::Warning { message } => {
+                    assert!(!message.contains("async_task"), "{message}")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(observed_step_clock.started_at_ms(), None);
+        let commands = relay.operational_state().background_commands;
+        assert_eq!(commands.len(), 2);
+        for command in commands {
+            assert!(command.can_stop);
+            assert!(command.command.ends_with(" sleeper"));
+            let target = relay.background_task_stop_target(&command.id).unwrap();
+            let (resolved, resolution) = oneshot::channel();
+            request_tx
+                .send(CommandRequest::StopBackgroundTask { target, resolved })
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), resolution)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            loop {
+                let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                match event {
+                    RuntimeEvent::AirTaskChanged { session_id, update } => {
+                        let finished = matches!(update, AirTaskUpdate::Finished { .. });
+                        relay.air_task_changed(session_id, update).unwrap();
+                        if finished
+                            && relay
+                                .operational_state()
+                                .background_commands
+                                .iter()
+                                .all(|entry| entry.id != command.id)
+                        {
+                            break;
+                        }
+                    }
+                    RuntimeEvent::Warning { message } => {
+                        assert!(!message.contains("async_task"), "{message}")
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(relay.operational_state().background_commands.is_empty());
+        assert!(relay.activity_facts().task_settled_at_ms.is_none());
         drop(request_tx);
         tokio::time::timeout(Duration::from_secs(5), driver)
             .await
-            .expect("closing the command channel ends the runtime")
-            .expect("the runtime task does not panic")
-            .expect("the fake adapter session ends cleanly");
-        let mut session_requests = Vec::new();
-        while let Ok(request) = observed_rx.try_recv() {
-            if matches!(
-                request["method"].as_str(),
-                Some("session/new" | "session/load" | "session/resume")
-            ) {
-                session_requests.push(request);
-            }
-        }
-        assert_eq!(session_requests.len(), 1, "open exactly one native session");
-        assert_eq!(
-            session_requests[0]["method"],
-            if resume_session.is_none() {
-                "session/new"
-            } else if advertised_resume {
-                "session/resume"
-            } else {
-                "session/load"
-            },
-            "session setup must select the advertised lifecycle method"
-        );
-        if resume_session.is_some() {
-            assert_eq!(session_requests[0]["params"]["sessionId"], "native");
-        }
+            .unwrap()
+            .unwrap()
+            .unwrap();
         bridge.abort();
     }
 }
@@ -6408,8 +6430,14 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
                 let method = request["method"].as_str().unwrap_or("");
                 let result = match method {
                     "initialize" => {
-                        assert!(request["params"]["clientCapabilities"]["_meta"]["jetbrains"]["air"]["capabilities"]
-                            .as_array().unwrap().iter().any(|v| v == "nativeSubagentSessions"));
+                        assert_eq!(
+                            request["params"]["clientCapabilities"]["_meta"]["jetbrains"]["air"]["capabilities"],
+                            serde_json::json!([
+                                "asyncTasks",
+                                "nativeSubagentSessions",
+                                "sessionFailure"
+                            ])
+                        );
                         serde_json::json!({"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}},
                             "_meta":{"jetbrains":{"air":{"version":1,"capabilities":["nativeSubagentSessions"]}}}})
                     }
@@ -7392,11 +7420,11 @@ async fn a_form_the_harness_withdraws_still_resolves() {
     bridge.abort();
 }
 
-/// A codex-acp that, once asked for typed failures, ends the first prompt the
+/// An adapter that, once asked for typed failures, ends the first prompt the
 /// way it ended issue 1217's: `end_turn`, no agent text, and the provider's
 /// error as a `sessionFailure` record on the response. Reports whether the
 /// worker's `initialize` asked for the records.
-async fn typed_failure_bridge(stream: tokio::io::DuplexStream) -> bool {
+async fn typed_failure_bridge(stream: tokio::io::DuplexStream, failure: serde_json::Value) -> bool {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (read, mut write) = tokio::io::split(stream);
@@ -7424,16 +7452,12 @@ async fn typed_failure_bridge(stream: tokio::io::DuplexStream) -> bool {
                 "sessionId": "typed-failure",
                 "modes": {
                     "currentModeId": "agent",
-                    "availableModes": [{"id": "agent", "name": "Agent"}],
+                    "availableModes": [{"id": "agent", "name": "Agent"}, {"id": "auto", "name": "Auto"}],
                 },
             }),
             "session/prompt" => serde_json::json!({
                 "stopReason": "end_turn",
-                "_meta": {"quota": {}, "jetbrains": {"air": {"version": 1, "sessionFailure": {
-                    "id": "turn-1:error", "revision": 1, "category": "service",
-                    "severity": "error", "actions": ["retry"],
-                    "title": "{\"type\":\"error\",\"error\":{\"message\":\"model 'gpt-6-luna' is not enabled in rustponsesapi\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null},\"status\":400}",
-                }}}},
+                "_meta": {"jetbrains": {"air": {"version": 1, "sessionFailure": failure}}},
             }),
             _ if !id.is_null() => serde_json::json!({}),
             _ => continue,
@@ -7453,70 +7477,128 @@ async fn typed_failure_bridge(stream: tokio::io::DuplexStream) -> bool {
 // Hard-won: 03e1b5a: Codex model failures counted as completed turns and asked child agents for reports they had not written.
 #[tokio::test]
 async fn a_typed_bridge_failure_fails_the_turn_with_the_providers_reason() {
-    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-    let bridge = tokio::spawn(typed_failure_bridge(bridge_stream));
-    let (client_read, client_write) = tokio::io::split(client_stream);
-    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
-    let (request_tx, mut request_rx) = mpsc::channel(4);
-    let (event_tx, mut event_rx) = mpsc::channel(64);
-    let mut spec = reload_fallback_spec(HarnessKind::Codex);
-    spec.resume_session = None;
-    let driver = tokio::spawn(async move {
-        drive(
-            transport,
-            spec,
-            &mut request_rx,
-            event_tx,
-            Arc::new(Mutex::new(None)),
-            false,
-        )
-        .await
-    });
-
-    request_tx
-        .send(CommandRequest::Prompt {
-            request_id: "task".into(),
-            prompt: vec![ContentBlock::Text(TextContent::new("Do the task."))],
-        })
-        .await
-        .unwrap();
-    let mut warnings = Vec::new();
-    let (stop_reason, diagnostic) = loop {
-        let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+    for (harness, failure_kind, actions, expected_stop) in [
+        (
+            HarnessKind::Codex,
+            None,
+            vec!["retry"],
+            PROMPT_ERROR_STOP_REASON,
+        ),
+        (
+            HarnessKind::Claude,
+            None,
+            vec!["retry"],
+            PROMPT_ERROR_STOP_REASON,
+        ),
+        (
+            HarnessKind::Claude,
+            Some("quota_exhausted"),
+            vec![],
+            mj_core::diagnostic::QUOTA_STOP_REASON,
+        ),
+        (
+            HarnessKind::Claude,
+            Some("rate_limited"),
+            vec!["retry"],
+            PROMPT_ERROR_STOP_REASON,
+        ),
+        (
+            HarnessKind::Claude,
+            Some("budget_exhausted"),
+            vec!["new_session"],
+            PROMPT_ERROR_STOP_REASON,
+        ),
+        (
+            HarnessKind::Claude,
+            Some("context_exhausted"),
+            vec!["new_session"],
+            PROMPT_ERROR_STOP_REASON,
+        ),
+    ] {
+        let title = if failure_kind.is_some() {
+            "This usage limit was reached"
+        } else {
+            r#"{"type":"error","error":{"message":"model 'gpt-6-luna' is not enabled in rustponsesapi"},"status":400}"#
+        };
+        let failure = serde_json::json!({"id":"turn-1:error", "revision":1,
+        "category":if failure_kind.is_some() {"limit"} else {"service"},
+        "severity":"error", "actions":actions, "title":title});
+        let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+        let bridge = tokio::spawn(typed_failure_bridge(bridge_stream, failure));
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+        let (request_tx, mut request_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        let mut spec = reload_fallback_spec(harness);
+        spec.resume_session = None;
+        let driver = tokio::spawn(async move {
+            drive(
+                transport,
+                spec,
+                &mut request_rx,
+                event_tx,
+                Arc::new(Mutex::new(None)),
+                false,
+            )
             .await
-            .expect("the runtime keeps reporting")
-            .expect("the runtime keeps its event channel");
-        match event {
-            RuntimeEvent::Warning { message } if message.starts_with("prompt") => {
-                warnings.push(message)
-            }
-            RuntimeEvent::PromptFinished {
-                stop_reason,
-                diagnostic,
-                ..
-            } => break (stop_reason, diagnostic),
-            _ => {}
-        }
-    };
-    assert_eq!(stop_reason, PROMPT_ERROR_STOP_REASON);
-    let diagnostic = diagnostic.expect("a failed turn carries its diagnostic");
-    assert_eq!(
-        diagnostic.message,
-        "model 'gpt-6-luna' is not enabled in rustponsesapi"
-    );
-    assert_eq!(diagnostic.http_status, Some(400));
-    assert_eq!(
-        warnings,
-        vec!["prompt failed: model 'gpt-6-luna' is not enabled in rustponsesapi".to_owned()],
-        "one line, not the empty-response warning"
-    );
+        });
 
-    drop(request_tx);
-    let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
-    assert!(
-        bridge.await.unwrap(),
-        "a Codex worker asks the bridge for typed failures"
-    );
+        request_tx
+            .send(CommandRequest::Prompt {
+                request_id: "task".into(),
+                prompt: vec![ContentBlock::Text(TextContent::new("Do the task."))],
+            })
+            .await
+            .unwrap();
+        let mut warnings = Vec::new();
+        let (stop_reason, diagnostic) = loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .expect("the runtime keeps reporting");
+            let Some(event) = event else {
+                panic!(
+                    "{harness:?} {failure_kind:?}: driver ended before failure: {:?}",
+                    driver.await
+                );
+            };
+            match event {
+                RuntimeEvent::Warning { message } if message.starts_with("prompt") => {
+                    warnings.push(message)
+                }
+                RuntimeEvent::PromptFinished {
+                    stop_reason,
+                    diagnostic,
+                    ..
+                } => break (stop_reason, diagnostic),
+                _ => {}
+            }
+        };
+        assert_eq!(stop_reason, expected_stop);
+        let diagnostic = diagnostic.expect("a failed turn carries its diagnostic");
+        let expected_message = if failure_kind.is_some() {
+            title
+        } else {
+            "model 'gpt-6-luna' is not enabled in rustponsesapi"
+        };
+        assert_eq!(diagnostic.message, expected_message);
+        assert_eq!(
+            diagnostic.http_status,
+            failure_kind.is_none().then_some(400)
+        );
+        let label = if expected_stop == mj_core::diagnostic::QUOTA_STOP_REASON {
+            "prompt failed (usage limit reached)"
+        } else {
+            "prompt failed"
+        };
+        assert_eq!(warnings, vec![format!("{label}: {expected_message}")]);
+
+        drop(request_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
+        assert!(
+            bridge.await.unwrap(),
+            "both adapters are asked for typed failures"
+        );
+    }
 }
 
 /// A fake OpenCode that opens one session and holds each prompt until

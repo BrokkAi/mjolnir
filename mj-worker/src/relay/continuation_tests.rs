@@ -529,11 +529,11 @@ fn background_work_holds_continuation_back_only_until_jev_judges_it_idle() {
     let root = tempfile::tempdir().unwrap();
     let mut relay = open(root.path());
     relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
-    relay.background_work = BackgroundWorkPolicy::ClaudeTasks;
+    relay.background_work = BackgroundWorkPolicy::AirTasks;
     submit_relay(&mut relay, "user-request", prompt("Implement and test"));
     completed(&mut relay, "user-request");
     relay
-        .claude_background_tasks_changed(vec![crate::acp::ClaudeBackgroundTask {
+        .set_air_tasks(vec![crate::relay::AirTaskFixture {
             task_id: "0".into(),
             description: "sleep infinity".into(),
         }])

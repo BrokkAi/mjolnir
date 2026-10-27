@@ -88,9 +88,6 @@ enum Lifecycle {
 pub(super) enum Routed {
     /// A native agent event for the relay.
     Event(NativeAgentEvent),
-    /// A child session's Claude `async_task_*` update. It is dropped: the parent's
-    /// task handler must not see it, and children's background tasks are not stoppable.
-    Ignored,
     /// Not a native agent notification; the caller handles it as parent output.
     Parent,
 }
@@ -101,14 +98,6 @@ impl NativeAgentRouter {
     }
     pub fn route(&mut self, addressed: &str, update: &Value) -> Result<Routed> {
         match update.get("sessionUpdate").and_then(Value::as_str) {
-            Some(kind) if kind.starts_with("async_task_") && self.children.contains(addressed) => {
-                tracing::debug!(
-                    kind,
-                    session = addressed,
-                    "ignored a native child's async task update"
-                );
-                Ok(Routed::Ignored)
-            }
             Some("subagent_spawned" | "subagent_state_update") => {
                 let event: Lifecycle = serde_json::from_value(update.clone())
                     .context("decode native agent lifecycle")?;
@@ -205,28 +194,5 @@ mod tests {
         assert!(
             matches!(router.route("grandchild", &message).unwrap(), Routed::Event(NativeAgentEvent::Update { session_id, .. }) if session_id == "grandchild")
         );
-    }
-
-    // Hard-won: a02d1c6: Claude child task updates became warning rows in the parent transcript.
-    #[test]
-    fn ignores_child_async_task_updates_but_leaves_the_parents_alone() {
-        let mut router = NativeAgentRouter::default();
-        let spawn = json!({"sessionUpdate":"subagent_spawned", "subagentSessionId":"child",
-            "name":"review", "task":"review source", "capabilities":{}});
-        router.route("root", &spawn).unwrap();
-        let spawned =
-            json!({"sessionUpdate":"async_task_spawned", "asyncTaskId":"t1", "canStop":true});
-        let progress = json!({"sessionUpdate":"async_task_progress", "asyncTaskId":"t1"});
-        for update in [&spawned, &progress] {
-            assert!(matches!(
-                router.route("child", update).unwrap(),
-                Routed::Ignored
-            ));
-            // The parent's own updates still reach the parent's task handler.
-            assert!(matches!(
-                router.route("root", update).unwrap(),
-                Routed::Parent
-            ));
-        }
     }
 }

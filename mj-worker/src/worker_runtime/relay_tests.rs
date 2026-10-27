@@ -6757,7 +6757,7 @@ async fn large_photo_transfer_is_verified_without_journaling_image_bytes() {
 async fn capacity_retry_dispatches_without_a_controller_after_the_deadline() {
     let temp = tempfile::tempdir().unwrap();
     let mut state = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
-    state.set_background_work_policy(crate::relay::BackgroundWorkPolicy::CodexExecCards);
+    state.set_background_work_policy(crate::relay::BackgroundWorkPolicy::AirTasks);
     state.set_turn_verdict_harness(HarnessKind::Codex);
     state
         .record_observation(RelayObservation::SessionConfigured {
