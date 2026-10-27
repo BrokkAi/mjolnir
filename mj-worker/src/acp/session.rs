@@ -38,10 +38,10 @@ pub(super) async fn serve_session(
             serde_json::json!({
                 "air": {
                     "version": 1,
-                    // `sessionFailure` makes codex-acp report a failed turn
+                    // `sessionFailure` makes adapters report a failed turn
                     // with a typed record instead of an ordinary end of turn
                     // whose error is agent text (issue 1217).
-                    "capabilities": if spec.harness == HarnessKind::Claude { vec!["asyncTasks", "nativeSubagentSessions", "nativeSubagentAvailability"] } else { vec!["nativeSubagentSessions", "nativeSubagentAvailability", "sessionFailure"] }
+                    "capabilities": ["asyncTasks", "nativeSubagentSessions", "sessionFailure"]
                 }
             }),
         );
@@ -69,24 +69,6 @@ pub(super) async fn serve_session(
         bail!(
             "ACP bridge negotiated unsupported protocol {:?}",
             initialized.protocol_version
-        );
-    }
-    if spec.harness == HarnessKind::Codex
-        && spec
-            .goal_recovery
-            .lock()
-            .expect("goal lock poisoned")
-            .asking()
-    {
-        ensure!(
-            initialized
-                .meta
-                .as_ref()
-                .and_then(|m| m.get("goal"))
-                .and_then(|g| g.get("resumePolicies"))
-                .and_then(|p| p.as_array())
-                .is_some_and(|p| p.iter().any(|v| v == "pause")),
-            "the installed Codex adapter cannot pause a goal before explicit resume; update the adapter"
         );
     }
     let native_children_supported = initialized
@@ -141,23 +123,46 @@ pub(super) async fn serve_session(
         }).await?;
     }
 
-    let capability = initialized
+    let air_goal = initialized
         .meta
         .as_ref()
-        .and_then(mj_core::goal::goal_meta)
-        .and_then(|value| {
-            match serde_json::from_value::<mj_core::goal::GoalCapability>(value.clone()) {
-                Ok(capability) => Some(capability),
-                Err(error) => {
-                    tracing::warn!(%error, "adapter advertised malformed goal controls");
-                    None
-                }
+        .and_then(|meta| meta.get("jetbrains"))
+        .and_then(|jetbrains| jetbrains.get("air"))
+        .and_then(|air| air.get("goal"));
+    let capability = air_goal.and_then(|value| {
+        match serde_json::from_value::<mj_core::goal::GoalCapability>(value.clone()) {
+            Ok(capability) => Some(capability),
+            Err(error) => {
+                tracing::warn!(%error, "adapter advertised malformed goal controls");
+                None
             }
-        });
+        }
+    });
+    let goal_recovery_supported = capability.as_ref().is_some_and(|capability| {
+        capability.supports(mj_core::goal::GoalControlAction::Pause)
+            && capability.supports(mj_core::goal::GoalControlAction::Resume)
+    }) && air_goal
+        .and_then(|goal| goal.get("resumePolicies"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|policies| policies.iter().any(|policy| policy == "pause"));
+    if capability
+        .as_ref()
+        .is_some_and(|capability| capability.supports(mj_core::goal::GoalControlAction::Resume))
+        && spec
+            .goal_recovery
+            .lock()
+            .expect("goal lock poisoned")
+            .asking()
+    {
+        ensure!(
+            goal_recovery_supported,
+            "the installed adapter cannot pause a goal before explicit resume; update the adapter"
+        );
+    }
     goal::publish(
         spec,
         events,
-        serde_json::json!({"mjGoalCapability": capability}),
+        serde_json::json!({"mjGoalCapability": &capability}),
     )
     .await?;
 
@@ -275,7 +280,7 @@ pub(super) async fn serve_session(
                 {
                     *state = fresh;
                 }
-                if spec.harness == HarnessKind::Codex
+                if capability.is_some()
                     && let Some(meta) = loaded_meta.as_ref()
                 {
                     goal::publish(spec, events, serde_json::Value::Object(meta.clone())).await?;
@@ -304,7 +309,7 @@ pub(super) async fn serve_session(
             let created = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();
             let created = created.context("create ACP session")?;
-            if spec.harness == HarnessKind::Codex
+            if capability.is_some()
                 && let Some(meta) = created.meta.as_ref()
             {
                 goal::publish(spec, events, serde_json::Value::Object(meta.clone())).await?;
@@ -683,6 +688,7 @@ pub(super) async fn serve_session(
     }
 
     let mut goal_question = goal::recover(
+        goal_recovery_supported,
         connection,
         &session_id,
         spec,
@@ -961,7 +967,7 @@ pub(super) async fn serve_session(
                                         // has no failed one.
                                         tracing::warn!(harness = ?spec.harness, category = %failure.category, title = %failure.title, "prompt failed");
                                         let failed = mj_core::diagnostic::TurnDiagnostic::from_session_failure(&failure);
-                                        let (stop_reason, message) = session_failure_outcome(spec.harness, &failed);
+                                        let (stop_reason, message) = session_failure_outcome(&failed);
                                         emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
                                         diagnostic = Some(failed);
                                         stop_reason

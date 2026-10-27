@@ -154,8 +154,8 @@ pub(super) fn session_request_meta(
             .expect("goal lock poisoned")
             .asking();
         let mut meta = serde_json::Map::from_iter([(
-            "goal".into(),
-            serde_json::json!({"resumePolicy": if asking {"pause"} else {"preserve"}}),
+            "jetbrains".into(),
+            serde_json::json!({"air":{"goal":{"resumePolicy": if asking {"pause"} else {"preserve"}}}}),
         )]);
         // The launch policy owns suppression independently of MCP exposure:
         // None and children suppress native delegation without a parent socket.

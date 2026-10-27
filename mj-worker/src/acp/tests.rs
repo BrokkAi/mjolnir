@@ -29,21 +29,21 @@ for line in sys.stdin:
     ident = request.get('id')
     if method == 'initialize':
         result = {'protocolVersion':1, 'agentCapabilities':{'loadSession':True, 'sessionCapabilities':{'resume':{}}},
-            '_meta':{'jetbrains':{'air':{'version':1,'capabilities':['nativeSubagentSessions']}},
-                'goal':{'version':1,'controlMethod':'_session/goal','actions':['pause','resume','clear']}}}
+            '_meta':{'jetbrains':{'air':{'version':1,'capabilities':['nativeSubagentSessions'],
+                'goal':{'version':1,'controlMethod':'_session/goal','actions':['pause','resume','clear']}}}}}
     elif method in ('session/new', 'session/resume', 'session/load'):
         assert method == 'session/load', request
         update({'sessionUpdate':'agent_message_chunk', 'content':{'type':'text','text':'old history ' * 12000}})
         update({'sessionUpdate':'available_commands_update', 'availableCommands':[{'name':'goal','description':'Set a goal'}]})
         update({'sessionUpdate':'tool_call','toolCallId':'old-tool','title':'old call','status':'in_progress'})
-        update({'sessionUpdate':'session_info_update','title':'Current title','_meta':{'goal':goal,'execution':execution}})
+        update({'sessionUpdate':'session_info_update','title':'Current title','_meta':{'jetbrains':{'air':{'goal':goal}},'execution':execution}})
         update({'sessionUpdate':'usage_update','used':100,'size':1000})
         update({'sessionUpdate':'config_option_update','configOptions':[
             {'id':'model','name':'Model','type':'select','currentValue':'astra','options':[{'value':'astra','name':'Astra'}]}]})
         update({'sessionUpdate':'current_mode_update','currentModeId':'agent'})
         update({'sessionUpdate':'plan','entries':[{'content':'old plan','priority':'medium','status':'completed'}]})
         result = {'sessionId':'native', 'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'}]},
-            '_meta':{'goal':goal,'execution':execution}}
+            '_meta':{'jetbrains':{'air':{'goal':goal}},'execution':execution}}
     elif method == 'session/prompt':
         update({'sessionUpdate':'tool_call_update','toolCallId':'old-tool','status':'completed'})
         update({'sessionUpdate':'tool_call','toolCallId':'new-tool','title':'new call','status':'in_progress'})
@@ -147,7 +147,7 @@ for line in sys.stdin:
     assert!(
         before_load_response
             .iter()
-            .any(|u| u["_meta"]["goal"]["tokensUsed"] == 42)
+            .any(|u| u["_meta"]["jetbrains"]["air"]["goal"]["tokensUsed"] == 42)
     );
     assert!(
         before_load_response
@@ -6408,8 +6408,14 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
                 let method = request["method"].as_str().unwrap_or("");
                 let result = match method {
                     "initialize" => {
-                        assert!(request["params"]["clientCapabilities"]["_meta"]["jetbrains"]["air"]["capabilities"]
-                            .as_array().unwrap().iter().any(|v| v == "nativeSubagentSessions"));
+                        assert_eq!(
+                            request["params"]["clientCapabilities"]["_meta"]["jetbrains"]["air"]["capabilities"],
+                            serde_json::json!([
+                                "asyncTasks",
+                                "nativeSubagentSessions",
+                                "sessionFailure"
+                            ])
+                        );
                         serde_json::json!({"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}},
                             "_meta":{"jetbrains":{"air":{"version":1,"capabilities":["nativeSubagentSessions"]}}}})
                     }
@@ -7392,11 +7398,11 @@ async fn a_form_the_harness_withdraws_still_resolves() {
     bridge.abort();
 }
 
-/// A codex-acp that, once asked for typed failures, ends the first prompt the
+/// An adapter that, once asked for typed failures, ends the first prompt the
 /// way it ended issue 1217's: `end_turn`, no agent text, and the provider's
 /// error as a `sessionFailure` record on the response. Reports whether the
 /// worker's `initialize` asked for the records.
-async fn typed_failure_bridge(stream: tokio::io::DuplexStream) -> bool {
+async fn typed_failure_bridge(stream: tokio::io::DuplexStream, failure: serde_json::Value) -> bool {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (read, mut write) = tokio::io::split(stream);
@@ -7424,16 +7430,12 @@ async fn typed_failure_bridge(stream: tokio::io::DuplexStream) -> bool {
                 "sessionId": "typed-failure",
                 "modes": {
                     "currentModeId": "agent",
-                    "availableModes": [{"id": "agent", "name": "Agent"}],
+                    "availableModes": [{"id": "agent", "name": "Agent"}, {"id": "auto", "name": "Auto"}],
                 },
             }),
             "session/prompt" => serde_json::json!({
                 "stopReason": "end_turn",
-                "_meta": {"quota": {}, "jetbrains": {"air": {"version": 1, "sessionFailure": {
-                    "id": "turn-1:error", "revision": 1, "category": "service",
-                    "severity": "error", "actions": ["retry"],
-                    "title": "{\"type\":\"error\",\"error\":{\"message\":\"model 'gpt-6-luna' is not enabled in rustponsesapi\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null},\"status\":400}",
-                }}}},
+                "_meta": {"jetbrains": {"air": {"version": 1, "sessionFailure": failure}}},
             }),
             _ if !id.is_null() => serde_json::json!({}),
             _ => continue,
@@ -7453,70 +7455,128 @@ async fn typed_failure_bridge(stream: tokio::io::DuplexStream) -> bool {
 // Hard-won: 03e1b5a: Codex model failures counted as completed turns and asked child agents for reports they had not written.
 #[tokio::test]
 async fn a_typed_bridge_failure_fails_the_turn_with_the_providers_reason() {
-    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-    let bridge = tokio::spawn(typed_failure_bridge(bridge_stream));
-    let (client_read, client_write) = tokio::io::split(client_stream);
-    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
-    let (request_tx, mut request_rx) = mpsc::channel(4);
-    let (event_tx, mut event_rx) = mpsc::channel(64);
-    let mut spec = reload_fallback_spec(HarnessKind::Codex);
-    spec.resume_session = None;
-    let driver = tokio::spawn(async move {
-        drive(
-            transport,
-            spec,
-            &mut request_rx,
-            event_tx,
-            Arc::new(Mutex::new(None)),
-            false,
-        )
-        .await
-    });
-
-    request_tx
-        .send(CommandRequest::Prompt {
-            request_id: "task".into(),
-            prompt: vec![ContentBlock::Text(TextContent::new("Do the task."))],
-        })
-        .await
-        .unwrap();
-    let mut warnings = Vec::new();
-    let (stop_reason, diagnostic) = loop {
-        let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+    for (harness, failure_kind, actions, expected_stop) in [
+        (
+            HarnessKind::Codex,
+            None,
+            vec!["retry"],
+            PROMPT_ERROR_STOP_REASON,
+        ),
+        (
+            HarnessKind::Claude,
+            None,
+            vec!["retry"],
+            PROMPT_ERROR_STOP_REASON,
+        ),
+        (
+            HarnessKind::Claude,
+            Some("quota_exhausted"),
+            vec![],
+            mj_core::diagnostic::QUOTA_STOP_REASON,
+        ),
+        (
+            HarnessKind::Claude,
+            Some("rate_limited"),
+            vec!["retry"],
+            PROMPT_ERROR_STOP_REASON,
+        ),
+        (
+            HarnessKind::Claude,
+            Some("budget_exhausted"),
+            vec!["new_session"],
+            PROMPT_ERROR_STOP_REASON,
+        ),
+        (
+            HarnessKind::Claude,
+            Some("context_exhausted"),
+            vec!["new_session"],
+            PROMPT_ERROR_STOP_REASON,
+        ),
+    ] {
+        let title = if failure_kind.is_some() {
+            "This usage limit was reached"
+        } else {
+            r#"{"type":"error","error":{"message":"model 'gpt-6-luna' is not enabled in rustponsesapi"},"status":400}"#
+        };
+        let failure = serde_json::json!({"id":"turn-1:error", "revision":1,
+        "category":if failure_kind.is_some() {"limit"} else {"service"},
+        "severity":"error", "actions":actions, "title":title});
+        let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+        let bridge = tokio::spawn(typed_failure_bridge(bridge_stream, failure));
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+        let (request_tx, mut request_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        let mut spec = reload_fallback_spec(harness);
+        spec.resume_session = None;
+        let driver = tokio::spawn(async move {
+            drive(
+                transport,
+                spec,
+                &mut request_rx,
+                event_tx,
+                Arc::new(Mutex::new(None)),
+                false,
+            )
             .await
-            .expect("the runtime keeps reporting")
-            .expect("the runtime keeps its event channel");
-        match event {
-            RuntimeEvent::Warning { message } if message.starts_with("prompt") => {
-                warnings.push(message)
-            }
-            RuntimeEvent::PromptFinished {
-                stop_reason,
-                diagnostic,
-                ..
-            } => break (stop_reason, diagnostic),
-            _ => {}
-        }
-    };
-    assert_eq!(stop_reason, PROMPT_ERROR_STOP_REASON);
-    let diagnostic = diagnostic.expect("a failed turn carries its diagnostic");
-    assert_eq!(
-        diagnostic.message,
-        "model 'gpt-6-luna' is not enabled in rustponsesapi"
-    );
-    assert_eq!(diagnostic.http_status, Some(400));
-    assert_eq!(
-        warnings,
-        vec!["prompt failed: model 'gpt-6-luna' is not enabled in rustponsesapi".to_owned()],
-        "one line, not the empty-response warning"
-    );
+        });
 
-    drop(request_tx);
-    let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
-    assert!(
-        bridge.await.unwrap(),
-        "a Codex worker asks the bridge for typed failures"
-    );
+        request_tx
+            .send(CommandRequest::Prompt {
+                request_id: "task".into(),
+                prompt: vec![ContentBlock::Text(TextContent::new("Do the task."))],
+            })
+            .await
+            .unwrap();
+        let mut warnings = Vec::new();
+        let (stop_reason, diagnostic) = loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .expect("the runtime keeps reporting");
+            let Some(event) = event else {
+                panic!(
+                    "{harness:?} {failure_kind:?}: driver ended before failure: {:?}",
+                    driver.await
+                );
+            };
+            match event {
+                RuntimeEvent::Warning { message } if message.starts_with("prompt") => {
+                    warnings.push(message)
+                }
+                RuntimeEvent::PromptFinished {
+                    stop_reason,
+                    diagnostic,
+                    ..
+                } => break (stop_reason, diagnostic),
+                _ => {}
+            }
+        };
+        assert_eq!(stop_reason, expected_stop);
+        let diagnostic = diagnostic.expect("a failed turn carries its diagnostic");
+        let expected_message = if failure_kind.is_some() {
+            title
+        } else {
+            "model 'gpt-6-luna' is not enabled in rustponsesapi"
+        };
+        assert_eq!(diagnostic.message, expected_message);
+        assert_eq!(
+            diagnostic.http_status,
+            failure_kind.is_none().then_some(400)
+        );
+        let label = if expected_stop == mj_core::diagnostic::QUOTA_STOP_REASON {
+            "prompt failed (usage limit reached)"
+        } else {
+            "prompt failed"
+        };
+        assert_eq!(warnings, vec![format!("{label}: {expected_message}")]);
+
+        drop(request_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
+        assert!(
+            bridge.await.unwrap(),
+            "both adapters are asked for typed failures"
+        );
+    }
 }
 
 /// A fake OpenCode that opens one session and holds each prompt until

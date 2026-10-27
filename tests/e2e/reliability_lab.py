@@ -564,7 +564,7 @@ def report_execution(status, goal_cleared=False):
     # session's goal state synchronized and defers every recovery checkpoint.
     meta = {"execution": {"version": 1, "status": status}}
     if goal_cleared:
-        meta["goal"] = None
+        meta["jetbrains"] = {"air": {"goal": None}}
     send({
         "jsonrpc": "2.0",
         "method": "session/update",
@@ -607,12 +607,12 @@ for line in sys.stdin:
         result = {
             "protocolVersion": 1,
             "_meta": {
-                "goal": {
+                "jetbrains": {"air": {"goal": {
                     "version": 1,
                     "controlMethod": "_session/goal",
                     "actions": ["resume", "pause", "clear"],
                     "resumePolicies": ["pause", "preserve"],
-                },
+                }}},
             },
         }
     elif method in ("session/new", "session/load"):

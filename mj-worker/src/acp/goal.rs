@@ -241,6 +241,7 @@ async fn control(
 }
 
 pub(super) async fn recover(
+    recovery_supported: bool,
     connection: &ConnectionTo<Agent>,
     session: &SessionId,
     spec: &LaunchSpec,
@@ -252,7 +253,7 @@ pub(super) async fn recover(
         .lock()
         .expect("goal lock poisoned")
         .clone();
-    if spec.harness != HarnessKind::Codex || spec.resume_session.is_none() {
+    if !recovery_supported || spec.resume_session.is_none() {
         return Ok(None);
     }
     // A crash can leave the prior question in the durable projection after
@@ -464,11 +465,11 @@ for line in sys.stdin:
     r = json.loads(line); method=r.get('method'); ident=r.get('id'); p=r.get('params',{})
     if ident is None: continue
     if method == 'initialize':
-        result={'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':{'resume':{}}},'_meta':{'goal':{'version':1,'controlMethod':'_session/goal','actions':['resume','pause'],'resumePolicies':['pause','preserve']},'execution':{'version':1}}}
+        result={'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':{'resume':{}}},'_meta':{'jetbrains':{'air':{'goal':{'version':1,'controlMethod':'_session/goal','actions':['resume','pause'],'resumePolicies':['pause','preserve']}}},'execution':{'version':1}}}
     elif method == 'session/resume':
-        assert p['_meta']['goal']['resumePolicy'] == ('pause' if asking else 'preserve')
+        assert p['_meta']['jetbrains']['air']['goal']['resumePolicy'] == ('pause' if asking else 'preserve')
         goal['status']='paused' if asking and os.environ['GOAL_STATUS']=='active' else os.environ['GOAL_STATUS']
-        result={'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'},{'id':'auto','name':'Auto'}]},'_meta':{'goal':goal,'execution':{'version':1,'status':'running' if running else 'idle','turnId':'native-turn' if running else None}}}
+        result={'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'},{'id':'auto','name':'Auto'}]},'_meta':{'jetbrains':{'air':{'goal':goal}},'execution':{'version':1,'status':'running' if running else 'idle','turnId':'native-turn' if running else None}}}
         # Live output is legal before the resume response and exceeds a pipe buffer.
         if running:
             emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'x'*80000}}}})
@@ -476,9 +477,9 @@ for line in sys.stdin:
         if p['action']=='resume':
             assert p['expectedGoal']=={'objective':'finish campaign','createdAt':123}
             with open('resumes','a') as f: f.write('resume\n')
-            goal['status']='active'; update({'goal':goal,'execution':{'version':1,'status':'running','turnId':'resumed'}})
+            goal['status']='active'; update({'jetbrains':{'air':{'goal':goal}},'execution':{'version':1,'status':'running','turnId':'resumed'}})
         else:
-            goal['status']='paused'; update({'goal':goal})
+            goal['status']='paused'; update({'jetbrains':{'air':{'goal':goal}}})
         result={}
     else: result={}
     emit({'jsonrpc':'2.0','id':ident,'result':result})
@@ -627,7 +628,7 @@ import json, os, sys
 def emit(x): print(json.dumps(x), flush=True)
 def result(i): emit({'jsonrpc':'2.0','id':i,'result':{}})
 def update(x): emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native','update':x}})
-def goal(status): update({'sessionUpdate':'session_info_update','_meta':{'goal':None if status is None else {'objective':'finish','status':status,'createdAt':123,'tokensUsed':42,'tokenBudget':900}}})
+def goal(status): update({'sessionUpdate':'session_info_update','_meta':{'jetbrains':{'air':{'goal':None if status is None else {'objective':'finish','status':status,'createdAt':123,'tokensUsed':42,'tokenBudget':900}}}}})
 def text(s): update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':s}})
 codex = os.environ['CODEX'] == 'true'
 held = None
@@ -636,9 +637,9 @@ for line in sys.stdin:
     r=json.loads(line); m=r.get('method'); i=r.get('id'); p=r.get('params',{})
     if i is None: continue
     if m=='initialize':
-        emit({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':1,'agentCapabilities':{},'_meta':{'goal':{'version':1,'controlMethod':'_session/goal','actions':['pause','resume','clear'] if codex else ['set','clear']}}}})
+        emit({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':1,'agentCapabilities':{},'_meta':{'jetbrains':{'air':{'goal':{'version':1,'controlMethod':'_session/goal','actions':['pause','resume','clear'] if codex else ['set','clear']}}}}}})
     elif m=='session/new':
-        emit({'jsonrpc':'2.0','id':i,'result':{'sessionId':'native','modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'},{'id':'auto','name':'Auto'}]}}})
+        emit({'jsonrpc':'2.0','id':i,'result':{'sessionId':'native','modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'},{'id':'auto','name':'Auto'}]},'_meta':{'jetbrains':{'air':{'goal':{'objective':'finish','status':'active','createdAt':123,'tokensUsed':42,'tokenBudget':900}}}}}})
     elif m=='session/prompt':
         assert p['prompt'][0]['text']=='work'
         text('prompt-started')
@@ -724,6 +725,10 @@ for line in sys.stdin:
                         .unwrap()
                         .state
                         .supports(GoalControlAction::Clear)
+                );
+                assert!(
+                    context.lock().unwrap().state.active(),
+                    "both adapters' session-open AIR goal snapshot is ingested"
                 );
                 if foreground {
                     tx.send(CommandRequest::Prompt {

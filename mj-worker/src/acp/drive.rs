@@ -1512,12 +1512,11 @@ fn failed_turn_stop_reason(
 }
 
 /// The stop reason and warning of a turn the bridge answered as an ordinary
-/// end of turn but with a typed failure record (codex-acp does this for every
-/// failed turn once Mjolnir asks for `sessionFailure`; issue 1217). The
+/// end of turn but with a typed failure record (Claude and Codex do this
+/// once Mjolnir asks for `sessionFailure`; issue 1217). The
 /// bridge no longer streams the error as agent text, so the warning line is
 /// the only place the conversation shows it.
 pub(super) fn session_failure_outcome(
-    harness: HarnessKind,
     diagnostic: &mj_core::diagnostic::TurnDiagnostic,
 ) -> (String, String) {
     let label = if diagnostic.is_usage_limit() {
@@ -1526,7 +1525,11 @@ pub(super) fn session_failure_outcome(
         "prompt failed"
     };
     (
-        failed_turn_stop_reason(harness, diagnostic),
+        if diagnostic.is_usage_limit() {
+            mj_core::diagnostic::QUOTA_STOP_REASON.to_owned()
+        } else {
+            PROMPT_ERROR_STOP_REASON.to_owned()
+        },
         format!("{label}: {}", single_spaced(&diagnostic.message)),
     )
 }
