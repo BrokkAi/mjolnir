@@ -23,14 +23,18 @@ pub use mj_client::quota::{
     API_LABEL, NOT_REPORTED_LABEL, ProfileQuota, QuotaWindow, projects_exhaustion,
 };
 
-/// Clone a daemon report for a user-facing quota surface without exposing
-/// model-specific provider limits. Internal selection and health keep the
-/// complete report.
+/// Clone a daemon report for a user-facing quota surface, retaining only
+/// unscoped windows and Claude's Fable weekly allowance. Internal selection
+/// and health keep the complete report.
 pub(crate) fn surface_quota_report(report: &ProfileQuota) -> ProfileQuota {
     let mut visible = report.clone();
+    let fable_weekly = report.fable_weekly_window().cloned();
     visible
         .windows
         .retain(|window| window.model_scope.is_none());
+    if let Some(window) = fable_weekly {
+        visible.windows.push(window);
+    }
     visible
 }
 
