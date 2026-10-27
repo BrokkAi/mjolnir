@@ -19,8 +19,8 @@ After this work, both harnesses declare the same AIR capabilities, and Mjolnir u
 - [ ] Mjolnir milestone 3 (deferred 2026-10-27): Claude adapter 0.97.0 and AIR turn tasks. Implemented, then set aside in `git stash` ("AIR milestone 3 ...") before validation finished. Another session (e8566ee4) owns the 0.97.0 bump, and claude-agent-acp#1453 makes AIR turn-task ends unreliable. Resume after #1453 is fixed, starting from that session's bump (now merged here as 87a322241, whose turn tasks flow through the shared AIR routing since merge 3ef8c29cb). The design study is kept at `.agents/docs/claude-097-air-turn-design.md`.
 - [x] (2026-10-27) Milestone 3 implementation (now in the stash, not committed): pins and registry lock updated together; Claude declares backgroundSubagents, launches ACP v1, and ends prompts at PromptResponse. The relay classifies AIR turns by session/task, retains terminal tombstones, and owns captured autonomous stop targets. Raw results, early release, output inference, stop-chunk pairing and synthetic idle are removed.
 - [ ] Milestone 3 validation and commit (deferred with milestone 3): converted relay/coordinator fixtures and fake-adapter integration tests exist in the stash; final suites, clippy and formatting were not run.
-- [ ] Live check of Claude 0.94.0 and Codex in an isolated instance with the packed Codex 1.15.0 adapter.
-- [ ] Publish `@brokkai/codex-acp` 1.15.0; pin it in Mjolnir and the agent-dev image; push.
+- [x] (2026-10-27) Live checks in an isolated instance, driven through the TUI in tmux. Codex (managed 1.14.1): a running `exec_command` appeared as an AIR task with a Stop control, and Stop ended the process without opening a turn. Claude 0.94.0: a background Bash task listed from AIR, Stop removed it without a turn, and a task that finished on its own produced Claude's follow-up turn and returned to Idle. Codex 1.15.0 (published, pinned): a `/goal` run left the relay with the AIR goal capability (set, pause, resume, clear) and a `complete` snapshot.
+- [x] (2026-10-27) Published `@brokkai/codex-acp` 1.15.0 (tag v1.15.0, npm provenance; release tarball identical to the gate-tested one), pinned it in 14c567dfa, merged origin/master (including the Claude 0.97.0 bump 87a322241 in 3ef8c29cb), pushed master 0a47952e5, and installed it locally with `scripts/install.sh`; the daemon handed off to that build.
 
 ## Surprises & Discoveries
 
@@ -75,7 +75,11 @@ After this work, both harnesses declare the same AIR capabilities, and Mjolnir u
 
 ## Outcomes & Retrospective
 
-Not started.
+Claude and Codex now declare the same AIR capabilities (asyncTasks, nativeSubagentSessions, sessionFailure) and Mjolnir consumes each of them the same way for both harnesses. AIR task updates are the only background-task list for both: Claude's raw SDK task level and Codex's exec-card inference are gone, Codex shell tasks became stoppable, and tasks in native child sessions are listed and stopped through their own session. Claude typed failures, including quota stops, go through the shared decoder. Goals use only the AIR goal namespace; the Codex fork's root `_meta.goal` copy was removed in 1.15.0, and its remaining goal extensions travel as extra fields on the AIR goal objects. The spurious `nativeSubagentAvailability` AIR declaration was dropped.
+
+Remaining: milestone 3 (ending Claude turns from AIR turn tasks instead of raw SDK results) waits for claude-agent-acp#1453; the implementation is in this clone's stash and the design in `.agents/docs/claude-097-air-turn-design.md`. The Codex fork keeps patches for things AIR does not cover (goal recovery guarantees, execution state, idle steering policy, native child cancellation, guardian permissions, token usage, DeepSeek ordering, model labels, MCP approval policy, asynchronous questions).
+
+Lessons: a first adapter-level release gate failed only because its harness exposed its own `exec` tool; an A/B run of the previous release with Mjolnir's launch settings separated harness artifacts from regressions. Another session was bumping the same adapter at the same time; checking memory notes and session history before continuing a large change found the overlap and a real upstream bug (#1453) that the plan had not considered.
 
 ## Context and Orientation
 

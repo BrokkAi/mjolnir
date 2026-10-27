@@ -831,6 +831,7 @@ fn an_apple_container_takes_macs_claude_keychain_login_unless_a_setup_token_does
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     let backend = targets::TargetLocator::AppleContainer {
         borrowed_from: None,
