@@ -1944,7 +1944,143 @@ fn released_protocol_transcripts() -> Vec<ProtocolTranscript> {
                 r#"{"protocol_version":62,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
             ],
         },
+        ProtocolTranscript {
+            protocol_version: 64,
+            daemon_build: "2.59.1",
+            expected_requests: requests(64),
+            responses: [
+                r#"{"protocol_version":64,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-10-27T00:00:00Z","build_version":"2.59.1","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
+                r#"{"protocol_version":64,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
+            ],
+        },
     ]
+}
+
+// Hard-won: 848b4781f: direct CLI removal saved config before failing without the daemon database writer.
+#[cfg(unix)]
+#[tokio::test]
+async fn remove_project_rpc_removes_missing_directory_from_config_and_runtime_feed() {
+    const NAME: &str = "remove_project_rpc_removes_missing_directory_from_config_and_runtime_feed";
+    const CHILD: &str = "MJ_TEST_REMOVE_MISSING_PROJECT_RPC";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+
+    let writer = crate::database::install_isolated_test_writer();
+    let data_dir = std::env::var_os("MJ_DATA_DIR").unwrap();
+    let missing = PathBuf::from(data_dir).join("missing-project-checkout");
+    assert!(!missing.exists());
+    let bundle_id = "missingpath";
+    let bundle = mj_core::config::ProjectBundle {
+        primary_repo: bundle_id.into(),
+        repositories: vec![mj_core::config::ProjectRepository {
+            id: bundle_id.into(),
+            github: None,
+            local: Some(missing.clone()),
+            destination: PathBuf::from(bundle_id),
+            git_ref: None,
+        }],
+    };
+    mj_core::config::Config::update(|config| {
+        config.bundles.insert(bundle_id.into(), bundle.clone());
+        config.validate()
+    })
+    .unwrap();
+    crate::database::store_catalog_project(
+        bundle_id,
+        &mj_core::repository::ProjectBundleSnapshot {
+            bundle,
+            identities: BTreeMap::from([(
+                bundle_id.into(),
+                mj_core::repository::RepositoryIdentity::Local(missing),
+            )]),
+            network_sources: BTreeMap::new(),
+            plain_directories: BTreeSet::new(),
+        },
+        true,
+    )
+    .unwrap();
+
+    drop(writer);
+    let error = crate::controller::remove_bundle(bundle_id).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("database writer is not available"),
+        "unexpected removal failure: {error:#}"
+    );
+    assert!(
+        mj_core::config::Config::load()
+            .unwrap()
+            .bundles
+            .contains_key(bundle_id)
+    );
+    let _writer = crate::database::install_isolated_test_writer();
+
+    let state = test_runtime_state_loading_the_store();
+    let mut replica = mj_client::runtime_feed::RuntimeReplica::default();
+    replica
+        .apply(state.runtime_changes(None, false).await.unwrap())
+        .unwrap();
+    assert!(
+        replica
+            .projection
+            .metadata
+            .config
+            .bundles
+            .contains_key(bundle_id)
+    );
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_state = state.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        serve_client(
+            stream,
+            test_metadata(address),
+            server_state,
+            CancellationToken::new(),
+        )
+        .await
+    });
+    let mut client = mj_client::daemon::DaemonClient::connect(test_metadata(address))
+        .await
+        .unwrap();
+    client.remove_project(bundle_id.into()).await.unwrap();
+    drop(client);
+    server.await.unwrap().unwrap();
+
+    let cursor = replica.cursor.clone();
+    replica
+        .apply(state.runtime_changes(cursor, false).await.unwrap())
+        .unwrap();
+    assert!(
+        !replica
+            .projection
+            .metadata
+            .config
+            .bundles
+            .contains_key(bundle_id)
+    );
+    assert!(
+        !mj_core::config::Config::load()
+            .unwrap()
+            .bundles
+            .contains_key(bundle_id)
+    );
+    assert!(
+        crate::database::read_project_catalog()
+            .unwrap()
+            .projects
+            .iter()
+            .all(|project| project.bundle_id != bundle_id)
+    );
 }
 
 #[tokio::test]

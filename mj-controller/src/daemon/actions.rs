@@ -322,6 +322,10 @@ pub(super) async fn handle_action(
                 },
             ))
         }
+        DaemonAction::RemoveProject { bundle_id } => {
+            state.remove_project(bundle_id).await?;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::WikiSearch { query, limit } => Ok(DaemonReply::WikiRows(
             state.wiki_search(query, limit).await?,
         )),
@@ -743,6 +747,9 @@ pub(super) async fn handle_action(
 pub(super) fn upgrade_request_activity(
     action: &DaemonAction,
 ) -> Result<Option<crate::upgrade::Work>> {
+    if matches!(action, DaemonAction::RemoveProject { .. }) {
+        return crate::upgrade::activity("project removal").map(Some);
+    }
     if matches!(action, DaemonAction::SetOperatorAway { .. }) {
         return crate::upgrade::activity("operator away setting").map(Some);
     }

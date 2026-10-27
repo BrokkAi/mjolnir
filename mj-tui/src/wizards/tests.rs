@@ -601,6 +601,105 @@ fn a_saved_project_with_a_missing_directory_is_marked_unavailable() {
         joined.contains("Unavailable: the directory") && joined.contains("does not exist."),
         "{text}"
     );
+
+    // An unavailable local path does not disable removing the saved project.
+    assert_eq!(
+        click_project_text(&mut dashboard, &mut terminal, "Remove"),
+        DashboardAction::RemoveBundle {
+            bundle_id: "missingpath".into()
+        }
+    );
+    dashboard.fail_bundle_removal("simulated persistence error");
+    let failure = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
+    assert!(
+        failure.contains("Could not remove project: simulated persistence error"),
+        "the async failure must be shown inside the picker:\n{failure}"
+    );
+
+    assert_eq!(
+        click_project_text(&mut dashboard, &mut terminal, "Remove"),
+        DashboardAction::RemoveBundle {
+            bundle_id: "missingpath".into()
+        }
+    );
+    let retry = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
+    assert!(retry.contains("Removing project…"), "{retry}");
+    assert!(!retry.contains("simulated persistence error"), "{retry}");
+
+    let mut removed = dashboard.config.clone();
+    removed.bundles.remove("missingpath");
+    dashboard.apply_removed_bundle(removed, "missingpath");
+    let success = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
+    assert!(!success.contains("missingpath ·"), "{success}");
+    assert!(
+        !success.contains("/definitely/not/here/missingpath"),
+        "{success}"
+    );
+    assert!(
+        !success.contains("simulated persistence error"),
+        "{success}"
+    );
+}
+
+// Hard-won: 848b4781f: unavailable-project removal refusal appeared only in the dashboard notice behind the modal.
+#[test]
+fn refusal_to_remove_unavailable_project_is_visible_inside_picker() {
+    let missing = PathBuf::from("/definitely/not/here/missingpath");
+    let mut configuration = two_project_config();
+    configuration.bundles.insert(
+        "missingpath".into(),
+        mj_core::config::ProjectBundle {
+            primary_repo: "missingpath".into(),
+            repositories: vec![mj_core::config::ProjectRepository {
+                id: "missingpath".into(),
+                github: None,
+                local: Some(missing.clone()),
+                destination: PathBuf::from("missingpath"),
+                git_ref: None,
+            }],
+        },
+    );
+    let mut session = stopped_session();
+    session.bundle_id = "missingpath".into();
+    let mut state = State::default();
+    state.sessions.insert(session.id.clone(), session);
+    let mut dashboard = DashboardState::new(configuration, state, BTreeMap::new());
+    open_new_session_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    dashboard.apply_project_directory_check(missing, Some(false));
+    select_saved_project(&mut dashboard, "missingpath");
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 16)).unwrap();
+    assert_eq!(
+        click_project_text(&mut dashboard, &mut terminal, "Remove"),
+        DashboardAction::None
+    );
+    let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
+    assert!(
+        text.contains("is used by a session"),
+        "the modal must show the refusal at short height:\n{text}"
+    );
+    assert!(text.contains("(unavailable)"), "{text}");
+
+    focus_project_control(&mut dashboard, WizardControl::BundleList);
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Down)),
+        DashboardAction::None
+    );
+    assert_ne!(
+        nth_bundle_key(
+            &dashboard.config,
+            &dashboard.launch_recency,
+            project_wizard(&dashboard).bundle
+        ),
+        "missingpath"
+    );
+    let changed_selection = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
+    assert!(
+        !changed_selection.contains("is used by a session"),
+        "{changed_selection}"
+    );
 }
 
 fn saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove() {

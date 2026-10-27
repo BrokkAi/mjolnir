@@ -545,6 +545,9 @@ pub enum DaemonAction {
     CreateProject {
         sources: Vec<String>,
     },
+    RemoveProject {
+        bundle_id: String,
+    },
     WikiSearch {
         query: String,
         limit: usize,
@@ -1800,6 +1803,16 @@ impl DaemonClient {
         }
     }
 
+    pub async fn remove_project(&mut self, bundle_id: String) -> Result<()> {
+        match self
+            .request(DaemonAction::RemoveProject { bundle_id })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            other => bail!("unexpected project removal reply: {other:?}"),
+        }
+    }
+
     pub async fn wiki_search(&mut self, query: String, limit: usize) -> Result<WikiSearchPage> {
         match self
             .request(DaemonAction::WikiSearch { query, limit })
@@ -2422,8 +2435,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Creation and runtime metadata carry interactive launch-choice provenance.
 // New-session creation independently controls whether its container size
 // becomes the host's saved default.
-// Operator-away action and runtime metadata.
-pub const PROTOCOL_VERSION: u32 = 63;
+// Operator-away action and runtime metadata; daemon-owned project removal.
+pub const PROTOCOL_VERSION: u32 = 64;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
