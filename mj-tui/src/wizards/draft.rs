@@ -323,6 +323,9 @@ impl WizardDraft for NewWizard {
     /// attachment editor and editing an unrelated field do not, because none of
     /// them changes the sources the preflight resolved.
     fn note_draft_change(&mut self, dashboard: &mut DashboardState, change: DraftChange) {
+        if change == DraftChange::BundleSelected {
+            self.bundle_removal_outcome = None;
+        }
         if matches!(
             change,
             DraftChange::BundleSelected

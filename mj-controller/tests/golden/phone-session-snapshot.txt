@@ -1242,3 +1242,83 @@
     "session_id": "0123456789abcdef0123456789abcdef"
   }
 }
+=== viewer quota windows (Claude, unknown Claude, and Codex profiles) ===
+{
+  "profiles": [
+    {
+      "id": "claude",
+      "quota": {
+        "summary": "Week 21% left · Week (Fable) 17% left",
+        "windows": [
+          {
+            "label": "Week",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "long",
+            "percent_used": 79,
+            "fable_remaining_percent": 17,
+            "projects_exhaustion_before_reset": false
+          },
+          {
+            "label": "5H",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "five_hour",
+            "percent_used": 37,
+            "projects_exhaustion_before_reset": false
+          }
+        ],
+        "stale": true,
+        "refreshed_at_epoch_seconds": 0,
+        "has_error": false
+      }
+    },
+    {
+      "id": "claude-unknown",
+      "quota": {
+        "summary": "Week available · Week (Fable) 17% left",
+        "windows": [
+          {
+            "label": "Week",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "long",
+            "projects_exhaustion_before_reset": false
+          },
+          {
+            "label": "5H",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "five_hour",
+            "percent_used": 37,
+            "projects_exhaustion_before_reset": false
+          }
+        ],
+        "stale": true,
+        "refreshed_at_epoch_seconds": 0,
+        "has_error": false
+      }
+    },
+    {
+      "id": "codex",
+      "quota": {
+        "summary": "Week 70% left",
+        "windows": [
+          {
+            "label": "Week",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "long",
+            "percent_used": 30,
+            "projects_exhaustion_before_reset": false
+          },
+          {
+            "label": "5H",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "five_hour",
+            "percent_used": 20,
+            "projects_exhaustion_before_reset": false
+          }
+        ],
+        "stale": true,
+        "refreshed_at_epoch_seconds": 0,
+        "has_error": false
+      }
+    }
+  ]
+}

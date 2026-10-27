@@ -271,7 +271,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn published_quota_snapshot_hides_scoped_windows_and_keeps_daemon_report() {
+    fn published_quota_snapshot_keeps_claude_fable_and_hides_other_scopes() {
         let report = ProfileQuota {
             banked_resets: None,
             profile_id: "claude".into(),
@@ -289,7 +289,7 @@ mod tests {
                 },
                 crate::quota::QuotaWindow {
                     label: "Week (Fable)".into(),
-                    remaining_percent: Some(0),
+                    remaining_percent: Some(17),
                     duration_seconds: Some(604_800),
                     model_scope: Some("fable".into()),
                     used: None,
@@ -297,17 +297,58 @@ mod tests {
                     resets: None,
                     resets_at_epoch_seconds: Some(1_500),
                 },
+                crate::quota::QuotaWindow {
+                    label: "Week (Other)".into(),
+                    remaining_percent: Some(8),
+                    duration_seconds: Some(604_800),
+                    model_scope: Some("other-model".into()),
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: None,
+                },
             ],
             extra: None,
             error: None,
             refreshed_at_epoch_seconds: 1_000,
             rate_limited_until_epoch_seconds: None,
         };
-        let reports = BTreeMap::from([("claude".to_owned(), report.clone())]);
-        let published = surface_quota_reports(&reports);
+        let codex = ProfileQuota {
+            profile_id: "codex".into(),
+            harness: mj_core::config::HarnessKind::Codex,
+            windows: vec![crate::quota::QuotaWindow {
+                label: "Week (Scoped)".into(),
+                remaining_percent: Some(9),
+                duration_seconds: Some(604_800),
+                model_scope: Some("fable".into()),
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: None,
+            }],
+            ..report.clone()
+        };
+        let reports = BTreeMap::from([
+            ("claude".to_owned(), report.clone()),
+            ("codex".to_owned(), codex.clone()),
+        ]);
+        let snapshot = mj_client::quota::QuotaSnapshot {
+            reports: surface_quota_reports(&reports),
+            ..Default::default()
+        };
+        let serialized = serde_json::to_vec(&snapshot).expect("serialize published snapshot");
+        let snapshot: mj_client::quota::QuotaSnapshot =
+            serde_json::from_slice(&serialized).expect("read published snapshot");
 
-        assert_eq!(reports["claude"].windows.len(), 2);
-        assert_eq!(published["claude"].windows.len(), 1);
-        assert_eq!(published["claude"].windows[0].label, "Week");
+        assert_eq!(reports["claude"].windows.len(), 3);
+        assert_eq!(reports["codex"].windows.len(), 1);
+        assert_eq!(snapshot.reports["claude"].windows.len(), 2);
+        assert_eq!(snapshot.reports["claude"].windows[0].label, "Week");
+        assert_eq!(snapshot.reports["claude"].windows[1].label, "Week (Fable)");
+        assert_eq!(
+            snapshot.reports["claude"].windows[1].remaining_percent,
+            Some(17)
+        );
+        assert_eq!(snapshot.reports["codex"].windows.len(), 0);
     }
 }

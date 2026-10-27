@@ -8,7 +8,7 @@ use mj_core::config::Config;
 use mj_core::elicitation::ElicitationRequest;
 use mj_core::state::{
     MaterializedExecutionState, MaterializedSession, MaterializedSessionSummary, MoveOperation,
-    SessionRecord, State, TranscriptBody, TranscriptItem, normalize_session_title,
+    SessionRecord, State, TranscriptBody, TranscriptItem,
 };
 
 use mj_chat::chat::{Notices, TranscriptSnapshot};
@@ -234,7 +234,6 @@ pub(crate) fn latest_agent_activity(
 pub struct PreparedMaterializedSessionDetail {
     pub(crate) session_id: String,
     pub(crate) applied_event_ordinal: u64,
-    pub(crate) session_title: Option<String>,
     pub(crate) current_turn_started_at: Option<u64>,
     pub(crate) awaiting_input: bool,
     pub(crate) last_activity_at_ms: Option<u64>,
@@ -257,7 +256,6 @@ pub struct PreparedMaterializedSessionDetail {
 pub struct PreparedMaterializedSessionSummary {
     session_id: String,
     applied_event_ordinal: u64,
-    session_title: Option<String>,
     current_turn_started_at: Option<u64>,
     last_activity_at_ms: Option<u64>,
     last_agent_message: Option<Arc<str>>,
@@ -295,10 +293,6 @@ impl PreparedMaterializedSessionSummary {
         Self {
             session_id: summary.session_id,
             applied_event_ordinal: summary.applied_event_ordinal,
-            session_title: summary
-                .session_title
-                .as_deref()
-                .and_then(normalize_session_title),
             current_turn_started_at,
             last_activity_at_ms: summary
                 .last_activity_at_ms
@@ -449,10 +443,6 @@ impl PreparedMaterializedSessionDetail {
         let pending_elicitations = session.pending_elicitations.clone();
         let session_id = session.session_id.clone();
         let applied_event_ordinal = session.applied_event_ordinal;
-        let session_title = session
-            .session_title
-            .as_deref()
-            .and_then(normalize_session_title);
         let last_activity_at_ms = session
             .last_activity_at_ms()
             .and_then(|value| u64::try_from(value).ok());
@@ -466,7 +456,6 @@ impl PreparedMaterializedSessionDetail {
         Self {
             session_id,
             applied_event_ordinal,
-            session_title,
             current_turn_started_at,
             awaiting_input,
             last_activity_at_ms,
@@ -1176,46 +1165,31 @@ impl DashboardState {
         {
             return false;
         }
-        {
-            detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
-            detail.current_turn_started_at = prepared.current_turn_started_at;
-            detail.awaiting_input = prepared.awaiting_input;
-            detail.last_activity_at_ms = prepared.last_activity_at_ms;
-            detail.last_agent_message = prepared.last_agent_message;
-            detail.last_user_message = prepared.last_user_message;
-            detail.last_agent_message_follows_last_user =
-                prepared.last_agent_message_follows_last_user;
-            detail.latest_agent_activity_after_last_user =
-                prepared.latest_agent_activity_after_last_user;
-            detail.agent_message_latest_content_ordinals =
-                prepared.agent_message_latest_content_ordinals;
-            detail.unread_agent_messages = prepared.unread_agent_messages;
-            detail.interruption_event_ordinals = prepared.interruption_event_ordinals;
-            detail.unread_interruptions = prepared.unread_interruptions;
-            // The replaced transcript owns every converted entry and rendered
-            // line of the previous projection, so it is freed off the loop.
-            crate::retire::retire((
-                detail.transcript.replace(prepared.transcript),
-                std::mem::replace(&mut detail.projection, prepared.projection),
-            ));
-            detail.transcript_hydration = TranscriptHydration::Ready;
-            detail.queued_prompts = prepared.queued_prompts;
-            detail.pending_elicitations = prepared.pending_elicitations;
-            detail.pending_elicitations_applied_event_ordinal =
-                Some(prepared.applied_event_ordinal);
-            detail.update_unread(through);
-        }
-        let mut title_changed = false;
-        if let Some(title) = prepared.session_title.as_ref()
-            && let Some(record) = self.state.sessions.get_mut(&prepared.session_id)
-            && record.acp_session_title.as_deref() != Some(title.as_str())
-        {
-            record.acp_session_title = Some(title.clone());
-            title_changed = true;
-        }
-        if title_changed {
-            self.rebuild_resume_rows();
-        }
+        detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
+        detail.current_turn_started_at = prepared.current_turn_started_at;
+        detail.awaiting_input = prepared.awaiting_input;
+        detail.last_activity_at_ms = prepared.last_activity_at_ms;
+        detail.last_agent_message = prepared.last_agent_message;
+        detail.last_user_message = prepared.last_user_message;
+        detail.last_agent_message_follows_last_user = prepared.last_agent_message_follows_last_user;
+        detail.latest_agent_activity_after_last_user =
+            prepared.latest_agent_activity_after_last_user;
+        detail.agent_message_latest_content_ordinals =
+            prepared.agent_message_latest_content_ordinals;
+        detail.unread_agent_messages = prepared.unread_agent_messages;
+        detail.interruption_event_ordinals = prepared.interruption_event_ordinals;
+        detail.unread_interruptions = prepared.unread_interruptions;
+        // The replaced transcript owns every converted entry and rendered
+        // line of the previous projection, so it is freed off the loop.
+        crate::retire::retire((
+            detail.transcript.replace(prepared.transcript),
+            std::mem::replace(&mut detail.projection, prepared.projection),
+        ));
+        detail.transcript_hydration = TranscriptHydration::Ready;
+        detail.queued_prompts = prepared.queued_prompts;
+        detail.pending_elicitations = prepared.pending_elicitations;
+        detail.pending_elicitations_applied_event_ordinal = Some(prepared.applied_event_ordinal);
+        detail.update_unread(through);
         true
     }
 
@@ -1241,33 +1215,19 @@ impl DashboardState {
         {
             return false;
         }
-        {
-            detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
-            detail.current_turn_started_at = prepared.current_turn_started_at;
-            detail.last_activity_at_ms = prepared.last_activity_at_ms;
-            detail.last_agent_message = prepared.last_agent_message;
-            detail.last_user_message = prepared.last_user_message;
-            detail.last_agent_message_follows_last_user =
-                prepared.last_agent_message_follows_last_user;
-            detail.latest_agent_activity_after_last_user = None;
-            detail.agent_message_latest_content_ordinals =
-                prepared.agent_message_latest_content_ordinals;
-            detail.unread_agent_messages = prepared.unread_agent_messages;
-            detail.interruption_event_ordinals = prepared.interruption_event_ordinals;
-            detail.unread_interruptions = prepared.unread_interruptions;
-            detail.update_unread(through);
-        }
-        let mut title_changed = false;
-        if let Some(title) = prepared.session_title.as_ref()
-            && let Some(record) = self.state.sessions.get_mut(&prepared.session_id)
-            && record.acp_session_title.as_deref() != Some(title.as_str())
-        {
-            record.acp_session_title = Some(title.clone());
-            title_changed = true;
-        }
-        if title_changed {
-            self.rebuild_resume_rows();
-        }
+        detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
+        detail.current_turn_started_at = prepared.current_turn_started_at;
+        detail.last_activity_at_ms = prepared.last_activity_at_ms;
+        detail.last_agent_message = prepared.last_agent_message;
+        detail.last_user_message = prepared.last_user_message;
+        detail.last_agent_message_follows_last_user = prepared.last_agent_message_follows_last_user;
+        detail.latest_agent_activity_after_last_user = None;
+        detail.agent_message_latest_content_ordinals =
+            prepared.agent_message_latest_content_ordinals;
+        detail.unread_agent_messages = prepared.unread_agent_messages;
+        detail.interruption_event_ordinals = prepared.interruption_event_ordinals;
+        detail.unread_interruptions = prepared.unread_interruptions;
+        detail.update_unread(through);
         true
     }
 

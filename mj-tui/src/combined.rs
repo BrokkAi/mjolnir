@@ -1731,7 +1731,7 @@ fn render_transition_surface(
     let type_ahead = !failed && DashboardState::transition_accepts_prompts(transition);
     let mut details = vec![
         Line::styled(
-            format!("{} · {}", target, session.display_title()),
+            format!("{} · {}", target, session.listed_title()),
             Style::default().add_modifier(ratatui::style::Modifier::BOLD),
         ),
         Line::raw(format!("Operation: {}", transition.label())),

@@ -296,30 +296,19 @@ impl DashboardContext {
                     None
                 }
             };
-            match apply_worker_poll_update(
-                &mut self.controller,
+            if let Some(materialized) = apply_worker_poll_update(
+                &self.controller,
                 &mut self.dashboard,
-                &mut self.chats,
                 update,
                 Some((&self.dashboard_io_tx, &self.critical_operations)),
             ) {
-                Ok(Some(materialized)) => {
-                    let viewed_through_event_ordinal = self
-                        .controller
-                        .state
-                        .sessions
-                        .get(&session_id)
-                        .map_or(0, |session| session.viewed_through_event_ordinal);
-                    self.request_materialized_projection(
-                        materialized,
-                        viewed_through_event_ordinal,
-                    );
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    self.dashboard
-                        .set_notice(format!("Could not save harness title: {error:#}"));
-                }
+                let viewed_through_event_ordinal = self
+                    .controller
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .map_or(0, |session| session.viewed_through_event_ordinal);
+                self.request_materialized_projection(materialized, viewed_through_event_ordinal);
             }
             if let Some(episode_id) =
                 self.worker_diagnoses

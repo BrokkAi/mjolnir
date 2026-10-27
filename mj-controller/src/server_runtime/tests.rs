@@ -1219,6 +1219,113 @@ fn golden_phone_session_snapshot() {
         }),
     );
 
+    let mut quota_controller = controller_with_profiles(&["claude", "claude-unknown", "codex"]);
+    quota_controller
+        .config
+        .profiles
+        .get_mut("claude")
+        .unwrap()
+        .kind = HarnessKind::Claude;
+    quota_controller
+        .config
+        .profiles
+        .get_mut("claude-unknown")
+        .unwrap()
+        .kind = HarnessKind::Claude;
+    let quota_window = |label: &str,
+                        remaining_percent: Option<u8>,
+                        model_scope: Option<&str>,
+                        duration_seconds: i64| crate::quota::QuotaWindow {
+        label: label.into(),
+        remaining_percent,
+        duration_seconds: Some(duration_seconds),
+        model_scope: model_scope.map(str::to_owned),
+        used: None,
+        limit: None,
+        resets: None,
+        resets_at_epoch_seconds: Some(2_000_000_000),
+    };
+    let quota_report = |profile_id: &str, harness: HarnessKind, windows| ProfileQuota {
+        banked_resets: None,
+        profile_id: profile_id.into(),
+        harness,
+        windows,
+        extra: None,
+        error: None,
+        refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
+    };
+    let quota_reports = BTreeMap::from([
+        (
+            "claude".into(),
+            quota_report(
+                "claude",
+                HarnessKind::Claude,
+                vec![
+                    quota_window("Week", Some(21), None, 7 * 24 * 60 * 60),
+                    quota_window("Week (Fable)", Some(17), Some("fable"), 7 * 24 * 60 * 60),
+                    quota_window("5H", Some(63), None, 5 * 60 * 60),
+                ],
+            ),
+        ),
+        (
+            "claude-unknown".into(),
+            quota_report(
+                "claude-unknown",
+                HarnessKind::Claude,
+                vec![
+                    quota_window("Week", None, None, 7 * 24 * 60 * 60),
+                    quota_window("Week (Fable)", Some(17), Some("fable"), 7 * 24 * 60 * 60),
+                    quota_window("5H", Some(63), None, 5 * 60 * 60),
+                ],
+            ),
+        ),
+        (
+            "codex".into(),
+            quota_report(
+                "codex",
+                HarnessKind::Codex,
+                vec![
+                    quota_window("Week", Some(70), None, 7 * 24 * 60 * 60),
+                    quota_window("5H", Some(80), None, 5 * 60 * 60),
+                ],
+            ),
+        ),
+    ]);
+    let quota_snapshot = viewer_snapshot(
+        &quota_controller,
+        &[],
+        &quota_reports,
+        &PhoneSessionViews {
+            native_agents: &Default::default(),
+            conversations: &Default::default(),
+            queued_prompts: &Default::default(),
+            active_user_shells: &Default::default(),
+            pending_elicitations: &Default::default(),
+            prompt_images: &Default::default(),
+            operational: &Default::default(),
+            materialized_activity: &Default::default(),
+            project_sources: &PhoneProjectSources::default(),
+            operations: &Default::default(),
+            move_recoveries: &Default::default(),
+            capacity: &[],
+            launch_failures: &[],
+            reviews: &Default::default(),
+        },
+        1,
+    );
+    section(
+        &mut out,
+        "viewer quota windows",
+        "Claude, unknown Claude, and Codex profiles",
+        &serde_json::json!({
+            "profiles": quota_snapshot.profiles.iter().map(|profile| serde_json::json!({
+                "id": profile.id,
+                "quota": profile.quota,
+            })).collect::<Vec<_>>(),
+        }),
+    );
+
     mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "phone-session-snapshot", &out);
 }
 

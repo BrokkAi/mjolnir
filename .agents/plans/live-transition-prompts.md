@@ -26,7 +26,9 @@ startup composer and is outside this change.
 - [x] (2026-10-27 15:20Z) Full backend/core/client validation passes: core 552 plus 3 Jev integration, client 43, controller 2,162; no failures.
 - [x] (2026-10-27 15:40Z) Verify transition ordering, native reply ownership, immutable retry requests, and once-only recovered image drafts; independent review accepts fixes.
 - [x] (2026-10-27 15:40Z) Full touched-crate suites, workspace Clippy, formatting, and diff checks pass. A concurrent-build doctest artifact failure passed its docs-only rerun.
-- [ ] Commit the validated implementation, merge upstream changes, validate affected integration points, and push current master.
+- [x] (2026-10-27 16:11Z) Commit implementation as `8f49f1413`, merge upstream through `77c0143b7`, and pass focused integration, upgrade, Clippy, and formatting checks.
+- [x] (2026-10-27 16:11Z) Fix the user-reported lifecycle regression call layout; direct pinned rustfmt file check and workspace formatting pass.
+- [ ] Merge the latest upstream updates, finish integration checks, and push current master.
 
 ## Surprises & Discoveries
 
@@ -120,7 +122,16 @@ target; its docs-only rerun passed after that build completed. Formatting and
 diff checks pass. No default/live daemon or actual platform clipboard was used.
 
 Upstream master advanced to protocol 65 during implementation. The validated
-checkpoint must merge upstream and advance the combined protocol before pushing.
+implementation was committed as `8f49f1413`. The first upstream merge uses combined
+protocol 66 and store floor 100. Its targeted checks pass: client 43, controller
+startup 54 plus direct historical migration, TUI ingest 22 and combined render 13,
+CLI startup requests four, attach two, and isolated daemon startup/upgrade 16.
+Workspace Clippy and formatting pass. The user-reported call in
+`mj-controller/src/controller/lifecycle/tests.rs` was explicitly formatted with
+the pinned rustfmt; its direct edition-2024 check passes.
+
+Upstream subsequently advanced to `58f8eec8b` with protocol 66. Combine those
+updates at protocol 67 before the final push; the schema floor remains 100.
 
 ## Context and Orientation
 

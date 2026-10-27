@@ -4916,9 +4916,12 @@ function renderQuota() {
           const used = window?.percent_used;
           const remaining = used == null ? null : 100 - used;
           const warning = window?.projects_exhaustion_before_reset;
-          const value = window ? remaining === null ? '?' : `${remaining}%` : '—';
+          const fable = window?.fable_remaining_percent;
+          const value = window
+            ? `${remaining === null ? '?' : `${remaining}%`}${fable == null ? '' : ` (${fable}%)`}`
+            : '—';
           const cell = el('span', `quota-value ${band(remaining)}`, value + (warning ? ' !' : ''));
-          const description = `${label}: ${window ? remaining === null ? 'unknown' : `${remaining}% left` : 'not reported'}${warning ? ', projected to run out before reset' : ''}`;
+          const description = `${label}: ${window ? remaining === null ? 'unknown' : `${remaining}% left` : 'not reported'}${fable == null ? '' : `; Fable weekly ${fable}% left`}${warning ? ', projected to run out before reset' : ''}`;
           cell.title = description;
           summary.append(cell);
           spoken.push(description);
@@ -4951,7 +4954,8 @@ function renderQuota() {
       for (const window of windows) {
         const row = el('div', 'quota-window');
         const label = el('div', 'quota-label');
-        label.append(el('span', '', window.label));
+        const fable = window.fable_remaining_percent;
+        label.append(el('span', '', fable == null ? window.label : `${window.label} (Fable ${fable}% left)`));
         const used = window.percent_used;
         label.append(
           el(
