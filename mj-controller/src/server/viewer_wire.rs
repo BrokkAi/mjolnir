@@ -17,7 +17,7 @@ const INTERNED_FIELDS: [&str; 5] = [
 
 pub(super) const METADATA_FIELDS: [&str; 16] = [
     "profile_capabilities",
-    "last_subagent_policy",
+    "last_subagent_policies",
     "operator_away",
     "auto_afk_minutes",
     "subagents_configured",
@@ -99,7 +99,8 @@ struct SnapshotMetadata<'a> {
     operator_away: bool,
     auto_afk_minutes: u32,
     profile_capabilities: &'a mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
-    last_subagent_policy: &'a mj_core::subagent::SubagentPolicy,
+    last_subagent_policies:
+        &'a std::collections::BTreeMap<String, mj_core::subagent::SubagentPolicy>,
     subagents_configured: bool,
     revision: u64,
     generated_at: &'a str,
@@ -149,7 +150,7 @@ pub(super) fn metadata(
         operator_away: snapshot.operator_away,
         auto_afk_minutes: snapshot.auto_afk_minutes,
         profile_capabilities: &snapshot.profile_capabilities,
-        last_subagent_policy: &snapshot.last_subagent_policy,
+        last_subagent_policies: &snapshot.last_subagent_policies,
         subagents_configured: snapshot.subagents_configured,
         revision: snapshot.revision,
         generated_at: &snapshot.generated_at,

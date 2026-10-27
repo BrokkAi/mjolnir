@@ -286,10 +286,10 @@ pub async fn run_bounded_with_input(
 ///
 /// The process is genuinely detached: on Unix it is a grandchild reparented to
 /// init, not a child of the caller. A double fork is the right shape here
-/// rather than a background reaper thread, because the one caller
-/// (`connect_or_start` in `mj-cli`) starts a daemon that outlives the spawner,
-/// discards the returned PID, and confirms readiness over IPC instead. A reaper
-/// thread would make the spawner hold a `Child` for the whole life of a process
+/// rather than a background reaper thread, because the caller
+/// (`connect_or_start_holding` in `mj-cli`) starts a daemon that outlives the
+/// spawner. It uses the PID for liveness checks and confirms readiness over IPC.
+/// A reaper thread would make the spawner hold a `Child` for the whole life of a process
 /// it explicitly wanted to detach from, and would pin that process's
 /// process-table entry under a long-lived spawner until it exits; init reaps a
 /// grandchild straight away.
@@ -297,6 +297,9 @@ pub async fn run_bounded_with_input(
 /// The returned PID is the real process rather than the intermediate, so
 /// callers can still signal or probe it, and that process still leads its own
 /// process group, so group termination works exactly as before.
+/// On Unix, Rust's close-on-exec status channel reports exec errors from the
+/// grandchild before this returns. This is not an application-readiness barrier:
+/// Linux can still be updating `/proc/<pid>/comm` after closing that channel.
 pub fn spawn_detached(command: &mut Command, log_path: &Path) -> Result<u32> {
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent).with_context(|| {
@@ -373,6 +376,9 @@ fn disinherit_standard_handles() {
 /// takes a session of its own and goes on to exec the real program. The
 /// intermediate is waited for here, which returns immediately, so this process
 /// has nothing left to reap and the grandchild is reparented to init.
+/// Both descendants inherit Rust's exec-status writer: the intermediate's exit
+/// cannot produce EOF while the grandchild still holds it. `Command::spawn`
+/// therefore waits for the grandchild's exec or receives its exec error.
 ///
 /// Forking inside `pre_exec` rather than forking this process directly keeps
 /// the fork out of a multi-threaded address space: only `fork`, `setsid`,
@@ -912,6 +918,7 @@ mod tests {
         }
     }
 
+    // Hard-won: cd0af9150: Linux published the exec'd child's comm after spawn returned.
     #[cfg(target_os = "linux")]
     #[test]
     fn spawn_detached_reports_the_real_child_and_leaves_it_leading_its_own_group() {
@@ -919,21 +926,39 @@ mod tests {
         // down, so the PID has to be the exec'd program rather than the
         // short-lived intermediate, and it has to lead that group.
         let log_dir = tempfile::tempdir().expect("create log directory");
-        let mut command = Command::new("sleep");
+        let executable = std::fs::canonicalize("/bin/sleep").expect("resolve sleep executable");
+        let mut command = Command::new(&executable);
         command.arg("30");
         let pid = spawn_detached(&mut command, &log_dir.path().join("child.log"))
             .expect("spawn_detached should start the child");
 
-        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        // Linux installs mm->exe_file before closing the exec-status channel,
+        // but updates comm afterwards. Check the executable identity owned by
+        // the new address space, not the independently published display name.
+        let actual_executable = std::fs::read_link(format!("/proc/{pid}/exe"))
             .expect("the reported pid must name a live process");
-        assert_eq!(comm.trim(), "sleep");
+        let group_guard = ProcessGroupGuard::new(Some(pid));
+        assert_eq!(actual_executable, executable);
 
         let raw_pid = libc::pid_t::try_from(pid).expect("pid fits pid_t");
         // SAFETY: getpgid only reads the group of an existing process.
         let group = unsafe { libc::getpgid(raw_pid) };
         assert_eq!(group, raw_pid, "the child must lead its own process group");
 
-        signal_process_group(raw_pid, libc::SIGKILL).expect("terminate the detached child group");
+        drop(group_guard);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_detached_reports_exec_failure_from_the_grandchild() {
+        let directory = tempfile::tempdir().expect("create log directory");
+        let mut command = Command::new(directory.path().join("missing-executable"));
+        let error = spawn_detached(&mut command, &directory.path().join("child.log"))
+            .expect_err("the intermediate exiting must not hide the grandchild's exec failure");
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            ErrorKind::NotFound
+        );
     }
 
     // Hard-won: 99a5e469: An inherited macOS pipe descriptor prevented EOF and hung concurrent daemon upgrades.

@@ -1,6 +1,5 @@
 //! Durable controller-side state for Hel-managed sessions.
 
-#[cfg(test)]
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
@@ -2376,9 +2375,10 @@ pub struct State {
     pub operator_presence: OperatorPresence,
     #[serde(
         default,
-        deserialize_with = "crate::subagent::deserialize_launch_policy"
+        alias = "last_subagent_policy",
+        deserialize_with = "crate::subagent::deserialize_policy_map"
     )]
-    pub last_subagent_policy: crate::subagent::SubagentPolicy,
+    pub last_subagent_policies: BTreeMap<String, crate::subagent::SubagentPolicy>,
     pub version: u32,
     #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
     pub sessions: SnapshotMap<String, SessionRecord>,
@@ -2399,12 +2399,24 @@ impl Default for State {
         Self {
             version: STATE_VERSION,
             operator_presence: OperatorPresence::default(),
-            last_subagent_policy: Default::default(),
+            last_subagent_policies: Default::default(),
             sessions: SnapshotMap::new(),
             subagents: SnapshotMap::new(),
             mount_history: SnapshotMap::new(),
             container_sizes: SnapshotMap::new(),
         }
+    }
+}
+
+impl State {
+    /// The remembered choice for a profile, falling back to the legacy global
+    /// choice and then the default when that profile has no saved choice.
+    pub fn last_subagent_policy_for(&self, profile_id: &str) -> crate::subagent::SubagentPolicy {
+        self.last_subagent_policies
+            .get(profile_id)
+            .or_else(|| self.last_subagent_policies.get(""))
+            .cloned()
+            .unwrap_or_default()
     }
 }
 

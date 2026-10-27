@@ -29,17 +29,20 @@ pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
         )?,
         ..Default::default()
     };
-    let remembered: Option<String> = connection
-        .query_row(
-            "SELECT policy FROM subagent_preference WHERE singleton = 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    state.last_subagent_policy = remembered
-        .map(|json| mj_core::subagent::parse_stored_policy(&json))
-        .transpose()?
-        .unwrap_or_default();
+    let mut statement = connection
+        .prepare("SELECT profile_id, policy FROM subagent_preference ORDER BY profile_id")?;
+    let rows = statement.query_map([], |row| {
+        let profile_id = row.get::<_, String>(0)?;
+        let json = row.get::<_, String>(1)?;
+        let policy = mj_core::subagent::parse_stored_policy(&json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
+        })?;
+        Ok((profile_id, policy))
+    })?;
+    for row in rows {
+        let (profile_id, policy) = row?;
+        state.last_subagent_policies.insert(profile_id, policy);
+    }
     let mut statement = connection.prepare(&format!("{SESSION_QUERY} ORDER BY s.session_id"))?;
     let rows = statement.query_map([], decode_session)?;
     for row in rows {

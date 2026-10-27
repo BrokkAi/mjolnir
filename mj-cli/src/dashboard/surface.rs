@@ -40,7 +40,7 @@ impl PollingRecords {
             state: State {
                 sessions,
                 subagents: source.state.subagents.clone(),
-                last_subagent_policy: source.state.last_subagent_policy.clone(),
+                last_subagent_policies: source.state.last_subagent_policies.clone(),
                 ..source.state.clone()
             },
         }

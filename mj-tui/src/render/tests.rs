@@ -1079,7 +1079,7 @@ fn minimized_sessions_dashboard(projects: usize, per_project: usize) -> Dashboar
         config(),
         State {
             operator_presence: Default::default(),
-            last_subagent_policy: Default::default(),
+            last_subagent_policies: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,

@@ -2493,7 +2493,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Terminals no longer save harness titles; the daemon alone projects them.
 // Human interface activity can reset the daemon's automatic AFK clock.
 // Project removal runs through the daemon-owned database writer.
-pub const PROTOCOL_VERSION: u32 = 67;
+// Per-profile remembered subagent preferences change runtime metadata shape.
+pub const PROTOCOL_VERSION: u32 = 68;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

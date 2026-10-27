@@ -136,7 +136,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
     };
     let state = AppState {
         operator_presence: Default::default(),
-        last_subagent_policy: Default::default(),
+        last_subagent_policies: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
         sessions: [(

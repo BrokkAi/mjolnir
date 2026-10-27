@@ -243,6 +243,7 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     // Hard-won: 803c9fe1: rewound upgrade fixtures retained the later mailbox failure column.
     // Hard-won: #1302: the old-store fixture must also remove the notification epoch.
     // Hard-won: 5f5e74082: kept current GitHub watch tables, so migration 85 found no v84 columns to drop.
+    // Restore the singleton preference table used before schema 101.
     connection
         .execute_batch(
             "ALTER TABLE subagent_sessions DROP COLUMN notification_epoch;
@@ -255,6 +256,11 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
          DROP TABLE github_watch_items;
          DROP TABLE github_watch_classifications;
          DROP TABLE github_watch_cursors;
+         ALTER TABLE subagent_preference RENAME TO subagent_preference_profiled;
+         CREATE TABLE subagent_preference (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), policy TEXT NOT NULL CHECK(json_valid(policy)));
+         INSERT INTO subagent_preference(singleton, policy)
+             SELECT 1, policy FROM subagent_preference_profiled WHERE profile_id='';
+         DROP TABLE subagent_preference_profiled;
          PRAGMA writable_schema=ON;
          UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '')
              WHERE type='table' AND name='sessions';

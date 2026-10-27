@@ -38,13 +38,21 @@ pub(super) fn save_new_session_to(
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     validate_session_record(session)?;
+    ensure!(
+        !session.last_profile.is_empty(),
+        "a session profile id cannot use the reserved legacy preference key"
+    );
     insert_session(&tx, session)?;
     if let Some((host, size)) = container_size.filter(|_| remember_container_size) {
         write_host_container_size(&tx, &host, size)?;
     }
     let policy = session.subagents.clone().unwrap_or_default();
     if remember_launch_choices && policy.updates_remembered_choice(session.harness_kind) {
-        tx.execute("INSERT INTO subagent_preference(singleton, policy) VALUES(1, ?1) ON CONFLICT(singleton) DO UPDATE SET policy = excluded.policy", [serde_json::to_string(&policy)?])?;
+        tx.execute(
+            "INSERT INTO subagent_preference(profile_id, policy) VALUES(?1, ?2)
+             ON CONFLICT(profile_id) DO UPDATE SET policy = excluded.policy",
+            params![session.last_profile, serde_json::to_string(&policy)?],
+        )?;
     }
     tx.commit()?;
     Ok(())
@@ -652,7 +660,48 @@ pub fn set_session_title_override(session_id: &str, title: &str, updated_at: &st
 /// turn in one SQLite transaction. Configuration is stored separately, so the controller owns
 /// coordinating this update with the matching config-map rename.
 pub fn rename_profile_references(old_id: &str, new_id: &str) -> Result<usize> {
-    rename_session_reference("last_profile", old_id, new_id)
+    let old_id = old_id.to_owned();
+    let new_id = new_id.to_owned();
+    submit_database_write("rename_profile_references", move |_| {
+        rename_profile_references_at(&database_path(), &old_id, &new_id)
+    })
+}
+
+pub(super) fn rename_profile_references_at(
+    path: &Path,
+    old_id: &str,
+    new_id: &str,
+) -> Result<usize> {
+    ensure!(
+        !old_id.is_empty() && !new_id.is_empty(),
+        "profile ids cannot use the reserved legacy preference key"
+    );
+    if old_id == new_id {
+        return Ok(0);
+    }
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let changed = tx.execute(
+        "UPDATE sessions SET last_profile = ?2 WHERE last_profile = ?1",
+        params![old_id, new_id],
+    )?;
+    tx.execute(
+        "UPDATE session_turn_selections SET profile = ?2 WHERE profile = ?1",
+        params![old_id, new_id],
+    )?;
+    // The source wins on a rename. A retry after commit finds no source row.
+    tx.execute(
+        "INSERT INTO subagent_preference(profile_id, policy)
+         SELECT ?2, policy FROM subagent_preference WHERE profile_id = ?1
+         ON CONFLICT(profile_id) DO UPDATE SET policy = excluded.policy",
+        params![old_id, new_id],
+    )?;
+    tx.execute(
+        "DELETE FROM subagent_preference WHERE profile_id = ?1",
+        [old_id],
+    )?;
+    tx.commit()?;
+    Ok(changed)
 }
 
 /// Rewrite a configured target id in every persisted session in one SQLite
@@ -667,7 +716,7 @@ pub(super) fn rename_session_reference(
     new_id: &str,
 ) -> Result<usize> {
     ensure!(
-        matches!(column, "last_profile" | "target_template_id"),
+        column == "target_template_id",
         "unsupported session reference column"
     );
     let old_id = old_id.to_owned();
@@ -689,13 +738,6 @@ pub(super) fn rename_session_reference_at(
         &format!("UPDATE sessions SET {column} = ?2 WHERE {column} = ?1"),
         params![old_id, new_id],
     )?;
-    if column == "last_profile" {
-        // Usage stays with the renamed profile, including destroyed sessions'.
-        tx.execute(
-            "UPDATE session_turn_selections SET profile = ?2 WHERE profile = ?1",
-            params![old_id, new_id],
-        )?;
-    }
     tx.commit()?;
     Ok(changed)
 }

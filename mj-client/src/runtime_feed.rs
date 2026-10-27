@@ -66,9 +66,10 @@ pub struct RuntimeMetadata {
     pub default_targets: std::collections::BTreeSet<String>,
     #[serde(
         default,
-        deserialize_with = "mj_core::subagent::deserialize_launch_policy"
+        alias = "last_subagent_policy",
+        deserialize_with = "mj_core::subagent::deserialize_policy_map"
     )]
-    pub last_subagent_policy: SubagentPolicy,
+    pub last_subagent_policies: BTreeMap<String, SubagentPolicy>,
     pub workspace_names: BTreeMap<String, String>,
     pub lifecycles: Vec<RuntimeLifecycleView>,
     pub reviews: Vec<RuntimeReviewView>,
@@ -675,6 +676,23 @@ mod tests {
         value.as_object_mut().unwrap().remove("default_targets");
         let older: RuntimeMetadata = serde_json::from_value(value).unwrap();
         assert!(!older.installed_config().is_default_target("docker"));
+    }
+
+    #[test]
+    fn remembered_subagent_policies_accept_old_scalar_and_new_profile_map() {
+        let mut old_value = serde_json::to_value(RuntimeMetadata::default()).unwrap();
+        old_value
+            .as_object_mut()
+            .unwrap()
+            .remove("last_subagent_policies");
+        old_value["last_subagent_policy"] = serde_json::json!({"mode": "mjolnir"});
+        let old: RuntimeMetadata = serde_json::from_value(old_value).unwrap();
+        assert!(old.last_subagent_policies[""].uses_mjolnir());
+
+        let mut new_value = serde_json::to_value(RuntimeMetadata::default()).unwrap();
+        new_value["last_subagent_policies"] = serde_json::json!({"mode": {"mode": "none"}});
+        let new: RuntimeMetadata = serde_json::from_value(new_value).unwrap();
+        assert_eq!(new.last_subagent_policies["mode"], SubagentPolicy::None);
     }
 
     #[test]

@@ -64,13 +64,13 @@ system-or-managed Node runtime. Bake `@mimo-ai/cli@0.1.15` and set
 `MIMOCODE_DISABLE_AUTOUPDATE=1` to avoid installing it.
 
 DSH speaks ACP itself, so `dsh-acp` is both its bridge and its agent. Without
-`dsh-acp` on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.4.0`,
+`dsh-acp` on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.5.0`,
 using Node.js 22 or newer with npm and npx; the npm package bundles the release
 binaries. An older `dsh-acp` on `PATH` is likewise skipped, so the image needs
-the same Node.js tools for the fallback unless its binary is 0.4.0 or newer.
+the same Node.js tools for the fallback unless its binary is 0.5.0 or newer.
 Mjolnir supplies the pinned Node runtime when the image has no compatible one.
 To bake it in, run
-`npm install -g @brokkai/dsh-acp@0.4.0`
+`npm install -g @brokkai/dsh-acp@0.5.0`
 (Node.js 22 or newer), or put the `dsh-acp` binary from a release archive at
 <https://github.com/BrokkAi/dsh-acp/releases> on `PATH`. The Linux binaries
 need glibc 2.34 or newer, so musl images such as Alpine cannot run DSH.

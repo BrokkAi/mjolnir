@@ -6083,10 +6083,13 @@ fn golden_create_delegation_availability_and_submission() {
             dashboard.config.subagents.straightforward = Some(choice.clone());
             dashboard.config.subagents.subtle = Some(choice);
         }
-        dashboard.state.last_subagent_policy = SubagentPolicy::Mjolnir {
-            straightforward: None,
-            subtle: None,
-        };
+        dashboard.state.last_subagent_policies.insert(
+            String::new(),
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
+        );
         dashboard.begin_new_wizard();
         let Mode::New(wizard) = &mut dashboard.mode else {
             panic!("new");
@@ -6164,7 +6167,10 @@ fn golden_create_delegation_availability_and_submission() {
         );
         output.push_str(&format!("action: {action:?}\n"));
         // The remembered selection must survive opening another draft.
-        dashboard.state.last_subagent_policy = SubagentPolicy::None;
+        dashboard
+            .state
+            .last_subagent_policies
+            .insert(String::new(), SubagentPolicy::None);
         dashboard.begin_new_wizard();
         dashboard.take_subagent_discovery();
         assert_eq!(
@@ -6192,7 +6198,10 @@ fn golden_create_delegation_availability_and_submission() {
                 effort: None,
             });
         }
-        dashboard.state.last_subagent_policy = remembered.clone();
+        dashboard
+            .state
+            .last_subagent_policies
+            .insert(String::new(), remembered.clone());
         dashboard.begin_new_wizard();
         let dsh = dashboard
             .config
@@ -6312,10 +6321,26 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
     dashboard.config.subagents.straightforward = Some(choice.clone());
     dashboard.config.subagents.subtle = Some(choice);
     dashboard.config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Grok;
-    dashboard.state.last_subagent_policy = SubagentPolicy::Mjolnir {
-        straightforward: None,
-        subtle: None,
-    };
+    dashboard.state.last_subagent_policies.insert(
+        "codex-1".into(),
+        SubagentPolicy::Mjolnir {
+            straightforward: Some(Box::new(SubagentChoice {
+                model: "codex-model".into(),
+                effort: None,
+            })),
+            subtle: None,
+        },
+    );
+    dashboard.state.last_subagent_policies.insert(
+        "claude-1".into(),
+        SubagentPolicy::Mjolnir {
+            straightforward: Some(Box::new(SubagentChoice {
+                model: "grok-model".into(),
+                effort: None,
+            })),
+            subtle: None,
+        },
+    );
     dashboard.begin_new_wizard();
     let supported = dashboard
         .config
@@ -6331,7 +6356,10 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
         (
             supported,
             SubagentPolicy::Mjolnir {
-                straightforward: None,
+                straightforward: Some(Box::new(SubagentChoice {
+                    model: "codex-model".into(),
+                    effort: None,
+                })),
                 subtle: None,
             },
         ),
@@ -6339,7 +6367,10 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
         (
             supported,
             SubagentPolicy::Mjolnir {
-                straightforward: None,
+                straightforward: Some(Box::new(SubagentChoice {
+                    model: "codex-model".into(),
+                    effort: None,
+                })),
                 subtle: None,
             },
         ),
@@ -6355,7 +6386,8 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
         assert_eq!(wizard.subagents.policy, expected);
         assert!(wizard.subagents.error().is_none());
     }
-    // Committing Native even when it is the displayed fallback is an explicit choice.
+    // A same-profile explicit choice survives availability refreshes. Switching
+    // profiles loads that destination's saved policy.
     let Mode::New(wizard) = &mut dashboard.mode else {
         unreachable!()
     };
@@ -6371,7 +6403,13 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
     dashboard.take_subagent_discovery();
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
-        SubagentPolicy::Native
+        SubagentPolicy::Mjolnir {
+            straightforward: Some(Box::new(SubagentChoice {
+                model: "codex-model".into(),
+                effort: None,
+            })),
+            subtle: None,
+        }
     );
 }
 
@@ -6381,10 +6419,13 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     use mj_core::config::SubagentChoice;
     use mj_core::subagent::SubagentPolicy;
     let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.state.last_subagent_policy = SubagentPolicy::Mjolnir {
-        straightforward: None,
-        subtle: None,
-    };
+    dashboard.state.last_subagent_policies.insert(
+        String::new(),
+        SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        },
+    );
     dashboard.begin_new_wizard();
     let supported = dashboard
         .config
@@ -6451,7 +6492,10 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
         SubagentPolicy::Native
     );
     dashboard.config.subagents.straightforward = Some(choice);
-    dashboard.state.last_subagent_policy = SubagentPolicy::Native;
+    dashboard
+        .state
+        .last_subagent_policies
+        .insert(String::new(), SubagentPolicy::Native);
     dashboard.set_profile_capabilities(Default::default());
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,

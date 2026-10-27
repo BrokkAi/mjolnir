@@ -51,7 +51,7 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
         ("session_mount_access", "session", "session_id"),
         ("session_checkpoints", "session", "session_id"),
         ("subagent_sessions", "relation", "child_session_id"),
-        ("subagent_preference", "preference", "singleton"),
+        ("subagent_preference", "preference", "profile_id"),
         ("operator_away", "operator_away", "singleton"),
         ("mount_history", "mount_history", "host"),
         ("project_locations", "mount_history", "host"),
@@ -395,17 +395,21 @@ pub(super) fn finish_operation(
             "preference" => {
                 let json: Option<String> = transaction
                     .query_row(
-                        "SELECT policy FROM subagent_preference WHERE singleton=1",
-                        [],
+                        "SELECT policy FROM subagent_preference WHERE profile_id=?1",
+                        [key],
                         |row| row.get(0),
                     )
                     .optional()?;
                 let policy = json
                     .map(|json| mj_core::subagent::parse_stored_policy(&json))
-                    .transpose()?
-                    .unwrap_or_default();
-                if state.last_subagent_policy != policy {
-                    state.last_subagent_policy = policy;
+                    .transpose()?;
+                let prior = state.last_subagent_policies.get(key);
+                if prior != policy.as_ref() {
+                    if let Some(policy) = policy {
+                        state.last_subagent_policies.insert(key.clone(), policy);
+                    } else {
+                        state.last_subagent_policies.remove(key);
+                    }
                     changed = true;
                 }
             }

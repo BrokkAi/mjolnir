@@ -71,7 +71,7 @@ pub(crate) async fn run_server(
     controller.state.sessions = initial.records;
     controller.state.subagents = initial.subagents;
     controller.config = initial.metadata.installed_config();
-    controller.state.last_subagent_policy = initial.metadata.last_subagent_policy;
+    controller.state.last_subagent_policies = initial.metadata.last_subagent_policies;
     controller.state.operator_presence = initial.metadata.operator_presence;
     let mut operations = initial
         .metadata
@@ -329,7 +329,7 @@ pub(crate) async fn run_server(
                 controller.state.sessions = runtime.records;
                 controller.state.subagents = runtime.subagents;
                 controller.config = runtime.metadata.installed_config();
-                controller.state.last_subagent_policy = runtime.metadata.last_subagent_policy;
+                controller.state.last_subagent_policies = runtime.metadata.last_subagent_policies;
                 controller.state.operator_presence = runtime.metadata.operator_presence;
                 for (session_id, error) in &pending_action_errors {
                     if let Some(session) = controller.state.sessions.get_mut(session_id)
