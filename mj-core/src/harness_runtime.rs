@@ -121,11 +121,11 @@ pub const CLAUDE_CLI_VERSION: &str = "2.1.308";
 pub const KIMI_VERSION: &str = "2.3.2";
 pub const GROK_VERSION: &str = "1.0.40";
 pub const MUSE_ACP_PACKAGE: &str = "@brokkai/muse-acp";
-pub const MUSE_ACP_VERSION: &str = "0.17.0";
+pub const MUSE_ACP_VERSION: &str = "0.18.0";
 pub const MUSE_VERSION: &str = "1.4.13-R6996.1";
 pub const OPENCODE_VERSION: &str = "2.1.2";
 pub const MIMO_CLI_VERSION: &str = "0.1.15";
-pub const DSH_ACP_VERSION: &str = "0.4.0";
+pub const DSH_ACP_VERSION: &str = "0.5.0";
 pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
 
 /// The shell commands that start OpenCode's ACP server with the executable
@@ -468,8 +468,8 @@ pub struct HarnessPin {
 pub const fn pin(kind: HarnessKind) -> HarnessPin {
     match kind {
         HarnessKind::Muse => HarnessPin {
-            install_id: "muse-acp-0.17.0_muse-1.4.13-R6996.1",
-            display_version: "muse-acp 0.17.0 + Muse Code 1.4.13-R6996.1",
+            install_id: "muse-acp-0.18.0_muse-1.4.13-R6996.1",
+            display_version: "muse-acp 0.18.0 + Muse Code 1.4.13-R6996.1",
             entrypoint: "bin/muse",
             cli_entrypoint: "bin/muse",
         },
@@ -513,8 +513,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             cli_entrypoint: "node_modules/.bin/mimo",
         },
         HarnessKind::Dsh => HarnessPin {
-            install_id: "dsh-acp-0.4.0",
-            display_version: "dsh-acp 0.4.0",
+            install_id: "dsh-acp-0.5.0",
+            display_version: "dsh-acp 0.5.0",
             entrypoint: "dsh-acp",
             cli_entrypoint: "dsh-acp",
         },
