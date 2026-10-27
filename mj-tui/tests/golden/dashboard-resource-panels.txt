@@ -161,10 +161,10 @@
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly       Resets  5H Resets                       │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        ▕   API    ▏                                         │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││                  Harness      Weekly       Resets  5H Resets                 │
+│                                      ││  bedrock-claude  Claude Code  ▕   API    ▏                                   │
+│                                      ││  codex-1         Codex        ▕   API    ▏                                   │
+│                                      ││  codex-2         Codex        refreshing…                                    │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === quota a harness never shares (120x28) ===
