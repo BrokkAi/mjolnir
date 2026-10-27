@@ -7,6 +7,7 @@ pub mod quota;
 pub mod review;
 pub mod runtime_feed;
 pub mod session;
+pub mod settings;
 pub mod target;
 pub mod web;
 
