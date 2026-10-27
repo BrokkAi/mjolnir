@@ -373,24 +373,65 @@ impl DurableRelay {
         Ok(())
     }
 
-    /// Add or remove the stop affordance announced by Claude's AIR extension.
-    /// Task existence remains owned by `claude_background_tasks_changed`.
+    /// Apply Claude AIR task edges: autonomous cycles own harness turns;
+    /// ordinary task existence remains owned by `claude_background_tasks_changed`.
     pub fn claude_async_task_control_changed(
         &mut self,
         task_id: String,
         can_stop: bool,
+        autonomous_turn: bool,
         settled: bool,
+        replayed: bool,
     ) -> Result<()> {
         if self.background_work != BackgroundWorkPolicy::ClaudeTasks {
             return Ok(());
         }
-        if can_stop {
-            self.claude_stoppable_tasks.insert(task_id);
-        } else {
+        if autonomous_turn && replayed {
+            self.claude_autonomous_turn_tasks
+                .entry(task_id)
+                .or_insert(None);
+        } else if autonomous_turn {
             self.claude_stoppable_tasks.remove(&task_id);
-        }
-        if settled {
-            self.note_task_settled();
+            if !self.claude_autonomous_turn_tasks.contains_key(&task_id) {
+                if self.harness_turns == HarnessTurnPolicy::ClaudeAdapter {
+                    self.open_harness_turn_if_allowed()?;
+                }
+                let ordinal = if self.snapshot.active_prompt.is_none() {
+                    self.snapshot.harness_turn.map(|turn| turn.first_ordinal)
+                } else {
+                    None
+                };
+                self.claude_autonomous_turn_tasks.insert(task_id, ordinal);
+            }
+        } else if let Some(ordinal) = self.claude_autonomous_turn_tasks.get_mut(&task_id) {
+            // Running/paused/progress edges never reach this method. All other
+            // edges for a known autonomous ID end it, including stopped (which
+            // deliberately has settled=false). An old end cannot close a newer
+            // turn, or the mj prompt that took ownership of the SDK cycle.
+            // Retain the ID after its end so duplicate terminal edges cannot
+            // turn this synthetic task into an ordinary task-notification gap.
+            if let Some(ordinal) = ordinal.take()
+                && self.snapshot.active_prompt.is_none()
+                // claude-agent-acp 0.97.0 dist/acp-agent.js (4262–4263,
+                // 4283–4294): a lagging idle can end the next active task.
+                // Only silent turns trust task end; output waits for a result.
+                && !self.harness_turn_output_seen
+                && self
+                    .snapshot
+                    .harness_turn
+                    .is_some_and(|turn| turn.first_ordinal == ordinal)
+            {
+                self.settle_harness_turn(Some("autonomous_task_ended".into()))?;
+            }
+        } else {
+            if can_stop {
+                self.claude_stoppable_tasks.insert(task_id);
+            } else {
+                self.claude_stoppable_tasks.remove(&task_id);
+            }
+            if settled {
+                self.note_task_settled();
+            }
         }
         self.persist_activity_transition()
     }
@@ -506,6 +547,8 @@ impl DurableRelay {
         self.claude_background_tasks.clear();
         self.claude_pending_stops.clear();
         self.claude_stoppable_tasks.clear();
+        self.claude_autonomous_turn_tasks.clear();
+        self.harness_turn_output_seen = false;
         self.task_settled_at_ms = None;
         self.kimi_background_tasks.clear();
         self.kimi_provisional_tasks.clear();

@@ -161,7 +161,7 @@ pub struct DurableRelay {
     journal_generation: u64,
     acp_activity: AcpActivityClock,
     step_clock: crate::acp::StepClock,
-    /// Whether agent output arriving with no prompt in flight opens a turn.
+    /// Whether harness announcements or output with no prompt open a turn.
     /// The runtime sets this from the configured harness right after `open`.
     harness_turns: HarnessTurnPolicy,
     /// Where commands the agent left running are read from.
@@ -208,6 +208,12 @@ pub struct DurableRelay {
     background_work_known: Option<bool>,
     /// Claude AIR tasks that the adapter currently says can be stopped.
     claude_stoppable_tasks: BTreeSet<String>,
+    /// Process-local autonomous task IDs and the harness-turn opening ordinal
+    /// they own. None means opening was gated or the task already ended;
+    /// retain ended IDs until bridge restart to recognize duplicate edges.
+    claude_autonomous_turn_tasks: BTreeMap<String, Option<u64>>,
+    /// Agent output observed during the current process-local harness turn.
+    harness_turn_output_seen: bool,
     /// Whether the daemon will act on a `Continue` verdict. Off when the
     /// launch environment says automatic continuation is disabled.
     continuation_enabled: bool,
@@ -515,6 +521,8 @@ impl DurableRelay {
             kimi_observed_tool_ids: BTreeSet::new(),
             background_work_known: None,
             claude_stoppable_tasks: BTreeSet::new(),
+            claude_autonomous_turn_tasks: BTreeMap::new(),
+            harness_turn_output_seen: false,
             continuation_enabled: true,
             task_settled_at_ms: None,
             active_agent_terminals: BTreeMap::new(),
@@ -1119,14 +1127,10 @@ impl DurableRelay {
             return self.record_observation(RelayObservation::Notice { message });
         }
         if claude && !ack && self.opens_harness_turn(&update) {
-            // The turn a settled task promised has arrived.
-            self.task_settled_at_ms = None;
-            self.append_relay_event(
-                None,
-                RelayObservation::HarnessTurnStarted {
-                    started_at_ms: epoch_millis(),
-                },
-            )?;
+            self.open_harness_turn_if_allowed()?;
+        }
+        if claude && !ack && self.snapshot.harness_turn.is_some() && is_agent_output(&update) {
+            self.harness_turn_output_seen = true;
         }
         self.foreground_tools.observe_with_start(
             &update,
@@ -1158,6 +1162,20 @@ impl DurableRelay {
     pub fn claude_turn_result(&mut self, result: &mj_core::acp::ClaudeTurnResult) -> Result<()> {
         if self.harness_turns != HarnessTurnPolicy::ClaudeAdapter
             || self.snapshot.harness_turn.is_none()
+        {
+            return Ok(());
+        }
+        // claude-agent-acp 0.97.0 dist/acp-agent.js (4906–4911, 5230–5238):
+        // successful zero-turn results precede the coalesced task follow-up.
+        if result.num_turns == 0
+            && !result.is_error
+            && self.claude_autonomous_turn_tasks.values().any(|ordinal| {
+                ordinal.is_some_and(|ordinal| {
+                    self.snapshot
+                        .harness_turn
+                        .is_some_and(|turn| turn.first_ordinal == ordinal)
+                })
+            })
         {
             return Ok(());
         }
@@ -1282,9 +1300,14 @@ impl DurableRelay {
             // stopped this tool call before it ran.") after the result, and no
             // cycle would end a turn opened for that status. Checked against
             // claude-agent-acp 0.94.0 `dist/tool-calls/renderer.js`
-            // (`unfinished`) on 2026-10-23.
+            // (`unfinished`) on 2026-10-23; the file is unchanged in 0.97.0.
             && !matches!(update, SessionUpdate::ToolCallUpdate(_))
-            && self.snapshot.active_prompt.is_none()
+            && self.can_open_harness_turn()
+    }
+
+    /// The shared admission decision for Claude output and autonomous spawns.
+    fn can_open_harness_turn(&self) -> bool {
+        self.snapshot.active_prompt.is_none()
             && self.snapshot.harness_turn.is_none()
             && !self.session_setup
             && !self.configuration_request_in_flight()
@@ -1292,6 +1315,27 @@ impl DurableRelay {
                 self.snapshot.execution,
                 RelayExecutionState::Closing | RelayExecutionState::Closed
             )
+    }
+
+    /// Open the one durable boundary shared by output and turn announcements.
+    fn open_harness_turn_if_allowed(&mut self) -> Result<()> {
+        if !self.can_open_harness_turn() {
+            return Ok(());
+        }
+        // New work invalidates a ready checkpoint cut. Replaying earlier held
+        // writes may itself open a turn, so ask the owner again afterwards.
+        self.end_checkpoint_hold()?;
+        if self.can_open_harness_turn() {
+            self.task_settled_at_ms = None;
+            self.harness_turn_output_seen = false;
+            self.append_relay_event(
+                None,
+                RelayObservation::HarnessTurnStarted {
+                    started_at_ms: epoch_millis(),
+                },
+            )?;
+        }
+        Ok(())
     }
 
     fn digest_at(&self, ordinal: u64) -> Result<Option<String>> {

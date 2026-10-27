@@ -116,8 +116,8 @@ pub fn managed_harness_manifest_matches(
 pub const CODEX_ACP_PACKAGE: &str = "@brokkai/codex-acp";
 pub const CODEX_ACP_VERSION: &str = "1.14.1";
 pub const CODEX_CLI_VERSION: &str = "0.164.0";
-pub const CLAUDE_ACP_VERSION: &str = "0.94.0";
-pub const CLAUDE_CLI_VERSION: &str = "2.1.306";
+pub const CLAUDE_ACP_VERSION: &str = "0.97.0";
+pub const CLAUDE_CLI_VERSION: &str = "2.1.308";
 pub const KIMI_VERSION: &str = "2.3.2";
 pub const GROK_VERSION: &str = "1.0.40";
 pub const MUSE_ACP_PACKAGE: &str = "@brokkai/muse-acp";
@@ -483,8 +483,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             // pkg2: the asset lists @anthropic-ai/claude-code in allowScripts.
             // Installs made before that change kept the package's native-binary
             // stub, so their identity must not match this pin.
-            install_id: "claude-agent-acp-0.94.0_claude-2.1.306_pkg2",
-            display_version: "claude-agent-acp 0.94.0 + Claude Code 2.1.306",
+            install_id: "claude-agent-acp-0.97.0_claude-2.1.308_pkg2",
+            display_version: "claude-agent-acp 0.97.0 + Claude Code 2.1.308",
             entrypoint: "node_modules/.bin/claude-agent-acp",
             cli_entrypoint: "node_modules/.bin/claude",
         },

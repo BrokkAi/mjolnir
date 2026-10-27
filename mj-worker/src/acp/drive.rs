@@ -182,12 +182,19 @@ where
                         Ok(Some(ClaudeAsyncTaskControlUpdate::Set {
                             task_id,
                             can_stop,
+                            autonomous_turn,
                             settled,
                         })) => {
+                            // Preserve replayed IDs so their untyped terminal edges
+                            // cannot become ordinary background-task completions.
+                            let replayed =
+                                !notification_live_history_enabled.load(Ordering::Acquire);
                             notification_events
                                 .send(RuntimeEvent::ClaudeAsyncTaskControlChanged {
                                     task_id,
                                     can_stop,
+                                    autonomous_turn,
+                                    replayed,
                                     settled,
                                 })
                                 .await
