@@ -3556,9 +3556,8 @@ where
     F: FnMut(&RuntimeEvent) -> bool,
 {
     loop {
-        let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+        let event = crate::test_support::wait_for("runtime event", events.recv())
             .await
-            .expect("runtime event arrives")
             .expect("runtime event channel stays open");
         if matches(&event) {
             return event;
@@ -5226,6 +5225,7 @@ for line in sys.stdin:
     );
 }
 
+// Hard-won: bd326e2bb: Bridge startup and recovery can exceed five seconds under parallel I/O load.
 #[cfg(unix)]
 #[tokio::test]
 async fn dead_bridge_after_session_start_reloads_the_native_session() {
@@ -5343,7 +5343,7 @@ while True:
     let mut saw_reload = false;
     let mut capability_updates = 0;
     loop {
-        let event = tokio::time::timeout(std::time::Duration::from_secs(5), event_rx.recv())
+        let event = tokio::time::timeout(crate::test_support::IO_TIMEOUT, event_rx.recv())
             .await
             .expect("ACP runtime keeps reporting")
             .expect("event channel stays open");
@@ -5386,18 +5386,18 @@ while True:
     assert_eq!(started, vec![false, true], "the second open is a resume");
 
     drop(request_tx);
-    tokio::time::timeout(std::time::Duration::from_secs(5), runtime)
+    tokio::time::timeout(crate::test_support::IO_TIMEOUT, runtime)
         .await
         .expect("closing the command channel must end the runtime")
         .expect("runtime task does not panic")
         .expect("a recovered bridge must not fail the worker");
 }
 
+// Hard-won: 410851f2d: Bridge startup is not bounded by the five-second fixture wait.
 #[cfg(unix)]
 #[tokio::test]
 async fn an_acknowledged_cancel_keeps_the_running_bridge() {
     let temp = tempfile::tempdir().unwrap();
-    let prompt_seen = temp.path().join("prompt-seen");
     let initializes = temp.path().join("initializes");
     let script = temp.path().join("cancelled_acp.py");
     std::fs::write(
@@ -5405,7 +5405,6 @@ async fn an_acknowledged_cancel_keeps_the_running_bridge() {
         format!(
             r#"
 import json, sys
-prompt_seen = {prompt_seen:?}
 initializes = {initializes:?}
 
 def read():
@@ -5432,7 +5431,9 @@ while True:
     elif method == "session/prompt":
         prompts += 1
         if prompts == 1:
-            open(prompt_seen, "w").close()
+            write({{"jsonrpc": "2.0", "method": "session/update", "params": {{
+                "sessionId": "scripted", "update": {{"sessionUpdate": "agent_message_chunk",
+                "content": {{"type": "text", "text": "prompt-ready"}}}}}}}})
             cancellation = read()
             assert cancellation.get("method") == "session/cancel", cancellation
             write({{"jsonrpc": "2.0", "id": ident, "result": {{"stopReason": "cancelled"}}}})
@@ -5486,7 +5487,7 @@ while True:
     let wait_for_finished_prompt =
         async |event_rx: &mut mpsc::Receiver<RuntimeEvent>, finished: &mut Vec<String>| {
             loop {
-                let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                let event = tokio::time::timeout(crate::test_support::IO_TIMEOUT, event_rx.recv())
                     .await
                     .expect("the ACP runtime keeps reporting")
                     .expect("the event channel stays open");
@@ -5514,13 +5515,11 @@ while True:
         })
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !prompt_seen.exists() {
-            tokio::task::yield_now().await;
-        }
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::SessionUpdate { update }
+            if update["content"]["text"] == "prompt-ready")
     })
-    .await
-    .expect("the prompt reaches the bridge");
+    .await;
     request_tx
         .send(CommandRequest::Cancel {
             request_id: "cancel-1".into(),
@@ -5547,7 +5546,7 @@ while True:
     );
 
     drop(request_tx);
-    tokio::time::timeout(Duration::from_secs(5), runtime)
+    tokio::time::timeout(crate::test_support::IO_TIMEOUT, runtime)
         .await
         .expect("closing the command channel ends the runtime")
         .expect("runtime task does not panic")
@@ -6592,6 +6591,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
     }
 }
 
+// Hard-won: 29a80b2d2: Correct bridge startup exceeded the fixture event deadline under load.
 #[tokio::test]
 async fn clear_replaces_the_native_session_without_forwarding_a_prompt() {
     exercise_context_clear(false, HarnessKind::Codex).await;
@@ -6669,7 +6669,7 @@ for line in sys.stdin:
     .await;
     drop(request_tx);
     let drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
-    tokio::time::timeout(Duration::from_secs(20), runtime)
+    tokio::time::timeout(crate::test_support::IO_TIMEOUT, runtime)
         .await
         .unwrap()
         .unwrap()
@@ -6677,6 +6677,7 @@ for line in sys.stdin:
     drain.await.unwrap();
 }
 
+// Hard-won: 29a80b2d2: Correct bridge replacement exceeded the fixture event deadline under load.
 #[tokio::test]
 async fn failed_clear_reloads_the_previous_native_session() {
     exercise_context_clear(true, HarnessKind::Codex).await;
@@ -6763,7 +6764,7 @@ for line in sys.stdin:
     drop(request_tx);
     // Drain the bounded event channel while shutdown completes.
     let drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
-    tokio::time::timeout(Duration::from_secs(20), runtime)
+    tokio::time::timeout(crate::test_support::IO_TIMEOUT, runtime)
         .await
         .unwrap()
         .unwrap()
@@ -7078,20 +7079,17 @@ fn cancelling_a_turn_withdraws_its_pending_permission_forms() {
     // I2-15: after Escape, Kimi left its permission request pending and the
     // form stayed open on an idle session.
     let pending = PendingElicitations::default();
-    let (permission, mut permission_rx) = oneshot::channel();
-    let (question, mut question_rx) = oneshot::channel();
-    {
-        let mut map = pending.lock().unwrap();
-        let permission_id = format!("{TOOL_PERMISSION_ID_PREFIX}1");
-        map.insert(
-            permission_id.clone(),
-            PendingElicitation::open(&permission_id, permission),
-        );
-        map.insert(
-            "elicitation-1".to_owned(),
-            PendingElicitation::open("elicitation-1", question),
-        );
-    }
+    let permission_id = format!("{TOOL_PERMISSION_ID_PREFIX}1");
+    let mut permission_rx = pending.register(
+        pending_test_question(&permission_id),
+        String::new(),
+        AwayRequest::Tool("permission".into()),
+    );
+    let mut question_rx = pending.register(
+        pending_test_question("elicitation-1"),
+        String::new(),
+        AwayRequest::Question,
+    );
     withdraw_tool_permissions(&pending);
     assert!(
         matches!(
@@ -7104,17 +7102,30 @@ fn cancelling_a_turn_withdraws_its_pending_permission_forms() {
         question_rx.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
     ));
-    assert_eq!(pending.lock().unwrap().len(), 1);
+    assert!(!pending.is_empty());
+    assert!(pending.remove("elicitation-1").is_some());
+    assert!(pending.is_empty());
+}
+
+fn pending_test_question(id: &str) -> ElicitationRequest {
+    ElicitationRequest {
+        id: id.to_owned(),
+        message: String::new(),
+        title: None,
+        description: None,
+        fields: Vec::new(),
+        tool_permission: None,
+    }
 }
 
 #[tokio::test]
 async fn accepted_elicitation_replies_survive_concurrent_withdrawal() {
     for accepted in [true, false] {
         let pending = PendingElicitations::default();
-        let (answer, received) = oneshot::channel();
-        pending.lock().unwrap().insert(
-            "question-1".into(),
-            PendingElicitation::open("question-1", answer),
+        let received = pending.register(
+            pending_test_question("question-1"),
+            String::new(),
+            AwayRequest::Question,
         );
         if accepted {
             resolve_pending_elicitation(
@@ -7130,10 +7141,138 @@ async fn accepted_elicitation_replies_survive_concurrent_withdrawal() {
             await_elicitation_response(&pending, "question-1", received, std::future::ready(()))
                 .await;
         assert_eq!(response.is_some(), accepted);
-        assert!(pending.lock().unwrap().is_empty());
+        assert!(pending.is_empty());
         assert!(
             resolve_pending_elicitation(&pending, "question-1", ElicitationResponse::Cancel)
                 .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn pending_afk_arbitration_preserves_registration_order_and_bridge_scope() {
+    let owner = OperatorAway::default();
+    let old = owner.pending_for_bridge();
+    let current = owner.pending_for_bridge();
+    // Lexical id order differs from the order in which the worker accepted them.
+    let first = old.register(
+        pending_test_question("question-2"),
+        String::new(),
+        AwayRequest::Question,
+    );
+    let mut repeated = current.register(
+        pending_test_question("question-10"),
+        String::new(),
+        AwayRequest::Question,
+    );
+    let human = current.register(
+        pending_test_question("human"),
+        "native-child".into(),
+        AwayRequest::Question,
+    );
+    resolve_pending_elicitation(&current, "human", ElicitationResponse::Decline).unwrap();
+    owner.set(mj_core::state::OperatorPresence {
+        away: true,
+        revision: 1,
+    });
+    assert!(matches!(
+        await_elicitation_response(&old, "question-2", first, std::future::ready(())).await,
+        Some(PendingAnswer::OperatorAway)
+    ));
+    assert!(matches!(
+        await_elicitation_response(&current, "human", human, std::future::ready(())).await,
+        Some(PendingAnswer::Human(ElicitationResponse::Decline))
+    ));
+    assert!(matches!(
+        repeated.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    // Same ids in different bridges cannot make an old bridge withdraw new work.
+    let mut reused = current.register(
+        pending_test_question("question-2"),
+        String::new(),
+        AwayRequest::Question,
+    );
+    old.close();
+    assert!(matches!(
+        reused.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    let mut late = old.register(
+        pending_test_question("late"),
+        "another-child".into(),
+        AwayRequest::Question,
+    );
+    assert!(matches!(
+        late.try_recv(),
+        Err(oneshot::error::TryRecvError::Closed)
+    ));
+    // A missed off revision still starts a new period, and registration order wins.
+    owner.set(mj_core::state::OperatorPresence {
+        away: true,
+        revision: 3,
+    });
+    assert!(matches!(
+        await_elicitation_response(&current, "question-10", repeated, std::future::ready(())).await,
+        Some(PendingAnswer::OperatorAway)
+    ));
+    assert!(matches!(
+        reused.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    current.close();
+    assert!(matches!(
+        reused.try_recv(),
+        Err(oneshot::error::TryRecvError::Closed)
+    ));
+    let next = owner.pending_for_bridge();
+    let mut restarted = next.register(
+        pending_test_question("question-2"),
+        String::new(),
+        AwayRequest::Question,
+    );
+    assert!(
+        matches!(
+            restarted.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ),
+        "bridge cleanup retains the period's refusal memory"
+    );
+}
+
+#[tokio::test]
+async fn permission_cancel_and_afk_claim_the_pending_entry_once() {
+    for cancel_first in [true, false] {
+        let owner = OperatorAway::default();
+        let pending = owner.pending_for_bridge();
+        let id = format!("{TOOL_PERMISSION_ID_PREFIX}1");
+        let received = pending.register(
+            pending_test_question(&id),
+            String::new(),
+            AwayRequest::Tool("command".into()),
+        );
+        let cancelled = cancel_first.then(|| {
+            pending
+                .take_turn_cancel(&id, &ElicitationResponse::Cancel)
+                .unwrap()
+        });
+        owner.set(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 1,
+        });
+        assert!(
+            pending
+                .take_turn_cancel(&id, &ElicitationResponse::Cancel)
+                .is_none()
+        );
+        assert!(resolve_pending_elicitation(&pending, &id, ElicitationResponse::Decline).is_err());
+        // The cancellation owner retains the sender until session/cancel is sent.
+        drop(cancelled);
+        let answer =
+            await_elicitation_response(&pending, &id, received, std::future::ready(())).await;
+        assert_eq!(
+            matches!(answer, Some(PendingAnswer::OperatorAway)),
+            !cancel_first
         );
     }
 }

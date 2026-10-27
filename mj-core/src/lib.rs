@@ -18,6 +18,7 @@ pub mod diff;
 pub mod draft;
 pub mod elicitation;
 pub mod event_outcome;
+pub mod file_lock;
 pub mod github_item;
 pub mod go;
 pub mod goal;

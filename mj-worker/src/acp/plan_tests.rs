@@ -1891,6 +1891,180 @@ impl PlanProbe {
             }
         }
     }
+
+    async fn away_pending_refusal(&mut self, ask: Value, revision: u64, expected: Value) {
+        let id = ask["id"].clone();
+        self.send(ask).await;
+        let pending = loop {
+            match self.event().await {
+                RuntimeEvent::ElicitationRequested { request } => break request,
+                RuntimeEvent::Warning { message } => {
+                    panic!("request failed before AFK: {message}")
+                }
+                _ => {}
+            }
+        };
+        self.operator_away.set(mj_core::state::OperatorPresence {
+            away: true,
+            revision,
+        });
+        loop {
+            if let RuntimeEvent::ElicitationResolved {
+                elicitation_id,
+                action,
+                reply,
+            } = self.event().await
+            {
+                assert_eq!(elicitation_id, pending.id);
+                assert_eq!(action, mj_core::elicitation::OPERATOR_AWAY_ACTION);
+                assert!(reply.is_none());
+                break;
+            }
+        }
+        let response = self.message().await;
+        assert_eq!(response["id"], id);
+        assert_eq!(response["result"], expected);
+        assert!(
+            self.answer_with(&pending.id, ElicitationResponse::Cancel,)
+                .await
+                .is_err(),
+            "AFK must remove the unanswered form from the externally answerable set"
+        );
+    }
+}
+
+/// Verify requests stay answerable until their pending owner observes AFK.
+// Hard-won: 08e09d915: enabling AFK left already-open forms pending.
+#[tokio::test]
+async fn operator_away_resolves_questions_already_pending_across_harnesses() {
+    for harness in HarnessKind::ALL {
+        let mut probe =
+            PlanProbe::with_harness(ExecutionPolicy::ConfiguredApprovals, false, harness).await;
+        let human_first = json!({"jsonrpc":"2.0", "id":"question-human-first", "method":"elicitation/create", "params":{
+            "sessionId":"plan-session", "mode":"form", "message":"Which file?",
+            "requestedSchema":{"type":"object", "properties":{"answer":{"type":"string"}}}
+        }});
+        probe.send(human_first.clone()).await;
+        let human_pending = loop {
+            match probe.event().await {
+                RuntimeEvent::ElicitationRequested { request } => break request,
+                RuntimeEvent::Warning { message } => {
+                    panic!("question failed before AFK: {message}")
+                }
+                _ => {}
+            }
+        };
+        probe
+            .answer_with(
+                &human_pending.id,
+                ElicitationResponse::Accept {
+                    content: BTreeMap::from([(
+                        "answer".into(),
+                        ElicitationValue::String("before AFK".into()),
+                    )]),
+                },
+            )
+            .await
+            .unwrap();
+        let human_response = probe.message().await;
+        assert_eq!(human_response["id"], "question-human-first");
+        assert_eq!(human_response["result"]["action"], "accept");
+        assert_eq!(human_response["result"]["content"]["answer"], "before AFK");
+        loop {
+            if let RuntimeEvent::ElicitationResolved {
+                elicitation_id,
+                action,
+                ..
+            } = probe.event().await
+            {
+                assert_eq!(elicitation_id, human_pending.id);
+                assert_eq!(action, "accept");
+                break;
+            }
+        }
+        probe.operator_away.set(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 1,
+        });
+        probe.operator_away.set(mj_core::state::OperatorPresence {
+            away: false,
+            revision: 2,
+        });
+
+        let question = json!({"jsonrpc":"2.0", "id":"question-pending", "method":"elicitation/create", "params":{
+            "sessionId":"plan-session", "mode":"form", "message":"Which file?",
+            "requestedSchema":{"type":"object", "properties":{"answer":{"type":"string"}}}
+        }});
+        let rejected = json!({"outcome":{"outcome":"selected", "optionId":"reject"}});
+        let tool = json!({"jsonrpc":"2.0", "id":"permission-pending", "method":"session/request_permission", "params":{
+            "sessionId":"plan-session", "toolCall":{"toolCallId":"tool", "kind":"execute", "title":"Run command"},
+            "options":[{"optionId":"allow", "name":"Allow once", "kind":"allow_once"},
+                {"optionId":"reject", "name":"Reject", "kind":"reject_once"}]
+        }});
+        let plan = json!({"jsonrpc":"2.0", "id":"plan-pending", "method":"session/request_permission", "params":permission("Proposed plan", &["bypassPermissions", "reject"])});
+        let mut asks = vec![
+            (question.clone(), json!({"action":"decline"})),
+            (tool, rejected.clone()),
+            (plan, rejected),
+        ];
+        if harness == HarnessKind::Grok {
+            asks.push((
+                json!({"jsonrpc":"2.0", "id":"grok-plan-pending", "method":"x.ai/exit_plan_mode", "params":{"sessionId":"plan-session", "plan":"Proposed plan"}}),
+                json!({"outcome":"cancelled"}),
+            ));
+        }
+        let mut revision = 2;
+        for (ask, expected) in asks {
+            revision += 1;
+            probe.operator_away.set(mj_core::state::OperatorPresence {
+                away: false,
+                revision,
+            });
+            revision += 1;
+            probe
+                .away_pending_refusal(ask.clone(), revision, expected.clone())
+                .await;
+            let repeat_id = format!("{}-repeat", ask["id"].as_str().unwrap());
+            let mut repeated = ask;
+            repeated["id"] = json!(repeat_id);
+            probe.away_repeat(repeated, expected).await;
+        }
+        probe.close().await;
+    }
+
+    let mut probe = PlanProbe::new(ExecutionPolicy::ConfiguredApprovals).await;
+    probe
+        .commands
+        .send(CommandRequest::Prompt {
+            request_id: "original-prompt".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new(
+                "Inspect the repository",
+            ))],
+        })
+        .await
+        .unwrap();
+    let prompt = probe.message().await;
+    probe
+        .send(json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"plan-session", "update":{
+            "sessionUpdate":"subagent_spawned", "subagentSessionId":"child-question",
+            "name":"worker", "task":"inspect", "capabilities":{}
+        }}}))
+        .await;
+    loop {
+        if let RuntimeEvent::NativeAgent { .. } = probe.event().await {
+            break;
+        }
+    }
+    let child_question = json!({"jsonrpc":"2.0", "id":"child-question", "method":"elicitation/create", "params":{
+        "sessionId":"child-question", "mode":"form", "message":"Which file?",
+        "requestedSchema":{"type":"object", "properties":{"answer":{"type":"string"}}}
+    }});
+    probe
+        .away_pending_refusal(child_question, 1, json!({"action":"decline"}))
+        .await;
+    probe.answered(&prompt).await;
+    assert_eq!(probe.finished().await, "EndTurn");
+    probe.close().await;
 }
 
 /// Real ACP ingress/response envelopes exercise the gate before form registration.

@@ -220,8 +220,12 @@ impl DaemonStorage {
             Err(error) => return Err(error).context("open fixture controller ownership lock"),
         };
         match lock.try_lock() {
-            // Closing the file releases the lock this probe just took.
-            Ok(()) => Ok(false),
+            Ok(()) => {
+                mj_core::file_lock::FileLock::new(lock)
+                    .release()
+                    .context("release fixture controller ownership probe")?;
+                Ok(false)
+            }
             Err(TryLockError::WouldBlock) => Ok(true),
             Err(TryLockError::Error(error)) => Err(error.into()),
         }

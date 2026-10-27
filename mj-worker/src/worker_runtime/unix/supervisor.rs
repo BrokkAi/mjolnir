@@ -227,25 +227,6 @@ pub async fn run_acp_supervisor(spec: AcpSupervisorSpec) -> Result<()> {
     run_acp_supervisor_with_streams(spec, stdin, stdout).await
 }
 
-// The supervisor owns the lock, including its release. A concurrent fork
-// inherits even CLOEXEC descriptors until exec; closing only our descriptor
-// would let that unrelated child extend the lease beyond supervisor cleanup.
-struct SupervisorLease(std::fs::File);
-
-impl SupervisorLease {
-    fn acquire(path: &std::path::Path) -> Result<Self> {
-        crate::worker_runtime::harness::acquire_supervisor_lease(path).map(Self)
-    }
-}
-
-impl Drop for SupervisorLease {
-    fn drop(&mut self) {
-        if let Err(error) = self.0.unlock() {
-            tracing::warn!(%error, "could not release ACP supervisor installation lease");
-        }
-    }
-}
-
 pub(crate) async fn run_acp_supervisor_with_streams<R, W>(
     spec: AcpSupervisorSpec,
     mut parent_stdin: R,
@@ -260,12 +241,12 @@ where
     let _harness_lease = spec
         .harness_lease
         .as_deref()
-        .map(SupervisorLease::acquire)
+        .map(crate::worker_runtime::harness::acquire_supervisor_lease)
         .transpose()?;
     let _node_lease = spec
         .node_lease
         .as_deref()
-        .map(SupervisorLease::acquire)
+        .map(crate::worker_runtime::harness::acquire_supervisor_lease)
         .transpose()?;
     let mut environment = mj_core::login_environment::with_overrides(&spec.environment).await?;
     // Removed after the merge, so a value the target's login environment sets

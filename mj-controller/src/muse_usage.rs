@@ -497,7 +497,7 @@ fn save_login(home: &Path, mut document: Value, grant: &TokenGrant, now: i64) ->
 }
 
 /// Take the exclusive lock Muse holds while it writes `auth.json`.
-async fn acquire_auth_lock(home: &Path) -> Result<std::fs::File> {
+async fn acquire_auth_lock(home: &Path) -> Result<mj_core::file_lock::FileLock> {
     let path = home.join(AUTH_LOCK_FILE);
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -508,7 +508,7 @@ async fn acquire_auth_lock(home: &Path) -> Result<std::fs::File> {
     let deadline = tokio::time::Instant::now() + AUTH_LOCK_WAIT;
     loop {
         match file.try_lock() {
-            Ok(()) => return Ok(file),
+            Ok(()) => return Ok(mj_core::file_lock::FileLock::new(file)),
             Err(std::fs::TryLockError::WouldBlock) if tokio::time::Instant::now() < deadline => {
                 tokio::time::sleep(AUTH_LOCK_RETRY_INTERVAL).await;
             }

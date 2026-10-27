@@ -6880,11 +6880,11 @@ async fn checkpoint_only_start_refuses_missing_or_corrupt_state_without_starting
     assert!(format!("{error:#}").contains("existing relay state"));
     let state = root.join(mj_core::relay::RELAY_STATE_FILE);
     std::fs::write(&state, b"corrupt state").unwrap();
-    let owner = super::root_owner::acquire_after_fork_exec_window(&root).unwrap();
+    let owner = super::WorkerRootOwner::acquire(&root).unwrap();
     let child = super::root_owner::ForkedPreExecChild::start();
     drop(owner);
     let release = child.release_after(std::time::Duration::from_millis(30));
-    let owner = super::root_owner::acquire_after_fork_exec_window(&root).unwrap();
+    let owner = super::WorkerRootOwner::acquire(&root).unwrap();
     let error = unix::run_daemon_owned(&owner, config).await.unwrap_err();
     release.join().unwrap();
     assert!(format!("{error:#}").contains("parse"), "{error:#}");
@@ -6893,12 +6893,16 @@ async fn checkpoint_only_start_refuses_missing_or_corrupt_state_without_starting
     assert!(!root.join("acp-supervisor.json").exists());
 }
 
+// Hard-won: 630dee318: File polling imposed a five-second startup budget on a correct process tree.
 #[tokio::test]
 async fn acp_supervisor_terminates_descendants_when_parent_input_ends() {
     use std::time::Duration;
+    use tokio::io::AsyncReadExt;
     for broken_output in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("descendant-writes");
+        let ready_path = root.path().join("ready.sock");
+        let ready = tokio::net::UnixListener::bind(&ready_path).unwrap();
         struct GroupGuard(std::path::PathBuf);
         impl Drop for GroupGuard {
             fn drop(&mut self) {
@@ -6915,19 +6919,31 @@ async fn acp_supervisor_terminates_descendants_when_parent_input_ends() {
             args: vec![
                 "-c".into(),
                 r#"
-import os, signal, sys, time
+import os, signal, socket, sys, time
 with open(sys.argv[1] + '.pid', 'w') as f: f.write(str(os.getpid()))
+read_ready, write_ready = os.pipe()
 if os.fork() == 0:
+    os.close(read_ready)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    with open(sys.argv[1], 'a') as f: f.write('x')
+    with socket.socket(socket.AF_UNIX) as ready:
+        ready.connect(sys.argv[2])
+        ready.sendall(b'x')
+    os.write(write_ready, b'x')
+    os.close(write_ready)
     while True:
         with open(sys.argv[1], 'a') as f: f.write('x')
         time.sleep(.01)
-while not os.path.exists(sys.argv[1]): time.sleep(.01)
+# Do not trigger broken-output cleanup before the child has signalled readiness.
+os.close(write_ready)
+assert os.read(read_ready, 1) == b'x'
+os.close(read_ready)
 print('x' * 100000, flush=True)
 while True: time.sleep(1)
 "#
                 .into(),
                 marker.to_string_lossy().into_owned(),
+                ready_path.to_string_lossy().into_owned(),
             ],
             environment: BTreeMap::new(),
             excluded_environment: Vec::new(),
@@ -6944,18 +6960,16 @@ while True: time.sleep(1)
             Box::new(tokio::io::sink())
         };
         let task = tokio::spawn(unix::run_acp_supervisor_with_streams(spec, input, output));
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !marker.exists() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+        crate::test_support::wait_for("descendant readiness", async {
+            let (mut child, _) = ready.accept().await.unwrap();
+            assert_eq!(child.read_u8().await.unwrap(), b'x');
         })
-        .await
-        .unwrap();
+        .await;
         let mut held = Some(held);
         if !broken_output {
             drop(held.take());
         }
-        let result = tokio::time::timeout(Duration::from_secs(5), task)
+        let result = tokio::time::timeout(crate::test_support::IO_TIMEOUT, task)
             .await
             .unwrap()
             .unwrap();

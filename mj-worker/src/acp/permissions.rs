@@ -1,33 +1,6 @@
 use super::*;
 use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionId};
 
-pub(super) type PendingElicitations = Arc<Mutex<BTreeMap<String, PendingElicitation>>>;
-
-/// A question the worker published and is waiting to have answered. It keeps
-/// the question so an answer is checked against what was actually offered.
-pub(super) struct PendingElicitation {
-    pub(super) question: ElicitationRequest,
-    pub(super) answer: oneshot::Sender<ElicitationResponse>,
-}
-
-#[cfg(test)]
-impl PendingElicitation {
-    /// A pending question with no fields, for tests that only need it open.
-    pub(super) fn open(id: &str, answer: oneshot::Sender<ElicitationResponse>) -> Self {
-        Self {
-            question: ElicitationRequest {
-                id: id.to_owned(),
-                message: String::new(),
-                title: None,
-                description: None,
-                fields: Vec::new(),
-                tool_permission: None,
-            },
-            answer,
-        }
-    }
-}
-
 /// A permission callback captures the current command's sender, so a late
 /// answer cannot attach an implementation to a subsequent prompt or bridge.
 pub(super) type PlanImplementationSlot =
@@ -487,18 +460,18 @@ impl OwnedMcpApprovals {
 }
 
 /// Taking the pending entry decides whether answering or withdrawal wins.
-/// Once an answer was accepted, cancellation must still receive it so its
-/// reply is recorded, even if both notifications are ready at the same time.
+/// Once a human or AFK answer was accepted, cancellation still receives it
+/// so its resolution is recorded even when both notifications are ready.
 pub(super) async fn await_elicitation_response(
     pending: &PendingElicitations,
     id: &str,
-    mut answer: oneshot::Receiver<ElicitationResponse>,
+    mut answer: oneshot::Receiver<PendingAnswer>,
     cancellation: impl std::future::Future<Output = ()>,
-) -> Option<ElicitationResponse> {
+) -> Option<PendingAnswer> {
     tokio::select! {
         biased;
         () = cancellation => {
-            let withdrawn = pending.lock().expect("pending elicitation lock poisoned").remove(id);
+            let withdrawn = pending.remove(id);
             if withdrawn.is_some() {
                 None
             } else {
@@ -514,20 +487,5 @@ pub(super) fn resolve_pending_elicitation(
     elicitation_id: &str,
     response: ElicitationResponse,
 ) -> std::result::Result<(), String> {
-    let mut pending = pending.lock().expect("pending elicitation lock poisoned");
-    let Some(question) = pending.get(elicitation_id) else {
-        return Err(format!(
-            "elicitation {elicitation_id:?} is no longer pending"
-        ));
-    };
-    // The worker accepts only an answer to the question it published, and
-    // forwards it in the shape the harness reads. A refused answer leaves
-    // the question pending for a valid one.
-    let response = question.question.harness_response(response)?;
-    let PendingElicitation { answer, .. } = pending
-        .remove(elicitation_id)
-        .expect("the pending entry was just found");
-    answer
-        .send(response)
-        .map_err(|_| format!("elicitation {elicitation_id:?} was cancelled before it was answered"))
+    pending.resolve(elicitation_id, response)
 }

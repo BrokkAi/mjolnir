@@ -1,11 +1,10 @@
 //! Fixtures shared by more than one test module in this crate.
 
-#[cfg(unix)]
-pub(crate) const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+mod timeouts;
+pub(crate) use timeouts::IO_TIMEOUT;
 
 /// A hang detector for fixtures that perform real filesystem, process, or
 /// socket I/O. Tests of application deadlines use their own controlled clock.
-#[cfg(unix)]
 pub(crate) async fn wait_for<T>(
     description: &str,
     future: impl std::future::Future<Output = T>,

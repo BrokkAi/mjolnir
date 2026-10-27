@@ -124,6 +124,7 @@ async fn run(
     Ok(text)
 }
 
+// Hard-won: 1300d5692: a fork inherited the atomic launcher's writer and caused ETXTBSY.
 #[tokio::test]
 async fn generated_launchers_preserve_shell_arguments_and_explicit_bazel_flags() -> Result<()> {
     let root = tempfile::tempdir()?;
@@ -132,7 +133,13 @@ async fn generated_launchers_preserve_shell_arguments_and_explicit_bazel_flags()
     std::fs::create_dir_all(&checkout)?;
     std::fs::create_dir_all(&tools)?;
     std::fs::write(checkout.join("MODULE.bazel"), "")?;
-    write_launcher(&tools.join("bazel"), "printf '<%s>\\n' \"$@\"\n")?;
+    // Exercise the writer's stdin beyond a pipe buffer and Linux's per-argument
+    // limit, including shell quoting, without changing the fixture's output.
+    let body = format!(
+        "# {}\nprintf '<%s>\\n' \"$@\"\n",
+        "quoted ' $literal ".repeat(16 * 1024)
+    );
+    write_launcher(&tools.join("bazel"), &body)?;
     let mut env = environment(root.path(), &checkout);
     env.insert("PATH".into(), tools.to_string_lossy().into_owned());
     prepare(&checkout, &mut env)?;

@@ -1,6 +1,6 @@
 //! One serialized setup transaction per instance, including interruption recovery.
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -173,7 +173,10 @@ fn add_profiles_for(
     Ok(added)
 }
 
-fn acquire_setup_lock(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<File> {
+fn acquire_setup_lock(
+    path: &Path,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<mj_core::file_lock::FileLock> {
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true);
     #[cfg(unix)]
@@ -185,7 +188,7 @@ fn acquire_setup_lock(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<File>
     loop {
         ensure!(!cancelled(), "setup cancelled");
         match file.try_lock() {
-            Ok(()) => return Ok(file),
+            Ok(()) => return Ok(mj_core::file_lock::FileLock::new(file)),
             Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(25)),
             Err(std::fs::TryLockError::Error(error)) => return Err(error).context("lock setup"),
         }

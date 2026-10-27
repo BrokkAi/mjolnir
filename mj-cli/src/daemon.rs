@@ -85,16 +85,7 @@ struct SharedStartGuard {
     _lock: StartLock,
 }
 
-#[derive(Debug)]
-struct StartLock(fs::File);
-
-impl Drop for StartLock {
-    fn drop(&mut self) {
-        if let Err(error) = self.0.unlock() {
-            tracing::warn!(%error, "could not release daemon startup lock");
-        }
-    }
-}
+type StartLock = mj_core::file_lock::FileLock;
 
 async fn acquire_start_guard(path: PathBuf) -> Result<DaemonStartGuard> {
     acquire_start_lock(path, false)
@@ -131,7 +122,7 @@ async fn acquire_start_lock(path: PathBuf, shared: bool) -> Result<StartLock> {
                 file.try_lock()
             };
             match locked {
-                Ok(()) => Ok(Some(StartLock(file))),
+                Ok(()) => Ok(Some(StartLock::new(file))),
                 Err(std::fs::TryLockError::WouldBlock) => Ok(None),
                 Err(std::fs::TryLockError::Error(error)) => {
                     Err(error).context("lock daemon startup")

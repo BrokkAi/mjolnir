@@ -92,7 +92,7 @@ where
     let ext_step_clock = spec.step_clock.clone();
     let ext_harness = spec.harness;
     let elicitation_events = events.clone();
-    let pending_elicitations = PendingElicitations::default();
+    let pending_elicitations = spec.operator_away.pending_for_bridge();
     let handler_elicitations = pending_elicitations.clone();
     let permission_elicitations = pending_elicitations.clone();
     let permission_review_ids = Arc::new(AtomicU64::new(1));
@@ -100,9 +100,6 @@ where
     let session_elicitations = pending_elicitations.clone();
     let next_elicitation_id = Arc::new(AtomicU64::new(1));
     let managed_subagent = spec.managed_subagent;
-    let permission_away = spec.operator_away.clone();
-    let elicitation_away = spec.operator_away.clone();
-    let ext_away = spec.operator_away.clone();
     let permission_policy = spec.execution_policy;
     let permission_harness = spec.harness;
     let permission_owned_mcp = OwnedMcpApprovals::for_launch(&spec);
@@ -392,18 +389,10 @@ where
                         record_delegated_question(&permission_events, review).await?;
                         return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
                     }
-                    if permission_away.refuse(String::new(), AwayRequest::Plan) {
-                        record_away_question(&permission_events, review).await?;
-                        return responder.respond(permission_plan_response(&request, ElicitationResponse::Decline));
-                    }
                     let approved_plan = plan_review_proposal(&review).unwrap_or_default().to_owned();
                     let implementation = permission_implementation_slot
                         .lock().expect("plan implementation lock poisoned").clone();
-                    let (answer, answer_rx) = oneshot::channel();
-                    permission_elicitations
-                        .lock()
-                        .expect("pending elicitation lock poisoned")
-                        .insert(id.clone(), PendingElicitation { question: review.clone(), answer });
+                    let answer_rx = permission_elicitations.register(review.clone(), String::new(), AwayRequest::Plan);
                     let pending = permission_elicitations.clone();
                     let events = permission_events.clone();
                     let cancellation = responder.cancellation();
@@ -413,10 +402,7 @@ where
                             .await
                             .is_err()
                         {
-                            pending
-                                .lock()
-                                .expect("pending elicitation lock poisoned")
-                                .remove(&id);
+                            pending.remove(&id);
                             if let Err(error) =
                                 responder.respond_with_error(relay_event_channel_error())
                             {
@@ -434,13 +420,13 @@ where
                         ).await;
                         let action = response
                             .as_ref()
-                            .map_or("cancel", ElicitationResponse::action_name)
+                            .map_or("cancel", PendingAnswer::action_name)
                             .to_owned();
                         if let Err(error) = events
                             .send(RuntimeEvent::ElicitationResolved {
                                 elicitation_id: id.clone(),
                                 action,
-                                reply: response.as_ref().map(|response| review.reply_text(response)),
+                                reply: response.as_ref().and_then(PendingAnswer::human).map(|response| review.reply_text(response)),
                             })
                             .await
                         {
@@ -455,7 +441,7 @@ where
                         let mut handoff_completion = None;
                         let selection = response.map_or_else(
                             || Ok(PlanPermissionAnswer::Native(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled))),
-                            |response| policy_plan_permission_answer(&request, response, permission_harness, permission_policy),
+                            |response| policy_plan_permission_answer(&request, response.harness_response(), permission_harness, permission_policy),
                         ).and_then(|selection| match selection {
                             PlanPermissionAnswer::Native(answer) => Ok(answer),
                             PlanPermissionAnswer::ContinueInBypass => {
@@ -562,20 +548,7 @@ where
                 } else {
                     away_permission_identity(&request, permission_tool_input(&request.tool_call, &permission_tool_content))
                 };
-                if permission_away.refuse(if native_child { request.session_id.to_string() } else { String::new() }, identity) {
-                    record_away_question(&permission_events, form).await?;
-                    let response = if plan_permission || claude_plan_approval {
-                        permission_plan_response(&request, ElicitationResponse::Decline)
-                    } else {
-                        let outcome = skip.map_or(RequestPermissionOutcome::Cancelled, |option_id|
-                            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)));
-                        RequestPermissionResponse::new(outcome)
-                    };
-                    return responder.respond(response);
-                }
-                let (answer, answer_rx) = oneshot::channel();
-                permission_elicitations.lock().expect("pending elicitation lock poisoned")
-                    .insert(id.clone(), PendingElicitation { question: form.clone(), answer });
+                let answer_rx = permission_elicitations.register(form.clone(), if native_child { request.session_id.to_string() } else { String::new() }, identity);
                 let pending = permission_elicitations.clone();
                 let events = permission_events.clone();
                 let cancellation = responder.cancellation();
@@ -583,7 +556,7 @@ where
                     let response = if events.send(RuntimeEvent::ElicitationRequested { request: form.clone() }).await.is_ok() {
                         await_elicitation_response(&pending, &id, answer_rx, cancellation.cancelled()).await
                     } else {
-                        pending.lock().expect("pending elicitation lock poisoned").remove(&id);
+                        pending.remove(&id);
                         None
                     };
                     // ACP keeps `cancelled` for a cancelled turn. Skip is a
@@ -593,24 +566,27 @@ where
                     // turn is running.
                     let selected = match &response {
                         _ if cancellation.is_cancelled() => None,
-                        Some(ElicitationResponse::Accept { content }) => match content.get("choice") {
+                        Some(PendingAnswer::Human(ElicitationResponse::Accept { content })) => match content.get("choice") {
                             Some(ElicitationValue::String(value)) => choices.iter()
                                 .find(|choice| choice.option_id.to_string() == *value)
                                 .map(|choice| choice.option_id.clone()),
                             _ => None,
                         },
-                        Some(ElicitationResponse::Decline) => skip,
-                        Some(ElicitationResponse::Cancel) | None => None,
+                        Some(PendingAnswer::Human(ElicitationResponse::Decline) | PendingAnswer::OperatorAway) => skip,
+                        Some(PendingAnswer::Human(ElicitationResponse::Cancel)) | None => None,
                     };
                     let outcome = selected.map_or(RequestPermissionOutcome::Cancelled, |option_id|
                         RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)));
-                    if let Err(error) = responder.respond(RequestPermissionResponse::new(outcome)) {
+                    let answer = if matches!(response, Some(PendingAnswer::OperatorAway)) && (plan_permission || claude_plan_approval) {
+                        permission_plan_response(&request, ElicitationResponse::Decline)
+                    } else { RequestPermissionResponse::new(outcome) };
+                    if let Err(error) = responder.respond(answer) {
                         tracing::debug!(%error, "harness permission responder closed");
                     }
                     if let Err(error) = events.send(RuntimeEvent::ElicitationResolved {
                         elicitation_id: id,
-                        action: response.as_ref().map_or("cancel", ElicitationResponse::action_name).into(),
-                        reply: response.as_ref().map(|response| form.reply_text(response)),
+                        action: response.as_ref().map_or("cancel", PendingAnswer::action_name).into(),
+                        reply: response.as_ref().and_then(PendingAnswer::human).map(|response| form.reply_text(response)),
                     }).await {
                         tracing::debug!(%error, "harness permission result receiver closed");
                     }
@@ -817,15 +793,7 @@ where
                         record_delegated_question(&elicitation_events, request).await?;
                         return responder.respond(serde_json::json!({"action":"cancel"}));
                     }
-                    if elicitation_away.refuse(requesting_agent, AwayRequest::Question) {
-                        record_away_question(&elicitation_events, request).await?;
-                        return responder.respond(serde_json::json!({"action":"decline"}));
-                    }
-                    let (answer, answer_rx) = oneshot::channel();
-                    handler_elicitations
-                        .lock()
-                        .expect("pending elicitation lock poisoned")
-                        .insert(id.clone(), PendingElicitation { question: request.clone(), answer });
+                    let answer_rx = handler_elicitations.register(request.clone(), requesting_agent, AwayRequest::Question);
                     let pending = handler_elicitations.clone();
                     let events = elicitation_events.clone();
                     let cancellation = responder.cancellation();
@@ -835,10 +803,7 @@ where
                             .await
                             .is_err()
                         {
-                            pending
-                                .lock()
-                                .expect("pending elicitation lock poisoned")
-                                .remove(&id);
+                            pending.remove(&id);
                             if let Err(error) =
                                 responder.respond_with_error(relay_event_channel_error())
                             {
@@ -856,13 +821,13 @@ where
                         ).await;
                         let action = response
                             .as_ref()
-                            .map_or("cancel", ElicitationResponse::action_name)
+                            .map_or("cancel", PendingAnswer::action_name)
                             .to_owned();
                         if let Err(error) = events
                             .send(RuntimeEvent::ElicitationResolved {
                                 elicitation_id: id.clone(),
                                 action,
-                                reply: response.as_ref().map(|response| request.reply_text(response)),
+                                reply: response.as_ref().and_then(PendingAnswer::human).map(|response| request.reply_text(response)),
                             })
                             .await
                         {
@@ -874,7 +839,7 @@ where
                             );
                         }
                         match response {
-                            Some(response) => match serde_json::to_value(response) {
+                            Some(response) => match serde_json::to_value(response.harness_response()) {
                                 Ok(response) => {
                                     if let Err(error) = responder.respond(response) {
                                         tracing::debug!(
@@ -929,15 +894,7 @@ where
                         .and_then(serde_json::Value::as_str)
                         .filter(|id| ext_parent_router.lock().expect("native agent router poisoned").is_child(id))
                         .unwrap_or_default().to_owned();
-                    if ext_away.refuse(requesting_agent, AwayRequest::Plan) {
-                        record_away_question(&ext_events, review).await?;
-                        return responder.respond(serde_json::json!({"outcome":"cancelled"}));
-                    }
-                    let (answer, answer_rx) = oneshot::channel();
-                    handler_elicitations
-                        .lock()
-                        .expect("pending elicitation lock poisoned")
-                        .insert(id.clone(), PendingElicitation { question: review.clone(), answer });
+                    let answer_rx = handler_elicitations.register(review.clone(), requesting_agent, AwayRequest::Plan);
                     let pending = handler_elicitations.clone();
                     let events = ext_events.clone();
                     let cancellation = responder.cancellation();
@@ -947,10 +904,7 @@ where
                             .await
                             .is_err()
                         {
-                            pending
-                                .lock()
-                                .expect("pending elicitation lock poisoned")
-                                .remove(&id);
+                            pending.remove(&id);
                             if let Err(error) =
                                 responder.respond_with_error(relay_event_channel_error())
                             {
@@ -968,13 +922,13 @@ where
                         ).await;
                         let action = response
                             .as_ref()
-                            .map_or("cancel", ElicitationResponse::action_name)
+                            .map_or("cancel", PendingAnswer::action_name)
                             .to_owned();
                         if let Err(error) = events
                             .send(RuntimeEvent::ElicitationResolved {
                                 elicitation_id: id.clone(),
                                 action,
-                                reply: response.as_ref().map(|response| review.reply_text(response)),
+                                reply: response.as_ref().and_then(PendingAnswer::human).map(|response| review.reply_text(response)),
                             })
                             .await
                         {
@@ -987,7 +941,7 @@ where
                         }
                         if let Err(error) = responder.respond(response.map_or_else(
                             || serde_json::json!({ "outcome": "cancelled" }),
-                            grok::plan_response,
+                            |response| grok::plan_response(response.harness_response()),
                         )) {
                             tracing::debug!(
                                 %id,
@@ -1190,29 +1144,11 @@ pub(super) fn cancel_prompt_turn(
     sent
 }
 
-/// Whether an answer stops the running turn instead of answering its form:
-/// Cancel on a pending tool permission request.
-pub(super) fn answer_cancels_turn(
-    pending: &PendingElicitations,
-    elicitation_id: &str,
-    response: &ElicitationResponse,
-) -> bool {
-    *response == ElicitationResponse::Cancel
-        && elicitation_id.starts_with(TOOL_PERMISSION_ID_PREFIX)
-        && pending
-            .lock()
-            .expect("pending elicitation lock poisoned")
-            .contains_key(elicitation_id)
-}
-
 /// Drops the answer channel of every pending tool permission request. Each
 /// request's task then answers the agent with `cancelled` and reports the
 /// elicitation resolved, which closes its form.
 pub(super) fn withdraw_tool_permissions(pending: &PendingElicitations) {
-    pending
-        .lock()
-        .expect("pending elicitation lock poisoned")
-        .retain(|id, _| !id.starts_with(TOOL_PERMISSION_ID_PREFIX));
+    pending.retain(|id| !id.starts_with(TOOL_PERMISSION_ID_PREFIX));
 }
 
 /// The id prefix of a permission request shown as a form.
@@ -1685,10 +1621,7 @@ pub(super) async fn drive_connection(
         &grok_usage,
     )
     .await;
-    pending_elicitations
-        .lock()
-        .expect("pending elicitation lock poisoned")
-        .clear();
+    pending_elicitations.close();
     terminals.shutdown(events).await;
     result
 }
@@ -1958,13 +1891,6 @@ async fn record_delegated_question(
     request: ElicitationRequest,
 ) -> std::result::Result<(), agent_client_protocol::Error> {
     record_refused_question(events, request, "cancel").await
-}
-
-async fn record_away_question(
-    events: &mpsc::Sender<RuntimeEvent>,
-    request: ElicitationRequest,
-) -> std::result::Result<(), agent_client_protocol::Error> {
-    record_refused_question(events, request, mj_core::elicitation::OPERATOR_AWAY_ACTION).await
 }
 
 async fn record_refused_question(
