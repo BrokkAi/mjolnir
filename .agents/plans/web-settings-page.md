@@ -16,7 +16,7 @@ To see it working: start an isolated instance, open the viewer, sign in, choose 
 
 - [x] (2026-10-27 15:10Z) Research: mapped the terminal Settings model (`mj-tui/src/setup/`), the save path (`mj-cli/src/dashboard/io/spawn.rs`), the daemon HTTP surfaces, the viewer page pattern and the web test harness.
 - [x] (2026-10-27 16:40Z) Milestone 1: shared settings model in `mj-client/src/settings/` (`schema`, `page`, `draft`, `edit`, `save`), used by the terminal. `mj-tui` 561 tests pass with no golden changes; the six `mj-cli` save tests pass against the moved `save_at`.
-- [ ] Milestone 2: daemon settings routes on the signed-in viewer surface.
+- [x] (2026-10-27 18:05Z) Milestone 2: daemon settings routes (`GET /api/settings`, `POST /api/settings/page`, `/edit`, `/save`) on the signed-in viewer surface, with `mj_client::settings::{view, hidden}`. Exchange golden `mj-controller/tests/golden/viewer-settings-exchange.txt` and the stale-draft test pass.
 - [ ] Milestone 3: the web Settings page.
 - [ ] Milestone 4: choices that need discovery (code review and sub-agent model and effort).
 - [ ] Full validation, documentation, retrospective.
@@ -68,6 +68,19 @@ To see it working: start an isolated instance, open the viewer, sign in, choose 
 
 - Decision: the conflict refusal now says "Reopen Settings to edit the latest value." instead of "Reopen Setup…".
   Rationale: both surfaces title the screen Settings; the old word was a leftover from when the dialog was called Setup.
+  Date/Author: 2026-10-27, Claude.
+
+
+- Decision: the save runs in the HTTP handler under the configuration file lock (`Config::update_to`) and reads session state with `crate::database::load_state()`, rather than travelling over a new channel to the server runtime loop with the daemon's `config_mutation` lock.
+  Rationale: this is exactly how the terminal saves, from another process, so both surfaces have one save behaviour; the file lock already serializes it with the daemon's own writers, and inside the daemon `load_state()` returns the daemon's committed in-memory state, which is the owner of session facts. The daemon's 500 ms poll installs the saved file as it does after a terminal save.
+  Date/Author: 2026-10-27, Claude.
+
+- Decision: a separate `POST /api/settings/page` renders another page of the browser's draft, so navigation never needs the browser to understand configuration either.
+  Rationale: rendering is the daemon's job; the draft is opaque to the page.
+  Date/Author: 2026-10-27, Claude.
+
+- Decision: rows the terminal guards with something only it can measure or discover are `read_only` on the web for now: every build-cache field (the terminal inspects the machine's mbx installation, which may own the budgets), the reviewer's model and effort, and sub-agent model and effort until discovery has filled `_subagent_options`. Remote `~` paths are refused with "Enter the full path on that machine".
+  Rationale: accepting these without the terminal's checks would let the web write values the terminal would refuse. `view::apply` accepts an edit only through a control the rendered page offers, so a read-only row cannot be changed by a crafted request either.
   Date/Author: 2026-10-27, Claude.
 
 

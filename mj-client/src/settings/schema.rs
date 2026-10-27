@@ -625,6 +625,49 @@ pub fn choice_label(path: &[String], value: &Value, draft: &Value) -> String {
     .to_owned()
 }
 
+/// How one of a setting's offered values reads in its list of choices. Unset
+/// says what it falls back to, and the build cache switch, whose unset value
+/// means on, says so.
+pub fn option_label(path: &[String], value: &Value, draft: &Value) -> String {
+    if is_build_cache_field(path, "enabled") {
+        match value {
+            Value::Null => "Default (on)",
+            Value::Bool(true) => "On",
+            _ => "Off",
+        }
+        .to_owned()
+    } else if value.is_null() {
+        format!(
+            "Default ({})",
+            null_label(&super::draft::storage_path(path), draft)
+        )
+    } else {
+        choice_label(path, value, draft)
+    }
+}
+
+/// The text a typed setting's field holds for `value`. A build cache budget
+/// is typed in whole GB, whatever unit the file spells it in.
+pub fn field_text(path: &[String], value: &Value) -> String {
+    if value.is_null() {
+        String::new()
+    } else if let Some(size) = value.as_str().filter(|_| is_build_cache_budget(path)) {
+        build_cache_gigabytes_label(size)
+    } else {
+        value
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| value.to_string())
+    }
+}
+
+/// A size string as the whole number of GB the field is measured in, or the
+/// string itself when it is not a size at all.
+pub fn build_cache_gigabytes_label(size: &str) -> String {
+    mj_core::config::build_cache_size_gigabytes(size)
+        .map_or_else(|| size.to_owned(), |gigabytes| gigabytes.to_string())
+}
+
 pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
     let key = path.last().map(String::as_str).unwrap_or("");
     if path.len() == 3 && path[0] == "subagents" && matches!(key, "model" | "effort") {
@@ -718,7 +761,13 @@ fn jev_enabled(draft: &Value) -> bool {
 /// another setting in the draft changes what the page does. Continuation
 /// cannot run while Jev is off, whatever its own box says.
 pub fn page_help(path: &[String], draft: &Value) -> &'static str {
-    match path {
+    page_specific_help(path, draft).unwrap_or_else(|| help(path))
+}
+
+/// [`page_help`] without the general hint every page without help of its
+/// own falls back to.
+pub fn page_specific_help(path: &[String], draft: &Value) -> Option<&'static str> {
+    Some(match path {
         [section] if section == "continuation" && !jev_enabled(draft) => {
             "Off because Jev is off: continuation needs Jev to judge each reply. Turn Jev on under Privacy to use it."
         }
@@ -731,8 +780,8 @@ pub fn page_help(path: &[String], draft: &Value) -> &'static str {
         {
             "Off because Jev is off: the GitHub watcher needs Jev to classify activity. Mailbox delivery and child reports remain available."
         }
-        _ => help(path),
-    }
+        _ => return specific_help(path),
+    })
 }
 
 /// Alternate names for a page participate in the search's preferred matches.
@@ -753,6 +802,17 @@ pub fn search_aliases(path: &[String]) -> &'static [&'static str] {
 }
 
 pub fn help(path: &[String]) -> &'static str {
+    specific_help(path).unwrap_or(if path.last().is_none_or(String::is_empty) {
+        // The first page has no parent setting to describe, so it says what
+        // the whole screen does instead.
+        "Changes stay in this draft until you save."
+    } else {
+        "Enter opens or edits a setting. Changes stay in this draft until you save."
+    })
+}
+
+/// What the setting at `path` does, when it has help of its own.
+pub fn specific_help(path: &[String]) -> Option<&'static str> {
     match path
         .iter()
         .map(String::as_str)
@@ -760,20 +820,28 @@ pub fn help(path: &[String]) -> &'static str {
         .as_slice()
     {
         ["github"] | ["github", "watch"] => {
-            return "Receive GitHub activity selected by Jev. This switch controls only the GitHub event source. Mailbox hooks, peer messages and child reports remain available at tool boundaries and through idle wakes.";
+            return Some(
+                "Receive GitHub activity selected by Jev. This switch controls only the GitHub event source. Mailbox hooks, peer messages and child reports remain available at tool boundaries and through idle wakes.",
+            );
         }
         ["machines", _, "build_cache", "scheduler"] => {
-            return "mbx shares this scheduler across all builds on the machine. Blank fields keep mbx's defaults.";
+            return Some(
+                "mbx shares this scheduler across all builds on the machine. Blank fields keep mbx's defaults.",
+            );
         }
         ["machines", _, "build_cache", "scheduler", "cpus"] => {
-            return "Machine-wide compile permit count shared by all mbx builds. Must be a positive integer; blank uses mbx's default.";
+            return Some(
+                "Machine-wide compile permit count shared by all mbx builds. Must be a positive integer; blank uses mbx's default.",
+            );
         }
         ["machines", _, "build_cache", "scheduler", "memory"] => {
-            return "Shared admission budget for compiles (e.g. 8GiB). `none` disables weighting; not a hard cap. Blank keeps mbx default.";
+            return Some(
+                "Shared admission budget for compiles (e.g. 8GiB). `none` disables weighting; not a hard cap. Blank keeps mbx default.",
+            );
         }
         _ => {}
     }
-    match path.last().map(String::as_str).unwrap_or("") {
+    Some(match path.last().map(String::as_str).unwrap_or("") {
         "prefix" if path.first().is_some_and(|key| key == "interface") => {
             "Key pressed before global shortcuts. Use ctrl, alt, or cmd/super with a key, or use a function key."
         }
@@ -870,11 +938,8 @@ pub fn help(path: &[String]) -> &'static str {
         "codex_profile" => {
             "Codex only: the name of a profile file in the account directory, such as ds for ds.config.toml, layered over config.toml like codex -p ds."
         }
-        // The first page has no parent setting to describe, so it says what
-        // the whole screen does instead.
-        "" => "Changes stay in this draft until you save.",
-        _ => "Enter opens or edits a setting. Changes stay in this draft until you save.",
-    }
+        _ => return None,
+    })
 }
 
 /// Path ownership is explicit: a similarly named environment key is still text.

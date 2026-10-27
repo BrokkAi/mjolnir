@@ -499,36 +499,11 @@ impl SetupDialog {
     }
 
     pub(super) fn choice_label(&self, path: &[String], value: &Value) -> String {
-        if is_build_cache_field(path, "enabled") {
-            match value {
-                Value::Null => "Default (on)",
-                Value::Bool(true) => "On",
-                _ => "Off",
-            }
-            .to_owned()
-        } else if value.is_null() {
-            format!(
-                "Default ({})",
-                schema::null_label(&storage_path(path), &self.draft)
-            )
-        } else {
-            schema::choice_label(path, value, &self.draft)
-        }
+        schema::option_label(path, value, &self.draft)
     }
 }
 
-fn field_text(path: &[String], value: &Value) -> String {
-    if value.is_null() {
-        String::new()
-    } else if let Some(size) = value.as_str().filter(|_| is_build_cache_budget(path)) {
-        build_cache_gigabytes_label(size)
-    } else {
-        value
-            .as_str()
-            .map(str::to_owned)
-            .unwrap_or_else(|| value.to_string())
-    }
-}
+use mj_client::settings::schema::field_text;
 
 fn field_input(path: &[String], text: &str) -> EditorInput {
     if schema::path_kind(path).is_some() {

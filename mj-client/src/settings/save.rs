@@ -1,6 +1,6 @@
 //! Writing a settings draft to the configuration file. Every surface saves
 //! through here, so a save means the same thing wherever it was made.
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use mj_core::config::Config;
 use mj_core::state::State;
 use serde_json::Value;
@@ -100,5 +100,26 @@ pub fn merge_edit(
         }
         return Ok(Some(Value::Object(merged)));
     }
-    bail!("{path} changed in another client. Reopen Settings to edit the latest value.")
+    Err(EditConflict {
+        path: path.to_owned(),
+    }
+    .into())
 }
+
+/// A field this save and another client both changed. Nothing is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditConflict {
+    pub path: String,
+}
+
+impl std::fmt::Display for EditConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} changed in another client. Reopen Settings to edit the latest value.",
+            self.path
+        )
+    }
+}
+
+impl std::error::Error for EditConflict {}

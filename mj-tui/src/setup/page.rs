@@ -36,22 +36,8 @@ pub(super) fn machine_build_cache_summary(
     value: &Value,
     unavailable: Option<&str>,
 ) -> Option<String> {
-    if !matches!(path, [section, _, page] if section == "machines" && page == "build_cache") {
-        return None;
-    }
-    if let Some(reason) = unavailable {
-        return Some(format!("{reason}  ›"));
-    }
-    let enabled = match value["enabled"].as_bool() {
-        Some(false) => "Disabled",
-        Some(true) => "Enabled",
-        None => "Enabled by default",
-    };
-    let budget = value["max_total_size"].as_str().map_or_else(
-        || "automatic budget".to_owned(),
-        |size| format!("{} GB budget", build_cache_gigabytes_label(size)),
-    );
-    Some(format!("{enabled} · {budget}  ›"))
+    let configured = mj_client::settings::page::machine_build_cache_summary(path, value)?;
+    Some(format!("{}  ›", unavailable.unwrap_or(&configured)))
 }
 
 /// `automatic` replaces the placeholder for an unset value when its resolved
@@ -66,10 +52,10 @@ pub(super) fn value_summary(
     let mut child_path = path.to_vec();
     child_path.push(key.to_owned());
     let summary = match value {
-        Value::Object(entries) => {
-            format!("{}  ›", counted(entries.len(), "setting", "settings"))
-        }
-        Value::Array(entries) => format!("{}  ›", counted(entries.len(), "entry", "entries")),
+        Value::Object(_) | Value::Array(_) => format!(
+            "{}  ›",
+            mj_client::settings::page::contents_summary(value).expect("a page holds entries")
+        ),
         // The machine's own switch is a checkbox, and an unset value means on.
         // A host that cannot support the cache reports an unchecked box
         // through `automatic`, whatever the machine asks for.

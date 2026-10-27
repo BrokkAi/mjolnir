@@ -193,6 +193,12 @@ pub fn row_label(path: &[String], parent: &Value, key: &str, value: Option<&Valu
 /// label table: a machine called `local` is that machine, not the "Local
 /// repository directory" setting that shares the key.
 pub fn breadcrumb(path: &[String], draft: &Value) -> String {
+    breadcrumb_segments(path, draft).join(" › ")
+}
+
+/// [`breadcrumb`] as separate names: the first page's, then one per key of
+/// `path`.
+pub fn breadcrumb_segments(path: &[String], draft: &Value) -> Vec<String> {
     let mut segments = vec!["Settings".to_owned()];
     let mut parent: Vec<String> = Vec::new();
     for key in path {
@@ -204,7 +210,36 @@ pub fn breadcrumb(path: &[String], draft: &Value) -> String {
         });
         parent = child;
     }
-    segments.join(" › ")
+    segments
+}
+
+/// A machine's build cache policy as configured. What the host actually
+/// resolves an unset value to is only known once a surface inspects it.
+pub fn machine_build_cache_summary(path: &[String], value: &Value) -> Option<String> {
+    if !matches!(path, [section, _, page] if section == "machines" && page == "build_cache") {
+        return None;
+    }
+    let enabled = match value["enabled"].as_bool() {
+        Some(false) => "Disabled",
+        Some(true) => "Enabled",
+        None => "Enabled by default",
+    };
+    let budget = value["max_total_size"].as_str().map_or_else(
+        || "automatic budget".to_owned(),
+        |size| format!("{} GB budget", schema::build_cache_gigabytes_label(size)),
+    );
+    Some(format!("{enabled} · {budget}"))
+}
+
+/// How much a row that opens its own page holds.
+pub fn contents_summary(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(entries) => {
+            Some(mj_core::text::counted(entries.len(), "setting", "settings"))
+        }
+        Value::Array(entries) => Some(mj_core::text::counted(entries.len(), "entry", "entries")),
+        _ => None,
+    }
 }
 
 /// How a row of a settings page is edited.

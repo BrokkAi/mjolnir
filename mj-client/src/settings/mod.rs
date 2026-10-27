@@ -3,6 +3,8 @@
 //! draft, and how a draft is saved. Surfaces own only their own drawing.
 pub mod draft;
 pub mod edit;
+pub mod hidden;
 pub mod page;
 pub mod save;
 pub mod schema;
+pub mod view;

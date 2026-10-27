@@ -40,12 +40,9 @@ pub(super) fn format_compiler_time(nanoseconds: u64) -> String {
     }
 }
 
-pub(super) fn build_cache_gigabytes_label(size: &str) -> String {
-    mj_core::config::build_cache_size_gigabytes(size)
-        .map_or_else(|| size.to_owned(), |gigabytes| gigabytes.to_string())
-}
-
-pub(super) use mj_client::settings::schema::{is_build_cache_budget, is_build_cache_field};
+pub(super) use mj_client::settings::schema::{
+    build_cache_gigabytes_label, is_build_cache_budget, is_build_cache_field,
+};
 
 impl SetupDialog {
     pub(super) fn build_cache_key(&self, machine_id: &str) -> Option<Value> {
