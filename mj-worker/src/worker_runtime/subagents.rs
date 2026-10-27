@@ -249,10 +249,18 @@ fn edit_profile_json(
 /// `<root>/profile` on this machine, `profiles/<session>` in a container or
 /// under a remote login (the controller's `removable_profile_root`). An
 /// earlier local session's `<root>/profile` may link to the person's own home,
-/// so each directory is checked without following links; resolving both sides
-/// would accept that link.
+/// so each directory is checked without following links. Only the local
+/// profile's parent and root are resolved for comparison, allowing symlinked
+/// ancestors without accepting a linked profile or root directory.
 fn private_staged_home(root: &Path, session_id: &str, home: &Path) -> bool {
-    let staged_directories = if home == root.join("profile") {
+    let local_profile = home.file_name() == Some("profile".as_ref())
+        && home.parent().is_some_and(|parent| {
+            match (std::fs::canonicalize(parent), std::fs::canonicalize(root)) {
+                (Ok(parent), Ok(root)) => parent == root,
+                _ => false,
+            }
+        });
+    let staged_directories = if local_profile {
         vec![root, home]
     } else if home.file_name() == Some(session_id.as_ref())
         && home.parent().and_then(Path::file_name) == Some("profiles".as_ref())
@@ -1048,6 +1056,63 @@ mod tests {
 
     use mj_core::subagent::SubagentToolAction;
 
+    // Hard-won: a602a316a: a symlinked data ancestor disabled Claude messaging and native steering.
+    #[cfg(unix)]
+    #[test]
+    fn claude_profile_repair_accepts_symlinked_ancestors_with_different_path_spellings() {
+        use mj_core::subagent::SubagentMcpRole;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let alias = temp.path().join("data-link");
+        let staged_root = data.join("workers/session");
+        std::fs::create_dir_all(staged_root.join("profile")).unwrap();
+        std::os::unix::fs::symlink(&data, &alias).unwrap();
+        let alias_root = alias.join("workers/session");
+        let owner = super::super::WorkerRootOwner::acquire(&alias_root).unwrap();
+        let canonical_root = owner.root();
+
+        for (root, home) in [
+            (canonical_root, alias_root.join("profile")),
+            (alias_root.as_path(), canonical_root.join("profile")),
+        ] {
+            std::fs::write(home.join(".claude.json"), b"{}").unwrap();
+            std::fs::write(home.join("settings.json"), b"{}").unwrap();
+            configure_claude_subagent_mcp(
+                root,
+                "session",
+                &home,
+                Some(SubagentMcpRole::MessageOnly),
+                true,
+                true,
+                false,
+            )
+            .unwrap();
+            assert!(configure_claude_mailbox_hook(root, "session", &home).unwrap());
+
+            let config: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(home.join(".claude.json")).unwrap()).unwrap();
+            assert_eq!(
+                config["mcpServers"]["mj-agents"]["command"],
+                serde_json::json!(root.join("hel"))
+            );
+            let settings: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(home.join("settings.json")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                settings["permissions"]["allow"],
+                serde_json::json!(["mcp__mj-agents__send_message"])
+            );
+            let command = settings["hooks"]["PostToolBatch"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap();
+            assert!(command.ends_with(&format!(
+                "--socket {} --event PostToolBatch",
+                mj_core::targets::posix_quote(&root.join("control.sock").to_string_lossy())
+            )));
+        }
+    }
+
     // Hard-won: 3c8973b87: the check expected <root>/profile/.claude, so it refused every real Claude home and steering was never offered.
     #[test]
     fn claude_mailbox_hook_resolves_the_worker_socket_and_preserves_profile_settings() {
@@ -1207,6 +1272,37 @@ mod tests {
         let before = std::fs::read(&path).unwrap();
         assert!(!configure_claude_mailbox_hook(root.path(), "session", &home).unwrap());
         assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        // A root that is itself a link stays unsafe, even when the home is
+        // spelled through the real directory. Unrelated profiles stay unsafe.
+        std::fs::remove_file(home.join("settings.json")).unwrap();
+        let linked_root = outside.path().join("worker-link");
+        std::os::unix::fs::symlink(root.path(), &linked_root).unwrap();
+        let unrelated_home = outside.path().join("profile");
+        std::fs::create_dir(&unrelated_home).unwrap();
+        for (root, home) in [
+            (linked_root.as_path(), home.clone()),
+            (linked_root.as_path(), linked_root.join("profile")),
+            (root.path(), unrelated_home),
+        ] {
+            for name in ["settings.json", ".claude.json"] {
+                std::fs::write(home.join(name), b"{}").unwrap();
+            }
+            assert!(!configure_claude_mailbox_hook(root, "session", &home).unwrap());
+            configure_claude_subagent_mcp(
+                root,
+                "session",
+                &home,
+                Some(mj_core::subagent::SubagentMcpRole::MessageOnly),
+                true,
+                true,
+                false,
+            )
+            .unwrap();
+            for name in ["settings.json", ".claude.json"] {
+                assert_eq!(std::fs::read(home.join(name)).unwrap(), b"{}");
+            }
+        }
     }
 
     #[test]
