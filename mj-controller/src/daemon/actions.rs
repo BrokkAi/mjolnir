@@ -8,6 +8,10 @@ pub(super) async fn handle_action(
 ) -> Result<DaemonReply> {
     let _work = upgrade_request_activity(&action)?;
     match action {
+        DaemonAction::RecordOperatorActivity => {
+            state.record_operator_activity().await;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::PrepareUpgrade => {
             if crate::upgrade::gate().try_close() {
                 cancellation.cancel();
@@ -809,7 +813,8 @@ pub(super) fn upgrade_request_activity(
     }
     if matches!(
         action,
-        DaemonAction::Ping
+        DaemonAction::RecordOperatorActivity
+            | DaemonAction::Ping
             | DaemonAction::MoveSession(_)
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade

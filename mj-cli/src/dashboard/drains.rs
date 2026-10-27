@@ -333,6 +333,10 @@ impl DashboardContext {
         let Some(update) = latest else {
             return;
         };
+        self.auto_afk.configure(
+            self.controller.config.advanced.auto_afk_minutes > 0,
+            update.operator_presence.away,
+        );
         // The serialized runtime feed owns ordering through incarnation-scoped
         // cursors. A replacement daemon's revision can start below the old one.
         let removed_layouts = self
@@ -493,6 +497,8 @@ impl DashboardContext {
         let Some(config) = latest else {
             return;
         };
+        self.auto_afk
+            .set_enabled(config.advanced.auto_afk_minutes > 0);
         // The chat's copy of `[review]` follows the daemon's, so `/review
         // status` and the composer's armed indicator report what is actually
         // running rather than what this process last read from disk.

@@ -88,6 +88,7 @@ impl RuntimeState {
             Some(profile_catalog.clone()),
             reviewer_runtime.clone(),
         );
+        let inactivity = auto_afk::Inactivity::new(controller.config.advanced.auto_afk_minutes);
         Self {
             attachments: Mutex::new(BTreeMap::new()),
             phone_status: Mutex::new(WebViewerStatus::Starting),
@@ -111,7 +112,8 @@ impl RuntimeState {
             startup_enqueue: tokio::sync::Mutex::new(()),
             startup_delivery_gates: Mutex::new(BTreeMap::new()),
             controller_loader,
-            config_mutation: tokio::sync::Mutex::new(()),
+            config_mutation: tokio::sync::Mutex::new(inactivity),
+            inactivity_changed: tokio::sync::Notify::new(),
             projects: Arc::new(crate::project_catalog::Catalog::default()),
             profile_catalog,
             recovery_observer,
@@ -829,11 +831,12 @@ impl RuntimeState {
     /// Remove a saved project under the daemon's config-mutation coordinator,
     /// then publish the exact config returned by the persisted mutation.
     pub async fn remove_project(&self, bundle_id: String) -> Result<()> {
-        let _mutation = self.config_mutation.lock().await;
+        let mut inactivity = self.config_mutation.lock().await;
         let config =
             tokio::task::spawn_blocking(move || crate::controller::remove_bundle(&bundle_id))
                 .await
                 .context("project removal task panicked")??;
+        self.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
         {
             self.owner().install_config(config.clone());
             self.review_config

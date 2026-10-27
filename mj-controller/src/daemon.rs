@@ -1,5 +1,6 @@
 //! Persistent per-user controller daemon and its authenticated local protocol.
 
+mod auto_afk;
 pub(crate) mod capacity;
 mod container_upgrade;
 mod feed;
@@ -222,7 +223,8 @@ pub struct RuntimeState {
     /// Orders worker admission against Move source sealing, independently per session.
     startup_delivery_gates: Mutex<BTreeMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     controller_loader: fn() -> Result<Controller>,
-    config_mutation: tokio::sync::Mutex<()>,
+    config_mutation: tokio::sync::Mutex<auto_afk::Inactivity>,
+    inactivity_changed: tokio::sync::Notify,
     projects: Arc<crate::project_catalog::Catalog>,
     profile_catalog: crate::review_host::SharedProfileCatalog,
     recovery_observer: RecoveryObserver,

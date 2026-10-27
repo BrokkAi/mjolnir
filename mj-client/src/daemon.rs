@@ -442,6 +442,7 @@ pub struct DraftPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
+    RecordOperatorActivity,
     SetOperatorAway {
         away: bool,
     },
@@ -2490,6 +2491,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Operator-away action and runtime metadata.
 // Structured startup prompts, caller-owned command IDs, and ID withdrawal.
 // Terminals no longer save harness titles; the daemon alone projects them.
+// Human interface activity can reset the daemon's automatic AFK clock.
 // Project removal runs through the daemon-owned database writer.
 pub const PROTOCOL_VERSION: u32 = 66;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;

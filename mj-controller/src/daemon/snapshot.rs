@@ -57,17 +57,19 @@ impl RuntimeState {
     pub async fn reload_controller(&self) -> Result<()> {
         // Serialize installs so an earlier phone publication cannot overwrite
         // a later completed lifecycle with the controller snapshot it loaded.
-        let _mutation = self.config_mutation.lock().await;
+        let mut inactivity = self.config_mutation.lock().await;
         if self.committed.is_some() {
             let config = tokio::task::spawn_blocking(Config::load)
                 .await
                 .context("daemon configuration reader panicked")??;
+            self.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
             self.owner().install_config(config);
         } else {
             let controller_loader = self.controller_loader;
             let controller = tokio::task::spawn_blocking(controller_loader)
                 .await
                 .context("daemon controller loader panicked")??;
+            self.configure_inactivity(&mut inactivity, controller.config.advanced.auto_afk_minutes);
             self.owner().install_controller(controller);
         }
         self.publish_revision();
@@ -389,12 +391,22 @@ fn record_age(updated_at: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Du
 impl RuntimeState {
     /// Persist before publishing; the mutex orders concurrent operator toggles.
     pub async fn set_operator_away(&self, away: bool) -> Result<()> {
-        let _mutation = self.config_mutation.lock().await;
+        let mut inactivity = self.config_mutation.lock().await;
+        let ids = self.persist_operator_away(away).await?;
+        inactivity.reset();
+        self.inactivity_changed.notify_one();
+        drop(inactivity);
+        self.deliver_operator_away(ids).await;
+        Ok(())
+    }
+
+    // Caller holds the inactivity/config coordinator through commit.
+    pub(super) async fn persist_operator_away(&self, away: bool) -> Result<Vec<String>> {
         let changed = tokio::task::spawn_blocking(move || crate::database::set_operator_away(away))
             .await
             .context("operator away database writer panicked")??;
         if !changed {
-            return Ok(());
+            return Ok(Vec::new());
         }
         // The committed owner is refreshed on access; bootstrap tests have no
         // committed feed and install the freshly loaded controller instead.
@@ -420,6 +432,10 @@ impl RuntimeState {
             })
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
+        Ok(ids)
+    }
+
+    pub(super) async fn deliver_operator_away(&self, ids: Vec<String>) {
         let mut deliveries = tokio::task::JoinSet::new();
         for id in ids {
             let manager = self.session_manager.clone();
@@ -440,6 +456,5 @@ impl RuntimeState {
                 tracing::warn!(%error, "operator away delivery task failed");
             }
         }
-        Ok(())
     }
 }

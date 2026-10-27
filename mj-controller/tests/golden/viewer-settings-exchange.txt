@@ -157,7 +157,7 @@
                   "advanced"
                 ],
                 "label": "Advanced",
-                "help": "Display options: activity clocks, session order, symbols, and how tool calls show.",
+                "help": "Display options, activity clocks, session order, symbols, tool calls, and automatic AFK.",
                 "control": "page",
                 "summary": "All off"
               }
@@ -450,7 +450,7 @@
                   "advanced"
                 ],
                 "label": "Advanced",
-                "help": "Display options: activity clocks, session order, symbols, and how tool calls show.",
+                "help": "Display options, activity clocks, session order, symbols, tool calls, and automatic AFK.",
                 "control": "page",
                 "summary": "All off"
               }
@@ -715,7 +715,7 @@
                   "advanced"
                 ],
                 "label": "Advanced",
-                "help": "Display options: activity clocks, session order, symbols, and how tool calls show.",
+                "help": "Display options, activity clocks, session order, symbols, tool calls, and automatic AFK.",
                 "control": "page",
                 "summary": "All off"
               }

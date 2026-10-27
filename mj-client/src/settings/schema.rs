@@ -14,7 +14,8 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
         "advanced" => {
             json!({"detailed_activity_clocks":false,"session_order":"project","symbols":null,
                    "tool_output":"grouped",
-                   "tool_output_lines":mj_core::config::DEFAULT_TOOL_OUTPUT_LINES})
+                   "tool_output_lines":mj_core::config::DEFAULT_TOOL_OUTPUT_LINES,
+                   "auto_afk_minutes":0})
         }
         "notify" => {
             json!({"mode":"terminal","bell":true,"delay_seconds":2,"title":true})
@@ -168,6 +169,12 @@ pub fn whole_number(path: &[String]) -> Option<WholeNumber> {
         ["notify", "delay_seconds"] => (0, u64::MAX, "Enter a whole number of seconds.", true),
         ["subagents", "max_concurrent"] => (1, 64, "Enter a whole number from 1 to 64.", true),
         ["advanced", "tool_output_lines"] => (0, 50, "Enter a whole number from 0 to 50.", true),
+        ["advanced", "auto_afk_minutes"] => (
+            0,
+            u64::from(u32::MAX),
+            "Enter a whole number of minutes from 0 to 4294967295.",
+            true,
+        ),
         ["sessionwiki", "archive_after_days"] => (
             1,
             u64::from(u32::MAX),
@@ -241,6 +248,7 @@ pub fn label(key: &str) -> String {
         "symbols" => "Symbols",
         "tool_output" => "Tool calls",
         "tool_output_lines" => "Tool output lines",
+        "auto_afk_minutes" => "Auto-AFK after (minutes)",
         "notify" => "Notifications",
         "mode" => "Notify through",
         "bell" => "Ring the terminal bell",
@@ -367,6 +375,7 @@ pub fn null_label(path: &[String], draft: &Value) -> String {
         ["advanced", "tool_output_lines"] => {
             format!("{} (default)", mj_core::config::DEFAULT_TOOL_OUTPUT_LINES)
         }
+        ["advanced", "auto_afk_minutes"] => "0 (disabled)".to_owned(),
         // Unset symbols follow the terminal: ASCII on the Linux console or
         // without a UTF-8 locale, Unicode otherwise.
         ["advanced", "symbols"] => "Follows the terminal".to_owned(),
@@ -458,9 +467,14 @@ pub fn section_summary(
             } else {
                 ""
             };
+            let auto_afk = section["auto_afk_minutes"]
+                .as_u64()
+                .filter(|minutes| *minutes > 0)
+                .map(|minutes| format!(" · auto-AFK after {minutes} min"))
+                .unwrap_or_default();
             match on {
-                0 => format!("All off{order}{tools}"),
-                count => format!("{count} on{order}{tools}"),
+                0 => format!("All off{order}{tools}{auto_afk}"),
+                count => format!("{count} on{order}{tools}{auto_afk}"),
             }
         }
         "notify" => match section["mode"].as_str() {
@@ -861,7 +875,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Web access changes take effect when the background server next starts. Remote access requires a certificate and key."
         }
         "advanced" => {
-            "Display options: activity clocks, session order, symbols, and how tool calls show."
+            "Display options, activity clocks, session order, symbols, tool calls, and automatic AFK."
         }
         "notify" => {
             "How to be told when a session you are not looking at asks a question, fails, or finishes."
@@ -888,6 +902,9 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         }
         "tool_output_lines" => {
             "Output rows under each inline tool call: the first and last lines, with a count of the rest. 0 hides output."
+        }
+        "auto_afk_minutes" => {
+            "Enter AFK after this many minutes without input in the terminal or web UI. Input resets the timer. 0 disables automatic AFK. Use the AFK return action to come back."
         }
         "bundles" => {
             "Projects can contain one or more repositories. Choose the main repository where the agent starts."

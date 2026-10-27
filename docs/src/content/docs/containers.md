@@ -17,10 +17,12 @@ selected harness's own control: Codex `agent-full-access`, Claude Code
 `bypassPermissions`, Kimi Code `auto`, Grok Build's `--always-approve` launch
 flag, OpenCode's `"permission": "allow"` config setting, MiMo Code's
 dangerously-skip-permissions startup mode, or DSH's `permission_mode` `allow`.
-Muse stages `:ask-me`, selects `promptUnmatched` approvals, turns muse-acp's auto-review
-on, and disables only the sandbox (`--disable-sandbox`): the reviewer answers
-each approval without prompting you, so critical actions can still be denied.
-Every other harness's control approves every call. Note that Kimi Code's
+Muse stages `:ask-me`, selects `allowAll` approvals, turns muse-acp's auto-review
+off, and disables only the sandbox (`--disable-sandbox`), so it runs without
+permission checks like OpenCode. A Muse profile with `muse_auto_review = true`
+opts back into the reviewer (`promptUnmatched` approvals with auto-review on),
+which answers each approval without prompting you, so critical actions can
+still be denied. Every other harness's control approves every call. Note that Kimi Code's
 mode is named `auto` but is not a guardian policy that approves only low-risk
 calls.
 
