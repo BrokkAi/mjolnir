@@ -9,7 +9,29 @@ fn background_task_id(kind: &str, provider_id: &str) -> String {
 pub(super) struct AirTaskEntry {
     pub(super) session_id: String,
     pub(super) task_id: String,
-    pub(super) command: BackgroundCommand,
+    pub(super) state: AirTaskState,
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum AirTaskState {
+    Background(BackgroundCommand),
+    /// Retain ended turn IDs as tombstones until the adapter restarts.
+    Turn(Option<u64>),
+}
+
+impl AirTaskEntry {
+    pub(super) fn turn_ordinal(&self) -> Option<u64> {
+        match self.state {
+            AirTaskState::Turn(ordinal) => ordinal,
+            _ => None,
+        }
+    }
+    fn command(&self) -> Option<&BackgroundCommand> {
+        match &self.state {
+            AirTaskState::Background(command) => Some(command),
+            _ => None,
+        }
+    }
 }
 
 fn air_task_key(session_id: &str, task_id: &str) -> String {
@@ -146,7 +168,11 @@ impl DurableRelay {
             })
             .collect();
         if self.background_work == BackgroundWorkPolicy::AirTasks {
-            commands.extend(self.air_tasks.values().map(|entry| entry.command.clone()));
+            commands.extend(
+                self.air_tasks
+                    .values()
+                    .filter_map(|entry| entry.command().cloned()),
+            );
         }
         if self.background_work == BackgroundWorkPolicy::KimiTasks {
             commands.extend(
@@ -215,7 +241,59 @@ impl DurableRelay {
         {
             return Ok(());
         }
+        let task_id = match &update {
+            AirTaskUpdate::TurnSpawned { task_id, .. }
+            | AirTaskUpdate::Spawned { task_id, .. }
+            | AirTaskUpdate::Changed { task_id, .. }
+            | AirTaskUpdate::Finished { task_id, .. } => task_id,
+        };
+        let key = air_task_key(&session_id, task_id);
+        if let Some(AirTaskEntry {
+            state: AirTaskState::Turn(ordinal),
+            ..
+        }) = self.air_tasks.get_mut(&key)
+        {
+            if matches!(update, AirTaskUpdate::Finished { .. }) {
+                let ordinal = ordinal.take();
+                // A late idle may end the next turn's task (#1453). Only a
+                // silent turn trusts task end; output waits for its SDK result.
+                if let Some(ordinal) = ordinal
+                    && self.snapshot.active_prompt.is_none()
+                    && !self.harness_turn_output_seen
+                    && self
+                        .snapshot
+                        .harness_turn
+                        .is_some_and(|turn| turn.first_ordinal == ordinal)
+                {
+                    self.settle_harness_turn(Some("autonomous_task_ended".into()))?;
+                }
+            }
+            return self.persist_activity_transition();
+        }
         match update {
+            AirTaskUpdate::TurnSpawned { task_id, replayed } => {
+                let ordinal = if !replayed
+                    && self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
+                    && self.snapshot.native_session_id.as_deref() == Some(session_id.as_str())
+                {
+                    self.open_harness_turn_if_allowed()?;
+                    if self.snapshot.active_prompt.is_none() {
+                        self.snapshot.harness_turn.map(|turn| turn.first_ordinal)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                self.air_tasks.insert(
+                    key,
+                    AirTaskEntry {
+                        session_id,
+                        task_id,
+                        state: AirTaskState::Turn(ordinal),
+                    },
+                );
+            }
             AirTaskUpdate::Spawned {
                 task_id,
                 description,
@@ -225,18 +303,19 @@ impl DurableRelay {
                 let started_at_ms = self
                     .air_tasks
                     .get(&key)
-                    .map_or_else(epoch_millis, |entry| entry.command.started_at_ms);
+                    .and_then(AirTaskEntry::command)
+                    .map_or_else(epoch_millis, |command| command.started_at_ms);
                 self.air_tasks.insert(
                     key.clone(),
                     AirTaskEntry {
                         session_id,
                         task_id,
-                        command: BackgroundCommand {
+                        state: AirTaskState::Background(BackgroundCommand {
                             id: background_task_id("air", &key),
                             started_at_ms,
                             command: description,
                             can_stop,
-                        },
+                        }),
                     },
                 );
             }
@@ -245,12 +324,16 @@ impl DurableRelay {
                 description,
                 can_stop,
             } => {
-                if let Some(entry) = self.air_tasks.get_mut(&air_task_key(&session_id, &task_id)) {
+                if let Some(AirTaskEntry {
+                    state: AirTaskState::Background(command),
+                    ..
+                }) = self.air_tasks.get_mut(&air_task_key(&session_id, &task_id))
+                {
                     if let Some(description) = description {
-                        entry.command.command = description;
+                        command.command = description;
                     }
                     if let Some(can_stop) = can_stop {
-                        entry.command.can_stop = can_stop;
+                        command.can_stop = can_stop;
                     }
                 }
             }
@@ -429,11 +512,11 @@ impl DurableRelay {
                 terminal_id: terminal_id.clone(),
             });
         }
-        if let Some((key, entry)) = self
-            .air_tasks
-            .iter()
-            .find(|(_, entry)| entry.command.id == requested_id)
-        {
+        if let Some((key, entry)) = self.air_tasks.iter().find(|(_, entry)| {
+            entry
+                .command()
+                .is_some_and(|command| command.id == requested_id)
+        }) {
             if self.harness_turns == HarnessTurnPolicy::ClaudeAdapter {
                 self.claude_pending_stops
                     .entry(entry.session_id.clone())
@@ -535,6 +618,7 @@ impl DurableRelay {
     pub(super) fn forget_harness_processes(&mut self) {
         self.air_tasks.clear();
         self.claude_pending_stops.clear();
+        self.harness_turn_output_seen = false;
         self.task_settled_at_ms = None;
         self.kimi_background_tasks.clear();
         self.kimi_provisional_tasks.clear();
@@ -684,7 +768,8 @@ impl DurableRelay {
             let can_stop = self
                 .air_tasks
                 .get(&air_task_key("root", &task.task_id))
-                .is_some_and(|entry| entry.command.can_stop);
+                .and_then(AirTaskEntry::command)
+                .is_some_and(|command| command.can_stop);
             self.air_task_changed(
                 "root".into(),
                 AirTaskUpdate::Spawned {
@@ -695,5 +780,42 @@ impl DurableRelay {
             )?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl DurableRelay {
+    pub(crate) fn apply_claude_task_fixture(
+        &mut self,
+        task_id: String,
+        can_stop: bool,
+        autonomous_turn: bool,
+        settled: bool,
+        replayed: bool,
+    ) -> Result<()> {
+        use crate::acp::AirTaskUpdate;
+        let update = if autonomous_turn {
+            AirTaskUpdate::TurnSpawned { task_id, replayed }
+        } else if can_stop {
+            AirTaskUpdate::Changed {
+                task_id,
+                description: None,
+                can_stop: Some(true),
+            }
+        } else {
+            AirTaskUpdate::Finished { task_id, settled }
+        };
+        let session = self
+            .snapshot
+            .native_session_id
+            .clone()
+            .unwrap_or_else(|| "root".into());
+        self.air_task_changed(session, update)
+    }
+    pub(crate) fn turn_task_ordinal(&self, task_id: &str) -> Option<u64> {
+        let session = self.snapshot.native_session_id.as_deref().unwrap_or("root");
+        self.air_tasks
+            .get(&air_task_key(session, task_id))
+            .and_then(AirTaskEntry::turn_ordinal)
     }
 }

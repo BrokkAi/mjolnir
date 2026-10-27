@@ -186,8 +186,8 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
 # install on demand. Muse installs below from its runtime.json file.
 RUN npm install --global --no-audit --no-fund \
         @brokkai/codex-acp@1.14.1 \
-        @agentclientprotocol/claude-agent-acp@0.94.0 \
-        @anthropic-ai/claude-code@2.1.306 \
+        @agentclientprotocol/claude-agent-acp@0.97.0 \
+        @anthropic-ai/claude-code@2.1.308 \
         @brokkai/muse-acp@0.17.0 \
         @openai/codex@0.164.0 \
         @mimo-ai/cli@0.1.15 \

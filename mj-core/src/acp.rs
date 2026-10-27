@@ -485,6 +485,11 @@ pub struct ClaudeBackgroundTask {
 /// A change in the adapter-owned AIR background task inventory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AirTaskUpdate {
+    TurnSpawned {
+        task_id: String,
+        #[serde(default)]
+        replayed: bool,
+    },
     Spawned {
         task_id: String,
         description: String,
@@ -564,8 +569,15 @@ pub enum RuntimeEvent {
     ClaudeAsyncTaskControlChanged {
         task_id: String,
         can_stop: bool,
-        /// The task completed or failed, so Claude Code will follow it with a
-        /// task-notification turn. A task the user stopped gets no turn.
+        /// claude-agent-acp 0.97.0 publishes autonomous model cycles through the async
+        /// task API; these are not background work or a pending task turn.
+        #[serde(default)]
+        autonomous_turn: bool,
+        /// The edge arrived before live history was enabled.
+        #[serde(default)]
+        replayed: bool,
+        /// An ordinary task completed or failed, so Claude Code will follow
+        /// it with a task-notification turn. A stopped task gets no turn.
         settled: bool,
     },
     AirTaskChanged {

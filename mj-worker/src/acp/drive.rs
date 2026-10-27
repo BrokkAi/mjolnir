@@ -161,7 +161,10 @@ where
                 if matches!(notification_harness, HarnessKind::Claude | HarnessKind::Codex) {
                     match air_task_update(&notification.update) {
                         Ok(Some(update)) => {
-                            if let Some(update) = update {
+                            if let Some(mut update) = update {
+                                if let AirTaskUpdate::TurnSpawned { replayed, .. } = &mut update {
+                                    *replayed = !notification_live_history_enabled.load(Ordering::Acquire);
+                                }
                                 notification_events.send(RuntimeEvent::AirTaskChanged {
                                     session_id: notification.session_id.to_string(), update,
                                 }).await.map_err(|_| relay_event_channel_error())?;

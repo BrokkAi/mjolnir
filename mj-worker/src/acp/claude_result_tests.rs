@@ -28,6 +28,10 @@ impl Drop for ClaudeProbe {
 
 impl ClaudeProbe {
     async fn new() -> Self {
+        Self::with_replayed_autonomous_turn(false).await
+    }
+
+    async fn with_replayed_autonomous_turn(replay: bool) -> Self {
         let (client, agent) = tokio::io::duplex(64 * 1024);
         let (client_read, client_write) = tokio::io::split(client);
         let (agent_read, agent_write) = tokio::io::split(agent);
@@ -50,7 +54,7 @@ impl ClaudeProbe {
             additional_directories: vec![],
             extra_mcp_servers: vec![],
             project_memory: None,
-            resume_session: None,
+            resume_session: replay.then(|| SESSION.to_owned()),
             native_session_may_have_history: false,
             accepted_config: Default::default(),
             initial_model: None,
@@ -89,16 +93,27 @@ impl ClaudeProbe {
         probe
             .result(
                 &init,
-                json!({"protocolVersion": 1, "_meta": {"steering": {"supported": true}}}),
+                json!({"protocolVersion": 1, "agentCapabilities": {"loadSession": true}, "_meta": {"steering": {"supported": true}}}),
             )
             .await;
         let new = probe.message().await;
-        assert_eq!(new["method"], "session/new");
         assert_eq!(
-            new["params"]["_meta"]["claudeCode"]["emitRawSDKMessages"],
-            json!([{"type": "result"}]),
-            "the session must ask the adapter for SDK results"
+            new["method"],
+            if replay {
+                "session/load"
+            } else {
+                "session/new"
+            }
         );
+        if !replay {
+            assert_eq!(
+                new["params"]["_meta"]["claudeCode"]["emitRawSDKMessages"],
+                json!([{"type":"result"}])
+            );
+        }
+        if replay {
+            probe.autonomous_turn("replayed-turn").await;
+        }
         probe
             .result(
                 &new,
@@ -153,6 +168,18 @@ impl ClaudeProbe {
             "params": {"sessionId": SESSION, "update": {
                 "sessionUpdate": "agent_message_chunk",
                 "content": {"type": "text", "text": text},
+            }},
+        }))
+        .await;
+    }
+
+    async fn autonomous_turn(&mut self, task_id: &str) {
+        self.send(json!({
+            "jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": SESSION, "update": {
+                "sessionUpdate": "async_task_spawned", "asyncTaskId": task_id,
+                "name": "Claude is working", "taskType": "turn",
+                "showInTranscript": false, "canStop": true,
             }},
         }))
         .await;
@@ -603,6 +630,32 @@ async fn a_steer_still_waiting_for_its_acknowledgement_is_settled_before_the_pro
     probe.close().await;
 }
 
+#[tokio::test]
+async fn autonomous_turn_spawns_are_live_edges_and_not_replayed_history() {
+    let mut probe = ClaudeProbe::with_replayed_autonomous_turn(true).await;
+    probe.autonomous_turn("live-turn").await;
+    let mut replay_seen = false;
+    loop {
+        if let RuntimeEvent::AirTaskChanged {
+            session_id,
+            update: AirTaskUpdate::TurnSpawned { task_id, replayed },
+        } = probe.event().await
+        {
+            assert_eq!(session_id, "claude-session");
+            if task_id == "replayed-turn" {
+                assert!(replayed);
+                replay_seen = true;
+            } else {
+                assert_eq!(task_id, "live-turn");
+                assert!(!replayed);
+                assert!(replay_seen);
+                break;
+            }
+        }
+    }
+    probe.close().await;
+}
+
 /// Stop while Claude Code works on its own reaches the adapter as
 /// `session/cancel`. The relay ends that turn at the interrupted cycle's
 /// result, which the runtime forwards like any other.
@@ -610,9 +663,7 @@ async fn a_steer_still_waiting_for_its_acknowledgement_is_settled_before_the_pro
 #[tokio::test]
 async fn stop_while_claude_works_on_its_own_sends_session_cancel() {
     let mut probe = ClaudeProbe::new().await;
-    probe
-        .chunk("Summarizing what the background agent found")
-        .await;
+    probe.autonomous_turn("silent-turn").await;
     probe
         .commands
         .send(CommandRequest::Cancel {

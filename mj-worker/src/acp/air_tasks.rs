@@ -37,8 +37,18 @@ pub(super) fn air_task_update(
     if !kind.starts_with("async_task_") {
         return Ok(None);
     }
-    if update.get("taskType").and_then(serde_json::Value::as_str) == Some("turn") {
-        return Ok(Some(None));
+    if kind == "async_task_spawned"
+        && update.get("taskType").and_then(serde_json::Value::as_str) == Some("turn")
+    {
+        let task_id = update
+            .get("asyncTaskId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| format!("{kind} requires a non-empty asyncTaskId"))?;
+        return Ok(Some(Some(AirTaskUpdate::TurnSpawned {
+            task_id: task_id.to_owned(),
+            replayed: false,
+        })));
     }
     let task_id = update
         .get("asyncTaskId")
@@ -184,4 +194,29 @@ struct NativeAgentCancelRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcResponse)]
 struct NativeAgentCancelResponse {
     cancelled: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_097_autonomous_turn_spawn_is_identified_by_task_type() {
+        let update = serde_json::json!({
+            "sessionUpdate": "async_task_spawned",
+            "asyncTaskId": "autonomous-turn-123",
+            "name": "Claude is working",
+            "taskType": "turn",
+            "showInTranscript": false,
+            "canStop": true,
+            "description": "Working autonomously"
+        });
+        assert_eq!(
+            air_task_update(&update).unwrap(),
+            Some(Some(AirTaskUpdate::TurnSpawned {
+                task_id: "autonomous-turn-123".into(),
+                replayed: false,
+            }))
+        );
+    }
 }

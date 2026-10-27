@@ -486,7 +486,9 @@ mod tests {
         })).unwrap()).unwrap();
         relay.set_air_tasks(tasks()).unwrap();
         for task in relay.air_tasks.values_mut() {
-            task.command.started_at_ms = 100;
+            if let super::super::background::AirTaskState::Background(command) = &mut task.state {
+                command.started_at_ms = 100;
+            }
         }
         relay.activity_facts();
         relay
@@ -687,6 +689,41 @@ mod settled_task_tests {
             .unwrap();
         assert!(relay.activity_facts().task_settled_at_ms.is_none());
         assert!(relay.activity_facts().harness_turn_started_at_ms.is_some());
+    }
+
+    // Hard-won: agentclientprotocol/claude-agent-acp#1390: an autonomous turn's task end predicted a notification turn for 60 s.
+    #[test]
+    fn an_autonomous_turn_task_does_not_settle_or_offer_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
+        relay.acp_ready = true;
+        relay.snapshot.native_session_id = Some("root".into());
+
+        // claude-agent-acp 0.97.0's autonomousTurnStarted payload canStop=true although
+        // this synthetic turn is not background work.
+        relay
+            .apply_claude_task_fixture("autonomous-turn-uuid".into(), true, true, false, false)
+            .unwrap();
+        assert!(relay.operational_state().background_commands.is_empty());
+        assert!(
+            relay
+                .background_task_stop_target("air:4:root:autonomous-turn-uuid")
+                .is_err()
+        );
+
+        // autonomousTurnEnded is an ordinary terminal update without taskType.
+        relay
+            .apply_claude_task_fixture("autonomous-turn-uuid".into(), false, false, true, false)
+            .unwrap();
+        let facts = relay.activity_facts();
+        assert!(facts.task_settled_at_ms.is_none());
+        assert!(relay.operational_state().is_quiet());
+        assert!(
+            relay
+                .background_task_stop_target("air:4:root:autonomous-turn-uuid")
+                .is_err()
+        );
     }
 
     #[test]
