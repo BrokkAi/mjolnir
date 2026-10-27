@@ -5,18 +5,18 @@
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
-│› ■ ACP pretty name               ◇ ⋯ ││                                                                              │
+│› ■ ACP pre                                                                                                           │
 │  Stopped                                                                                                             │
-│  │ No mess                                                                                                           │
-│  │          ╭ × Confirm import ───────────────────────────────────────────────────────────────────────╮              │
-│             │These scratch repositories are under temporary directories and stay out of the workspace:│              │
+│  │ No mess  ╭ × Confirm import ───────────────────────────────────────────────────────────────────────╮              │
+│  │          │These checkouts have uncommitted changes:                                                │              │
+│             │/work/repo — 1 tracked change · 2 untracked paths                                        │              │
+│             │                                                                                         │              │
+│             │These scratch repositories are in temporary directories and stay outside the import:     │              │
 │             │/tmp/mj-golden-scratch                                                                   │              │
 │             │                                                                                         │              │
-│             │This import uses an isolated workspace.                                                  │              │
-│             │                                                                                         │              │
-│             │                                                                                         │  ────────────╯
-│             │                                                                                         │  ────────────╮
-│             │                                                                                         │              │
+│             │Checked creates a clean, separate checkout. Unchecked uses the original directory with   │  ────────────╯
+│             │its current files.                                                                       │  ────────────╮
+│             │☒ Create isolated checkout                                                               │              │
 │             │                                                                                         │              │
 │             │  Cancel     Continue                                                                    │  ────────────╯
 │             ╰─────────────────────────────────────────────────────────────────────────────────────────╯  ───── ▁   ▄ ╮

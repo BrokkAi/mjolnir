@@ -578,7 +578,6 @@ pub enum DashboardAction {
     ConfirmImportBundle {
         create_managed_worktree: Option<bool>,
         accepted: bool,
-        include_untracked: bool,
     },
     OpenConfig,
     DiscoverSetup {

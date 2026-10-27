@@ -536,14 +536,16 @@ fn rename_focus(dashboard: &DashboardState) -> DialogControl {
 }
 
 #[test]
-fn import_safety_defaults_to_ignoring_untracked_files_and_can_include_them() {
+fn import_safety_keeps_managed_checkout_choice_without_file_inclusion_toggle() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.show_import_bundle_confirmation(
         vec!["/work/repo — 1 tracked change · 222561 untracked paths".into()],
         Vec::new(),
         Vec::new(),
-        true,
-        Default::default(),
+        mj_core::state::ManagedWorktreeOptions {
+            available: true,
+            default_create: false,
+        },
     );
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
     terminal
@@ -556,38 +558,61 @@ fn import_safety_defaults_to_ignoring_untracked_files_and_can_include_them() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("☒ Ignore untracked files"));
+    assert!(rendered.contains("☐ Create isolated checkout"));
+    assert!(rendered.contains("Checked creates a clean, separate checkout."));
+    assert!(rendered.contains("These checkouts have uncommitted changes:"));
     assert!(rendered.contains(" Cancel "));
     assert!(rendered.contains(" Continue "));
-    assert!(rendered.contains("Space toggles the checkbox."));
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::ConfirmImportBundle {
             create_managed_worktree: Some(false),
             accepted: true,
-            include_untracked: false,
         }
     );
 
     dashboard.show_import_bundle_confirmation(
-        vec!["/work/repo — 222561 untracked paths".into()],
         Vec::new(),
         Vec::new(),
-        true,
-        Default::default(),
+        Vec::new(),
+        mj_core::state::ManagedWorktreeOptions {
+            available: true,
+            default_create: false,
+        },
     );
-    dashboard.handle_key(key(KeyCode::Tab));
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char(' '))),
-        DashboardAction::None
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw managed checkout choice");
+    for _ in 0..3 {
+        if matches!(dashboard.mode, Mode::ConfirmImportBundle(ref dialog)
+            if dialog.form.borrow().focused() == Some(DialogControl::ImportManagedWorktree))
+        {
+            break;
+        }
+        dashboard.handle_key(key(KeyCode::Tab));
+    }
+    assert!(
+        matches!(dashboard.mode, Mode::ConfirmImportBundle(ref dialog)
+        if dialog.form.borrow().focused() == Some(DialogControl::ImportManagedWorktree))
     );
-    dashboard.handle_key(key(KeyCode::BackTab));
+    dashboard.handle_key(key(KeyCode::Char(' ')));
+    for _ in 0..3 {
+        if matches!(dashboard.mode, Mode::ConfirmImportBundle(ref dialog)
+            if dialog.form.borrow().focused() == Some(DialogControl::ImportContinue))
+        {
+            break;
+        }
+        dashboard.handle_key(key(KeyCode::Tab));
+    }
+    assert!(
+        matches!(dashboard.mode, Mode::ConfirmImportBundle(ref dialog)
+        if dialog.form.borrow().focused() == Some(DialogControl::ImportContinue))
+    );
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::ConfirmImportBundle {
-            create_managed_worktree: Some(false),
+            create_managed_worktree: Some(true),
             accepted: true,
-            include_untracked: true,
         }
     );
 }
@@ -1431,11 +1456,13 @@ fn golden_tui_container_editor_details() {
 fn golden_tui_import_confirmation() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.show_import_bundle_confirmation(
-        Vec::new(),
+        vec!["/work/repo — 1 tracked change · 2 untracked paths".into()],
         Vec::new(),
         vec!["/tmp/mj-golden-scratch".into()],
-        false,
-        Default::default(),
+        mj_core::state::ManagedWorktreeOptions {
+            available: true,
+            default_create: true,
+        },
     );
     let lines = drawn(&mut dashboard, 120, 30);
     let mut output = String::new();

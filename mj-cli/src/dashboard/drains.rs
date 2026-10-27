@@ -657,7 +657,6 @@ impl DashboardContext {
                                 prompt.dirty_git_roots,
                                 prompt.omitted_non_git_dirs,
                                 prompt.scratch_git_roots,
-                                prompt.has_untracked_files,
                                 prompt.managed_worktree,
                             );
                         }

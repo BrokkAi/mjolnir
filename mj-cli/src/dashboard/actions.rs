@@ -838,7 +838,6 @@ pub(crate) async fn apply_dashboard_action(
                     DashboardImportSafety {
                         create_managed_worktree: None,
                         accepted: false,
-                        include_untracked: true,
                     },
                 );
             }
@@ -855,7 +854,6 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::ConfirmImportBundle {
             create_managed_worktree,
             accepted,
-            include_untracked,
         } => {
             let Some(pending) = context.pending_import.take() else {
                 context.dashboard.finish_import();
@@ -874,7 +872,6 @@ pub(crate) async fn apply_dashboard_action(
                         DashboardImportSafety {
                             create_managed_worktree,
                             accepted: true,
-                            include_untracked,
                         },
                     );
                 }

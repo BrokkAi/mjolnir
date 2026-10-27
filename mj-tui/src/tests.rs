@@ -872,7 +872,6 @@ fn the_detach_chord_quits_without_mutating_any_dashboard_modal() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
-        false,
         Default::default(),
     );
 

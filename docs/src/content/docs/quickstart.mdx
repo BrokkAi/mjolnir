@@ -230,11 +230,11 @@ By default Mjolnir sends recent prompt and reply text to TypeSafe's Jev classifi
 The Import tab of the session dialog (`prefix+g`) and `mj import` adopt a
 session you started directly in Claude Code, Codex, Kimi Code, Grok Build, or
 Muse Code. OpenCode and MiMo Code sessions use SQLite stores that are not
-importable yet, and DSH sessions are not importable yet either. Import only
-reads your repository: it archives the tracked changes
-into Mjolnir's data directory and does not change the checkout. When the
-imported session has a single Git root, resuming it runs the agent in that live
-checkout, not in a new clone. See [sessions](/sessions/#import-a-native-harness-session).
+importable yet, and DSH sessions are not importable yet either. Import leaves
+your repository unchanged. For a bare Git project, the dialog shows any
+uncommitted changes and offers **Create isolated checkout**. Select it to
+resume in a clean managed clone, or clear it to use the original checkout
+with its current files. See [sessions](/sessions/#import-a-native-harness-session).
 
 ## Stopping and uninstalling
 

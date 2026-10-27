@@ -27,8 +27,7 @@ use mj_controller::import::{
 use mj_tui::{ImportProfileOption, ImportSessionOption};
 
 const IMPORT_CANCELLED_MESSAGE: &str = "Import cancelled; no Mjolnir files were changed.";
-const DIRTY_IMPORT_WARNING: &str =
-    "These Git roots are dirty; Mjolnir will archive their complete current state:";
+const DIRTY_IMPORT_WARNING: &str = "These Git checkouts have uncommitted changes:";
 const IMPORT_RUNTIME_CONTEXT: &str = "import persistence requires the Mjolnir async runtime";
 
 #[derive(Debug, Args)]
@@ -328,11 +327,8 @@ fn import_native(
 
 fn import_success_message(imported: &ImportedClaudeSession) -> String {
     format!(
-        "Imported {} as Mjolnir session {} (bundle {}, archive {})",
-        imported.native_session_id,
-        imported.session_id,
-        imported.bundle_id,
-        imported.archive_path.display()
+        "Imported {} as Mjolnir session {} (bundle {})",
+        imported.native_session_id, imported.session_id, imported.bundle_id
     )
 }
 
@@ -423,7 +419,6 @@ pub(crate) struct PendingDashboardImport {
 pub(crate) struct DashboardImportSafety {
     pub(crate) create_managed_worktree: Option<bool>,
     pub(crate) accepted: bool,
-    pub(crate) include_untracked: bool,
 }
 
 pub(crate) struct ImportBundlePrompt {
@@ -431,7 +426,6 @@ pub(crate) struct ImportBundlePrompt {
     pub(crate) dirty_git_roots: Vec<String>,
     pub(crate) omitted_non_git_dirs: Vec<String>,
     pub(crate) scratch_git_roots: Vec<String>,
-    pub(crate) has_untracked_files: bool,
 }
 
 pub(crate) struct DashboardImportSuccess {
@@ -700,29 +694,21 @@ fn report_import_archive_progress(
         ImportArchiveProgress::Repository { current, total, id } => report(
             current,
             Some(total),
-            &format!("Snapshotting repository {current}/{total}: {id}"),
+            &format!("Preparing repository {current}/{total}: {id}"),
             true,
         ),
         ImportArchiveProgress::UntrackedFile {
-            repository_id,
             current,
             total,
             path,
+            ..
         } => report(
             current,
             Some(total),
-            &format!(
-                "Repository {repository_id}: archiving untracked file {current}/{total}: {}",
-                path.display()
-            ),
+            &format!("Preparing file {current}/{total}: {}", path.display()),
             current == 1 || current == total,
         ),
-        ImportArchiveProgress::WritingArchive => report(
-            1,
-            None,
-            "Writing, syncing, and verifying the archive…",
-            true,
-        ),
+        ImportArchiveProgress::WritingArchive => report(1, None, "Saving imported session…", true),
     }
 }
 
@@ -779,7 +765,6 @@ fn resolve_background_import_bundle(
                     .into_iter()
                     .map(|path| path.display().to_string())
                     .collect(),
-                has_untracked_files: issues.has_untracked_files,
             },
         ));
     }
@@ -825,7 +810,7 @@ fn import_session_from_profile(
     let control = ImportControl {
         cancelled,
         progress: &archive_progress,
-        include_untracked: safety.include_untracked,
+        include_untracked: false,
     };
     let imported = import_native_session(
         &controller.config,
@@ -1119,10 +1104,10 @@ mod tests {
     }
 
     #[test]
-    fn clean_raw_imports_require_a_worktree_choice_and_keep_it_when_imported() {
+    fn raw_imports_offer_worktree_choice_and_report_dirty_source_changes() {
         if crate::test_support::rerun_in_isolated_child(
             "MJ_TEST_IMPORT_WORKTREE_CHOICE",
-            "import::tests::clean_raw_imports_require_a_worktree_choice_and_keep_it_when_imported",
+            "import::tests::raw_imports_offer_worktree_choice_and_report_dirty_source_changes",
         ) {
             return;
         }
@@ -1144,6 +1129,22 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+        std::fs::write(root.join("tracked.txt"), "committed\n").unwrap();
+        let mut command = std::process::Command::new("git");
+        command.arg("-C").arg(&root).args(["add", "tracked.txt"]);
+        let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
+        assert!(output.status.success());
+        let mut command = std::process::Command::new("git");
+        command
+            .arg("-C")
+            .arg(&root)
+            .args(["commit", "-m", "tracked file"]);
+        let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let home = directory.path().join("codex");
         let native_id = "11111111-2222-4333-8444-555555555555";
         let rollout = home
@@ -1192,7 +1193,6 @@ mod tests {
             "Imported",
             DashboardImportSafety {
                 accepted: false,
-                include_untracked: true,
                 create_managed_worktree: None,
             },
             &AtomicBool::new(false),
@@ -1217,7 +1217,6 @@ mod tests {
                 "Imported",
                 DashboardImportSafety {
                     accepted: true,
-                    include_untracked: true,
                     create_managed_worktree: Some(choice),
                 },
                 &AtomicBool::new(false),
@@ -1241,5 +1240,56 @@ mod tests {
                 Some(choice)
             );
         }
+
+        std::fs::write(root.join("tracked.txt"), "modified\n").unwrap();
+        std::fs::write(root.join("untracked.txt"), "untracked\n").unwrap();
+        let result = import_session_from_profile(
+            Controller {
+                config: config.clone(),
+                state: State::default(),
+            },
+            "codex",
+            native_id,
+            "Imported",
+            DashboardImportSafety {
+                accepted: false,
+                create_managed_worktree: None,
+            },
+            &AtomicBool::new(false),
+            |_, _, _, _| {},
+        )
+        .unwrap();
+        let DashboardImportTaskResult::NeedsBundle(prompt) = result else {
+            panic!("dirty import must report changes and offer worktree choice")
+        };
+        assert_eq!(prompt.dirty_git_roots.len(), 1);
+        assert!(prompt.dirty_git_roots[0].contains("1 tracked change"));
+        assert!(prompt.dirty_git_roots[0].contains("1 untracked path"));
+
+        let result = import_session_from_profile(
+            Controller {
+                config,
+                state: State::default(),
+            },
+            "codex",
+            native_id,
+            "Imported",
+            DashboardImportSafety {
+                accepted: true,
+                create_managed_worktree: Some(false),
+            },
+            &AtomicBool::new(false),
+            |_, _, _, _| {},
+        )
+        .unwrap();
+        assert!(matches!(result, DashboardImportTaskResult::Imported(_)));
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "modified\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("untracked.txt")).unwrap(),
+            "untracked\n"
+        );
     }
 }

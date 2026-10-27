@@ -146,14 +146,14 @@ DSH sessions are not importable yet either.
 | `--profile <id>` | Profile whose home holds the session. Needed only when several enabled profiles run this harness. |
 | `--bundle <id>` | Associate an existing configured repository bundle. |
 | `--title <text>` | Set the title displayed in the dashboard. |
-| `--allow-dirty` | Acknowledge that dirty Git roots will be archived in their complete current state. |
+| `--allow-dirty` | Proceed when the source Git checkouts have uncommitted changes. |
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
 | `--review <off\|turn\|push>` | Set the imported session's review trigger, overriding `[review]`. |
 | `--review-model <name>`, `--review-effort <name>`, `--review-tier quick\|extended` | Set the reviewer model or effort. Without `--review`, these options select `turn`. The deprecated tier option still accepts either value but ignores it. |
 | `--workspace <name>` | Workspace to put the imported session in. Needed when the instance has more than one workspace. |
 
-Import never edits the harness's source transcript. It builds and verifies a Mjolnir recovery archive, creates a suspended session record, and makes that record available through `prefix+g`.
+Import leaves the source checkout and the harness's source transcript unchanged. The imported session starts suspended and is available through `prefix+g`.
 
 Examples:
 

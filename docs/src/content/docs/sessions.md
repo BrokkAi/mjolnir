@@ -458,7 +458,7 @@ For Codex, the archive includes the primary thread and child-agent results surfa
 
 ## Import a native harness session
 
-The `prefix+g` picker also has an Import view for sessions created outside Mjolnir. Native sessions from five of the eight supported harnesses can be adopted into a suspended, verified Mjolnir archive and then resumed on a configured target; OpenCode and MiMo Code keep their sessions in SQLite databases, so they cannot be imported yet, and DSH sessions cannot be imported yet either. Muse imports retain their native session IDs and support workspace relocation. Muse accepts one workspace root.
+The `prefix+g` picker also has an Import view for sessions created outside Mjolnir. Native sessions from five of the eight supported harnesses can be imported as suspended Mjolnir sessions and then resumed on a configured target; OpenCode and MiMo Code keep their sessions in SQLite databases, so they cannot be imported yet, and DSH sessions cannot be imported yet either. Muse imports retain their native session IDs and support workspace relocation. Muse accepts one workspace root.
 
 The Import view and `mj import` read the home of each enabled profile. A session Mjolnir runs writes its native history into its own staged home instead, on this machine as on every other target, so it never appears in the Import view, and your harness's own resume command, such as `codex resume` or `claude --resume`, does not list it either. Find it on the **Mjolnir** or **Archived** tab. See [Native session history](/profiles/#native-session-history).
 
@@ -471,14 +471,16 @@ mj import grok --latest --bundle myapp
 mj import muse --session <native-uuid> --bundle myapp
 ```
 
-Dashboard imports that will resume in a bare Git project also offer
-**Create isolated checkout**, even when there are no import warnings. The saved
-choice takes effect on first resume, which then makes the session's clone
-under `.mj/clones/<session id>`.
+Dashboard imports that will resume in a bare Git project show any uncommitted
+changes and offer one option: **Create isolated checkout**. Select it to
+create a clean managed clone under `.mj/clones/<session id>` on first resume.
+Source changes stay in the original checkout. Clear it to resume in that
+original checkout with its current files. Import itself leaves the checkout
+unchanged.
 
 Close the source harness before importing. If it changes the session during import, select it again after it stops. Unsupported native storage versions report an error rather than importing partial history.
 
-If imported Git roots are dirty, Mjolnir warns that it will archive their complete current state; edited non-Git or scratch directories are omitted. An interactive CLI or dashboard import can acknowledge those warnings. For non-interactive use, pass `--allow-dirty` and, when applicable, `--allow-omitted-non-git`. See the [CLI reference](/cli-reference/#import-a-native-session) for every flag.
+Edited non-Git or scratch directories are omitted. An interactive CLI or dashboard import shows those directories before proceeding. For non-interactive CLI use, pass `--allow-dirty` when the checkout has uncommitted changes and, when applicable, `--allow-omitted-non-git`. See the [CLI reference](/cli-reference/#import-a-native-session) for every flag.
 
 ## Search and restore archived sessions
 
