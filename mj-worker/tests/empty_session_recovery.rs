@@ -11,6 +11,10 @@ use mj_worker::relay::DurableRelay;
 use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
 
+#[path = "../src/test_support/timeouts.rs"]
+mod timeouts;
+use timeouts::IO_TIMEOUT;
+
 const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 
 fn recovered_prompt_finished(root: &std::path::Path) -> bool {
@@ -216,12 +220,13 @@ for line in sys.stdin:
     command
         .env
         .insert("MJ_INSTANCE".into(), "wrong-launcher-instance".into());
-    let worker = std::thread::spawn(move || {
-        BoundedProcessExecutor::new(Duration::from_secs(20)).execute(&command)
-    });
+    // Leave time for both the observation and the subsequent stop.
+    let worker =
+        std::thread::spawn(move || BoundedProcessExecutor::new(IO_TIMEOUT * 2).execute(&command));
 
+    // Hard-won: fdd49cc1e: Startup under load exhausted the fixture budget before the bridge received work.
     let observation = (|| -> anyhow::Result<String> {
-        let deadline = Instant::now() + Duration::from_secs(12);
+        let deadline = Instant::now() + IO_TIMEOUT;
         loop {
             let methods = std::fs::read_to_string(&log).unwrap_or_default();
             if used && methods.contains("session/load") && worker.is_finished() {
@@ -231,6 +236,10 @@ for line in sys.stdin:
                 return Ok(methods);
             }
             anyhow::ensure!(
+                !worker.is_finished(),
+                "worker exited before recovering queued work: {methods}"
+            );
+            anyhow::ensure!(
                 Instant::now() < deadline,
                 "bridge never received queued work: {methods}"
             );
@@ -238,8 +247,8 @@ for line in sys.stdin:
         }
     })();
     let stop = mj_controller::targets::stop_worker_daemon_script(root.to_str().unwrap());
-    let stopped = BoundedProcessExecutor::new(Duration::from_secs(8))
-        .execute(&CommandSpec::new("sh", ["-c", &stop]));
+    let stopped =
+        BoundedProcessExecutor::new(IO_TIMEOUT).execute(&CommandSpec::new("sh", ["-c", &stop]));
     let owner = worker.join().expect("worker owner panicked");
     let worker_log = std::fs::read_to_string(root.join("worker.log"))
         .expect("read the owning worker's diagnostics");

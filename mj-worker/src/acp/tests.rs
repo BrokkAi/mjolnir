@@ -3556,9 +3556,8 @@ where
     F: FnMut(&RuntimeEvent) -> bool,
 {
     loop {
-        let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+        let event = crate::test_support::wait_for("runtime event", events.recv())
             .await
-            .expect("runtime event arrives")
             .expect("runtime event channel stays open");
         if matches(&event) {
             return event;
@@ -5226,6 +5225,7 @@ for line in sys.stdin:
     );
 }
 
+// Hard-won: bd326e2bb: Bridge startup and recovery can exceed five seconds under parallel I/O load.
 #[cfg(unix)]
 #[tokio::test]
 async fn dead_bridge_after_session_start_reloads_the_native_session() {
@@ -5343,7 +5343,7 @@ while True:
     let mut saw_reload = false;
     let mut capability_updates = 0;
     loop {
-        let event = tokio::time::timeout(std::time::Duration::from_secs(5), event_rx.recv())
+        let event = tokio::time::timeout(crate::test_support::IO_TIMEOUT, event_rx.recv())
             .await
             .expect("ACP runtime keeps reporting")
             .expect("event channel stays open");
@@ -5386,18 +5386,18 @@ while True:
     assert_eq!(started, vec![false, true], "the second open is a resume");
 
     drop(request_tx);
-    tokio::time::timeout(std::time::Duration::from_secs(5), runtime)
+    tokio::time::timeout(crate::test_support::IO_TIMEOUT, runtime)
         .await
         .expect("closing the command channel must end the runtime")
         .expect("runtime task does not panic")
         .expect("a recovered bridge must not fail the worker");
 }
 
+// Hard-won: 410851f2d: Bridge startup is not bounded by the five-second fixture wait.
 #[cfg(unix)]
 #[tokio::test]
 async fn an_acknowledged_cancel_keeps_the_running_bridge() {
     let temp = tempfile::tempdir().unwrap();
-    let prompt_seen = temp.path().join("prompt-seen");
     let initializes = temp.path().join("initializes");
     let script = temp.path().join("cancelled_acp.py");
     std::fs::write(
@@ -5405,7 +5405,6 @@ async fn an_acknowledged_cancel_keeps_the_running_bridge() {
         format!(
             r#"
 import json, sys
-prompt_seen = {prompt_seen:?}
 initializes = {initializes:?}
 
 def read():
@@ -5432,7 +5431,9 @@ while True:
     elif method == "session/prompt":
         prompts += 1
         if prompts == 1:
-            open(prompt_seen, "w").close()
+            write({{"jsonrpc": "2.0", "method": "session/update", "params": {{
+                "sessionId": "scripted", "update": {{"sessionUpdate": "agent_message_chunk",
+                "content": {{"type": "text", "text": "prompt-ready"}}}}}}}})
             cancellation = read()
             assert cancellation.get("method") == "session/cancel", cancellation
             write({{"jsonrpc": "2.0", "id": ident, "result": {{"stopReason": "cancelled"}}}})
@@ -5486,7 +5487,7 @@ while True:
     let wait_for_finished_prompt =
         async |event_rx: &mut mpsc::Receiver<RuntimeEvent>, finished: &mut Vec<String>| {
             loop {
-                let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                let event = tokio::time::timeout(crate::test_support::IO_TIMEOUT, event_rx.recv())
                     .await
                     .expect("the ACP runtime keeps reporting")
                     .expect("the event channel stays open");
@@ -5514,13 +5515,11 @@ while True:
         })
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !prompt_seen.exists() {
-            tokio::task::yield_now().await;
-        }
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::SessionUpdate { update }
+            if update["content"]["text"] == "prompt-ready")
     })
-    .await
-    .expect("the prompt reaches the bridge");
+    .await;
     request_tx
         .send(CommandRequest::Cancel {
             request_id: "cancel-1".into(),
@@ -5547,7 +5546,7 @@ while True:
     );
 
     drop(request_tx);
-    tokio::time::timeout(Duration::from_secs(5), runtime)
+    tokio::time::timeout(crate::test_support::IO_TIMEOUT, runtime)
         .await
         .expect("closing the command channel ends the runtime")
         .expect("runtime task does not panic")
@@ -6580,6 +6579,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
     }
 }
 
+// Hard-won: 29a80b2d2: Correct bridge startup exceeded the fixture event deadline under load.
 #[tokio::test]
 async fn clear_replaces_the_native_session_without_forwarding_a_prompt() {
     exercise_context_clear(false, HarnessKind::Codex).await;
@@ -6657,7 +6657,7 @@ for line in sys.stdin:
     .await;
     drop(request_tx);
     let drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
-    tokio::time::timeout(Duration::from_secs(20), runtime)
+    tokio::time::timeout(crate::test_support::IO_TIMEOUT, runtime)
         .await
         .unwrap()
         .unwrap()
@@ -6665,6 +6665,7 @@ for line in sys.stdin:
     drain.await.unwrap();
 }
 
+// Hard-won: 29a80b2d2: Correct bridge replacement exceeded the fixture event deadline under load.
 #[tokio::test]
 async fn failed_clear_reloads_the_previous_native_session() {
     exercise_context_clear(true, HarnessKind::Codex).await;
@@ -6751,7 +6752,7 @@ for line in sys.stdin:
     drop(request_tx);
     // Drain the bounded event channel while shutdown completes.
     let drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
-    tokio::time::timeout(Duration::from_secs(20), runtime)
+    tokio::time::timeout(crate::test_support::IO_TIMEOUT, runtime)
         .await
         .unwrap()
         .unwrap()
