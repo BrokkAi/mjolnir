@@ -600,7 +600,7 @@ mod tests {
         use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("away.sqlite");
-        for id in ["session-1", "session-2", "legacy", "late"] {
+        for id in ["session-1", "session-2", "legacy", "late", "pre-away"] {
             let mut record = super::super::tests::session(id, "project");
             record.state = SessionState::Running;
             save_session_to(&path, &record).unwrap();
@@ -618,6 +618,9 @@ mod tests {
             // Even a historical worker carrying a reply must not manufacture a user answer.
             reply: Some("not a user answer".into()),
         };
+        // A question already open when AFK starts must be captured into that AFK period
+        // when the worker's away resolution arrives.
+        page_for(&path, "pre-away", vec![requested()], false).unwrap();
         let mut connection = open(&path).unwrap();
         assert!(super::super::operator_away::set_with(&mut connection, true).unwrap());
         assert!(!super::super::operator_away::set_with(&mut connection, true).unwrap());
@@ -635,7 +638,8 @@ mod tests {
                 .query_row("SELECT count(*) FROM api_events", [], |r| r
                     .get::<_, u64>(0))
                 .unwrap(),
-            0
+            1,
+            "the pre-AFK request remains while the failed away resolution rolls back"
         );
         connection.execute_batch("DROP TRIGGER fail_away").unwrap();
         drop(connection);
@@ -644,6 +648,7 @@ mod tests {
             page_for(&path, id, vec![requested()], false).unwrap();
             page_for(&path, id, vec![resolved()], false).unwrap();
         }
+        page_for(&path, "pre-away", vec![resolved()], false).unwrap();
         open(&path)
             .unwrap()
             .execute(
@@ -687,6 +692,8 @@ mod tests {
         page_for(&path, "late", vec![resolved()], false).unwrap();
         save_materialized_session_to(&path, &MaterializedSession::empty("late")).unwrap();
         page_for(&path, "late", vec![requested(), resolved()], false).unwrap();
+        save_materialized_session_to(&path, &MaterializedSession::empty("pre-away")).unwrap();
+        page_for(&path, "pre-away", vec![requested(), resolved()], false).unwrap();
         save_materialized_session_to(&path, &MaterializedSession::empty("session-2")).unwrap();
         page_for(
             &path,
@@ -722,14 +729,14 @@ mod tests {
                 }
                 MailboxEventBody::OperatorBack { requests } => {
                     back_count += 1;
-                    assert!(target == "session-2" || target == "late");
+                    assert!(target == "session-2" || target == "late" || target == "pre-away");
                     assert_eq!(requests.len(), if target == "session-2" { 2 } else { 1 });
                 }
                 other => panic!("unexpected event {other:?}"),
             }
         }
-        assert_eq!(away_count, 4);
-        assert_eq!(back_count, 2);
+        assert_eq!(away_count, 5);
+        assert_eq!(back_count, 3);
     }
 
     #[test]
