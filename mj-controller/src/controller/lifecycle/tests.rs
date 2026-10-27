@@ -842,7 +842,11 @@ fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
     assert_eq!(closed.state, SessionState::Stopped);
     assert!(closed.target.is_none());
     assert!(!worker_root.exists(), "the child's worker root is removed");
-    assert!(!reports.join(session_id).exists());
+    // #1333: close keeps reports parents were told to cite.
+    assert!(
+        reports.join(session_id).is_dir(),
+        "close keeps the child's report directory"
+    );
     assert!(reports.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_dir());
 }
 
@@ -2070,11 +2074,11 @@ fn destroying_a_stopped_child_removes_reports_through_its_live_parent() {
     assert!(reports.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_dir());
 }
 
-// Hard-won: #1331: report removal is best effort and must never prevent child close.
+// Hard-won: #1331: report removal is best effort and must never prevent child destroy.
 #[cfg(unix)]
 #[test]
-fn report_removal_failure_does_not_fail_child_close() {
-    if !in_isolated_store("report_removal_failure_does_not_fail_child_close") {
+fn report_removal_failure_does_not_fail_child_destroy() {
+    if !in_isolated_store("report_removal_failure_does_not_fail_child_destroy") {
         return;
     }
     struct ReportFailureExecutor;
@@ -2092,12 +2096,13 @@ fn report_removal_failure_does_not_fail_child_close() {
     let mut controller = failed_subagent_controller(&directory.path().join(child_id), child_id);
     let reports = seed_child_reports(&mut controller, child_id, directory.path());
     controller
-        .suspend_session_without_checkpoint_with(child_id, &ReportFailureExecutor, |_| Ok(()))
+        .force_destroy_session_with(
+            child_id,
+            &ReportFailureExecutor,
+            BranchDisposition::Keep,
+            |_| Ok(()),
+        )
         .unwrap();
-    assert_eq!(
-        controller.state.sessions[child_id].state,
-        SessionState::Stopped
-    );
     assert!(
         reports.join(child_id).is_dir(),
         "failure did not secretly delete reports"
