@@ -321,6 +321,212 @@
     }
   },
   {
+    "uri": "/api/settings/page",
+    "request": {
+      "path": []
+    },
+    "status": 200,
+    "response": {
+      "page": {
+        "path": [],
+        "breadcrumb": [
+          "Settings"
+        ],
+        "help": "Changes stay in this draft until you save.",
+        "groups": [
+          {
+            "heading": "Setup",
+            "rows": [
+              {
+                "path": [
+                  "profiles"
+                ],
+                "label": "Agent Profiles",
+                "help": "Add a profile, then choose Sign in. Detect profiles finds installed agents.",
+                "control": "page",
+                "summary": "claude"
+              },
+              {
+                "path": [
+                  "bundles"
+                ],
+                "label": "Projects",
+                "help": "Projects can contain one or more repositories. Choose the main repository where the agent starts.",
+                "control": "page",
+                "summary": "None yet"
+              },
+              {
+                "path": [
+                  "targets"
+                ],
+                "label": "Runtimes",
+                "help": "Add a runtime and choose its machine, or use Detect runtimes to find what every machine can run.",
+                "control": "page",
+                "summary": "docker, lab, +2 more"
+              },
+              {
+                "path": [
+                  "machines"
+                ],
+                "label": "Machines",
+                "help": "Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its build cache settings.",
+                "control": "page",
+                "summary": "local"
+              }
+            ]
+          },
+          {
+            "heading": "Sessions",
+            "rows": [
+              {
+                "path": [
+                  "review"
+                ],
+                "label": "Code Review",
+                "help": "Used by turn review. Auto picks another provider with quota.",
+                "control": "page",
+                "summary": "Off"
+              },
+              {
+                "path": [
+                  "continuation"
+                ],
+                "label": "Continuation",
+                "help": "Continue an unfinished request up to three times per message, and resume a session after its quota resets.",
+                "control": "page",
+                "summary": "On · 3 continuations plus quota recovery"
+              },
+              {
+                "path": [
+                  "subagents"
+                ],
+                "label": "Sub-agents",
+                "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+                "control": "page",
+                "summary": "Up to 6 at once"
+              },
+              {
+                "path": [
+                  "sessionwiki"
+                ],
+                "label": "SessionWiki",
+                "help": "Sessions are always indexed into SessionWiki. This page sets archiving; the row below shows what it frees.",
+                "control": "page",
+                "summary": "Keeps every session"
+              },
+              {
+                "path": [
+                  "phone"
+                ],
+                "label": "Web Access",
+                "help": "Web access changes take effect when the background server next starts. Remote access requires a certificate and key.",
+                "control": "page",
+                "summary": "On · 127.0.0.1:3765"
+              }
+            ]
+          },
+          {
+            "heading": "Display",
+            "rows": [
+              {
+                "path": [
+                  "interface"
+                ],
+                "label": "Interface",
+                "control": "page",
+                "summary": "Midnight · sidebar left"
+              },
+              {
+                "path": [
+                  "notify"
+                ],
+                "label": "Notifications",
+                "help": "How to be told when a session you are not looking at asks a question, fails, or finishes.",
+                "control": "page",
+                "summary": "Terminal"
+              },
+              {
+                "path": [
+                  "advanced"
+                ],
+                "label": "Advanced",
+                "help": "Display options: activity clocks, session order, symbols, and how tool calls show.",
+                "control": "page",
+                "summary": "All off"
+              }
+            ]
+          },
+          {
+            "heading": "Privacy",
+            "rows": [
+              {
+                "path": [
+                  "jev"
+                ],
+                "label": "Jev (hosted service)",
+                "help": "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart.",
+                "control": "page",
+                "summary": "On · sends turn text for classification"
+              }
+            ]
+          },
+          {
+            "heading": "Other",
+            "rows": [
+              {
+                "path": [
+                  "github"
+                ],
+                "label": "GitHub events",
+                "help": "Receive GitHub activity selected by Jev. This switch controls only the GitHub event source. Mailbox hooks, peer messages and child reports remain available at tool boundaries and through idle wakes.",
+                "control": "page",
+                "summary": "On · GitHub activity"
+              }
+            ]
+          }
+        ],
+        "removable": false
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/page",
+    "request": {
+      "path": [
+        "continuation"
+      ]
+    },
+    "status": 200,
+    "response": {
+      "page": {
+        "path": [
+          "continuation"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Continuation"
+        ],
+        "help": "Continue an unfinished request up to three times per message, and resume a session after its quota resets.",
+        "groups": [
+          {
+            "rows": [
+              {
+                "path": [
+                  "continuation",
+                  "enabled"
+                ],
+                "label": "Enabled",
+                "control": "checkbox",
+                "checked": true
+              }
+            ]
+          }
+        ],
+        "removable": false
+      }
+    }
+  },
+  {
     "uri": "/api/settings/edit",
     "request": {
       "page": [
@@ -371,6 +577,234 @@
                 "label": "Enabled",
                 "control": "checkbox",
                 "checked": false
+              }
+            ]
+          }
+        ],
+        "removable": false
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/page",
+    "request": {
+      "path": []
+    },
+    "status": 200,
+    "response": {
+      "page": {
+        "path": [],
+        "breadcrumb": [
+          "Settings"
+        ],
+        "help": "Changes stay in this draft until you save.",
+        "groups": [
+          {
+            "heading": "Setup",
+            "rows": [
+              {
+                "path": [
+                  "profiles"
+                ],
+                "label": "Agent Profiles",
+                "help": "Add a profile, then choose Sign in. Detect profiles finds installed agents.",
+                "control": "page",
+                "summary": "claude"
+              },
+              {
+                "path": [
+                  "bundles"
+                ],
+                "label": "Projects",
+                "help": "Projects can contain one or more repositories. Choose the main repository where the agent starts.",
+                "control": "page",
+                "summary": "None yet"
+              },
+              {
+                "path": [
+                  "targets"
+                ],
+                "label": "Runtimes",
+                "help": "Add a runtime and choose its machine, or use Detect runtimes to find what every machine can run.",
+                "control": "page",
+                "summary": "docker, lab, +2 more"
+              },
+              {
+                "path": [
+                  "machines"
+                ],
+                "label": "Machines",
+                "help": "Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its build cache settings.",
+                "control": "page",
+                "summary": "local"
+              }
+            ]
+          },
+          {
+            "heading": "Sessions",
+            "rows": [
+              {
+                "path": [
+                  "review"
+                ],
+                "label": "Code Review",
+                "help": "Used by turn review. Auto picks another provider with quota.",
+                "control": "page",
+                "summary": "Off"
+              },
+              {
+                "path": [
+                  "continuation"
+                ],
+                "label": "Continuation",
+                "help": "Continue an unfinished request up to three times per message, and resume a session after its quota resets.",
+                "control": "page",
+                "summary": "Off"
+              },
+              {
+                "path": [
+                  "subagents"
+                ],
+                "label": "Sub-agents",
+                "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+                "control": "page",
+                "summary": "Up to 6 at once"
+              },
+              {
+                "path": [
+                  "sessionwiki"
+                ],
+                "label": "SessionWiki",
+                "help": "Sessions are always indexed into SessionWiki. This page sets archiving; the row below shows what it frees.",
+                "control": "page",
+                "summary": "Keeps every session"
+              },
+              {
+                "path": [
+                  "phone"
+                ],
+                "label": "Web Access",
+                "help": "Web access changes take effect when the background server next starts. Remote access requires a certificate and key.",
+                "control": "page",
+                "summary": "On · 127.0.0.1:3765"
+              }
+            ]
+          },
+          {
+            "heading": "Display",
+            "rows": [
+              {
+                "path": [
+                  "interface"
+                ],
+                "label": "Interface",
+                "control": "page",
+                "summary": "Midnight · sidebar left"
+              },
+              {
+                "path": [
+                  "notify"
+                ],
+                "label": "Notifications",
+                "help": "How to be told when a session you are not looking at asks a question, fails, or finishes.",
+                "control": "page",
+                "summary": "Terminal"
+              },
+              {
+                "path": [
+                  "advanced"
+                ],
+                "label": "Advanced",
+                "help": "Display options: activity clocks, session order, symbols, and how tool calls show.",
+                "control": "page",
+                "summary": "All off"
+              }
+            ]
+          },
+          {
+            "heading": "Privacy",
+            "rows": [
+              {
+                "path": [
+                  "jev"
+                ],
+                "label": "Jev (hosted service)",
+                "help": "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart.",
+                "control": "page",
+                "summary": "On · sends turn text for classification"
+              }
+            ]
+          },
+          {
+            "heading": "Other",
+            "rows": [
+              {
+                "path": [
+                  "github"
+                ],
+                "label": "GitHub events",
+                "help": "Receive GitHub activity selected by Jev. This switch controls only the GitHub event source. Mailbox hooks, peer messages and child reports remain available at tool boundaries and through idle wakes.",
+                "control": "page",
+                "summary": "On · GitHub activity"
+              }
+            ]
+          }
+        ],
+        "removable": false
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/page",
+    "request": {
+      "path": [
+        "subagents"
+      ]
+    },
+    "status": 200,
+    "response": {
+      "page": {
+        "path": [
+          "subagents"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Sub-agents"
+        ],
+        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+        "groups": [
+          {
+            "rows": [
+              {
+                "path": [
+                  "subagents",
+                  "max_concurrent"
+                ],
+                "label": "Maximum concurrent children",
+                "control": "text",
+                "value": "6",
+                "placeholder": "6 (default)",
+                "number": true
+              },
+              {
+                "path": [
+                  "subagents",
+                  "straightforward"
+                ],
+                "label": "Straightforward",
+                "help": "Work with a clear method. Choose a model and its effort.",
+                "control": "page",
+                "summary": "2 settings"
+              },
+              {
+                "path": [
+                  "subagents",
+                  "subtle"
+                ],
+                "label": "Subtle",
+                "help": "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward.",
+                "control": "page",
+                "summary": "2 settings"
               }
             ]
           }
@@ -466,7 +900,7 @@
     "uri": "/api/settings/save",
     "request": {
       "page": [
-        "continuation"
+        "subagents"
       ]
     },
     "status": 200,
@@ -503,24 +937,46 @@
       },
       "page": {
         "path": [
-          "continuation"
+          "subagents"
         ],
         "breadcrumb": [
           "Settings",
-          "Continuation"
+          "Sub-agents"
         ],
-        "help": "Continue an unfinished request up to three times per message, and resume a session after its quota resets.",
+        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
         "groups": [
           {
             "rows": [
               {
                 "path": [
-                  "continuation",
-                  "enabled"
+                  "subagents",
+                  "max_concurrent"
                 ],
-                "label": "Enabled",
-                "control": "checkbox",
-                "checked": false
+                "label": "Maximum concurrent children",
+                "control": "text",
+                "value": "6",
+                "placeholder": "6 (default)",
+                "number": true
+              },
+              {
+                "path": [
+                  "subagents",
+                  "straightforward"
+                ],
+                "label": "Straightforward",
+                "help": "Work with a clear method. Choose a model and its effort.",
+                "control": "page",
+                "summary": "2 settings"
+              },
+              {
+                "path": [
+                  "subagents",
+                  "subtle"
+                ],
+                "label": "Subtle",
+                "help": "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward.",
+                "control": "page",
+                "summary": "2 settings"
               }
             ]
           }

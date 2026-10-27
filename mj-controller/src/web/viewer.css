@@ -2275,3 +2275,141 @@ body[data-connection='reconnecting'] .connection {
   .conversation-header .model-select { max-width: 64px; }
   .turn-controls > button { padding-inline: 8px; }
 }
+
+/* ---- settings ----
+ *
+ * The daemon renders each page; these rules only lay its rows out. A row
+ * that opens a page is a full-width button naming the section and what it
+ * is set to, the way the terminal's Settings lists them.
+ */
+
+.settings-trail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.settings-crumb {
+  min-height: 32px;
+  padding: 4px 8px;
+  background: none;
+  border: 0;
+  color: var(--user);
+  font-weight: 400;
+  font-size: 14px;
+}
+
+.settings-crumb::after {
+  content: ' ›';
+  color: var(--dim);
+}
+
+.settings-group h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.settings-row + .settings-row {
+  border-top: 1px solid var(--border);
+}
+
+.settings-row .field {
+  margin: 8px 0;
+}
+
+.settings-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  color: var(--text);
+  font-weight: 400;
+  text-align: left;
+}
+
+.settings-link .settings-label {
+  flex: none;
+  max-width: 50%;
+  overflow-wrap: anywhere;
+}
+
+.settings-link .settings-summary {
+  flex: 1;
+  min-width: 0;
+  color: var(--dim);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.settings-link .settings-summary::after {
+  content: '  ›';
+}
+
+.settings-check {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  min-height: var(--touch);
+  margin: 4px 0;
+}
+
+.settings-check input {
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+}
+
+.settings-value {
+  overflow-wrap: anywhere;
+}
+
+.settings-row-help {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.settings-notice {
+  border-left: 3px solid var(--idle);
+  padding: 6px 10px;
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+
+#settings-entry-actions {
+  margin: 12px 0;
+}
+
+#settings-entry-actions input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Saving is always in reach while a draft has changes, however long the
+ * page it was made on. */
+.settings-savebar {
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  margin: 12px 0 0;
+  padding: 10px 0 calc(10px + env(safe-area-inset-bottom));
+  background: var(--ground);
+  border-top: 1px solid var(--border-strong);
+}
+
+.settings-savebar p {
+  margin: 0;
+  flex: 1 1 12rem;
+}

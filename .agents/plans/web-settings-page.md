@@ -17,7 +17,7 @@ To see it working: start an isolated instance, open the viewer, sign in, choose 
 - [x] (2026-10-27 15:10Z) Research: mapped the terminal Settings model (`mj-tui/src/setup/`), the save path (`mj-cli/src/dashboard/io/spawn.rs`), the daemon HTTP surfaces, the viewer page pattern and the web test harness.
 - [x] (2026-10-27 16:40Z) Milestone 1: shared settings model in `mj-client/src/settings/` (`schema`, `page`, `draft`, `edit`, `save`), used by the terminal. `mj-tui` 561 tests pass with no golden changes; the six `mj-cli` save tests pass against the moved `save_at`.
 - [x] (2026-10-27 18:05Z) Milestone 2: daemon settings routes (`GET /api/settings`, `POST /api/settings/page`, `/edit`, `/save`) on the signed-in viewer surface, with `mj_client::settings::{view, hidden}`. Exchange golden `mj-controller/tests/golden/viewer-settings-exchange.txt` and the stale-draft test pass.
-- [ ] Milestone 3: the web Settings page.
+- [x] (2026-10-27 19:30Z) Milestone 3: the web Settings page (`#settings/<path>` routes, one serialized request queue, rows rebuilt only when the page changes). Playwright golden `tests/e2e/web/golden/viewer_settings.txt` replays the Rust exchange in order; full web suite 57 unit + 109 browser tests pass; checked by hand against a real daemon in instance `websettings` (secret absent from every response, save wrote only `[continuation] enabled = false`).
 - [ ] Milestone 4: choices that need discovery (code review and sub-agent model and effort).
 - [ ] Full validation, documentation, retrospective.
 
@@ -81,6 +81,11 @@ To see it working: start an isolated instance, open the viewer, sign in, choose 
 
 - Decision: rows the terminal guards with something only it can measure or discover are `read_only` on the web for now: every build-cache field (the terminal inspects the machine's mbx installation, which may own the budgets), the reviewer's model and effort, and sub-agent model and effort until discovery has filled `_subagent_options`. Remote `~` paths are refused with "Enter the full path on that machine".
   Rationale: accepting these without the terminal's checks would let the web write values the terminal would refuse. `view::apply` accepts an edit only through a control the rendered page offers, so a read-only row cannot be changed by a crafted request either.
+  Date/Author: 2026-10-27, Claude.
+
+
+- Decision: the browser test replays the Rust exchange strictly in order, and the Rust test records the exact sequence a person's clicks produce (including re-rendering the first page after an edit). Drafts in the browser test are opaque tokens, and the fake daemon fails any request that does not send back the draft it last issued.
+  Rationale: the page must treat the draft as opaque; this proves it, and any request the page makes that the daemon side never recorded fails the browser test, so the two sides cannot drift.
   Date/Author: 2026-10-27, Claude.
 
 
@@ -210,7 +215,16 @@ Every step is additive or a move with its tests. If a move breaks a terminal gol
 
 ## Artifacts and Notes
 
-None yet.
+Against a real daemon in instance `websettings` with a profile holding `ANTHROPIC_API_KEY = "sk-live-check-literal-5e7b"`:
+
+    login 204
+    GET bytes 5056; secret present: 0
+    env (original): {'ANTHROPIC_API_KEY': {'mj_hidden_value': True}}
+    edit page rows: [('Enabled', False)] error: None
+    save 200
+    --- config file after save: (unchanged profile, plus)
+    [continuation]
+    enabled = false
 
 
 ## Interfaces and Dependencies

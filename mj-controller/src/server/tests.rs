@@ -4788,41 +4788,51 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
     let original = opened["original"].clone();
     let mut draft = opened["draft"].clone();
 
-    let page = serde_json::json!({"path": ["profiles", "claude"]});
-    let mut request = page.clone();
-    request["draft"] = draft.clone();
-    let (status, body) =
-        settings_request(&app, &cookie, "/api/settings/page", Some(&request)).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    record("/api/settings/page", page, status, &body);
-
-    for (page, edit) in [
+    // The requests a browser makes, in its order: open a page, then edit on
+    // it, and save from the page it is on. Each sends the draft the
+    // previous answer returned.
+    let root = || ("/api/settings/page", serde_json::json!({"path": []}));
+    let steps = [
         (
-            serde_json::json!(["continuation"]),
-            serde_json::json!({"kind": "toggle", "path": ["continuation", "enabled"]}),
+            "/api/settings/page",
+            serde_json::json!({"path": ["profiles", "claude"]}),
+        ),
+        root(),
+        (
+            "/api/settings/page",
+            serde_json::json!({"path": ["continuation"]}),
         ),
         (
-            serde_json::json!(["subagents"]),
-            serde_json::json!({"kind": "set", "path": ["subagents", "max_concurrent"], "text": "99"}),
+            "/api/settings/edit",
+            serde_json::json!({"page": ["continuation"], "edit": {"kind": "toggle", "path": ["continuation", "enabled"]}}),
         ),
-    ] {
-        let sent = serde_json::json!({"page": page, "edit": edit});
+        root(),
+        (
+            "/api/settings/page",
+            serde_json::json!({"path": ["subagents"]}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "max_concurrent"], "text": "99"}}),
+        ),
+        (
+            "/api/settings/save",
+            serde_json::json!({"page": ["subagents"]}),
+        ),
+    ];
+    for (uri, sent) in steps {
         let mut request = sent.clone();
         request["draft"] = draft.clone();
-        let (status, body) =
-            settings_request(&app, &cookie, "/api/settings/edit", Some(&request)).await;
+        if uri == "/api/settings/save" {
+            request["original"] = original.clone();
+        }
+        let (status, body) = settings_request(&app, &cookie, uri, Some(&request)).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        draft = record("/api/settings/edit", sent, status, &body)["draft"].clone();
+        let answer = record(uri, sent, status, &body);
+        if let Some(next) = answer.get("draft") {
+            draft = next.clone();
+        }
     }
-
-    let sent = serde_json::json!({"page": ["continuation"]});
-    let mut request = sent.clone();
-    request["original"] = original;
-    request["draft"] = draft;
-    let (status, body) =
-        settings_request(&app, &cookie, "/api/settings/save", Some(&request)).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    record("/api/settings/save", sent, status, &body);
 
     for body in &bodies {
         assert!(
