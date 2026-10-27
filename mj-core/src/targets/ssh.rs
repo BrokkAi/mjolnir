@@ -129,6 +129,12 @@ fn scp_command(ssh: &SshTarget, args: Vec<String>) -> CommandSpec {
 #[cfg(unix)]
 const CONTROL_PERSIST: &str = "60";
 
+/// The master's `ServerAliveInterval` seconds and `ServerAliveCountMax`: a
+/// host silent for a minute is gone. Patient enough that a stall of a few
+/// seconds does not drop the sessions on the connection.
+#[cfg(unix)]
+const MASTER_KEEPALIVE: (u32, u32) = (15, 4);
+
 /// Environment override that turns connection sharing off. Any of `0`, `off`,
 /// `false`, or `no` disables it.
 pub const CONTROL_MASTER_ENV: &str = "MJ_SSH_CONTROL_MASTER";
@@ -1484,6 +1490,13 @@ fn master_check_command(ssh: &SshTarget, socket: &Path) -> CommandSpec {
 /// its last session has been gone that long. `BatchMode=yes` keeps the daemon
 /// from ever waiting on a password prompt. This is a real connection, so it
 /// is admitted and retried like one.
+///
+/// Without a keepalive the master never notices a host that dropped off the
+/// network: every multiplexed session on it, a destroy's container removal
+/// included, waits until the host comes back and resets the connection.
+/// [`MASTER_KEEPALIVE`] makes the master give up on a silent host within
+/// about a minute, which fails each of its sessions with status 255. The
+/// user's own `ssh_args` come first and so still win.
 #[cfg(unix)]
 fn master_open_command(ssh: &SshTarget, socket: &Path) -> CommandSpec {
     let mut args = ssh.ssh_args.clone();
@@ -1492,6 +1505,10 @@ fn master_open_command(ssh: &SshTarget, socket: &Path) -> CommandSpec {
         "BatchMode=yes".to_owned(),
         "-o".to_owned(),
         "ConnectTimeout=10".to_owned(),
+        "-o".to_owned(),
+        format!("ServerAliveInterval={}", MASTER_KEEPALIVE.0),
+        "-o".to_owned(),
+        format!("ServerAliveCountMax={}", MASTER_KEEPALIVE.1),
         "-f".to_owned(),
         "-N".to_owned(),
         "-o".to_owned(),
