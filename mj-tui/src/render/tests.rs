@@ -3257,7 +3257,19 @@ fn golden_dashboard_resource_panels() {
     );
     append_dashboard_golden(&mut output, "expired login quota", 120, 28, &mut dashboard);
 
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    let mut api_config = config();
+    let mut bedrock = api_config.profiles.remove("claude-1").unwrap();
+    bedrock.home = std::path::PathBuf::from("/profiles/bedrock-claude");
+    bedrock
+        .environment
+        .insert("CLAUDE_CODE_USE_BEDROCK".into(), "1".into());
+    api_config.profiles.insert("bedrock-claude".into(), bedrock);
+    let mut dashboard = DashboardState::new(api_config, State::default(), BTreeMap::new());
+    dashboard.apply_quota(ProfileQuota {
+        harness: HarnessKind::Claude,
+        refreshed_at_epoch_seconds: 0,
+        ..api_quota("bedrock-claude")
+    });
     let mut quota = api_quota("codex-1");
     quota.refreshed_at_epoch_seconds = 0;
     dashboard.apply_quota(quota);
