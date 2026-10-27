@@ -340,9 +340,10 @@ pub fn remove_bundle(bundle_id: &str) -> Result<Config> {
             config.bundles.remove(bundle_id).is_some(),
             "project {bundle_id:?} is no longer saved"
         );
-        config.validate()
+        config.validate()?;
+        crate::database::hide_catalog_project(bundle_id)?;
+        Ok(())
     })?;
-    crate::database::hide_catalog_project(bundle_id)?;
     Ok(config)
 }
 

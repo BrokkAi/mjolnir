@@ -541,6 +541,9 @@ pub enum DaemonAction {
     CreateProject {
         sources: Vec<String>,
     },
+    RemoveProject {
+        bundle_id: String,
+    },
     WikiSearch {
         query: String,
         limit: usize,
@@ -1782,6 +1785,16 @@ impl DaemonClient {
         }
     }
 
+    pub async fn remove_project(&mut self, bundle_id: String) -> Result<()> {
+        match self
+            .request(DaemonAction::RemoveProject { bundle_id })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            other => bail!("unexpected project removal reply: {other:?}"),
+        }
+    }
+
     pub async fn wiki_search(&mut self, query: String, limit: usize) -> Result<WikiSearchPage> {
         match self
             .request(DaemonAction::WikiSearch { query, limit })
@@ -2406,7 +2419,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // becomes the host's saved default.
 // Operator-away action and runtime metadata.
 // Terminals no longer save harness titles; the daemon alone projects them.
-pub const PROTOCOL_VERSION: u32 = 64;
+// Project removal runs through the daemon-owned database writer.
+pub const PROTOCOL_VERSION: u32 = 65;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
