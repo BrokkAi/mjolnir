@@ -87,11 +87,29 @@ fn set_local_container_capacity(
     remaining: HostContainerSize,
     complete: bool,
 ) {
+    set_container_capacity_for_targets(
+        dashboard,
+        vec!["podman".into()],
+        total,
+        committed,
+        remaining,
+        complete,
+    );
+}
+
+fn set_container_capacity_for_targets(
+    dashboard: &mut DashboardState,
+    target_ids: Vec<String>,
+    total: HostContainerSize,
+    committed: HostContainerSize,
+    remaining: HostContainerSize,
+    complete: bool,
+) {
     let reserved = mj_core::state::reserved_container_capacity(total);
     dashboard.set_container_capacities(BTreeMap::from([(
         "local".into(),
         mj_client::runtime_feed::RuntimeContainerCapacity {
-            target_ids: vec!["podman".into()],
+            target_ids,
             capacity: mj_core::state::HostContainerCapacity {
                 total,
                 reserved,
@@ -3199,6 +3217,100 @@ fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() 
     );
 }
 
+fn wizard_with_capacity(template: TargetTemplate, remaining: HostContainerSize) -> DashboardState {
+    let mut config = config();
+    let TargetTemplate::LocalPodman { container } = config.targets["podman"].clone() else {
+        panic!("podman fixture target");
+    };
+    let template = match template {
+        TargetTemplate::LocalPodman { .. } => TargetTemplate::LocalPodman { container },
+        TargetTemplate::AppleContainer { .. } => TargetTemplate::AppleContainer { container },
+        _ => panic!("unexpected test target"),
+    };
+    config.targets.insert("podman".into(), template);
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+    set_container_capacity_for_targets(
+        &mut dashboard,
+        vec!["podman".into()],
+        HostContainerSize {
+            cpus: 12,
+            memory_bytes: 64 << 30,
+        },
+        HostContainerSize {
+            cpus: 10,
+            memory_bytes: 20 << 30,
+        },
+        remaining,
+        true,
+    );
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    dashboard
+}
+
+#[test]
+fn non_apple_container_overcommit_warns_and_can_submit() {
+    let mut dashboard = wizard_with_capacity(
+        config().targets["podman"].clone(),
+        HostContainerSize {
+            cpus: 2,
+            memory_bytes: 2 << 30,
+        },
+    );
+    let wizard = new_wizard(&dashboard);
+    assert!(wizard.resource_allocation.is_some());
+    assert!(wizard.sizing_error.is_none());
+    assert!(target_advance_enabled(&dashboard, wizard));
+    let screen = captured_drawn(&mut dashboard, 120, 30).join("\n");
+    assert!(screen.contains("It will still start."), "{screen}");
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert_ne!(new_wizard(&dashboard).step, WizardStep::Target);
+}
+
+#[test]
+fn apple_container_cpu_overcommit_warns_and_can_submit() {
+    let mut dashboard = wizard_with_capacity(
+        TargetTemplate::AppleContainer {
+            container: config().targets["podman"].container().unwrap().clone(),
+        },
+        HostContainerSize {
+            cpus: 2,
+            memory_bytes: 48 << 30,
+        },
+    );
+    let wizard = new_wizard(&dashboard);
+    assert!(wizard.resource_allocation.is_some());
+    assert!(wizard.sizing_error.is_none());
+    assert!(target_advance_enabled(&dashboard, wizard));
+    let screen = captured_drawn(&mut dashboard, 120, 30).join("\n");
+    assert!(screen.contains("more CPUs than the 2 left"), "{screen}");
+    assert!(!screen.contains("more RAM than"), "{screen}");
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert_ne!(new_wizard(&dashboard).step, WizardStep::Target);
+}
+
+#[test]
+fn apple_container_ram_overcommit_blocks_submission() {
+    let dashboard = wizard_with_capacity(
+        TargetTemplate::AppleContainer {
+            container: config().targets["podman"].container().unwrap().clone(),
+        },
+        HostContainerSize {
+            cpus: 12,
+            memory_bytes: 4 << 30,
+        },
+    );
+    let wizard = new_wizard(&dashboard);
+    assert!(wizard.resource_allocation.is_none());
+    assert!(
+        wizard
+            .sizing_error
+            .as_deref()
+            .is_some_and(|error| { error.contains("does not overcommit RAM on a Mac") })
+    );
+    assert!(!target_advance_enabled(&dashboard, wizard));
+}
+
 #[test]
 fn new_container_size_checkbox_is_explicit_and_reaches_the_create_action() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
@@ -3266,7 +3378,7 @@ fn new_container_size_checkbox_is_explicit_and_reaches_the_create_action() {
 }
 
 #[test]
-fn unknown_live_container_capacity_is_not_reported_as_zero() {
+fn unknown_live_container_capacity_warns_instead_of_blocking_non_apple_targets() {
     let mut session = running_session();
     session.target = Some(mj_core::state::TargetLocator::LocalPodman {
         container_id: "unknown-size".into(),
@@ -3311,13 +3423,13 @@ fn unknown_live_container_capacity_is_not_reported_as_zero() {
     ready_key(&mut dashboard, key(KeyCode::Enter));
 
     let wizard = new_wizard(&dashboard);
-    assert!(wizard.resource_allocation.is_none());
-    let error = wizard.sizing_error.as_deref().unwrap();
-    assert!(error.contains("no recorded sizing"), "{error}");
-    assert!(!error.contains("0 CPUs"), "{error}");
+    assert!(wizard.resource_allocation.is_some());
+    assert!(wizard.sizing_error.is_none());
+    assert!(target_advance_enabled(&dashboard, wizard));
     let screen = captured_drawn(&mut dashboard, 100, 30).join("\n");
     assert!(screen.contains("RAM left unavailable"), "{screen}");
     assert!(!screen.contains("RAM left: 0"), "{screen}");
+    assert!(screen.contains("The session will still start."), "{screen}");
 }
 
 // Hard-won: d27eb9f56: the TUI ignored daemon reservations while sizing a new session.

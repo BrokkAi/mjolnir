@@ -667,6 +667,7 @@ test('container remembered size is clamped to the reported host limits', async (
 test('container sizing enforces the useful minimum and hard remaining RAM', async ({ page }) => {
   const containerTarget = {
     ...defaultContainerTarget,
+    container_memory_hard_limit: true,
     container_capacity: {
       total: { cpus: 8, memory_bytes: 32 * 1024 ** 3 },
       reserved: { cpus: 0, memory_bytes: 6 * 1024 ** 3 },
@@ -682,7 +683,7 @@ test('container sizing enforces the useful minimum and hard remaining RAM', asyn
   await expect(page.locator('#new-next')).toBeDisabled();
   await page.locator('#new-resource-cpus').fill('4');
   await page.locator('#new-resource-memory').fill('9');
-  await expect(page.locator('#new-resource-error')).toContainText('7.9 GiB left');
+  await expect(page.locator('#new-resource-error')).toContainText('Mac has 7.9 GiB left');
   await expect(page.locator('#new-next')).toBeDisabled();
   await page.locator('#new-resource-memory').fill('7.9');
   await expect(page.locator('#new-resource-error')).toHaveText('');
@@ -692,6 +693,7 @@ test('container sizing enforces the useful minimum and hard remaining RAM', asyn
 test('unknown live-container sizing is never rendered as zero capacity', async ({ page }) => {
   const containerTarget = {
     ...defaultContainerTarget,
+    container_memory_hard_limit: true,
     container_capacity: {
       total: { cpus: 8, memory_bytes: 32 * 1024 ** 3 },
       reserved: { cpus: 0, memory_bytes: 6 * 1024 ** 3 },
@@ -705,8 +707,56 @@ test('unknown live-container sizing is never rendered as zero capacity', async (
   await expect(page.locator('#new-step')).toContainText('no recorded sizing');
   await expect(page.locator('#new-step')).not.toContainText('RAM left: 0');
   await expect(page.locator('#new-step')).not.toContainText('CPU left: 0');
-  await expect(page.locator('#new-resource-error')).toContainText('no recorded sizing');
+  await expect(page.locator('#new-resource-error')).toContainText('no recorded RAM size');
   await expect(page.locator('#new-next')).toBeDisabled();
+});
+
+test('container overcommit warns and remains launchable except for Apple RAM', async ({ context }) => {
+  const baseCapacity = {
+    total: { cpus: 8, memory_bytes: 32 * 1024 ** 3 },
+    reserved: { cpus: 0, memory_bytes: 8 * 1024 ** 3 },
+    committed: { cpus: 4, memory_bytes: 8 * 1024 ** 3 },
+    remaining: { cpus: 4, memory_bytes: 16 * 1024 ** 3 },
+    complete: true,
+  };
+  const cases = [
+    { name: 'non-Apple CPU and RAM', hardRam: false, cpu: '6', memory: '20', submits: true, warning: 'This session asks for more CPUs than the 4 left, so busy sessions may run slower, and more RAM than the 16 GiB left' },
+    { name: 'Apple CPU', hardRam: true, cpu: '6', memory: '8', submits: true, warning: 'more CPUs than the 4 left, so busy sessions may run slower' },
+    { name: 'Apple RAM', hardRam: true, cpu: '4', memory: '20', submits: false, error: 'Mac has 16 GiB left' },
+  ];
+  for (const scenario of cases) {
+    const page = await context.newPage();
+    const target = {
+      ...defaultContainerTarget,
+      container_memory_hard_limit: scenario.hardRam,
+      container_capacity: baseCapacity,
+      container_host_limits: baseCapacity.total,
+      default_resource_allocation: { kind: 'container', cpus: 4, memory_bytes: 8 * 1024 ** 3 },
+    };
+    const state = await mount(page, { containerTarget: target });
+    try {
+      await page.locator('#new-next').click();
+      await page.locator('#new-resource-cpus').fill(scenario.cpu);
+      await page.locator('#new-resource-memory').fill(scenario.memory);
+      if (scenario.warning) await expect(page.locator('#new-resource-warning')).toContainText(scenario.warning);
+      if (!scenario.submits) {
+        await expect(page.locator('#new-resource-error')).toContainText(scenario.error);
+        await expect(page.locator('#new-resource-warning')).toHaveText('');
+        await expect(page.locator('#new-next')).toBeDisabled();
+        expect(state.actions).toHaveLength(0);
+        continue;
+      }
+      await expect(page.locator('#new-resource-error')).toHaveText('');
+      await expect(page.locator('#new-next')).toBeEnabled();
+      const output = [];
+      await captureWizardPath(output, page, state, scenario.name);
+      const finish = await startHeldLaunch(page, state);
+      expect(state.actions).toHaveLength(1);
+      await finish();
+    } finally {
+      await page.close();
+    }
+  }
 });
 
 test('whole-row taps and in-progress gestures survive unrelated live updates', async ({ page }) => {

@@ -1513,34 +1513,54 @@ function parseMemoryGiB(text) {
 }
 
 function containerAllocationFromDraft(draft, target) {
+  const invalid = error => ({ allocation: null, error, warning: '' });
   const cpuText = draft.resourceCpuText.trim();
-  if (!/^\d+$/.test(cpuText)) return { allocation: null, error: 'CPU must be a positive whole number.' };
+  if (!/^\d+$/.test(cpuText)) return invalid('CPU must be a positive whole number.');
   const cpusBig = BigInt(cpuText);
   if (cpusBig < 1n || cpusBig > BigInt(Number.MAX_SAFE_INTEGER)) {
-    return { allocation: null, error: 'CPU must be a positive whole number.' };
+    return invalid('CPU must be a positive whole number.');
   }
   if (cpusBig < BigInt(MIN_CONTAINER_CPUS)) {
-    return { allocation: null, error: `CPU must be at least ${MIN_CONTAINER_CPUS}.` };
+    return invalid(`CPU must be at least ${MIN_CONTAINER_CPUS}.`);
   }
   const memoryBytes = parseMemoryGiB(draft.resourceMemoryText);
-  if (memoryBytes === null) return { allocation: null, error: 'MEM must be a positive number of GiB (up to 30 decimal places).' };
+  if (memoryBytes === null) return invalid('MEM must be a positive number of GiB (up to 30 decimal places).');
   if (BigInt(memoryBytes) < MIN_CONTAINER_MEMORY_BYTES) {
-    return { allocation: null, error: 'RAM must be at least 4 GiB.' };
+    return invalid('RAM must be at least 4 GiB.');
   }
   const capacity = target?.container_capacity;
-  if (capacity && !capacity.complete) {
-    return { allocation: null, error: 'A live container has no recorded sizing, so RAM left cannot be calculated safely.' };
+  const total = capacity?.total ?? target?.container_host_limits;
+  if (total && cpusBig > BigInt(total.cpus)) {
+    return invalid(`CPU exceeds the ${total.cpus} CPUs on this host.`);
   }
-  const limits = capacity?.remaining ?? target?.container_host_limits;
-  if (limits && cpusBig > BigInt(limits.cpus)) {
-    return { allocation: null, error: `CPU exceeds the ${limits.cpus} CPUs left on this host.` };
+  if (total && BigInt(memoryBytes) > BigInt(total.memory_bytes)) {
+    return invalid(`RAM exceeds the ${capacityGiBText(total.memory_bytes)} GiB on this host.`);
   }
-  if (limits && BigInt(memoryBytes) > BigInt(limits.memory_bytes)) {
-    return { allocation: null, error: `RAM exceeds the ${capacityGiBText(limits.memory_bytes)} GiB left on this host.` };
+  const allocation = { kind: 'container', cpus: Number(cpusBig), memory_bytes: memoryBytes };
+  let error = '';
+  if (target?.container_memory_hard_limit && (!capacity || !capacity.complete || BigInt(memoryBytes) > BigInt(capacity.remaining.memory_bytes))) {
+    error = !capacity || !capacity.complete
+      ? 'a live container on this Mac has no recorded RAM size, so Mjolnir cannot work out the RAM left safely'
+      : `this session asks for ${capacityGiBText(memoryBytes)} GiB of RAM, but this Mac has ${capacityGiBText(capacity.remaining.memory_bytes)} GiB left after the macOS reserve and live containers. Apple containers do not give freed memory back to macOS, so Mjolnir does not overcommit RAM on a Mac. Suspend or stop a session on this Mac, or choose less RAM. Mjolnir does not stop sessions automatically`;
+  }
+  const remaining = capacity?.remaining ?? target?.container_host_limits;
+  const overcommitsCpu = Boolean(remaining && cpusBig > BigInt(remaining.cpus));
+  const overcommitsMemory = Boolean(remaining && BigInt(memoryBytes) > BigInt(remaining.memory_bytes));
+  let warning = '';
+  if ((overcommitsCpu || overcommitsMemory) && capacity && !error) {
+    if (!capacity.complete) {
+      warning = 'A live container on this host has no recorded size, so Mjolnir cannot tell how much CPU and RAM is left. The session will still start.';
+    } else {
+      const parts = [];
+      if (overcommitsCpu) parts.push(`more CPUs than the ${capacity.remaining.cpus} left, so busy sessions may run slower`);
+      if (overcommitsMemory) parts.push(`more RAM than the ${capacityGiBText(capacity.remaining.memory_bytes)} GiB left, so the host may stop processes if sessions use all their RAM`);
+      warning = `This session asks for ${parts.join(', and ')}. It will still start.`;
+    }
   }
   return {
-    allocation: { kind: 'container', cpus: Number(cpusBig), memory_bytes: memoryBytes },
-    error: '',
+    allocation,
+    error,
+    warning,
   };
 }
 
@@ -1620,6 +1640,12 @@ function ensureNewTargetResourceOptions(draft) {
 function syncNewSizingState(draft) {
   const error = newResourceAllocationError(draft);
   if (newError) newError.textContent = error;
+  const target = snapshot?.targets.find(item => item.id === draft?.targetId);
+  const warning = targetResourceKind(draft?.targetId) === 'container'
+    ? containerAllocationFromDraft(draft, target).warning
+    : '';
+  const warningElement = document.querySelector('#new-resource-warning');
+  if (warningElement) warningElement.textContent = warning;
   if (newNextButton && visibleSteps()[draft.step]?.key === 'target') {
     newNextButton.disabled = Boolean(error) || draft.committing === true || draft.creatingBundle;
   }
@@ -1641,6 +1667,8 @@ function renderNewTargetSizingControls(draft, host) {
       syncNewSizingState(draft);
       const message = host.querySelector('#new-resource-error');
       if (message) message.textContent = result.error;
+      const warning = host.querySelector('#new-resource-warning');
+      if (warning) warning.textContent = result.warning;
     });
     const cpuInput = cpu.querySelector('input');
     cpuInput.type = 'number';
@@ -1654,6 +1682,8 @@ function renderNewTargetSizingControls(draft, host) {
       syncNewSizingState(draft);
       const message = host.querySelector('#new-resource-error');
       if (message) message.textContent = result.error;
+      const warning = host.querySelector('#new-resource-warning');
+      if (warning) warning.textContent = result.warning;
     });
     const memoryInput = memory.querySelector('input');
     memoryInput.type = 'number';
@@ -1692,6 +1722,9 @@ function renderNewTargetSizingControls(draft, host) {
     const error = el('p', 'error', newResourceAllocationError(draft));
     error.id = 'new-resource-error';
     host.append(error);
+    const warning = el('p', 'move-warning', containerAllocationFromDraft(draft, target).warning);
+    warning.id = 'new-resource-warning';
+    host.append(warning);
   } else if (kind === 'aws-ec2') {
     if (draft.resourceLoading) {
       host.append(el('p', 'dim', 'Loading EC2 size choices…'));
@@ -1935,7 +1968,7 @@ function renderNewForm() {
     profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
     targets: step.key === 'target' ? [
       launchableTargets(snapshot.targets).map(t => [t.id, t.kind, targetStatus(t), t.resource_allocation_kind,
-        t.default_resource_allocation, t.container_host_limits, t.container_capacity]),
+        t.default_resource_allocation, t.container_host_limits, t.container_capacity, t.container_memory_hard_limit]),
       newDraft.resourceCpuText, newDraft.resourceMemoryText, newDraft.resourceAllocation,
       newDraft.rememberContainerSize,
       newDraft.resourceLoading, newDraft.resourceError,

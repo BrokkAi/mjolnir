@@ -1200,15 +1200,15 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     };
     let client = ApiClient::connect().await?;
     let response = client.start(&request).await.map_err(name_launch_flags)?;
+    if let Some(notice) = &response.notice {
+        eprintln!("{notice}");
+    }
     if args.json {
         return print_json(&response);
     }
     println!("session {}", response.session_id);
     if let Some(turn_id) = response.turn_id {
         println!("turn {turn_id}");
-    }
-    if let Some(notice) = &response.notice {
-        eprintln!("{notice}");
     }
     Ok(())
 }
@@ -2018,17 +2018,17 @@ pub(crate) async fn resume(args: ResumeArgs) -> Result<()> {
         .clone()
         .context("name the session to resume with --session <id>")?;
     let client = ApiClient::connect().await?;
-    let response = client
-        .resume(
-            &session,
-            &ResumeSessionRequest {
-                profile_id: args.profile.clone(),
-                target_id: args.target.clone(),
-                workspace_id: args.workspace_id.clone(),
-                queue: args.queue.map(Into::into),
-            },
-        )
-        .await?;
+    let response = resume_with_warnings(
+        &client,
+        &session,
+        &ResumeSessionRequest {
+            profile_id: args.profile.clone(),
+            target_id: args.target.clone(),
+            workspace_id: args.workspace_id.clone(),
+            queue: args.queue.map(Into::into),
+        },
+    )
+    .await?;
     if args.json {
         return print_json(&response);
     }
@@ -2038,6 +2038,17 @@ pub(crate) async fn resume(args: ResumeArgs) -> Result<()> {
     );
     println!("watch it with `mj wait --session {}`", response.session_id);
     Ok(())
+}
+
+async fn resume_with_warnings(
+    client: &ApiClient,
+    session_id: &str,
+    request: &ResumeSessionRequest,
+) -> Result<mj_controller::server::api::ResumeSessionResponse> {
+    let mut warnings = crate::LaunchWarnings::new().await;
+    let response = client.resume(session_id, request).await?;
+    warnings.report(session_id).await;
+    Ok(response)
 }
 
 /// Continue the session a SessionWiki id names, whoever ran it.
@@ -2060,17 +2071,17 @@ async fn resume_wiki(args: ResumeArgs, wiki_id: String) -> Result<()> {
         info.status == WikiSessionStatus::Mine,
     )? {
         WikiContinuation::Resume { session_id } => {
-            let response = client
-                .resume(
-                    &session_id,
-                    &ResumeSessionRequest {
-                        profile_id: args.profile.clone(),
-                        target_id: args.target.clone(),
-                        workspace_id: args.workspace_id.clone(),
-                        queue: args.queue.map(Into::into),
-                    },
-                )
-                .await?;
+            let response = resume_with_warnings(
+                &client,
+                &session_id,
+                &ResumeSessionRequest {
+                    profile_id: args.profile.clone(),
+                    target_id: args.target.clone(),
+                    workspace_id: args.workspace_id.clone(),
+                    queue: args.queue.map(Into::into),
+                },
+            )
+            .await?;
             report_wiki_continuation(&args, "resume", &wiki_id, &response.session_id, || {
                 format!("resumed {}", response.session_id)
             })
@@ -2094,6 +2105,7 @@ async fn resume_wiki(args: ResumeArgs, wiki_id: String) -> Result<()> {
                         "the indexed session {wiki_id} records no target; name one with --target"
                     )
                 })?;
+            let mut warnings = crate::LaunchWarnings::new().await;
             let response = client
                 .wiki_restore(
                     &wiki_id,
@@ -2107,6 +2119,7 @@ async fn resume_wiki(args: ResumeArgs, wiki_id: String) -> Result<()> {
                     },
                 )
                 .await?;
+            warnings.report(&response.session_id).await;
             report_wiki_continuation(&args, "restore", &wiki_id, &response.session_id, || {
                 format!("restored {wiki_id} into {}", response.session_id)
             })
@@ -2140,17 +2153,17 @@ async fn resume_wiki(args: ResumeArgs, wiki_id: String) -> Result<()> {
                 .context("import task panicked")??
             };
             let session_id = imported.context("the import was cancelled")?;
-            let response = client
-                .resume(
-                    &session_id,
-                    &ResumeSessionRequest {
-                        profile_id: args.profile.clone(),
-                        target_id: args.target.clone(),
-                        workspace_id: args.workspace_id.clone(),
-                        queue: args.queue.map(Into::into),
-                    },
-                )
-                .await?;
+            let response = resume_with_warnings(
+                &client,
+                &session_id,
+                &ResumeSessionRequest {
+                    profile_id: args.profile.clone(),
+                    target_id: args.target.clone(),
+                    workspace_id: args.workspace_id.clone(),
+                    queue: args.queue.map(Into::into),
+                },
+            )
+            .await?;
             report_wiki_continuation(&args, "import", &wiki_id, &response.session_id, || {
                 format!(
                     "imported {} session {native_session_id} as {} and resumed it",

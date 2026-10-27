@@ -1693,15 +1693,95 @@ pub fn host_container_capacity<'a>(
     }
 }
 
+/// Which resources one more owning container would commit beyond what is
+/// left on its host. Launch surfaces show this as a warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ContainerOvercommit {
+    pub cpus: bool,
+    pub memory: bool,
+}
+
+impl ContainerOvercommit {
+    pub fn any(self) -> bool {
+        self.cpus || self.memory
+    }
+
+    /// The warning a launch surface shows, or `None` when nothing is
+    /// overcommitted. `capacity` is the budget this was computed from.
+    pub fn warning(self, capacity: &HostContainerCapacity) -> Option<String> {
+        if !self.any() {
+            return None;
+        }
+        if !capacity.complete {
+            return Some(
+                "A live container on this host has no recorded size, so Mjolnir cannot tell how much CPU and RAM is left. The session will still start."
+                    .into(),
+            );
+        }
+        let mut parts = Vec::new();
+        if self.cpus {
+            parts.push(format!(
+                "more CPUs than the {} left, so busy sessions may run slower",
+                capacity.remaining.cpus
+            ));
+        }
+        if self.memory {
+            parts.push(format!(
+                "more RAM than the {} GiB left, so the host may stop processes if sessions use all their RAM",
+                floor_gib_tenths(capacity.remaining.memory_bytes)
+            ));
+        }
+        Some(format!(
+            "This session asks for {}. It will still start.",
+            parts.join(", and ")
+        ))
+    }
+}
+
 impl HostContainerCapacity {
-    /// Whether a new owning container can commit this allocation.
-    pub fn fits(&self, allocation: &SessionResourceAllocation) -> bool {
-        let SessionResourceAllocation::Container { cpus, memory_bytes } = allocation else {
-            return false;
+    /// Whether admission must refuse this allocation. CPU is always allowed
+    /// to overcommit. RAM refuses only where `memory_is_hard_limit` (see
+    /// [`crate::config::container_memory_is_hard_limit`]); there an
+    /// incomplete budget also refuses, because unknown usage must not count
+    /// as zero.
+    pub fn refuses(
+        &self,
+        allocation: &SessionResourceAllocation,
+        memory_is_hard_limit: bool,
+    ) -> bool {
+        let SessionResourceAllocation::Container { memory_bytes, .. } = allocation else {
+            return true;
         };
-        self.complete
-            && self.remaining.cpus >= *cpus
-            && self.remaining.memory_bytes >= *memory_bytes
+        memory_is_hard_limit && (!self.complete || self.remaining.memory_bytes < *memory_bytes)
+    }
+
+    /// Why [`Self::refuses`] refused, for the person.
+    pub fn refusal_message(&self, allocation: &SessionResourceAllocation) -> String {
+        if !self.complete {
+            return "a live container on this Mac has no recorded RAM size, so Mjolnir cannot work out the RAM left safely".into();
+        }
+        let requested = match allocation {
+            SessionResourceAllocation::Container { memory_bytes, .. } => *memory_bytes,
+            _ => 0,
+        };
+        format!(
+            "this session asks for {} GiB of RAM, but this Mac has {} GiB left after the macOS reserve and live containers. Apple containers do not give freed memory back to macOS, so Mjolnir does not overcommit RAM on a Mac. Suspend or stop a session on this Mac, or choose less RAM. Mjolnir does not stop sessions automatically",
+            floor_gib_tenths(requested),
+            floor_gib_tenths(self.remaining.memory_bytes),
+        )
+    }
+
+    /// Which resources this allocation would overcommit. An incomplete budget
+    /// has nothing left, so it reports both; surfaces should say the usage is
+    /// unknown when `complete` is false.
+    pub fn overcommit(&self, allocation: &SessionResourceAllocation) -> ContainerOvercommit {
+        let SessionResourceAllocation::Container { cpus, memory_bytes } = allocation else {
+            return ContainerOvercommit::default();
+        };
+        ContainerOvercommit {
+            cpus: self.remaining.cpus < *cpus,
+            memory: self.remaining.memory_bytes < *memory_bytes,
+        }
     }
 }
 

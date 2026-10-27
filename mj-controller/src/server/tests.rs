@@ -2738,6 +2738,7 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     assert!(validate_action(&action("raw", Some("/work/project".into())), &snapshot).is_ok());
 }
 
+// Hard-won: #1375: the HTTP pre-check refused cgroup ceilings and CPU overcommit.
 #[test]
 fn new_action_validates_allocation_kind_and_reported_container_limits() {
     let (config, state) = sample_config_state();
@@ -2841,8 +2842,29 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
             ),
             &snapshot,
         )
-        .is_err()
+        .is_ok()
     );
+    // The same projected policy applies on the API boundary: only the Apple
+    // RAM flag changes aggregate admission; per-session physical limits stay.
+    let ram_overcommit = mj_core::state::SessionResourceAllocation::Container {
+        cpus: 4,
+        memory_bytes: 24 << 30,
+    };
+    assert!(validate_action(&action("podman", Some(ram_overcommit.clone())), &snapshot).is_ok());
+    snapshot
+        .targets
+        .iter_mut()
+        .find(|target| target.id == "podman")
+        .unwrap()
+        .container_memory_hard_limit = true;
+    let refusal = validate_action(&action("podman", Some(ram_overcommit)), &snapshot).unwrap_err();
+    assert_eq!(refusal.status, StatusCode::BAD_REQUEST);
+    assert!(refusal.message.contains("20 GiB left"));
+    let cpu_overcommit = mj_core::state::SessionResourceAllocation::Container {
+        cpus: 5,
+        memory_bytes: 8 << 30,
+    };
+    assert!(validate_action(&action("podman", Some(cpu_overcommit)), &snapshot).is_ok());
 }
 
 #[tokio::test]

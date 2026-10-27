@@ -282,11 +282,12 @@ mode:
 
 Mjolnir also shows how much CPU and RAM remains after accounting for every
 live container on the physical host and a reserve for the host operating
-system. A new container is refused if either requested amount would overcommit
-that host. Resuming a stopped container and moving a session onto a container
-target use the same admission check. The refusal names the remaining capacity
-and offers the explicit Suspend or Destroy actions; Mjolnir does not stop
-sessions automatically.
+system. CPU overcommit produces a warning and the launch proceeds. Docker and
+Podman also allow RAM overcommit with a warning, including on a Mac: their
+limits are ceilings, not memory reserved by idle containers. Only Apple
+`container` targets refuse RAM overcommit, because their VMs do not return
+freed memory to macOS. Create, resume, and move use the same policy. Mjolnir
+does not stop sessions automatically.
 
 | Mode | Effect |
 | --- | --- |

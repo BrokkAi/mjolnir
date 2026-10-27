@@ -1242,12 +1242,6 @@ pub(crate) async fn run_server(
                             continue;
                         }
                     };
-                    if let ControllerAction::Move { request: move_request } = &request.action
-                        && let Err(error) = daemon_runtime.start_move_session((**move_request).clone()).await {
-                        if let Some(id) = &session_id { active_actions.remove(id); }
-                        let _ = request.reply.send(ActionOutcome::Refused(Refusal::unusable(error.to_string())));
-                        continue;
-                    }
                     let ControllerRequest { action, reply } = request;
                     // A destroy holds admission as a destroy from the moment it is accepted, so a stop right after "accepted" waits for it (#1191).
                     let upgrade_work = match match &action { ControllerAction::Move { .. } => Ok(None), ControllerAction::Destroy { session_id, .. } => crate::upgrade::destroy_activity(session_id).map(Some), _ => crate::upgrade::activity("web action").map(Some) } {
@@ -1278,7 +1272,7 @@ pub(crate) async fn run_server(
                     if let Some(session_id) = &session_id {
                         action_sessions.insert(action_id, session_id.clone());
                     }
-                    let suspension_reply = if matches!(action, ControllerAction::Suspend { .. }) {
+                    let admission_reply = if matches!(action, ControllerAction::Suspend { .. } | ControllerAction::Move { .. }) {
                         Some(reply)
                     } else {
                         action_replies.accept(action_id, &action, reply);
@@ -1304,11 +1298,21 @@ pub(crate) async fn run_server(
                         let _upgrade_work = upgrade_work;
                         let joined = tokio::task::spawn_blocking(move || {
                             let _upgrade_blocking = upgrade_blocking;
-                            let mut suspension_reply = suspension_reply;
+                            let mut admission_reply = admission_reply;
                             let result = (|| -> Result<()> {
+                                // Move admission can probe an uncached host and load the
+                                // store. Keep that preparation off the control loop,
+                                // but refuse it before acknowledging the request.
+                                if let ControllerAction::Move { request } = &action {
+                                    anyhow::ensure!(!control.cancelled.load(Ordering::Acquire), "phone action cancelled");
+                                    mj_core::runtime::block_on(daemon_runtime.start_move_session((**request).clone(), control.lifecycle.clone().expect("Move has a lifecycle control")))??;
+                                    if let Some(reply) = admission_reply.take() {
+                                        let _ = reply.send(ActionOutcome::accepted());
+                                    }
+                                }
                                 if let ControllerAction::Suspend { session_id, .. } = &action {
                                     mj_core::runtime::block_on(daemon_runtime.prepare_suspension(session_id))??;
-                                    if let Some(reply) = suspension_reply.take() {
+                                    if let Some(reply) = admission_reply.take() {
                                         let _ = reply.send(ActionOutcome::accepted());
                                     }
                                 }
@@ -1332,7 +1336,7 @@ pub(crate) async fn run_server(
                                 ))?
                             })();
                             let result = result.map_err(|error| PhoneActionFailure::of(&error));
-                            if let Some(reply) = suspension_reply {
+                            if let Some(reply) = admission_reply {
                                 let outcome = match &result {
                                     Ok(()) => ActionOutcome::accepted(),
                                     Err(failure) => failure.outcome(&action_reference(action_id)),
@@ -1382,9 +1386,13 @@ pub(crate) async fn run_server(
                     let started_session_id = started.session.id.clone();
                     // Registration turned review off for a session it cannot
                     // review; tell whoever asked for it.
-                    let started_notice = started.review_turned_off.then(|| {
-                        mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF.to_owned()
-                    });
+                    let started_notice = [
+                        started.review_turned_off.then(|| {
+                            mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF.to_owned()
+                        }),
+                        started.capacity_warning,
+                    ].into_iter().flatten().collect::<Vec<_>>();
+                    let started_notice = (!started_notice.is_empty()).then(|| started_notice.join("\n"));
                     let publication = if !action_cancellations.contains_key(&started.action_id) {
                         Err("phone action completed before its provisional session was published".into())
                     } else {

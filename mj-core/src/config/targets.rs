@@ -777,6 +777,20 @@ pub fn is_container_target(template: &TargetTemplate) -> bool {
     )
 }
 
+/// Whether a container's RAM size is a hard admission limit on its host.
+///
+/// Apple's `container` runs each session in its own VM, and the macOS
+/// Virtualization framework does not return memory the guest frees, so a
+/// long-lived session's footprint grows toward its configured size. Every
+/// other runtime's limit is a cgroup ceiling that an idle container does not
+/// use, so its host may be overcommitted with a warning.
+pub fn container_memory_is_hard_limit(template: &TargetTemplate) -> bool {
+    matches!(
+        template,
+        TargetTemplate::AppleContainer { .. } | TargetTemplate::SshAppleContainer { .. }
+    )
+}
+
 /// The host name that prompt-history mounts on `template` should be filed
 /// under, or `None` if the target does not support attached mounts.
 pub fn mount_history_host(template: &TargetTemplate) -> Option<&str> {

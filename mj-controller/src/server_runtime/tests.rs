@@ -12,23 +12,39 @@ use mj_core::config::{
 use mj_core::state::SessionState;
 
 #[test]
-fn web_restart_uses_the_lifecycle_cancellation_control() {
-    let action = ControllerAction::Restart {
-        session_id: "restart-web-session".into(),
-        acknowledge_container_recreation: false,
-    };
-    let control = PhoneActionControl::for_action(&action);
-    let lifecycle_control = control
-        .create
-        .as_ref()
-        .expect("web Restart is admitted as a cancellable daemon lifecycle");
-    assert!(Arc::ptr_eq(
-        &control.cancelled,
-        &lifecycle_control.cancelled
-    ));
-    assert!(control.request_cancel());
-    assert!(control.cancelled.load(Ordering::Acquire));
-    assert!(lifecycle_control.cancelled.load(Ordering::Acquire));
+fn web_restart_and_move_use_the_lifecycle_cancellation_control() {
+    let move_request = serde_json::from_value(serde_json::json!({
+        "preparation": {
+            "selection": {"session_id": "move-web-session"},
+            "source_profile_id": "codex", "source_target_template_id": "podman",
+            "cross_harness": false, "active": false, "queued_commands": [],
+            "fingerprint": "prepared", "operation_id": "move-operation"
+        },
+        "queue": null, "acknowledge_interruption": true
+    }))
+    .unwrap();
+    for action in [
+        ControllerAction::Restart {
+            session_id: "restart-web-session".into(),
+            acknowledge_container_recreation: false,
+        },
+        ControllerAction::Move {
+            request: Box::new(move_request),
+        },
+    ] {
+        let control = PhoneActionControl::for_action(&action);
+        let lifecycle_control = control
+            .lifecycle
+            .as_ref()
+            .expect("web Restart and Move share their lifecycle cancellation control");
+        assert!(Arc::ptr_eq(
+            &control.cancelled,
+            &lifecycle_control.cancelled
+        ));
+        assert!(control.request_cancel());
+        assert!(control.cancelled.load(Ordering::Acquire));
+        assert!(lifecycle_control.cancelled.load(Ordering::Acquire));
+    }
 }
 
 #[test]
@@ -2103,11 +2119,11 @@ fn a_later_successful_action_clears_a_session_s_recorded_failure() {
 fn phone_cancel_targets_the_matching_background_action() {
     let first = PhoneActionControl {
         cancelled: Arc::new(AtomicBool::new(false)),
-        create: None,
+        lifecycle: None,
     };
     let second = PhoneActionControl {
         cancelled: Arc::new(AtomicBool::new(false)),
-        create: None,
+        lifecycle: None,
     };
     let action_sessions =
         std::collections::BTreeMap::from([(1, "session-1".into()), (2, "session-2".into())]);
@@ -2133,7 +2149,7 @@ fn phone_new_cancel_and_running_commit_have_one_atomic_winner() {
         let create = LifecycleControl::default();
         let control = PhoneActionControl {
             cancelled: create.cancelled.clone(),
-            create: Some(create),
+            lifecycle: Some(create),
         };
         let cancelling = control.clone();
         let committing = control.clone();

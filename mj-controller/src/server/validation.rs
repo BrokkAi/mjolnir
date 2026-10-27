@@ -492,19 +492,9 @@ fn validate_action_against(
             }
             if let (Some(allocation), Some(capacity)) =
                 (resource_allocation.as_deref(), target.container_capacity)
+                && capacity.refuses(allocation, target.container_memory_hard_limit)
             {
-                if !capacity.complete {
-                    return Err(ApiError::bad_request(
-                        "a live container has no recorded sizing, so Mjolnir cannot calculate the RAM left safely",
-                    ));
-                }
-                if !capacity.fits(allocation) {
-                    return Err(ApiError::bad_request(format!(
-                        "this launch exceeds the {} CPUs or {} GiB of RAM left on this host after live container commitments; suspend or stop a session, or choose a smaller allocation. Mjolnir does not stop sessions automatically",
-                        capacity.remaining.cpus,
-                        mj_core::state::floor_gib_tenths(capacity.remaining.memory_bytes),
-                    )));
-                }
+                return Err(ApiError::bad_request(capacity.refusal_message(allocation)));
             }
             if let (
                 Some(mj_core::state::SessionResourceAllocation::Container { cpus, memory_bytes }),

@@ -402,14 +402,15 @@ EC2 uses an instance type rather than independent CPU and memory strings. Bare
 targets use the host directly and have no Mjolnir resource limit.
 
 These choices are capacity controls. Mjolnir sums the CPU and memory limits of
-live containers that share a physical host and refuses a new container when
-the committed total would exceed the host's logical CPUs or usable RAM. The
-same check covers resuming a stopped container and moving a session onto a
-container target. RAM is treated as a hard commitment, with one fifth of
-physical RAM reserved for the host operating system and other processes.
-Compression, swap, and reclaimable memory do not increase the RAM available to
-another session. Mjolnir reports the RAM left rather than stopping or
-suspending sessions automatically.
+live containers that share a physical host, reserving one fifth of physical
+RAM (at least 2 GiB) for the operating system. CPU overcommit always produces
+a warning and the launch proceeds. RAM overcommit also proceeds with a warning
+for Docker and Podman, including on macOS: cgroup limits are ceilings that an
+idle container does not use. Only Apple `container` targets treat RAM as a hard
+commitment, because their VMs do not return freed memory to macOS. For those
+targets, compression, swap, and reclaimable memory do not increase the budget;
+an unavailable or incomplete budget refuses the launch. Create, resume, and
+move share this policy. Mjolnir never stops or suspends sessions automatically.
 
 ## Image pull policy
 

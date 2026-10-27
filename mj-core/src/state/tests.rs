@@ -313,6 +313,26 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
         }
     );
     assert!(capacity.complete);
+    let cpu_overcommit = SessionResourceAllocation::Container {
+        cpus: 8,
+        memory_bytes: 4 << 30,
+    };
+    assert!(!capacity.refuses(&cpu_overcommit, true));
+    assert!(capacity.overcommit(&cpu_overcommit).cpus);
+    assert!(!capacity.overcommit(&cpu_overcommit).memory);
+    let ram_overcommit = SessionResourceAllocation::Container {
+        cpus: 8,
+        memory_bytes: 8 << 30,
+    };
+    assert!(capacity.refuses(&ram_overcommit, true));
+    assert!(!capacity.refuses(&ram_overcommit, false));
+    let warning = capacity
+        .overcommit(&ram_overcommit)
+        .warning(&capacity)
+        .unwrap();
+    assert!(warning.contains("more CPUs"));
+    assert!(warning.contains("more RAM"));
+    assert!(warning.contains("still start"));
 }
 
 #[test]
@@ -330,6 +350,19 @@ fn an_unrecorded_owner_allocation_makes_remaining_capacity_unknown() {
     assert!(!capacity.complete);
     assert_eq!(capacity.remaining.cpus, 0);
     assert_eq!(capacity.remaining.memory_bytes, 0);
+    let allocation = SessionResourceAllocation::Container {
+        cpus: 2,
+        memory_bytes: 4 << 30,
+    };
+    assert!(capacity.refuses(&allocation, true));
+    assert!(!capacity.refuses(&allocation, false));
+    assert!(
+        capacity
+            .overcommit(&allocation)
+            .warning(&capacity)
+            .unwrap()
+            .contains("no recorded size")
+    );
 }
 
 #[test]

@@ -1333,9 +1333,18 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         queue,
         acknowledge_interruption: true,
     };
+    let mut warnings = LaunchWarnings::new().await;
+    let mut notice_poll = Box::pin(async {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            warnings.report(&args.session).await;
+        }
+    });
     let mut operation = Box::pin(daemon.move_session(request));
     let outcome = tokio::select! {
         result = &mut operation => result?,
+        _ = &mut notice_poll => bail!("launch notice polling stopped unexpectedly"),
         signal = tokio::signal::ctrl_c() => {
             signal.context("listen for Ctrl-C while moving session")?;
             // Dropping the request future only detaches this client. Ask the
@@ -1369,6 +1378,8 @@ async fn move_session(args: MoveArgs) -> Result<()> {
             return Err(error);
         }
     };
+    drop(notice_poll);
+    warnings.report(&args.session).await;
     if args.json {
         print_move_json(&outcome)?;
     } else {
@@ -1410,6 +1421,87 @@ fn queued_commands_need_choice(pending: usize) -> String {
         if pending == 1 { "" } else { "s" },
         if pending == 1 { "requires" } else { "require" }
     )
+}
+
+/// Reads daemon-produced launch notices without changing the daemon protocol.
+struct LaunchWarnings {
+    client: Option<daemon::DaemonClient>,
+    cursor: Option<mj_client::runtime_feed::RuntimeCursor>,
+    last_notice: u64,
+}
+
+impl LaunchWarnings {
+    async fn new() -> Self {
+        match Self::connect().await {
+            Ok(warnings) => warnings,
+            Err(error) => {
+                eprintln!("Could not read launch notices: {error:#}");
+                Self {
+                    client: None,
+                    cursor: None,
+                    last_notice: 0,
+                }
+            }
+        }
+    }
+
+    async fn connect() -> Result<Self> {
+        let mut client = daemon::connect_or_start().await?;
+        let mj_client::runtime_feed::RuntimeFrame::Snapshot { cursor, projection } =
+            client.runtime_changes(None, false).await?
+        else {
+            bail!("the daemon did not return a runtime snapshot");
+        };
+        Ok(Self {
+            client: Some(client),
+            cursor: Some(cursor),
+            last_notice: projection
+                .metadata
+                .notices
+                .iter()
+                .map(|notice| notice.id)
+                .max()
+                .unwrap_or(0),
+        })
+    }
+
+    async fn report(&mut self, session_id: &str) {
+        if let Err(error) = self.read(session_id).await {
+            eprintln!("Could not read launch notices: {error:#}");
+        }
+    }
+
+    async fn read(&mut self, session_id: &str) -> Result<()> {
+        use mj_client::runtime_feed::RuntimeFrame;
+        let Some(client) = self.client.as_mut() else {
+            return Ok(());
+        };
+        let metadata = match client.runtime_changes(self.cursor.clone(), false).await? {
+            RuntimeFrame::Snapshot { cursor, projection } => {
+                self.cursor = Some(cursor);
+                Some(projection.metadata)
+            }
+            RuntimeFrame::Delta {
+                cursor, changes, ..
+            } => {
+                self.cursor = Some(cursor);
+                changes.metadata
+            }
+            RuntimeFrame::ResetRequired => {
+                self.cursor = None;
+                return Ok(());
+            }
+        };
+        if let Some(metadata) = metadata {
+            for notice in metadata.notices {
+                if notice.id > self.last_notice && notice.session_id == session_id {
+                    eprintln!("{}", notice.text);
+                }
+                self.last_notice = self.last_notice.max(notice.id);
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn prompt_queue_choice(pending: usize) -> Result<ResumeQueueDisposition> {
