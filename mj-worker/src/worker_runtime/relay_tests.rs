@@ -5614,6 +5614,7 @@ async fn acp_supervisor_notices_child_exit_while_a_descendant_holds_stdout_open(
     );
 }
 
+// Hard-won: 68ad78d60: an unrelated fork kept the supervisor lease locked until exec.
 #[tokio::test]
 async fn acp_supervisor_holds_the_managed_node_lease_for_the_process_tree() {
     let temp = tempfile::tempdir().unwrap();
@@ -5657,6 +5658,40 @@ async fn acp_supervisor_holds_the_managed_node_lease_for_the_process_tree() {
     );
     drop(contender);
 
+    // Keep an unrelated child between fork and exec. CLOEXEC cannot release
+    // its inherited copy of the supervisor's lease until we let it exec.
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    let (parent, forked) = std::os::unix::net::UnixStream::pair().unwrap();
+    parent.set_nonblocking(true).unwrap();
+    let mut parent = tokio::net::UnixStream::from_std(parent).unwrap();
+    let parent_fd = parent.as_raw_fd();
+    let unrelated = tokio::task::spawn_blocking(move || {
+        let mut command = std::process::Command::new("/bin/true");
+        let fd = forked.as_raw_fd();
+        // SAFETY: only async-signal-safe close/read/write run in the child;
+        // forked stays alive until spawn completes, and EOF also unblocks it.
+        unsafe {
+            command.pre_exec(move || {
+                // The child must not hold the peer that sends its EOF.
+                libc::close(parent_fd);
+                let mut byte = 1_u8;
+                if libc::write(fd, (&byte as *const u8).cast(), 1) != 1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::read(fd, (&mut byte as *mut u8).cast(), 1) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        command.spawn().unwrap().wait().unwrap()
+    });
+    tokio::time::timeout(crate::test_support::IO_TIMEOUT, parent.read_u8())
+        .await
+        .expect("unrelated child did not fork")
+        .unwrap();
+
     drop(held_stdin);
     tokio::time::timeout(std::time::Duration::from_secs(2), task)
         .await
@@ -5669,9 +5704,12 @@ async fn acp_supervisor_holds_the_managed_node_lease_for_the_process_tree() {
         .write(true)
         .open(lease_path)
         .unwrap();
-    released
-        .try_lock()
-        .expect("the supervisor released the Node.js lease");
+    let released = released.try_lock();
+    // Probe while the inherited descriptor is still held, then release and
+    // reap the fixture even when the assertion is going to fail.
+    parent.write_all(&[1]).await.unwrap();
+    assert!(unrelated.await.unwrap().success());
+    released.expect("the supervisor released the Node.js lease");
 }
 
 #[tokio::test]
