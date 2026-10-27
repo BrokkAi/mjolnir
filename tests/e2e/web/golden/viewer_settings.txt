@@ -9,7 +9,7 @@ claude
 Projects
 None yet
 Runtimes
-docker, lab, +2 more
+apple-container, docker, +3 more
 Machines
 local
 SESSIONS

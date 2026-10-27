@@ -4750,7 +4750,8 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
              [profiles.claude.environment]\nANTHROPIC_API_KEY = \"{SECRET}\"\n\
              PROXY_TOKEN = {{ from_secret = \"PROXY_TOKEN\" }}\n\n\
              [targets.lab]\nkind = \"podman\"\nimage = \"example.test/lab:1\"\n\n\
-             [targets.lab.environment]\nLAB_TOKEN = \"{RUNTIME_SECRET}\"\n",
+             [targets.lab.environment]\nLAB_TOKEN = \"{RUNTIME_SECRET}\"\n\n\
+             [targets.apple-container]\nkind = \"apple-container\"\nimage = \"example.test/apple:1\"\n",
             version = mj_core::config::CONFIG_VERSION,
             home = home.display(),
         ),

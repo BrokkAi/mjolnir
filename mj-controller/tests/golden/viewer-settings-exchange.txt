@@ -69,7 +69,7 @@
                 "label": "Runtimes",
                 "help": "Add a runtime and choose its machine, or use Detect runtimes to find what every machine can run.",
                 "control": "page",
-                "summary": "docker, lab, +2 more"
+                "summary": "apple-container, docker, +3 more"
               },
               {
                 "path": [
@@ -362,7 +362,7 @@
                 "label": "Runtimes",
                 "help": "Add a runtime and choose its machine, or use Detect runtimes to find what every machine can run.",
                 "control": "page",
-                "summary": "docker, lab, +2 more"
+                "summary": "apple-container, docker, +3 more"
               },
               {
                 "path": [
@@ -627,7 +627,7 @@
                 "label": "Runtimes",
                 "help": "Add a runtime and choose its machine, or use Detect runtimes to find what every machine can run.",
                 "control": "page",
-                "summary": "docker, lab, +2 more"
+                "summary": "apple-container, docker, +3 more"
               },
               {
                 "path": [
