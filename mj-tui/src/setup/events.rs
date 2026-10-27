@@ -543,85 +543,43 @@ impl DashboardState {
                         .pointer(&pointer(&parent))
                         .is_some_and(|v| is_collection(&parent, v))
                 {
-                    if parent == ["machines"] && key == mj_core::config::LOCAL_MACHINE_ID {
-                        dialog.notice = Some("This machine is always available.".into());
-                    } else {
-                        let removed_path = dialog.path.clone();
-                        // A runtime cannot outlive the machine it names, so
-                        // removing a machine takes its runtimes with it. Left
-                        // behind, they would make the next save fail on a
-                        // machine the file no longer defines.
-                        let runtimes = if parent == ["machines"] {
-                            dialog.runtime_ids_on_machine(&key)
-                        } else {
-                            Vec::new()
-                        };
-                        let mut removed_paths = vec![removed_path];
-                        match dialog.draft.pointer_mut(&pointer(&parent)).unwrap() {
-                            Value::Object(object) => {
-                                object.remove(&key);
+                    match mj_client::settings::edit::remove_entry(&mut dialog.draft, &dialog.path) {
+                        Err(refusal) => dialog.notice = Some(refusal),
+                        Ok(removal) => {
+                            if removal.notice.is_some() {
+                                dialog.notice = removal.notice;
                             }
-                            Value::Array(array) => {
-                                array.remove(key.parse::<usize>().expect("array entry path"));
-                            }
-                            _ => {}
-                        }
-                        if !runtimes.is_empty()
-                            && let Some(targets) = dialog.draft["targets"].as_object_mut()
-                        {
-                            for runtime in &runtimes {
-                                targets.remove(runtime);
-                                removed_paths.push(vec!["targets".to_owned(), runtime.clone()]);
-                            }
-                            dialog.notice = Some(match runtimes.as_slice() {
-                                [only] => {
-                                    format!("Removed machine {key:?} and its runtime {only:?}.")
-                                }
-                                _ => format!(
-                                    "Removed machine {key:?} and its {} runtimes {}.",
-                                    runtimes.len(),
-                                    runtimes
+                            // Rebind pending text to the surviving entry when array indices shift.
+                            dialog.fields = std::mem::take(&mut dialog.fields)
+                                .into_iter()
+                                .filter_map(|(mut path, field)| {
+                                    if removal
+                                        .removed
                                         .iter()
-                                        .map(|runtime| format!("{runtime:?}"))
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                ),
-                            });
+                                        .any(|removed| path.starts_with(removed))
+                                    {
+                                        return None;
+                                    }
+                                    if let Some(removed) = removal.list_index
+                                        && path.starts_with(&parent)
+                                        && let Some(index) = path
+                                            .get(parent.len())
+                                            .and_then(|part| part.parse::<usize>().ok())
+                                        && index > removed
+                                    {
+                                        path[parent.len()] = (index - 1).to_string();
+                                    }
+                                    Some((path, field))
+                                })
+                                .collect();
+                            if parent.first().is_some_and(|p| p == "profiles") {
+                                dialog.invalidate_review_validation_for(Some(
+                                    parent.get(1).unwrap_or(&key),
+                                ));
+                            }
+                            dialog.descriptors.clear();
+                            dialog.open_page(parent);
                         }
-                        let array_index = dialog
-                            .draft
-                            .pointer(&pointer(&parent))
-                            .is_some_and(Value::is_array)
-                            .then(|| key.parse::<usize>().expect("array entry path"));
-                        // Rebind pending text to the surviving entry when array indices shift.
-                        dialog.fields = std::mem::take(&mut dialog.fields)
-                            .into_iter()
-                            .filter_map(|(mut path, field)| {
-                                if removed_paths
-                                    .iter()
-                                    .any(|removed| path.starts_with(removed))
-                                {
-                                    return None;
-                                }
-                                if let Some(removed) = array_index
-                                    && path.starts_with(&parent)
-                                    && let Some(index) = path
-                                        .get(parent.len())
-                                        .and_then(|part| part.parse::<usize>().ok())
-                                    && index > removed
-                                {
-                                    path[parent.len()] = (index - 1).to_string();
-                                }
-                                Some((path, field))
-                            })
-                            .collect();
-                        if parent.first().is_some_and(|p| p == "profiles") {
-                            dialog.invalidate_review_validation_for(Some(
-                                parent.get(1).unwrap_or(&key),
-                            ));
-                        }
-                        dialog.descriptors.clear();
-                        dialog.open_page(parent);
                     }
                 }
             }

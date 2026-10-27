@@ -401,34 +401,15 @@ impl SetupDialog {
                 .draft
                 .pointer(&pointer(&path))
                 .expect("visible setting exists");
-            let mut choices = if is_build_cache_field(&path, "enabled") {
-                vec![Value::Null, Value::Bool(true), Value::Bool(false)]
-            } else {
-                schema::choices(&storage_path(&path), &self.draft)
-            };
-            let parent = &path[..path.len() - 1];
-            let defaults = schema::defaults(
-                &storage_path(parent),
-                self.draft.pointer(&pointer(parent)).unwrap(),
-            );
-            if !choices.is_empty()
-                && defaults
-                    .get(path.last().unwrap())
-                    .is_some_and(Value::is_null)
-                && !choices.contains(&Value::Null)
-            {
-                choices.insert(0, Value::Null);
-            }
             let kind = if self.build_cache_field_user_managed(&path) {
                 SettingKind::ReadOnly
-            } else if value.is_object() || value.is_array() || self.collection() {
-                SettingKind::Page
-            } else if !choices.is_empty() {
-                SettingKind::Choices(choices)
-            } else if value.is_boolean() {
-                SettingKind::Checkbox
             } else {
-                SettingKind::Field
+                match mj_client::settings::page::row_kind(&self.draft, &self.path, &path) {
+                    RowKind::Page => SettingKind::Page,
+                    RowKind::Checkbox => SettingKind::Checkbox,
+                    RowKind::Choices(choices) => SettingKind::Choices(choices),
+                    RowKind::Field => SettingKind::Field,
+                }
             };
             let id = previous
                 .iter()

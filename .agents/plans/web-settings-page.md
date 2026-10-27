@@ -15,7 +15,7 @@ To see it working: start an isolated instance, open the viewer, sign in, choose 
 ## Progress
 
 - [x] (2026-10-27 15:10Z) Research: mapped the terminal Settings model (`mj-tui/src/setup/`), the save path (`mj-cli/src/dashboard/io/spawn.rs`), the daemon HTTP surfaces, the viewer page pattern and the web test harness.
-- [ ] Milestone 1: shared settings model in `mj-client/src/settings/`, used by the terminal.
+- [x] (2026-10-27 16:40Z) Milestone 1: shared settings model in `mj-client/src/settings/` (`schema`, `page`, `draft`, `edit`, `save`), used by the terminal. `mj-tui` 561 tests pass with no golden changes; the six `mj-cli` save tests pass against the moved `save_at`.
 - [ ] Milestone 2: daemon settings routes on the signed-in viewer surface.
 - [ ] Milestone 3: the web Settings page.
 - [ ] Milestone 4: choices that need discovery (code review and sub-agent model and effort).
@@ -59,6 +59,15 @@ To see it working: start an isolated instance, open the viewer, sign in, choose 
 
 - Decision: saving holds daemon admission under its own label, "settings save", taken with `crate::upgrade::activity_unless_draining` so a pending upgrade handoff refuses new saves (the browser's `request` helper already retries through the handoff's 503), and it holds the daemon's `config_mutation` lock while writing so it serializes with the daemon's other configuration writers.
   Rationale: `AGENTS.md` requires every daemon-owned operation to participate in handoff admission with a label of its own; the write is short and bounded.
+  Date/Author: 2026-10-27, Claude.
+
+
+- Decision: the save tests stay in `mj-cli/src/dashboard/io.rs` and reach the moved function through `pub(crate) use mj_client::settings::save::save_at as save_setup_at` in `mj-cli/src/dashboard/io/spawn.rs`.
+  Rationale: they build session fixtures with `mj-cli`'s `lifecycle_session` helper; moving them would duplicate that fixture for no gain in coverage.
+  Date/Author: 2026-10-27, Claude.
+
+- Decision: the conflict refusal now says "Reopen Settings to edit the latest value." instead of "Reopen Setup…".
+  Rationale: both surfaces title the screen Settings; the old word was a leftover from when the dialog was called Setup.
   Date/Author: 2026-10-27, Claude.
 
 
