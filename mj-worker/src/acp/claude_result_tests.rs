@@ -1,8 +1,4 @@
-//! A Claude prompt ends at the SDK result of the cycle that answered it, even
-//! while the adapter holds its `session/prompt` reply. The agent side of the
-//! ACP connection is driven by the test, and the test also stands in for the
-//! relay coordinator: it hands every result that would end a prompt to the
-//! prompt loop, which decides.
+//! Claude foreground prompts end only at PromptResponse; raw results still serve autonomous turns.
 
 use super::*;
 use serde_json::{Value, json};
@@ -90,10 +86,17 @@ impl ClaudeProbe {
         };
         let init = probe.message().await;
         assert_eq!(init["method"], "initialize");
+        assert!(
+            init["params"]["clientCapabilities"]["_meta"]["jetbrains"]["air"]["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "backgroundSubagents")
+        );
         probe
             .result(
                 &init,
-                json!({"protocolVersion": 1, "agentCapabilities": {"loadSession": true}, "_meta": {"steering": {"supported": true}}}),
+                json!({"protocolVersion": 1, "agentCapabilities": {"loadSession": true}, "_meta": {"steering": {"supported": true}, "jetbrains": {"air": {"capabilities": ["nativeSubagentSessions", "backgroundSubagents"]}}}}),
             )
             .await;
         let new = probe.message().await;
@@ -214,29 +217,7 @@ impl ClaudeProbe {
             .expect("runtime stopped")
     }
 
-    /// What the relay coordinator does with a result: hand one that would
-    /// end a prompt to the prompt loop.
-    async fn relay(&mut self, event: &RuntimeEvent, running_prompt: &str) {
-        if let RuntimeEvent::ClaudeTurnResult(result) = event {
-            self.release(running_prompt, result).await;
-        }
-    }
-
-    async fn release(&mut self, request_id: &str, result: &mj_core::acp::ClaudeTurnResult) {
-        if let Some(stop_reason) = result.prompt_stop_reason() {
-            self.commands
-                .send(CommandRequest::ReleasePrompt {
-                    request_id: request_id.into(),
-                    received: result.received,
-                    stop_reason,
-                    usage: Some(result.usage.token_usage()),
-                })
-                .await
-                .unwrap();
-        }
-    }
-
-    /// Relay results until `request_id` finishes, and return its stop reason
+    /// Wait until `request_id` finishes, and return its stop reason
     /// and usage. Any other prompt finishing first fails the test.
     async fn finished(&mut self, request_id: &str) -> (String, Option<mj_core::usage::TokenUsage>) {
         loop {
@@ -251,19 +232,17 @@ impl ClaudeProbe {
                 assert_eq!(finished, request_id, "the wrong prompt finished");
                 return (stop_reason.clone(), usage.clone());
             }
-            self.relay(&event, request_id).await;
         }
     }
 
-    /// Relay results for a moment and require that no prompt finishes.
-    async fn no_finish(&mut self, running_prompt: &str) {
+    /// Drain events for a moment and require that no prompt finishes.
+    async fn no_finish(&mut self, _running_prompt: &str) {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
         while let Ok(Some(event)) = tokio::time::timeout_at(deadline, self.events.recv()).await {
             assert!(
                 !matches!(event, RuntimeEvent::PromptFinished { .. }),
                 "no prompt may finish yet: {event:?}"
             );
-            self.relay(&event, running_prompt).await;
         }
     }
 
@@ -288,6 +267,273 @@ impl ClaudeProbe {
             .expect("the runtime does not panic");
         assert!(result.expect("close succeeds").is_none());
     }
+}
+
+#[cfg(unix)]
+struct RelayPeer {
+    probe: ClaudeProbe,
+    relay: Arc<Mutex<crate::relay::DurableRelay>>,
+    in_flight: BTreeMap<String, crate::relay::RelayCommand>,
+    _directory: tempfile::TempDir,
+}
+
+#[cfg(unix)]
+impl RelayPeer {
+    async fn new() -> Self {
+        use crate::relay::{BackgroundWorkPolicy, DurableRelay, HarnessTurnPolicy};
+        let directory = tempfile::tempdir().unwrap();
+        let mut durable = DurableRelay::open(directory.path(), SESSION, "test").unwrap();
+        durable.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
+        durable.set_background_work_policy(BackgroundWorkPolicy::AirTasks);
+        let mut peer = Self {
+            probe: ClaudeProbe::new().await,
+            relay: Arc::new(Mutex::new(durable)),
+            in_flight: BTreeMap::new(),
+            _directory: directory,
+        };
+        loop {
+            if matches!(peer.event().await, RuntimeEvent::SessionConfigured { .. }) {
+                break;
+            }
+        }
+        peer
+    }
+
+    async fn event(&mut self) -> RuntimeEvent {
+        let event = self.probe.event().await;
+        crate::worker_runtime::record_runtime_event(
+            &self.relay,
+            &mut self.in_flight,
+            event.clone(),
+        )
+        .unwrap();
+        event
+    }
+
+    async fn prompt(&mut self) -> Value {
+        let command = crate::relay::RelayCommand::Prompt {
+            prompt: vec![ContentBlock::Text(TextContent::new(
+                "start background work",
+            ))],
+        };
+        {
+            let mut relay = self.relay.lock().unwrap();
+            crate::relay::test_support::submit_relay(&mut relay, "prompt-1", command.clone());
+            assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+        }
+        self.in_flight.insert("prompt-1".into(), command);
+        self.probe.prompt("prompt-1", "start background work").await
+    }
+
+    async fn finished(&mut self) {
+        loop {
+            if matches!(self.event().await, RuntimeEvent::PromptFinished { .. }) {
+                break;
+            }
+        }
+    }
+}
+
+/// Notification ingress can outrun the prompt loop even though the adapter
+/// emits the response first. The relay restores that order before queue claims.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_autonomous_spawn_waits_for_the_prompt_boundary_unless_it_already_ended() {
+    use crate::relay::RelayCommand;
+    use mj_core::relay::{RELAY_EVENT_GENESIS_DIGEST, RelayExecutionState, RelayObservation};
+    for ended_first in [false, true] {
+        let mut peer = RelayPeer::new().await;
+        let prompt = peer.prompt().await;
+        peer.probe.chunk("Started background work.").await;
+        peer.probe.sdk_result(success("human")).await;
+        loop {
+            if matches!(peer.event().await, RuntimeEvent::ClaudeTurnResult(_)) {
+                break;
+            }
+        }
+        {
+            let relay = peer.relay.lock().unwrap();
+            let state = relay.operational_state();
+            assert!(state.active_prompt.is_some());
+            assert!(state.harness_turn.is_none());
+            assert_eq!(state.execution, RelayExecutionState::Running);
+        }
+        peer.probe.autonomous_turn("next-turn").await;
+        loop {
+            if matches!(peer.event().await, RuntimeEvent::AirTaskChanged { .. }) {
+                break;
+            }
+        }
+        if ended_first {
+            peer.probe
+                .send(
+                    json!({"jsonrpc":"2.0", "method":"session/update", "params": {
+                        "sessionId": SESSION, "update": {"sessionUpdate":"async_task_state_update",
+                        "asyncTaskId":"next-turn", "state":"completed"}
+                    }}),
+                )
+                .await;
+            loop {
+                if matches!(peer.event().await, RuntimeEvent::AirTaskChanged { .. }) {
+                    break;
+                }
+            }
+        }
+        {
+            let mut relay = peer.relay.lock().unwrap();
+            assert!(relay.operational_state().harness_turn.is_none());
+            crate::relay::test_support::submit_relay(
+                &mut relay,
+                "queued-prompt",
+                RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::Text(TextContent::new("next request"))],
+                },
+            );
+            assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+            let controls = relay.operational_state().turn_controls.unwrap();
+            assert_eq!(controls.interrupt, Some(RelayCommand::CancelTurn));
+            assert_eq!(controls.primary.unwrap().command, RelayCommand::CancelTurn);
+        }
+        peer.probe
+            .result(&prompt, json!({"stopReason":"end_turn"}))
+            .await;
+        peer.finished().await;
+        {
+            let mut relay = peer.relay.lock().unwrap();
+            assert_eq!(
+                relay.operational_state().harness_turn.is_some(),
+                !ended_first
+            );
+            let events = relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap();
+            let boundary = events.iter().position(|event| matches!(event.observation,
+                RelayObservation::CommandCompleted { ref command_id, .. } if command_id == "prompt-1")).unwrap();
+            let start = events.iter().position(|event| {
+                matches!(
+                    event.observation,
+                    RelayObservation::HarnessTurnStarted { .. }
+                )
+            });
+            if ended_first {
+                assert!(start.is_none());
+                assert_eq!(
+                    relay.claim_pending_commands(true).unwrap()[0].command_id,
+                    "queued-prompt"
+                );
+            } else {
+                assert!(start.unwrap() > boundary);
+                assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+            }
+        }
+        if !ended_first {
+            peer.probe.chunk("Autonomous answer").await;
+            peer.probe.sdk_result(success("task-notification")).await;
+            loop {
+                if matches!(peer.event().await, RuntimeEvent::ClaudeTurnResult(_)) {
+                    break;
+                }
+            }
+            assert_eq!(
+                peer.relay
+                    .lock()
+                    .unwrap()
+                    .claim_pending_commands(true)
+                    .unwrap()[0]
+                    .command_id,
+                "queued-prompt"
+            );
+        }
+        peer.probe.close().await;
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_native_child_can_send_output_and_request_permission_after_the_prompt_response() {
+    use mj_core::native_agent::{NativeAgentEvent, NativeAgentState};
+    let mut peer = RelayPeer::new().await;
+    let prompt = peer.prompt().await;
+    peer.probe.send(json!({"jsonrpc":"2.0", "method":"session/update", "params": {
+        "sessionId":SESSION, "update":{"sessionUpdate":"subagent_spawned", "subagentSessionId":"child",
+        "name":"review", "task":"inspect source", "capabilities":{}}
+    }})).await;
+    peer.probe.chunk("The child is reviewing.").await;
+    peer.probe
+        .result(&prompt, json!({"stopReason":"end_turn"}))
+        .await;
+    peer.finished().await;
+    {
+        let relay = peer.relay.lock().unwrap();
+        let state = relay.operational_state();
+        assert!(state.active_prompt.is_none());
+        assert_eq!(
+            state
+                .native_agents
+                .iter()
+                .find(|agent| agent.session_id == "child")
+                .unwrap()
+                .state,
+            NativeAgentState::Running
+        );
+    }
+    peer.probe
+        .send(
+            json!({"jsonrpc":"2.0", "method":"session/update", "params": {
+                "sessionId":"child", "update":{"sessionUpdate":"agent_message_chunk",
+                "content":{"type":"text", "text":"Still reviewing."}}
+            }}),
+        )
+        .await;
+    loop {
+        if matches!(
+            peer.event().await,
+            RuntimeEvent::NativeAgent {
+                event: NativeAgentEvent::Update { .. }
+            }
+        ) {
+            break;
+        }
+    }
+    peer.probe.send(json!({"jsonrpc":"2.0", "id":"child-permission", "method":"session/request_permission",
+        "params":{"sessionId":"child", "toolCall":{"toolCallId":"child-read", "title":"Read source", "kind":"read"},
+        "options":[{"optionId":"approve", "name":"Approve once", "kind":"allow_once"},
+        {"optionId":"reject", "name":"Reject", "kind":"reject_once"}]}
+    })).await;
+    let request = loop {
+        if let RuntimeEvent::ElicitationRequested { request } = peer.event().await {
+            break request;
+        }
+    };
+    assert!(request.message.contains("child"));
+    let (resolved, response) = oneshot::channel();
+    peer.probe
+        .commands
+        .send(CommandRequest::ResolveElicitation {
+            elicitation_id: request.id,
+            response: ElicitationResponse::Decline,
+            resolved,
+        })
+        .await
+        .unwrap();
+    response.await.unwrap().unwrap();
+    let answer = peer.probe.message().await;
+    assert_eq!(answer["id"], "child-permission");
+    assert_eq!(answer["result"]["outcome"]["optionId"], "reject");
+    {
+        let relay = peer.relay.lock().unwrap();
+        let state = relay.operational_state();
+        assert!(state.active_prompt.is_none());
+        assert!(state.harness_turn.is_none());
+        assert_eq!(
+            state
+                .native_agents
+                .iter()
+                .find(|agent| agent.session_id == "child")
+                .unwrap()
+                .state,
+            NativeAgentState::Running
+        );
+    }
+    peer.probe.close().await;
 }
 
 fn success(origin: &str) -> Value {
@@ -325,37 +571,35 @@ fn steer_interruption() -> Value {
 
 // Hard-won: 65a7390: Claude prompts stayed running because the result from their answer cycle did not end them.
 #[tokio::test]
-async fn a_claude_prompt_ends_at_its_result_while_the_adapter_holds_the_reply() {
+async fn a_claude_prompt_ends_at_its_response_while_background_work_continues() {
     let mut probe = ClaudeProbe::new().await;
     let first = probe.prompt("prompt-1", "start a background agent").await;
     probe.chunk("Started it; I will report back.").await;
     probe.sdk_result(success("human")).await;
+    probe.no_finish("prompt-1").await;
+    probe
+        .result(
+            &first,
+            json!({"stopReason":"end_turn", "usage": {
+                "totalTokens":1117, "inputTokens":100, "outputTokens":7,
+                "cachedReadTokens":1000, "cachedWriteTokens":10
+            }}),
+        )
+        .await;
     let (stop_reason, usage) = probe.finished("prompt-1").await;
     assert_eq!(stop_reason, "EndTurn");
-    let usage = usage.expect("the result's usage is recorded");
+    let usage = usage.expect("the response's usage is recorded");
     assert_eq!(usage.output_tokens, 7);
     assert_eq!(usage.total_tokens, 1117);
-    // The adapter still holds the reply. Keeping it alive means no
-    // `$/cancel_request`, which the adapter would treat as a cancel.
     probe.no_message().await;
-
-    // The loop left the prompt, so the next prompt goes out at once.
     let second = probe.prompt("prompt-2", "what did it find?").await;
-    // The adapter settles the held turn when the next prompt arrives. That
-    // late reply is discarded; it neither finishes prompt-1 again nor ends
-    // prompt-2.
-    probe
-        .result(&first, json!({"stopReason": "end_turn"}))
-        .await;
-    probe.no_finish("prompt-2").await;
     probe.chunk("It found three files.").await;
     probe.sdk_result(success("human")).await;
-    assert_eq!(probe.finished("prompt-2").await.0, "EndTurn");
-    probe.no_message().await;
+    probe.no_finish("prompt-2").await;
     probe
-        .result(&second, json!({"stopReason": "end_turn"}))
+        .result(&second, json!({"stopReason":"max_tokens"}))
         .await;
-    probe.no_finish("none").await;
+    assert_eq!(probe.finished("prompt-2").await.0, "MaxTokens");
     probe.close().await;
 }
 
@@ -378,29 +622,6 @@ async fn the_adapter_reply_still_ends_a_prompt_that_no_result_ended() {
         .result(&second, json!({"stopReason": "end_turn"}))
         .await;
     assert_eq!(probe.finished("prompt-2").await.0, "EndTurn");
-    probe.close().await;
-}
-
-#[tokio::test]
-async fn a_result_that_arrived_before_the_prompt_was_sent_does_not_end_it() {
-    let mut probe = ClaudeProbe::new().await;
-    // A stray user cycle's result arrives while nothing is running. The
-    // coordinator relays it late, after the next prompt went out.
-    probe.sdk_result(success("human")).await;
-    let stray = loop {
-        if let RuntimeEvent::ClaudeTurnResult(result) = probe.event().await {
-            break result;
-        }
-    };
-    let prompt = probe.prompt("prompt-1", "go").await;
-    probe.release("prompt-1", &stray).await;
-    probe.no_finish("prompt-1").await;
-    probe.chunk("done").await;
-    probe.sdk_result(success("human")).await;
-    assert_eq!(probe.finished("prompt-1").await.0, "EndTurn");
-    probe
-        .result(&prompt, json!({"stopReason": "end_turn"}))
-        .await;
     probe.close().await;
 }
 
@@ -444,7 +665,7 @@ async fn a_move_checkpoint_waits_for_the_cancelled_claude_prompt_response() {
     loop {
         let event = probe.event().await;
         let configured = matches!(event, RuntimeEvent::SessionConfigured { .. });
-        record_runtime_event(&relay, &mut in_flight, &probe.commands, event).unwrap();
+        record_runtime_event(&relay, &mut in_flight, event).unwrap();
         if configured {
             break;
         }
@@ -495,7 +716,7 @@ async fn a_move_checkpoint_waits_for_the_cancelled_claude_prompt_response() {
         cycle_result |= matches!(event, RuntimeEvent::ClaudeTurnResult(_));
         output_received |= matches!(&event, RuntimeEvent::SessionUpdate { update } if update["sessionUpdate"] == "agent_message_chunk");
         assert!(!matches!(event, RuntimeEvent::PromptFinished { .. }));
-        record_runtime_event(&relay, &mut in_flight, &probe.commands, event).unwrap();
+        record_runtime_event(&relay, &mut in_flight, event).unwrap();
         let mut durable = relay.lock().unwrap();
         assert!(durable.claim_pending_commands(true).unwrap().is_empty());
         assert!(durable.operational_state().checkpoint_ready.is_none());
@@ -507,7 +728,7 @@ async fn a_move_checkpoint_waits_for_the_cancelled_claude_prompt_response() {
     loop {
         let event = probe.event().await;
         let finished = matches!(event, RuntimeEvent::PromptFinished { .. });
-        record_runtime_event(&relay, &mut in_flight, &probe.commands, event).unwrap();
+        record_runtime_event(&relay, &mut in_flight, event).unwrap();
         if finished {
             break;
         }
@@ -533,10 +754,11 @@ async fn background_and_interrupted_cycles_do_not_end_the_prompt() {
     probe.no_finish("prompt-1").await;
     probe.chunk("done").await;
     probe.sdk_result(success("human")).await;
-    assert_eq!(probe.finished("prompt-1").await.0, "EndTurn");
+    probe.no_finish("prompt-1").await;
     probe
         .result(&prompt, json!({"stopReason": "end_turn"}))
         .await;
+    assert_eq!(probe.finished("prompt-1").await.0, "EndTurn");
     probe.close().await;
 }
 
@@ -569,7 +791,7 @@ async fn steer_applied(probe: &mut ClaudeProbe) {
             RuntimeEvent::PromptFinished { .. } => {
                 panic!("the prompt finished before the steer was applied")
             }
-            event => probe.relay(&event, "prompt-1").await,
+            _ => {}
         }
     }
 }
@@ -592,15 +814,15 @@ async fn the_steered_cycle_ends_the_prompt_whether_or_not_an_interruption_is_rep
         probe.no_finish("prompt-1").await;
         probe.chunk("Switched to the other file.").await;
         probe.sdk_result(success("human")).await;
+        probe.no_finish("prompt-1").await;
+        probe
+            .result(&prompt, json!({"stopReason":"end_turn"}))
+            .await;
         assert_eq!(
             probe.finished("prompt-1").await.0,
             "EndTurn",
             "{interrupted}"
         );
-        probe.no_message().await;
-        probe
-            .result(&prompt, json!({"stopReason": "end_turn"}))
-            .await;
         probe.close().await;
     }
 }
@@ -612,21 +834,15 @@ async fn a_steer_still_waiting_for_its_acknowledgement_is_settled_before_the_pro
     let steering = steer(&mut probe).await;
     probe.chunk("done").await;
     probe.sdk_result(success("human")).await;
-    let result = loop {
-        if let RuntimeEvent::ClaudeTurnResult(result) = probe.event().await {
-            break result;
-        }
-    };
-    probe.release("prompt-1", &result).await;
+    probe
+        .result(&prompt, json!({"stopReason":"end_turn"}))
+        .await;
     // The loop waits briefly for the steer's answer before ending the prompt.
     probe
         .result(&steering, json!({"outcome": "injected"}))
         .await;
     steer_applied(&mut probe).await;
     assert_eq!(probe.finished("prompt-1").await.0, "EndTurn");
-    probe
-        .result(&prompt, json!({"stopReason": "end_turn"}))
-        .await;
     probe.close().await;
 }
 
@@ -690,7 +906,6 @@ async fn stop_while_claude_works_on_its_own_sends_session_cancel() {
     loop {
         if let RuntimeEvent::ClaudeTurnResult(result) = probe.event().await {
             assert_eq!(result.origin_kind.as_deref(), Some("task-notification"));
-            assert_eq!(result.prompt_stop_reason(), None);
             break;
         }
     }
@@ -732,13 +947,6 @@ async fn a_local_command_ends_at_the_reply_after_its_text() {
                 assert_eq!(stop_reason, "EndTurn");
                 assert!(text_seen, "the command's text belongs to its prompt");
                 break;
-            }
-            RuntimeEvent::ClaudeTurnResult(result) => {
-                assert_eq!(
-                    result.prompt_stop_reason(),
-                    None,
-                    "a cycle with no model call is left to the reply"
-                );
             }
             _ => {}
         }

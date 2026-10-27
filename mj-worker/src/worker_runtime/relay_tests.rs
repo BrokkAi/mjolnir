@@ -1158,7 +1158,7 @@ async fn kimi_diagnostic_is_enriched_before_durable_completion() {
     unix::prepare_kimi_runtime_event(&mut monitor, &relay, &mut event)
         .await
         .unwrap();
-    unix::record_runtime_event(&relay, &mut BTreeMap::new(), &no_prompt_loop(), event).unwrap();
+    unix::record_runtime_event(&relay, &mut BTreeMap::new(), event).unwrap();
     assert!(relay.lock().unwrap().capacity_retry_deadline().is_none());
     drop(relay);
     let reopened = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
@@ -1261,7 +1261,7 @@ async fn an_empty_kimi_turn_with_a_journalled_login_failure_reports_the_failure(
         unix::prepare_kimi_runtime_event(&mut monitor, &relay, &mut event)
             .await
             .unwrap();
-        unix::record_runtime_event(&relay, &mut BTreeMap::new(), &no_prompt_loop(), event).unwrap();
+        unix::record_runtime_event(&relay, &mut BTreeMap::new(), event).unwrap();
     }
     drop(relay);
 
@@ -1375,7 +1375,7 @@ async fn kimi_turn_usage_is_recorded_from_native_records() {
     unix::prepare_kimi_runtime_event(&mut monitor, &relay, &mut event)
         .await
         .unwrap();
-    unix::record_runtime_event(&relay, &mut BTreeMap::new(), &no_prompt_loop(), event).unwrap();
+    unix::record_runtime_event(&relay, &mut BTreeMap::new(), event).unwrap();
     drop(relay);
     let reopened = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
     let events = reopened
@@ -2870,7 +2870,6 @@ fn typed_acp_observations_are_journaled() {
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::Connected {
             agent_name: Some("test-agent".into()),
             agent_version: Some("1".into()),
@@ -2887,7 +2886,6 @@ fn typed_acp_observations_are_journaled() {
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::SessionUpdate {
             update: serde_json::to_value(update).unwrap(),
         },
@@ -2935,7 +2933,6 @@ fn advertised_steering_enables_automatic_steering() {
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::Connected {
             agent_name: Some("test-agent".into()),
             agent_version: Some("1".into()),
@@ -2974,7 +2971,6 @@ fn harness_restarting_interrupts_in_flight_commands() {
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::HarnessRestarting {
             message: "ACP bridge exited; reloading the native session".into(),
         },
@@ -3026,7 +3022,6 @@ fn terminal_lifecycle_journals_a_fallback_tool_and_tail_capped_output() {
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::TerminalStarted {
             terminal_id: "term-1".into(),
             command: "cargo test".into(),
@@ -3070,7 +3065,6 @@ fn terminal_lifecycle_journals_a_fallback_tool_and_tail_capped_output() {
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::TerminalClosed {
             terminal_id: "term-1".into(),
             output,
@@ -3145,7 +3139,6 @@ fn a_fast_terminal_cannot_be_resurrected_by_a_late_start_event() {
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::TerminalClosed {
             terminal_id: "term-1".into(),
             output: String::new(),
@@ -3158,7 +3151,6 @@ fn a_fast_terminal_cannot_be_resurrected_by_a_late_start_event() {
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::TerminalStarted {
             terminal_id: "term-1".into(),
             command: "true".into(),
@@ -3186,33 +3178,16 @@ fn agent_output(text: &str, message_id: &str) -> RuntimeEvent {
     }
 }
 
-/// The `usage_update` the Claude adapter sends when an SDK turn ends.
-fn settle_marker(origin: &str) -> RuntimeEvent {
-    let mut usage = agent_client_protocol::schema::v1::UsageUpdate::new(10, 200);
-    usage.meta = Some(
-        serde_json::from_value(serde_json::json!({
-            "_claude/origin": {"kind": origin},
-        }))
-        .unwrap(),
-    );
-    RuntimeEvent::SessionUpdate {
-        update: serde_json::to_value(SessionUpdate::UsageUpdate(usage)).unwrap(),
-    }
-}
-
-/// The SDK `result` the Claude adapter forwards when a model cycle ends, as
-/// the ACP runtime stamps it.
-fn claude_result(origin: &str, received: u64) -> mj_core::acp::ClaudeTurnResult {
-    let mut result = mj_core::acp::ClaudeTurnResult::from_sdk_message(&serde_json::json!({
+/// The raw SDK result forwarded by the Claude adapter at a model boundary.
+fn claude_result(origin: &str) -> mj_core::acp::ClaudeTurnResult {
+    mj_core::acp::ClaudeTurnResult::from_sdk_message(&serde_json::json!({
         "type": "result", "subtype": "success", "is_error": false, "num_turns": 2,
         "stop_reason": "end_turn", "result": "done",
         "usage": {"input_tokens": 100, "output_tokens": 7},
         "origin": {"kind": origin},
     }))
     .unwrap()
-    .unwrap();
-    result.received = received;
-    result
+    .unwrap()
 }
 
 fn harness_turn_open(relay: &Arc<Mutex<DurableRelay>>) -> bool {
@@ -3294,7 +3269,6 @@ async fn a_self_started_turn_holds_prompt_promotion_and_checkpoint_admission() {
     event_tx
         .send(RuntimeEvent::ClaudeTurnResult(claude_result(
             "task-notification",
-            1,
         )))
         .unwrap();
     assert_prompt(
@@ -3362,7 +3336,6 @@ async fn a_self_started_turn_holds_prompt_promotion_and_checkpoint_admission() {
     event_tx
         .send(RuntimeEvent::ClaudeTurnResult(claude_result(
             "task-notification",
-            1,
         )))
         .unwrap();
     wait_until(
@@ -3573,186 +3546,6 @@ async fn harness_exit_during_a_turn_releases_held_prompt_after_worker_recovery()
     coordinator.await.unwrap().unwrap();
 }
 
-/// A Claude prompt ends at the result of the cycle that answered it. The
-/// coordinator hands that result to the prompt loop, which reports the
-/// completion; the answer streamed before the result is already recorded, and
-/// the adapter's marker after it touches nothing.
-#[tokio::test]
-async fn a_claude_result_hands_the_running_prompt_to_the_prompt_loop() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
-    durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
-    let relay = Arc::new(Mutex::new(durable));
-    let (event_tx, event_rx) = runtime_event_channel();
-    let (wake_tx, wake_rx) = mpsc::channel(1);
-    let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
-        relay.clone(),
-        event_rx,
-        wake_rx,
-        command_tx,
-    ));
-    event_tx
-        .send(RuntimeEvent::SessionConfigured {
-            config_options: Vec::new(),
-        })
-        .unwrap();
-    submit(
-        &mut relay.lock().unwrap(),
-        "prompt-claude-1",
-        prompt("start a background agent"),
-    );
-    wake_tx.try_send(()).unwrap();
-    assert_prompt(
-        next_command(&mut command_rx).await,
-        "prompt-claude-1",
-        "start a background agent",
-    );
-
-    event_tx
-        .send(agent_output("Started it; I will report back.", "answer-1"))
-        .unwrap();
-    // Neither a background cycle's result nor the report of an interrupted
-    // cycle ends the prompt.
-    event_tx
-        .send(RuntimeEvent::ClaudeTurnResult(claude_result(
-            "task-notification",
-            1,
-        )))
-        .unwrap();
-    let mut interrupted = claude_result("human", 2);
-    interrupted.is_error = true;
-    interrupted.diagnostic =
-        Some("[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null".into());
-    event_tx
-        .send(RuntimeEvent::ClaudeTurnResult(interrupted))
-        .unwrap();
-    event_tx
-        .send(RuntimeEvent::ClaudeTurnResult(claude_result("human", 3)))
-        .unwrap();
-    let CommandRequest::ReleasePrompt {
-        request_id,
-        received,
-        stop_reason,
-        usage,
-    } = next_command(&mut command_rx).await
-    else {
-        panic!("expected the prompt loop to be asked to end the prompt");
-    };
-    assert_eq!(request_id, "prompt-claude-1");
-    assert_eq!(received, 3, "only the user cycle's result ends the prompt");
-    assert_eq!(stop_reason, "EndTurn");
-    assert_eq!(usage.map(|usage| usage.output_tokens), Some(7));
-
-    // The prompt loop reports the completion, as it does for a reply.
-    event_tx
-        .send(RuntimeEvent::PromptFinished {
-            diagnostic: None,
-            request_id: request_id.clone(),
-            stop_reason,
-            usage: None,
-        })
-        .unwrap();
-    wait_until(
-        || {
-            relay
-                .lock()
-                .unwrap()
-                .operational_state()
-                .active_prompt
-                .is_none()
-        },
-        "the prompt did not complete",
-    )
-    .await;
-    let before_marker = relay.lock().unwrap().operational_state().latest_ordinal;
-    event_tx.send(settle_marker("human")).unwrap();
-    wait_until(
-        || relay.lock().unwrap().operational_state().latest_ordinal > before_marker,
-        "the marker was not recorded",
-    )
-    .await;
-    let state = relay.lock().unwrap().operational_state();
-    assert_eq!(state.execution, RelayExecutionState::Idle);
-    assert!(state.harness_turn.is_none(), "the marker opens no turn");
-    assert_eq!(
-        state.continuation.completed_command_id.as_deref(),
-        Some("prompt-claude-1"),
-        "the continuation and quota checks see a completed prompt"
-    );
-    let events = relay
-        .lock()
-        .unwrap()
-        .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
-        .unwrap();
-    let answer = events
-        .iter()
-        .position(|event| matches!(&event.observation, RelayObservation::SessionUpdate { .. }))
-        .expect("the answer is recorded");
-    let completed = events
-        .iter()
-        .position(|event| {
-            matches!(&event.observation, RelayObservation::CommandCompleted { command_id, .. } if command_id == "prompt-claude-1")
-        })
-        .expect("the prompt completed");
-    assert!(
-        answer < completed,
-        "the answer belongs to the prompt's turn"
-    );
-
-    // The background agent's follow-up is a turn Claude Code started on its
-    // own. Its result ends that turn and is not sent to the prompt loop.
-    event_tx
-        .send(agent_output(
-            "The background agent found three files.",
-            "follow-up-1",
-        ))
-        .unwrap();
-    wait_until(
-        || harness_turn_open(&relay),
-        "the follow-up did not open a turn",
-    )
-    .await;
-    event_tx
-        .send(RuntimeEvent::ClaudeTurnResult(claude_result(
-            "task-notification",
-            4,
-        )))
-        .unwrap();
-    wait_until(
-        || !harness_turn_open(&relay),
-        "the follow-up's result did not settle its turn",
-    )
-    .await;
-    assert_eq!(
-        relay.lock().unwrap().operational_state().execution,
-        RelayExecutionState::Idle
-    );
-    assert!(matches!(
-        relay
-            .lock()
-            .unwrap()
-            .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
-            .unwrap()
-            .last()
-            .map(|event| event.observation.clone()),
-        Some(RelayObservation::HarnessTurnSettled {
-            prompt_in_flight: false,
-            ..
-        })
-    ));
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), command_rx.recv())
-            .await
-            .is_err(),
-        "nothing else was sent to the prompt loop"
-    );
-
-    drop(event_tx);
-    drop(wake_tx);
-    coordinator.await.unwrap().unwrap();
-}
-
 /// Esc's non-targeted cancellation interrupts a Claude cycle with no active
 /// prompt; the queued user prompt starts once that cycle reports its result.
 // Hard-won: #1225: adapter cancellation could discard a prompt Hel had already shown as active.
@@ -3831,7 +3624,7 @@ async fn cancel_turn_during_a_claude_harness_turn_dispatches_queued_prompt_once(
             request_id: request_id.clone(),
         })
         .unwrap();
-    let mut interrupted = claude_result("task-notification", 1);
+    let mut interrupted = claude_result("task-notification");
     interrupted.subtype = "error_during_execution".into();
     interrupted.is_error = true;
     event_tx
@@ -5667,7 +5460,9 @@ async fn acp_supervisor_holds_the_managed_node_lease_for_the_process_tree() {
     let mut parent = tokio::net::UnixStream::from_std(parent).unwrap();
     let parent_fd = parent.as_raw_fd();
     let unrelated = tokio::task::spawn_blocking(move || {
-        let mut command = std::process::Command::new("/bin/true");
+        // `/bin/true` does not exist on macOS; `/usr/bin/true` is on every
+        // Unix under test (Windows CI compiles tests without running them).
+        let mut command = std::process::Command::new("/usr/bin/true");
         let fd = forked.as_raw_fd();
         // SAFETY: only async-signal-safe close/read/write run in the child;
         // forked stays alive until spawn completes, and EOF also unblocks it.
@@ -6008,7 +5803,6 @@ fn a_used_native_session_is_reported_as_used_after_a_worker_restart() {
     unix::record_runtime_event(
         &Arc::new(Mutex::new(relay)),
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::NativeSessionUsed,
     )
     .unwrap();
@@ -7550,12 +7344,6 @@ async fn a_reviewed_session_serves_its_relay_while_preparing_its_baseline() {
     );
     daemon.abort();
     assert!(daemon.await.unwrap_err().is_cancelled());
-}
-
-/// A command sender whose prompt loop is gone, for tests that record runtime
-/// events without one.
-fn no_prompt_loop() -> mpsc::Sender<CommandRequest> {
-    mpsc::channel(1).0
 }
 
 /// Start a coordinator whose session has a ready checkpoint barrier, fed by a

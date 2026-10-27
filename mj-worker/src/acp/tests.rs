@@ -6429,13 +6429,14 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
                 let method = request["method"].as_str().unwrap_or("");
                 let result = match method {
                     "initialize" => {
+                        let mut expected =
+                            vec!["asyncTasks", "nativeSubagentSessions", "sessionFailure"];
+                        if harness == HarnessKind::Claude {
+                            expected.push("backgroundSubagents");
+                        }
                         assert_eq!(
                             request["params"]["clientCapabilities"]["_meta"]["jetbrains"]["air"]["capabilities"],
-                            serde_json::json!([
-                                "asyncTasks",
-                                "nativeSubagentSessions",
-                                "sessionFailure"
-                            ])
+                            serde_json::json!(expected)
                         );
                         serde_json::json!({"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}},
                             "_meta":{"jetbrains":{"air":{"version":1,"capabilities":["nativeSubagentSessions"]}}}})
@@ -6536,11 +6537,18 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             .await
         });
         let mut children = Vec::new();
+        let mut missing_background_capability = false;
         tokio::time::timeout(Duration::from_secs(10), async {
             while let Some(event) = event_rx.recv().await {
                 match event {
                     RuntimeEvent::NativeAgent { event } => {
                         children.push(event);
+                    }
+                    RuntimeEvent::Warning { message }
+                        if message.contains("backgroundSubagents") =>
+                    {
+                        assert!(message.contains("0.95.0") && message.contains("upgrade"));
+                        missing_background_capability = true;
                     }
                     RuntimeEvent::SessionConfigured { .. } => break,
                     RuntimeEvent::SessionUpdate { update } => {
@@ -6552,6 +6560,10 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
         })
         .await
         .expect("child history load finishes");
+        assert_eq!(
+            missing_background_capability,
+            harness == HarnessKind::Claude
+        );
         assert_eq!(children.len(), 5);
         assert!(matches!(children[0], NativeAgentEvent::ReplayBegin));
         let spawn_index = if missing {
