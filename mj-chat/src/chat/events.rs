@@ -61,9 +61,11 @@ impl ChatState {
     }
 
     pub(super) fn set_anchor(&mut self, anchor: TranscriptAnchor) {
-        if self.anchor != anchor {
-            self.anchor = anchor;
-        }
+        // Explicit navigation owns follow intent, even when the chosen row
+        // is the same row the automatic opening reveal selected.
+        self.reveal_latest_agent_on_draw = false;
+        self.revealed_anchor = None;
+        self.anchor = anchor;
     }
 
     pub(crate) fn finish_reviewer_elicitation_response(

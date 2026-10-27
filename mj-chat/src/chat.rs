@@ -1033,6 +1033,11 @@ impl ChatState {
         self.latest_seq = session.applied_event_ordinal;
         self.sync_elicitation(&session.pending_elicitations);
         if rebuild_projection {
+            // Entries can move when the canonical window slides or history is
+            // rewritten. Preserve identity, including a deferred restoration.
+            // Bottom needs no remapping and keeps its pending opening reveal.
+            let position =
+                (self.anchor != TranscriptAnchor::Bottom).then(|| self.transcript_position());
             // While a prefix conversion is in flight the entries stand for the
             // tail only, so the rebuild has to line up with the same tail.
             // Compaction can shrink the transcript under the recorded prefix;
@@ -1053,6 +1058,9 @@ impl ChatState {
             // recomputed. A tool can become completed without changing the
             // transcript length, joining or splitting a collapsed streak.
             self.invalidate_render_cache();
+            if let Some(position) = position {
+                self.restore_transcript_position(position);
+            }
             // Re-read the seam from the projection that produced this tail, so
             // a prefix converted against replaced history is refused.
             self.prefix_seam = self

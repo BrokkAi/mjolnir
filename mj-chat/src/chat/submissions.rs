@@ -149,7 +149,6 @@ impl ChatState {
             recorded_at_ms: mj_core::clock::epoch_millis(),
             started_at: Some(std::time::Instant::now()),
         });
-        self.anchor = TranscriptAnchor::Bottom;
         self.invalidate_render_cache();
     }
 

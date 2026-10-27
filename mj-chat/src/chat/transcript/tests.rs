@@ -3639,6 +3639,7 @@ fn append_transcript_golden_state(
     }
 }
 
+// Hard-won: 0d4b1c9a1: submissions and rebuilds overrode deliberate reader navigation.
 #[test]
 fn golden_transcript_navigation() {
     let mut output = String::new();
@@ -3830,6 +3831,214 @@ fn golden_transcript_navigation() {
                 chat.transcript_scrollbar_dragging()
             )],
         );
+    }
+
+    // Exercise the live materialized path, not just appending ChatEntry rows.
+    let mut session = MaterializedSession::empty("scroll-regression");
+    session.transcript = (1..=40)
+        .map(|position| user_transcript_item(position, &format!("message {position}")))
+        .collect();
+    session.applied_event_ordinal = 40;
+    for shell in [false, true] {
+        let mut session = session.clone();
+        let mut chat = ChatState::from_materialized(&session, &[], &[]);
+        golden_chat_buffer(&mut chat, 60, 24);
+        chat.handle_key(key(KeyCode::PageUp));
+        let before = drawn_transcript(&mut chat, 60, 24);
+        assert!(!visible_messages(&before).is_empty());
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let operation = if shell {
+            super::super::remote::ChatRemoteOperation::RunShell {
+                command_id: "scroll-send".into(),
+                command: "printf hello".into(),
+            }
+        } else {
+            super::super::remote::ChatRemoteOperation::Prompt {
+                command_id: "scroll-send".into(),
+                text: "a new question".into(),
+                images: Vec::new(),
+            }
+        };
+        super::super::remote::queue_chat_remote_operation(&tx, operation, &mut chat);
+        let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+        assert_eq!(visible_messages(&before), visible_messages(&rows));
+        append_transcript_golden_state(
+            &mut output,
+            if shell {
+                "historical view while sending shell"
+            } else {
+                "historical view while sending prompt"
+            },
+            60,
+            24,
+            &rows,
+            &[],
+        );
+        let accepted = if shell {
+            fixture_item(
+                41,
+                "shell:scroll-send".into(),
+                TranscriptBody::System {
+                    text: "printf hello: completed".into(),
+                },
+            )
+        } else {
+            let mut item = user_transcript_item(41, "a new question");
+            Arc::make_mut(&mut item).stable_id = "user:scroll-send".into();
+            item
+        };
+        session.transcript.push(accepted);
+        session
+            .transcript
+            .push(agent_message_item("agent:42", 42, "new streamed reply"));
+        session.applied_event_ordinal = 42;
+        chat.apply_materialized(&session, &[], &[]);
+        let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+        assert_eq!(visible_messages(&before), visible_messages(&rows));
+        append_transcript_golden_state(
+            &mut output,
+            if shell {
+                "historical view after shell and reply"
+            } else {
+                "historical view after prompt and reply"
+            },
+            60,
+            24,
+            &rows,
+            &[],
+        );
+        let streaming = Arc::make_mut(session.transcript.last_mut().unwrap());
+        let TranscriptBody::Agent {
+            chunks,
+            streaming: active,
+        } = &mut streaming.body
+        else {
+            panic!("expected an agent reply");
+        };
+        *active = true;
+        chunks.push(serde_json::json!({"content": {"type": "text", "text": " grows in place"}}));
+        streaming.latest_content_event_ordinal = Some(43);
+        session.applied_event_ordinal = 43;
+        chat.apply_materialized(&session, &[], &[]);
+        let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+        assert_eq!(visible_messages(&before), visible_messages(&rows));
+        if !shell {
+            append_transcript_golden_state(
+                &mut output,
+                "historical view while reply grows",
+                60,
+                24,
+                &rows,
+                &[],
+            );
+        }
+        // A sliding canonical window moves the selected entry's index.
+        session.transcript.drain(..10);
+        session.applied_event_ordinal = 44;
+        chat.apply_materialized(&session, &[], &[]);
+        let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+        assert_eq!(visible_messages(&before), visible_messages(&rows));
+        if !shell {
+            append_transcript_golden_state(
+                &mut output,
+                "historical identity after window slides",
+                60,
+                24,
+                &rows,
+                &[],
+            );
+        }
+        chat.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
+        session.transcript.push(agent_message_item(
+            "agent:45",
+            45,
+            "reply at the followed tail",
+        ));
+        session.applied_event_ordinal = 45;
+        chat.apply_materialized(&session, &[], &[]);
+        let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+        assert!(shows(&rows, "reply at the followed tail"));
+        if !shell {
+            append_transcript_golden_state(
+                &mut output,
+                "explicit end resumes following updates",
+                60,
+                24,
+                &rows,
+                &[],
+            );
+        }
+    }
+
+    let mut revealed = MaterializedSession::empty("revealed-scroll");
+    revealed
+        .transcript
+        .push(agent_message_item("agent:1", 1, "opening reply"));
+    revealed.transcript.extend(
+        (2..=40).map(|position| user_transcript_item(position, &format!("message {position}"))),
+    );
+    revealed.applied_event_ordinal = 40;
+    let mut automatic = ChatState::from_materialized(&revealed, &[], &[]);
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut automatic, 60, 24));
+    assert!(shows(&rows, "opening reply"));
+    let mut updated = revealed.clone();
+    updated.transcript.push(agent_message_item(
+        "agent:41",
+        41,
+        "automatic reveal follows this reply",
+    ));
+    updated.applied_event_ordinal = 41;
+    automatic.apply_materialized(&updated, &[], &[]);
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut automatic, 60, 24));
+    assert!(shows(&rows, "automatic reveal follows this reply"));
+    append_transcript_golden_state(
+        &mut output,
+        "automatic reveal follows materialized update",
+        60,
+        24,
+        &rows,
+        &[],
+    );
+    for navigate_away in [false, true] {
+        let mut chat = ChatState::from_materialized(&revealed, &[], &[]);
+        // An update before the first draw must retain the automatic reveal.
+        let mut updated = revealed.clone();
+        updated.applied_event_ordinal = 41;
+        chat.apply_materialized(&updated, &[], &[]);
+        let before = drawn_transcript(&mut chat, 60, 24);
+        assert!(shows(&before, "opening reply"));
+        if navigate_away {
+            chat.handle_key(key(KeyCode::PageDown));
+        }
+        // Same coordinate, or away/back with no intervening draw.
+        chat.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL));
+        let saved = chat.transcript_position();
+        let mut reopened = ChatState::from_materialized(&updated, &[], &[]);
+        reopened.restore_transcript_position(saved);
+        updated.transcript.push(agent_message_item(
+            "agent:42",
+            42,
+            "new reply below the reveal",
+        ));
+        updated.applied_event_ordinal = 42;
+        for (label, mut chat) in [
+            ("explicit reveal navigation", chat),
+            ("restored explicit reveal navigation", reopened),
+        ] {
+            chat.apply_materialized(&updated, &[], &[]);
+            let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+            assert_eq!(visible_messages(&before), visible_messages(&rows));
+            assert!(shows(&rows, "opening reply"));
+            let label = format!(
+                "{label} ({})",
+                if navigate_away {
+                    "away and back"
+                } else {
+                    "same row"
+                }
+            );
+            append_transcript_golden_state(&mut output, &label, 60, 24, &rows, &[]);
+        }
     }
 
     mj_core::golden::assert_platform_golden(

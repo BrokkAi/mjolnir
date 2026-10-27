@@ -809,11 +809,11 @@ impl ChatState {
             return;
         };
         if target_scroll >= geometry.max_scroll {
-            self.anchor = TranscriptAnchor::Bottom;
+            self.set_anchor(TranscriptAnchor::Bottom);
             return;
         }
         if self.entries.is_empty() {
-            self.anchor = TranscriptAnchor::Bottom;
+            self.set_anchor(TranscriptAnchor::Bottom);
             return;
         }
         let mut remaining = target_scroll;
@@ -821,15 +821,15 @@ impl ChatState {
             let estimated = self.transcript_scrollbar.estimates[entry];
             if remaining < estimated {
                 let actual = self.entry_rows(entry);
-                self.anchor = TranscriptAnchor::Row {
+                self.set_anchor(TranscriptAnchor::Row {
                     entry,
                     row: remaining.saturating_mul(actual) / estimated,
-                };
+                });
                 return;
             }
             remaining = remaining.saturating_sub(estimated);
         }
-        self.anchor = TranscriptAnchor::Bottom;
+        self.set_anchor(TranscriptAnchor::Bottom);
     }
 
     fn prepare_transcript_scrollbar_metrics(&mut self, width: u16) {
@@ -1077,8 +1077,8 @@ impl ChatState {
         }
         // The opening reveal parks the view on the latest reply, but the
         // reader did not scroll there. Once something newer arrives, follow
-        // the tail again. Any scroll by the reader moves the anchor off the
-        // revealed row and ends this.
+        // the tail again. Explicit reader navigation clears this intent
+        // immediately, even when it selects the same row.
         if let Some((_, last)) = self.revealed_anchor {
             if !self.rests_on_opening_reveal() {
                 self.revealed_anchor = None;
@@ -1325,11 +1325,12 @@ impl ChatState {
             let limit = if row > 0 { entry + 1 } else { entry };
             (0..limit).rev().find(|index| is_stop(*index))
         };
-        self.anchor = match target {
+        let anchor = match target {
             Some(entry) => TranscriptAnchor::Row { entry, row: 0 },
             None if forward => TranscriptAnchor::Bottom,
-            None => return false,
+            None => before.clone(),
         };
+        self.set_anchor(anchor);
         self.anchor != before
     }
 
@@ -1354,7 +1355,7 @@ impl ChatState {
                 break;
             }
         }
-        self.anchor = TranscriptAnchor::Row { entry, row };
+        self.set_anchor(TranscriptAnchor::Row { entry, row });
         self.anchor != before
     }
 
@@ -1373,7 +1374,7 @@ impl ChatState {
                 // distance: upward traversal already skips them, and charging
                 // for them here can strand the viewport in a long tool run.
                 if entry + 1 >= self.entries.len() {
-                    self.anchor = TranscriptAnchor::Bottom;
+                    self.set_anchor(TranscriptAnchor::Bottom);
                     let changed = self.anchor != before;
                     return changed;
                 }
@@ -1387,7 +1388,7 @@ impl ChatState {
                 break;
             }
             if entry + 1 >= self.entries.len() {
-                self.anchor = TranscriptAnchor::Bottom;
+                self.set_anchor(TranscriptAnchor::Bottom);
                 let changed = self.anchor != before;
                 return changed;
             }
@@ -1400,11 +1401,12 @@ impl ChatState {
         // screenful. That page fills the viewport, but it is still the live
         // tail and must resume following new output. Resolve this on input so
         // ordinary render frames do not have to scan the tail twice.
-        self.anchor = if self.tail_viewport(self.last_viewport_height.max(1)).top == anchor {
+        let anchor = if self.tail_viewport(self.last_viewport_height.max(1)).top == anchor {
             TranscriptAnchor::Bottom
         } else {
             anchor.anchor()
         };
+        self.set_anchor(anchor);
         self.anchor != before
     }
 

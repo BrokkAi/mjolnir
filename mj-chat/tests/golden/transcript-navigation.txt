@@ -641,3 +641,315 @@ scrollbar dragging: false
 === empty transcript drag (0x0) ===
 
 scrollbar dragging: false
+
+=== historical view while sending prompt (60x24) ===
+╭ Conversation · message 30 of 40 · End to follow ─────────╮
+│ │ message 30                                            ━│
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 31                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 32                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 33                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ▐│
+│ │ message 34                                            ▐│
+│                                                         ━│
+│ ❯ You · 00:00                                           ││
+│ │ message 35                                            ││
+╰──────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane │ ctrl+b then q detach · : / ? palette
+
+=== historical view after prompt and reply (60x24) ===
+╭ Conversation · message 30 of 42 · End to follow ─────────╮
+│ │ message 30                                            ━│
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 31                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 32                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 33                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ▐│
+│ │ message 34                                            ▐│
+│                                                         ━│
+│ ❯ You · 00:00                                           ││
+│ │ message 35                                            ││
+╰──────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane │ ctrl+b then q detach · : / ? palette
+
+=== historical view while reply grows (60x24) ===
+╭ Conversation · message 30 of 42 · End to follow ─────────╮
+│ │ message 30                                            ━│
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 31                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 32                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 33                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ▐│
+│ │ message 34                                            ▐│
+│                                                         ━│
+│ ❯ You · 00:00                                           ││
+│ │ message 35                                            ││
+╰──────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane │ ctrl+b then q detach · : / ? palette
+
+=== historical identity after window slides (60x24) ===
+╭ Conversation · message 20 of 32 · End to follow ─────────╮
+│ │ message 30                                            ━│
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 31                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 32                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 33                                            ││
+│                                                         ▐│
+│ ❯ You · 00:00                                           ▐│
+│ │ message 34                                            ━│
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 35                                            ││
+╰──────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane │ ctrl+b then q detach · : / ? palette
+
+=== explicit end resumes following updates (60x24) ===
+╭ Conversation ────────────────────────────────────────────╮
+│                                                         ━│
+│ ❯ You · 00:00                                           ││
+│ │ message 39                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 40                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ a new question                                        ││
+│                                                         ││
+│ ● Agent · 00:00                                         ││
+│ │ new streamed reply grows in place                     ││
+│                                                         ││
+│ ● Agent · 00:00                                         ││
+│ │ reply at the followed tail                            ▐│
+│                                                         ▐│
+╰──────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane │ ctrl+b then q detach · : / ? palette
+
+=== historical view while sending shell (60x24) ===
+╭ Conversation · message 30 of 40 · End to follow ─────────╮
+│ │ message 30                                            ━│
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 31                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 32                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 33                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ▐│
+│ │ message 34                                            ▐│
+│                                                         ━│
+│ ❯ You · 00:00                                           ││
+│ │ message 35                                            ││
+╰──────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane │ ctrl+b then q detach · : / ? palette
+
+=== historical view after shell and reply (60x24) ===
+╭ Conversation · message 30 of 42 · End to follow ─────────╮
+│ │ message 30                                            ━│
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 31                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 32                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 33                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ▐│
+│ │ message 34                                            ▐│
+│                                                         ━│
+│ ❯ You · 00:00                                           ││
+│ │ message 35                                            ││
+╰──────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane │ ctrl+b then q detach · : / ? palette
+
+=== automatic reveal follows materialized update (60x24) ===
+╭ Conversation ────────────────────────────────────────────╮
+│                                                         ━│
+│ ❯ You · 00:00                                           ││
+│ │ message 37                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 38                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 39                                            ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 40                                            ││
+│                                                         ││
+│ ● Agent · 00:00                                         ││
+│ │ automatic reveal follows this reply                   ▐│
+│                                                         ▐│
+╰──────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane │ ctrl+b then q detach · : / ? palette
+
+=== explicit reveal navigation (same row) (60x24) ===
+╭ Conversation · message 1 of 41 · End to follow ──────────╮
+│ ● Agent · 00:00                                         ▐│
+│ │ opening reply                                         ▐│
+│                                                         ━│
+│ ❯ You · 00:00                                           ││
+│ │ message 2                                             ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 3                                             ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 4                                             ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 5                                             ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+╰──────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane │ ctrl+b then q detach · : / ? palette
+
+=== restored explicit reveal navigation (same row) (60x24) ===
+╭ Conversation · message 1 of 41 · End to follow ──────────╮
+│ ● Agent · 00:00                                         ▐│
+│ │ opening reply                                         ▐│
+│                                                         ━│
+│ ❯ You · 00:00                                           ││
+│ │ message 2                                             ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 3                                             ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 4                                             ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 5                                             ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+╰──────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane │ ctrl+b then q detach · : / ? palette
+
+=== explicit reveal navigation (away and back) (60x24) ===
+╭ Conversation · message 1 of 41 · End to follow ──────────╮
+│ ● Agent · 00:00                                         ▐│
+│ │ opening reply                                         ▐│
+│                                                         ━│
+│ ❯ You · 00:00                                           ││
+│ │ message 2                                             ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 3                                             ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 4                                             ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 5                                             ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+╰──────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane │ ctrl+b then q detach · : / ? palette
+
+=== restored explicit reveal navigation (away and back) (60x24) ===
+╭ Conversation · message 1 of 41 · End to follow ──────────╮
+│ ● Agent · 00:00                                         ▐│
+│ │ opening reply                                         ▐│
+│                                                         ━│
+│ ❯ You · 00:00                                           ││
+│ │ message 2                                             ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 3                                             ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 4                                             ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+│ │ message 5                                             ││
+│                                                         ││
+│ ❯ You · 00:00                                           ││
+╰──────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane │ ctrl+b then q detach · : / ? palette
