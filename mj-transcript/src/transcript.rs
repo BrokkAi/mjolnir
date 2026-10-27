@@ -1624,6 +1624,11 @@ pub fn apply_runtime_event_to_entries(
             None
         }
         RuntimeEvent::SessionStarted { resumed: true, .. } => None,
+        RuntimeEvent::ElicitationResolved { action, .. }
+            if action == mj_core::elicitation::OPERATOR_AWAY_ACTION =>
+        {
+            None
+        }
         RuntimeEvent::ElicitationResolved {
             reply: Some(reply), ..
         } => {

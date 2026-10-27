@@ -247,6 +247,7 @@ fn sample_state() -> State {
         }),
     };
     State {
+        operator_presence: Default::default(),
         last_subagent_policy: Default::default(),
         version: STATE_VERSION,
         sessions: [(session.id.clone(), session)].into_iter().collect(),

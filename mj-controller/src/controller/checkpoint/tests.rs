@@ -1256,6 +1256,19 @@ fn latch_relay_child_serves_stdio() {
         }
         let response = if reject_release && requests_checkpoint_release(&request) {
             unparseable_request_response(&request)
+        } else if matches!(
+            request.request,
+            mj_core::relay::RelayRequest::SetOperatorAway { .. }
+        ) {
+            mj_core::relay::RelayResponseEnvelope {
+                request_id: request.request_id.clone(),
+                protocol_version: request.protocol_version,
+                body: mj_core::relay::RelayResponseBody::Ok {
+                    payload: mj_core::relay::RelayResponsePayload::Status(
+                        relay.operational_state(),
+                    ),
+                },
+            }
         } else if let Some(response) = subagent_connection_response(&request) {
             response
         } else {

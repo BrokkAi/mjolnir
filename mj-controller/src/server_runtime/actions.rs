@@ -128,6 +128,9 @@ pub(super) async fn apply_phone_action(
     control: &PhoneActionControl,
 ) -> Result<()> {
     match action {
+        ControllerAction::SetOperatorAway { away } => {
+            services.daemon_runtime.set_operator_away(away).await
+        }
         ControllerAction::New {
             remember_launch_choices,
             remember_container_size,

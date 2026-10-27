@@ -724,6 +724,7 @@ fn validate_action_against(
                 ));
             }
         }
+        ControllerAction::SetOperatorAway { .. } => {}
         ControllerAction::RefreshQuota { profile_id } => {
             validate_public_id(profile_id)?;
             require_profile(snapshot, profile_id)?;

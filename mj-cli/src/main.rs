@@ -269,6 +269,11 @@ struct DaemonArgs {
 
 #[derive(Debug, Subcommand)]
 enum DaemonCommand {
+    /// Set or show whether the operator is away.
+    Afk {
+        #[command(subcommand)]
+        command: AfkCommand,
+    },
     /// Show daemon PID, version, start time, and client count.
     Status,
     /// Gracefully stop the daemon. Detached workers keep running unless
@@ -276,6 +281,13 @@ enum DaemonCommand {
     Stop(DaemonStopArgs),
     /// Gracefully replace the daemon with this Mjolnir build.
     Restart,
+}
+
+#[derive(Debug, Subcommand)]
+enum AfkCommand {
+    On,
+    Off,
+    Status,
 }
 
 #[derive(Debug, Args)]
@@ -2092,6 +2104,33 @@ fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<S
 
 async fn daemon_command(args: DaemonArgs) -> Result<()> {
     match args.command {
+        DaemonCommand::Afk { command } => {
+            let mut client = daemon::connect_or_start().await?;
+            if !matches!(command, AfkCommand::Status) {
+                let away = matches!(command, AfkCommand::On);
+                match client
+                    .request(daemon::DaemonAction::SetOperatorAway { away })
+                    .await?
+                {
+                    daemon::DaemonReply::Done => {}
+                    reply => bail!("unexpected operator away reply: {reply:?}"),
+                }
+            }
+            let mj_client::runtime_feed::RuntimeFrame::Snapshot { projection, .. } =
+                client.runtime_changes(None, false).await?
+            else {
+                bail!("daemon did not return a runtime snapshot");
+            };
+            println!(
+                "Operator away: {}",
+                if projection.metadata.operator_presence.away {
+                    "on"
+                } else {
+                    "off"
+                }
+            );
+            return Ok(());
+        }
         DaemonCommand::Status => {
             let mut daemon = match daemon::connect_management().await {
                 Ok(daemon) => daemon,

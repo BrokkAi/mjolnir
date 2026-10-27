@@ -34,6 +34,7 @@ impl ClaudeProbe {
         let (commands, mut requests) = mpsc::channel(16);
         let (event_tx, events) = mpsc::channel(128);
         let spec = LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,

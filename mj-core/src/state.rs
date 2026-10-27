@@ -2361,9 +2361,19 @@ fn created_at_seconds(timestamp: &str) -> Option<i64> {
         .map(|timestamp| timestamp.timestamp())
 }
 
+/// Durable operator availability. Revisions order control writes across connections.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorPresence {
+    pub away: bool,
+    pub revision: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
+    #[serde(default)]
+    pub operator_presence: OperatorPresence,
     #[serde(
         default,
         deserialize_with = "crate::subagent::deserialize_launch_policy"
@@ -2388,6 +2398,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             version: STATE_VERSION,
+            operator_presence: OperatorPresence::default(),
             last_subagent_policy: Default::default(),
             sessions: SnapshotMap::new(),
             subagents: SnapshotMap::new(),

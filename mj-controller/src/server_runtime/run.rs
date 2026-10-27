@@ -72,6 +72,7 @@ pub(crate) async fn run_server(
     controller.state.subagents = initial.subagents;
     controller.config = initial.metadata.installed_config();
     controller.state.last_subagent_policy = initial.metadata.last_subagent_policy;
+    controller.state.operator_presence = initial.metadata.operator_presence;
     let mut operations = initial
         .metadata
         .lifecycles
@@ -328,6 +329,7 @@ pub(crate) async fn run_server(
                 controller.state.subagents = runtime.subagents;
                 controller.config = runtime.metadata.installed_config();
                 controller.state.last_subagent_policy = runtime.metadata.last_subagent_policy;
+                controller.state.operator_presence = runtime.metadata.operator_presence;
                 for (session_id, error) in &pending_action_errors {
                     if let Some(session) = controller.state.sessions.get_mut(session_id)
                         && session.last_error.is_none()
@@ -1244,7 +1246,7 @@ pub(crate) async fn run_server(
                     };
                     let ControllerRequest { action, reply } = request;
                     // A destroy holds admission as a destroy from the moment it is accepted, so a stop right after "accepted" waits for it (#1191).
-                    let upgrade_work = match match &action { ControllerAction::Move { .. } => Ok(None), ControllerAction::Destroy { session_id, .. } => crate::upgrade::destroy_activity(session_id).map(Some), _ => crate::upgrade::activity("web action").map(Some) } {
+                    let upgrade_work = match match &action { ControllerAction::SetOperatorAway { .. } => crate::upgrade::activity("operator away setting").map(Some), ControllerAction::Move { .. } => Ok(None), ControllerAction::Destroy { session_id, .. } => crate::upgrade::destroy_activity(session_id).map(Some), _ => crate::upgrade::activity("web action").map(Some) } {
                         Ok(work) => work,
                         Err(error) => {
                             let _ = reply.send(ActionOutcome::Refused(Refusal::unusable(error.to_string())));

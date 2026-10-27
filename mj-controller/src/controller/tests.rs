@@ -2539,6 +2539,7 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
     let mut controller = Controller {
         config: registration_config(),
         state: State {
+            operator_presence: Default::default(),
             last_subagent_policy: SubagentPolicy::Mjolnir {
                 straightforward: None,
                 subtle: None,

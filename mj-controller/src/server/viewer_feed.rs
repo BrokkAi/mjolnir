@@ -470,8 +470,10 @@ mod tests {
         assert!(frame["metadata"].get("profiles").is_none());
 
         let mut metadata_change = snapshot(33, vec![changed]);
+        metadata_change.operator_away = true;
         metadata_change.review_config.trigger = mj_core::config::ReviewTrigger::Turn;
         let frame = decode(&feed.update(metadata_change).unwrap()[0]);
+        assert_eq!(frame["metadata"]["operator_away"], true);
         assert_eq!(frame["metadata"]["review_config"]["trigger"], "turn");
         assert!(frame["metadata"].get("profiles").is_none());
     }

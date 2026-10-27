@@ -385,3 +385,61 @@ fn record_age(updated_at: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Du
         .to_std()
         .ok()
 }
+
+impl RuntimeState {
+    /// Persist before publishing; the mutex orders concurrent operator toggles.
+    pub async fn set_operator_away(&self, away: bool) -> Result<()> {
+        let _mutation = self.config_mutation.lock().await;
+        let changed = tokio::task::spawn_blocking(move || crate::database::set_operator_away(away))
+            .await
+            .context("operator away database writer panicked")??;
+        if !changed {
+            return Ok(());
+        }
+        // The committed owner is refreshed on access; bootstrap tests have no
+        // committed feed and install the freshly loaded controller instead.
+        if self.committed.is_none() {
+            let load = self.controller_loader;
+            let controller = tokio::task::spawn_blocking(load).await??;
+            self.owner().install_controller(controller);
+        }
+        self.publish_revision();
+        let ids = self
+            .owner()
+            .sessions
+            .iter()
+            .filter(|(_, view)| {
+                view.connected
+                    && view
+                        .operational
+                        .as_ref()
+                        .and_then(|state| state.relay_protocol_version)
+                        .is_some_and(|version| {
+                            version >= mj_core::relay::RELAY_OPERATOR_AWAY_PROTOCOL
+                        })
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        let mut deliveries = tokio::task::JoinSet::new();
+        for id in ids {
+            let manager = self.session_manager.clone();
+            deliveries.spawn(async move {
+                let delivered = tokio::time::timeout(Duration::from_secs(3), async {
+                    if let Some(handle) = manager.find_session(id.clone()).await? {
+                        handle.sync_now().await?;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                }).await;
+                if !matches!(delivered, Ok(Ok(()))) {
+                    tracing::warn!(session_id=%id, result=?delivered, "could not synchronize operator away setting; reconnect will retry");
+                }
+            });
+        }
+        while let Some(result) = deliveries.join_next().await {
+            if let Err(error) = result {
+                tracing::warn!(%error, "operator away delivery task failed");
+            }
+        }
+        Ok(())
+    }
+}

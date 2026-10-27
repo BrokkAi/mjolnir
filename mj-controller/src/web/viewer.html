@@ -25,6 +25,7 @@
     <header id="shell-header">
       <button id="back" class="icon-button hidden" aria-label="Back">&#8592;</button>
       <h1 id="shell-title">MJ</h1>
+      <button id="operator-away-indicator" class="operator-away hidden" type="button" aria-label="End AFK">AFK</button>
       <button
         id="menu-button"
         class="icon-button hidden"
@@ -38,11 +39,13 @@
         <nav class="menu-items" role="menu" aria-label="Mjolnir">
           <button role="menuitem" data-route="targets">Targets</button>
           <button role="menuitem" data-route="quota">Quota</button>
+          <button role="menuitem" id="operator-away-toggle">Go AFK</button>
           <button role="menuitem" id="logout">Sign out</button>
         </nav>
         <p id="menu-version" class="menu-version">Mjolnir</p>
       </div>
     </header>
+    <p id="operator-away-error" class="operator-away-error hidden" role="status" aria-live="polite"></p>
 
     <main id="boot-status" class="card" role="status" aria-live="polite">
       <h2>Connecting to Mjolnir</h2>

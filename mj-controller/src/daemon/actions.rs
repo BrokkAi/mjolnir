@@ -16,6 +16,10 @@ pub(super) async fn handle_action(
                 Ok(DaemonReply::UpgradePending)
             }
         }
+        DaemonAction::SetOperatorAway { away } => {
+            state.set_operator_away(away).await?;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::Ping => Ok(DaemonReply::Pong),
         // Each blocker carries its count and age, so the waiting client can say
         // what the upgrade waits for and for how long.
@@ -739,6 +743,9 @@ pub(super) async fn handle_action(
 pub(super) fn upgrade_request_activity(
     action: &DaemonAction,
 ) -> Result<Option<crate::upgrade::Work>> {
+    if matches!(action, DaemonAction::SetOperatorAway { .. }) {
+        return crate::upgrade::activity("operator away setting").map(Some);
+    }
     if matches!(
         action,
         DaemonAction::Ping

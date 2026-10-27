@@ -1,0 +1,131 @@
+=== AFK (100x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default !4                         ≡ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessio                                                                                           │
+│ Create                                                                                           │
+│hel ───  ╭ ×  AFK  ─────────────────────────────────────────────────────────────────────╮         │
+│  ! Wai  │                                                                              │         │
+│  Quest  │                               A     FFFFF   K   K                            │         │
+│  │ Cho  │                              A A    F       K  K                             │         │
+│  │      │                             AAAAA   FFFF    KKK                              │         │
+│         │                             A   A   F       K  K                             │         │
+│  ! Wai  │                             A   A   F       K   K                            │         │
+│  Quest  │                                                                              │         │
+│  │ Cho  │   While you are away, an agent that asks a question or needs permission is   │         │
+│  │      │  told that you are away and asked to do other useful work first. If it asks  │         │
+│         │               the same thing again, the request waits for you.               │         │
+│  ! Wai  │                                                                              │         │
+│  Quest  │                               Waiting for you:                               │  ───────╯
+│  │ Cho  │                       Waiting session 0 (default / hel)                      │  ───────╮
+│  │      │                       Waiting session 1 (default / hel)                      │         │
+│         │                       Waiting session 2 (default / hel)                      │  en.    │
+│  ! Wai  │                       Waiting session 3 (default / hel)                      │  ───────╯
+│  Quest  │                                                                              │   ▁   ▄ ╮
+│  │ Cho  │                        Close this window to come back.                       │         │
+│  │      │                                                                              │  ───────╯
+│         ╰──────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
+│                                                                                           ets    │
+│                                                                                                  │
+│                                      ││  codex-1   Codex        refreshing…                      │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
+=== AFK waiting requests cleared (100x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessio                                                                                           │
+│ Create                                                                                           │
+│hel ───  ╭ ×  AFK  ─────────────────────────────────────────────────────────────────────╮         │
+│  · Wai  │                                                                              │         │
+│  Idle   │                               A     FFFFF   K   K                            │         │
+│  │ No   │                              A A    F       K  K                             │         │
+│  │      │                             AAAAA   FFFF    KKK                              │         │
+│         │                             A   A   F       K  K                             │         │
+│  · Wai  │                             A   A   F       K   K                            │         │
+│  Idle   │                                                                              │         │
+│  │ No   │   While you are away, an agent that asks a question or needs permission is   │         │
+│  │      │  told that you are away and asked to do other useful work first. If it asks  │         │
+│         │               the same thing again, the request waits for you.               │         │
+│  · Wai  │                                                                              │         │
+│  Idle   │                       No sessions are waiting for you.                       │  ───────╯
+│  │ No   │                                                                              │  ───────╮
+│  │      │                        Close this window to come back.                       │         │
+│         │                                                                              │  en.    │
+│  · Wai  │                                                                              │  ───────╯
+│  Idle   │                                                                              │   ▁   ▄ ╮
+│  │ No   │                                                                              │         │
+│  │      │                                                                              │  ───────╯
+│         ╰──────────────────────────────────────────────────────────────────────────────╯   ▁   ▄ ╮
+│                                                                                           ets    │
+│                                                                                                  │
+│                                      ││  codex-1   Codex        refreshing…                      │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
+=== AFK ASCII (100x32) ===
++ Workspaces -------- * MJOLNIR vX.Y.Z ++ Browse | Conversation -------------------------- +   .---+
+| default !4                         = ||                                                          |
++--------------------------------------+|                                                          |
++ Sessio                                                                                           |
+| Create                                                                                           |
+|hel ---  + x  AFK  ---------------------------------------------------------------------+         |
+|  ! Wai  |                                                                              |         |
+|  Quest  |                               A     FFFFF   K   K                            |         |
+|  | Cho  |                              A A    F       K  K                             |         |
+|  |      |                             AAAAA   FFFF    KKK                              |         |
+|         |                             A   A   F       K  K                             |         |
+|  ! Wai  |                             A   A   F       K   K                            |         |
+|  Quest  |                                                                              |         |
+|  | Cho  |   While you are away, an agent that asks a question or needs permission is   |         |
+|  |      |  told that you are away and asked to do other useful work first. If it asks  |         |
+|         |               the same thing again, the request waits for you.               |         |
+|  ! Wai  |                                                                              |         |
+|  Quest  |                               Waiting for you:                               |  -------+
+|  | Cho  |                       Waiting session 0 (default / hel)                      |  -------+
+|  |      |                       Waiting session 1 (default / hel)                      |         |
+|         |                       Waiting session 2 (default / hel)                      |  en.    |
+|  ! Wai  |                       Waiting session 3 (default / hel)                      |  -------+
+|  Quest  |                                                                              |   -   = +
+|  | Cho  |                        Close this window to come back.                       |         |
+|  |      |                                                                              |  -------+
+|         +------------------------------------------------------------------------------+   -   = +
+|                                                                                           sets   |
+|                                                                                                  |
+|                                      ||  codex-1   Codex        refreshing..                     |
+|                                      ||  codex-2   Codex        refreshing..                     |
++--------------------------------------++----------------------------------------------------------+
+/ search (filter a/b/w/i/d) - Tab pane | ctrl+b then c create - g sessions - : palette - ? keys
+=== AFK small (32x12) ===
+
+
+   ╭ ×  AFK  ──────────────╮
+   │                       │
+   │          AFK          │
+   │                       │
+   │  While you are away,  │
+   │ an agent that asks a  │
+   │   question or needs   │
+   ╰───────────────────────╯
+
+
+=== AFK small scrolled (32x12) ===
+
+
+   ╭ ×  AFK  ──────────────╮
+   │   Waiting for you:    │
+   │ Waiting session 0 (d… │
+   │      and 3 more       │
+   │                       │
+   │ Close this window to  │
+   │      come back.       │
+   ╰───────────────────────╯
+
+
+=== AFK tiny (10x5) ===
+╭ ×  AFK ╮
+│        │
+│   AFK  │
+│        │
+╰────────╯

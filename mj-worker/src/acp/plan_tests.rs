@@ -319,6 +319,7 @@ fn claude_missing_auto_is_an_error_and_missing_bypass_requires_a_continuation() 
 /// A real ACP transport with the agent side controlled by the test. No fake
 /// depends on runtime implementation order beyond the protocol under test.
 struct PlanProbe {
+    operator_away: OperatorAway,
     input: Lines<BufReader<ReadHalf<DuplexStream>>>,
     output: WriteHalf<DuplexStream>,
     commands: mpsc::Sender<CommandRequest>,
@@ -357,6 +358,7 @@ impl PlanProbe {
         let (commands, mut requests) = mpsc::channel(16);
         let (event_tx, events) = mpsc::channel(128);
         let spec = LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -388,6 +390,7 @@ impl PlanProbe {
             }),
             stall_policy: None,
         };
+        let operator_away = spec.operator_away.clone();
         let driver = tokio::spawn(async move {
             drive(
                 ByteStreams::new(client_write.compat_write(), client_read.compat()),
@@ -400,6 +403,7 @@ impl PlanProbe {
             .await
         });
         let mut probe = Self {
+            operator_away,
             input: BufReader::new(agent_read).lines(),
             output: agent_write,
             commands,
@@ -1120,6 +1124,10 @@ async fn unconstrained_tool_permissions_are_auto_approved_for_every_harness() {
     for harness in HarnessKind::ALL {
         let mut probe =
             PlanProbe::with_harness(ExecutionPolicy::Unconstrained, false, harness).await;
+        probe.operator_away.set(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 1,
+        });
         for (options, expected) in [
             (
                 vec![always.clone(), reject.clone(), once.clone()],
@@ -1217,6 +1225,10 @@ async fn unconstrained_permission_without_allow_reports_error_without_waiting() 
 #[tokio::test]
 async fn unconstrained_native_child_tool_permissions_are_auto_approved() {
     let mut probe = PlanProbe::new(ExecutionPolicy::Unconstrained).await;
+    probe.operator_away.set(mj_core::state::OperatorPresence {
+        away: true,
+        revision: 1,
+    });
     probe
         .send(json!({
             "jsonrpc": "2.0", "method": "session/update",
@@ -1710,6 +1722,10 @@ async fn managed_children_cancel_questions_and_permissions_at_the_original_respo
             ExecutionPolicy::Unconstrained,
         ] {
             let mut probe = PlanProbe::with_ownership(policy, false, harness, true).await;
+            probe.operator_away.set(mj_core::state::OperatorPresence {
+                away: true,
+                revision: 1,
+            });
             if harness == HarnessKind::Muse {
                 probe.send(json!({
                     "jsonrpc":"2.0", "id":"route", "method":"elicitation/create", "params":{
@@ -1824,4 +1840,238 @@ async fn managed_children_cancel_questions_and_permissions_at_the_original_respo
             probe.close().await;
         }
     }
+}
+
+impl PlanProbe {
+    async fn away_refusal(&mut self, ask: Value, expected: Value) {
+        let id = ask["id"].clone();
+        self.send(ask).await;
+        let question = loop {
+            if let RuntimeEvent::ElicitationRequested { request } = self.event().await {
+                break request;
+            }
+        };
+        match self.event().await {
+            RuntimeEvent::ElicitationResolved {
+                elicitation_id,
+                action,
+                reply,
+            } => {
+                assert_eq!(elicitation_id, question.id);
+                assert_eq!(action, mj_core::elicitation::OPERATOR_AWAY_ACTION);
+                assert!(reply.is_none());
+            }
+            event => panic!("away refusal must resolve immediately: {event:?}"),
+        }
+        let answer = self.message().await;
+        assert_eq!(answer["id"], id);
+        assert_eq!(answer["result"], expected);
+        assert!(
+            self.answer_with(&question.id, ElicitationResponse::Cancel)
+                .await
+                .is_err(),
+            "an away refusal must not leave an externally answerable form"
+        );
+    }
+
+    async fn away_repeat(&mut self, ask: Value, expected: Value) {
+        let id = ask["id"].clone();
+        self.send(ask).await;
+        let question = loop {
+            match self.event().await {
+                RuntimeEvent::ElicitationRequested { request } => break request,
+                RuntimeEvent::ElicitationResolved { action, .. } => {
+                    panic!("unexpected resolution: {action}")
+                }
+                _ => {}
+            }
+        };
+        assert_eq!(
+            self.answer_with(&question.id, ElicitationResponse::Decline)
+                .await,
+            Ok(())
+        );
+        let answer = self.message().await;
+        assert_eq!(answer["id"], id);
+        assert_eq!(answer["result"], expected);
+        loop {
+            if let RuntimeEvent::ElicitationResolved {
+                elicitation_id,
+                action,
+                ..
+            } = self.event().await
+            {
+                assert_eq!(elicitation_id, question.id);
+                assert_eq!(action, "decline");
+                break;
+            }
+        }
+    }
+}
+
+/// Real ACP ingress/response envelopes exercise the gate before form registration.
+// Hard-won: AFK review #1/#2: stale writes and missed transitions corrupted refusal memory.
+#[tokio::test]
+async fn operator_away_refuses_once_then_exposes_repeats_across_acp_paths() {
+    let rejected = json!({"outcome":{"outcome":"selected", "optionId":"reject"}});
+    for harness in HarnessKind::ALL {
+        let mut probe =
+            PlanProbe::with_harness(ExecutionPolicy::ConfiguredApprovals, false, harness).await;
+        probe.operator_away.set(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 1,
+        });
+        let mut tool = json!({
+            "jsonrpc":"2.0", "id":"tool-first", "method":"session/request_permission", "params":{
+                "sessionId":"plan-session", "toolCall":{"toolCallId":"tool", "kind":"execute", "title":"Run command",
+                "rawInput":{"command":"ls", "cwd":"/workspace"}},
+                "options":[{"optionId":"allow", "name":"Allow", "kind":"allow_once"},
+                    {"optionId":"reject", "name":"Reject", "kind":"reject_once"}]
+            }
+        });
+        probe.away_refusal(tool.clone(), rejected.clone()).await;
+        tool["id"] = json!("tool-repeat");
+        tool["params"]["toolCall"]["toolCallId"] = json!("new-call-id");
+        // Insertion order and transient tool-call ids do not change the action.
+        tool["params"]["toolCall"]["rawInput"] =
+            serde_json::from_str(r#"{"cwd":"/workspace","command":"ls"}"#).unwrap();
+        probe.away_repeat(tool.clone(), rejected.clone()).await;
+        tool["params"]["toolCall"]["rawInput"]["command"] = json!("pwd");
+        probe.away_refusal(tool.clone(), rejected.clone()).await;
+        tool["params"]["toolCall"]["rawInput"]["command"] = json!("ls");
+        probe.away_repeat(tool.clone(), rejected.clone()).await;
+        probe.operator_away.set(mj_core::state::OperatorPresence {
+            away: false,
+            revision: 2,
+        });
+        // A stale away writer cannot resurrect a superseded absence.
+        probe.operator_away.set(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 1,
+        });
+        probe.away_repeat(tool.clone(), rejected.clone()).await;
+        probe.operator_away.set(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 3,
+        });
+        // A delayed writer from the old period cannot undo the newer presence.
+        probe.operator_away.set(mj_core::state::OperatorPresence {
+            away: false,
+            revision: 2,
+        });
+        probe.away_refusal(tool.clone(), rejected.clone()).await;
+        // Equal revisions cannot clear refusal memory or change availability.
+        probe.operator_away.set(mj_core::state::OperatorPresence {
+            away: false,
+            revision: 3,
+        });
+        probe.away_repeat(tool.clone(), rejected.clone()).await;
+        // Revision4 (off) was missed. The newer away transition still starts a period.
+        probe.operator_away.set(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 5,
+        });
+        probe.away_refusal(tool.clone(), rejected.clone()).await;
+        probe.operator_away.set(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 3,
+        });
+        probe.away_repeat(tool.clone(), rejected.clone()).await;
+        // When no reject-once exists, cancel only this ACP responder.
+        tool["params"]["toolCall"]["rawInput"]["command"] = json!("no-rejection-option");
+        tool["params"]["options"].as_array_mut().unwrap().pop();
+        probe
+            .away_refusal(tool, json!({"outcome":{"outcome":"cancelled"}}))
+            .await;
+
+        let mut question = json!({"jsonrpc":"2.0", "id":"question", "method":"elicitation/create", "params":{
+            "sessionId":"plan-session", "mode":"form", "message":"Which file?",
+            "requestedSchema":{"type":"object", "properties":{"answer":{"type":"string"}}}
+        }});
+        probe
+            .away_refusal(question.clone(), json!({"action":"decline"}))
+            .await;
+        question["params"]["message"] = json!("Rephrased: which directory instead?");
+        probe
+            .away_repeat(question, json!({"action":"decline"}))
+            .await;
+
+        let mut plan = json!({"jsonrpc":"2.0", "id":"plan", "method":"session/request_permission", "params":permission("Proposed plan", &["bypassPermissions", "reject"])});
+        if harness == HarnessKind::Grok {
+            let grok = json!({"jsonrpc":"2.0", "id":"grok-plan", "method":"x.ai/exit_plan_mode", "params":{"sessionId":"plan-session", "plan":"First draft"}});
+            probe
+                .away_refusal(grok.clone(), json!({"outcome":"cancelled"}))
+                .await;
+            probe
+                .away_repeat(grok, json!({"outcome":"cancelled"}))
+                .await;
+            // Both plan transports share the same per-agent refusal memory.
+            probe.away_repeat(plan.clone(), rejected.clone()).await;
+        } else {
+            probe.away_refusal(plan.clone(), rejected.clone()).await;
+        }
+        plan["params"]["toolCall"]["rawInput"]["plan"] = json!("Entirely rewritten plan");
+        probe.away_repeat(plan, rejected.clone()).await;
+        probe.close().await;
+    }
+}
+
+#[tokio::test]
+async fn operator_away_native_children_have_independent_refusal_memory() {
+    let mut probe = PlanProbe::new(ExecutionPolicy::ConfiguredApprovals).await;
+    probe.operator_away.set(mj_core::state::OperatorPresence {
+        away: true,
+        revision: 1,
+    });
+    probe
+        .commands
+        .send(CommandRequest::Prompt {
+            request_id: "original-prompt".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new(
+                "Inspect the repository",
+            ))],
+        })
+        .await
+        .unwrap();
+    let prompt = probe.message().await;
+    assert_eq!(prompt["method"], "session/prompt");
+    for child in ["child-a", "child-b"] {
+        probe.send(json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"plan-session", "update":{
+            "sessionUpdate":"subagent_spawned", "subagentSessionId":child,
+            "name":"worker", "task":"inspect", "capabilities":{}
+        }}})).await;
+        loop {
+            if let RuntimeEvent::NativeAgent { .. } = probe.event().await {
+                break;
+            }
+        }
+    }
+    for agent in ["plan-session", "child-a", "child-b"] {
+        let question = json!({"jsonrpc":"2.0", "id":format!("question-{agent}"), "method":"elicitation/create", "params":{
+            "sessionId":agent, "mode":"form", "message":"Which file?",
+            "requestedSchema":{"type":"object", "properties":{"answer":{"type":"string"}}}
+        }});
+        probe
+            .away_refusal(question.clone(), json!({"action":"decline"}))
+            .await;
+        probe
+            .away_repeat(question, json!({"action":"decline"}))
+            .await;
+        let mut plan = permission("Inspect the repository", &["bypassPermissions", "reject"]);
+        plan["sessionId"] = json!(agent);
+        let ask = json!({"jsonrpc":"2.0", "id":format!("plan-{agent}"), "method":"session/request_permission", "params":plan});
+        let rejected = json!({"outcome":{"outcome":"selected", "optionId":"reject"}});
+        probe.away_refusal(ask.clone(), rejected.clone()).await;
+        probe.away_repeat(ask, rejected.clone()).await;
+        let tool = json!({"jsonrpc":"2.0", "id":format!("tool-{agent}"), "method":"session/request_permission", "params":{
+            "sessionId":agent, "toolCall":{"toolCallId":"tool", "kind":"execute", "title":"Run command", "rawInput":{"command":"pwd"}},
+            "options":[{"optionId":"allow", "name":"Allow", "kind":"allow_once"},
+                {"optionId":"reject", "name":"Reject", "kind":"reject_once"}]
+        }});
+        probe.away_refusal(tool.clone(), rejected.clone()).await;
+        probe.away_repeat(tool, rejected).await;
+    }
+    probe.answered(&prompt).await;
+    assert_eq!(probe.finished().await, "EndTurn");
+    probe.close().await;
 }

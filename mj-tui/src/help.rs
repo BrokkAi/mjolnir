@@ -65,7 +65,7 @@ struct HelpEntry {
 fn group(id: CommandId) -> &'static str {
     use CommandId::*;
     match id {
-        Help | Palette | NewSessionWizard | ResumeDialog | QuitDetach => GROUPS[0],
+        Help | Palette | NewSessionWizard | ResumeDialog | QuitDetach | GoAfk => GROUPS[0],
         Workspaces
         | FocusWorkspaces
         | SelectWorkspacePrevious

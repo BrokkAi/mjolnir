@@ -69,6 +69,11 @@ fn take_selection_recenter(dashboard: &DashboardState, focus: Focus) -> bool {
 pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut DashboardState) {
     dashboard.prepare_dialog_state();
     let mut surfaces = std::mem::take(&mut dashboard.frame_surfaces);
+    if let Some(dialog) = dashboard.away_dialog() {
+        crate::operator_away::render(frame, area, dashboard, dialog, &mut surfaces);
+        dashboard.frame_surfaces = surfaces;
+        return;
+    }
     match &dashboard.mode {
         Mode::New(wizard) => render_new_wizard(frame, area, dashboard, wizard, &mut surfaces),
         Mode::Resume(wizard) => render_resume_wizard(frame, area, dashboard, wizard, &mut surfaces),

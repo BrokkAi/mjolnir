@@ -78,6 +78,9 @@ impl DashboardState {
     /// whether the notice on screen has been readable long enough for this
     /// key press to dismiss it.
     pub fn handle_key_at(&mut self, key: KeyEvent, now: Instant) -> DashboardAction {
+        if self.away_dialog().is_some() {
+            return self.handle_away_event(Event::Key(key));
+        }
         if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
             return DashboardAction::None;
         }
@@ -129,6 +132,10 @@ impl DashboardState {
     }
 
     pub fn handle_paste(&mut self, pasted: &str) {
+        if self.away_dialog().is_some() {
+            self.handle_away_event(Event::Paste(pasted.to_owned()));
+            return;
+        }
         if matches!(self.mode, Mode::Help(_)) {
             self.paste_help(pasted);
             return;
@@ -157,6 +164,9 @@ impl DashboardState {
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> DashboardAction {
+        if self.away_dialog().is_some() {
+            return self.handle_away_event(Event::Mouse(mouse));
+        }
         let now = Instant::now();
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
             self.suppress_modal_release =

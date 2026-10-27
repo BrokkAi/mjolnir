@@ -12,6 +12,7 @@ pub struct StandaloneSession {
     subagent_queue: super::subagent_queue::SubagentQueueObserver,
     subagent_queue_error: Option<String>,
     history_jobs: tokio::task::JoinSet<mj_core::history::HistoryResult>,
+    operator_presence_revision: Option<u64>,
     history_active: std::collections::BTreeSet<String>,
 }
 
@@ -31,6 +32,13 @@ impl StandaloneSession {
         // be tens of megabytes, and the reconnect loop would otherwise pay that
         // whole synchronous read on every attempt against a worker that is down.
         let mut client = RelayClient::connect(&target.spec, &target.session_id).await?;
+        let session = target.session_id.clone();
+        let protocol = client.protocol_version();
+        tokio::task::spawn_blocking(move || {
+            crate::database::record_operator_away_worker_protocol(session, protocol)
+        })
+        .await
+        .context("record negotiated worker protocol")??;
         let operational = client.status().await?;
         let (materialized, window) = load_projection(&target.session_id).await?;
         let mut connection = Self {
@@ -45,6 +53,7 @@ impl StandaloneSession {
             subagent_queue: super::subagent_queue::SubagentQueueObserver::spawn(target),
             subagent_queue_error: None,
             history_jobs: tokio::task::JoinSet::new(),
+            operator_presence_revision: None,
             history_active: Default::default(),
         };
         connection.sync_in_place().await?;
@@ -107,6 +116,15 @@ impl StandaloneSession {
     }
 
     pub(super) async fn sync_in_place(&mut self) -> Result<bool> {
+        if self.protocol_version() >= mj_core::relay::RELAY_OPERATOR_AWAY_PROTOCOL {
+            let presence = tokio::task::spawn_blocking(crate::database::load_operator_presence)
+                .await
+                .context("read operator away setting")??;
+            if self.operator_presence_revision != Some(presence.revision) {
+                self.client.set_operator_away(presence).await?;
+                self.operator_presence_revision = Some(presence.revision);
+            }
+        }
         self.sync_history().await?;
         let original_ordinal = self.materialized.applied_event_ordinal;
         let original_digest = self.materialized.applied_event_digest.clone();

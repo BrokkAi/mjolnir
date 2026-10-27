@@ -22,6 +22,7 @@ pub(crate) async fn native_muse_turn(
     HarnessKind::Muse.configure_home_environment(home, &mut environment);
     let resuming = resume.is_some();
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -183,6 +184,7 @@ for line in sys.stdin:
     )
     .unwrap();
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -340,6 +342,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             ),
         ]);
         let spec = LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,

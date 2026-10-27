@@ -87,7 +87,9 @@ pub const RELAY_REVIEW_ATTRIBUTION_PROTOCOL: u32 = 42;
 pub const RELAY_PUSH_REVIEW_PROTOCOL: u32 = 43;
 /// 44 compresses project-memory trees with gzip, retaining plain-tree decoding.
 pub const RELAY_COMPRESSED_PROJECT_MEMORY_PROTOCOL: u32 = 44;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_COMPRESSED_PROJECT_MEMORY_PROTOCOL;
+/// 45 adds operator-away mode: SetOperatorAway and the OperatorAway mailbox body.
+pub const RELAY_OPERATOR_AWAY_PROTOCOL: u32 = 45;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_OPERATOR_AWAY_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

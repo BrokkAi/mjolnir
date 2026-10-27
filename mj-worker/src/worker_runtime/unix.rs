@@ -317,6 +317,11 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
     );
     let managed_subagent = config.is_managed_subagent();
     let acp_spec = LaunchSpec {
+        operator_away: relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .operator_away
+            .clone(),
         imported_logins: None,
         clear_context_request: None,
         context_restore: None,
@@ -2045,6 +2050,20 @@ pub(super) async fn serve_client_with_memory(
                 .as_ref()
                 .and_then(|services| services.subagents.clone())
                 .or_else(|| subagents.clone());
+            if let RelayRequest::SetOperatorAway { away, revision } = &envelope.request {
+                let state = {
+                    let relay = relay.lock().expect("relay state lock poisoned");
+                    relay.operator_away.set(mj_core::state::OperatorPresence { away: *away, revision: *revision });
+                    relay.operational_state()
+                };
+                let response = RelayResponseEnvelope {
+                    protocol_version: envelope.protocol_version,
+                    request_id: envelope.request_id,
+                    body: RelayResponseBody::Ok { payload: RelayResponsePayload::Status(state) },
+                };
+                write_logged_response(&mut writer, &response, &session_id, "set_operator_away").await?;
+                continue;
+            }
             if matches!(
                 &envelope.request,
                 RelayRequest::AttachmentPresent { .. }

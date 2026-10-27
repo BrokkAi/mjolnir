@@ -458,6 +458,9 @@ fn render_combined_themed(
             TerminalSizeRequirement::Width(NARROW_TERMINAL_WIDTH),
         );
         dashboard.end_surface_frame();
+        if dashboard.away_dialog().is_some() {
+            render_modal(frame, area, dashboard);
+        }
         return Vec::new();
     }
     // Below the sidebar width the Sessions list stacks above the
@@ -710,6 +713,9 @@ fn render_combined_themed(
                 TerminalSizeRequirement::Height(required_frame_height),
             );
             dashboard.end_surface_frame();
+            if dashboard.away_dialog().is_some() {
+                render_modal(frame, area, dashboard);
+            }
             return Vec::new();
         }
     };

@@ -281,6 +281,8 @@ impl DashboardContext {
             &update.workspace_names,
         );
         self.dashboard.set_workspace_names(update.workspace_names);
+        self.dashboard
+            .set_operator_presence(update.operator_presence);
         self.dashboard.set_launch_recency(update.launch_recency);
         self.dashboard.set_recent_launch(update.recent_launch);
         self.dashboard
