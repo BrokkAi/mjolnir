@@ -385,6 +385,7 @@ impl DashboardState {
         &mut self,
         mut wizard: NewWizard,
     ) -> DashboardAction {
+        wizard.bundle_removal_outcome = None;
         let Some(bundle_id) = bundle_ids_by_recent_creation(&self.config, &self.launch_recency)
             .get(wizard.bundle)
             .map(|id| (*id).to_owned())
@@ -392,6 +393,7 @@ impl DashboardState {
             return self.keep(wizard);
         };
         if let Some(refusal) = self.state.bundle_removal_refusal(&bundle_id) {
+            wizard.bundle_removal_outcome = Some(refusal.clone());
             self.notices.set(refusal);
             return self.keep(wizard);
         }
@@ -409,6 +411,7 @@ impl DashboardState {
             && wizard.bundle_removal_in_flight
         {
             wizard.bundle_removal_in_flight = false;
+            wizard.bundle_removal_outcome = None;
             wizard.bundle = wizard
                 .bundle
                 .min(self.config.bundles.len().saturating_sub(1));
@@ -426,6 +429,7 @@ impl DashboardState {
             && wizard.bundle_removal_in_flight
         {
             wizard.bundle_removal_in_flight = false;
+            wizard.bundle_removal_outcome = Some(format!("Could not remove project: {error}"));
             self.mode = Mode::New(wizard);
         }
         self.notices

@@ -38,6 +38,8 @@ Decision: Commit on the current branch and push its configured upstream after va
 
 Decision: Integrate upstream before final validation and use daemon protocol 65. Rationale: four concurrent upstream commits already use protocol 64 for daemon-owned session names. The current branch was fast-forwarded to `07044810f`; saved auto-AFK changes were reapplied and both protocol comments and all existing management transcripts were retained. No branch was created or changed. Date: 2026-10-27.
 
+Decision: Merge upstream after the first push was rejected and advance the combined protocol to 66. Rationale: concurrent project-removal changes already use protocol 65. Preserve both actions and update the inactivity coordinator in the new project-removal config-install path. Validate the affected daemon/protocol paths without repeating unrelated completed suites. Date: 2026-10-27.
+
 ## Outcomes & Retrospective
 
 Implementation and validation are complete and accepted. Full WUI validation passed: 57 Node tests and 113 deterministic Playwright tests, with three unconfigured lab cases skipped. Existing test dependencies were installed locally without tracked package changes. Chromium requires running outside the restricted sandbox on this host. No build storage or configuration was changed. No live daemon, store, or instance was used for testing this change.
@@ -47,6 +49,8 @@ The lock investigation confirmed normal active compilation under mbx's managed t
 Integrated protocol-65 validation completed: core, client and CLI full suites passed; controller passed 2159 tests with 17 ignored and one stale settings golden; TUI passed 563 with two ignored and one stale settings golden. Workspace Clippy, formatting and diff checks passed. All three backend auto-AFK tests, HTTP activity transport and frozen management compatibility tests passed. The only corrections are expected help text occurrences and TUI setting row ordering/padding; rerun only these two comparisons and doctests not reached after the library failures. No implementation source changed after final validation.
 
 Both corrected settings golden comparisons passed their targeted reruns. Controller and TUI doctest targets also completed successfully (neither contains doctests). All touched-crate suites therefore pass, using the original full runs plus only the two failing-case reruns. No successful suites or Clippy were repeated for fixture-only corrections. The parent reviewed the final fixture diff and integrated source before acceptance.
+
+After the concurrent upstream merge, protocol-66 checks also passed: three auto-AFK controller tests, project-removal RPC, frozen management compatibility, the full client suite (42 unit and one integration), two CLI reporter tests, workspace Clippy, formatting and diff checks. Independent review confirmed the new project-removal config-install path shares the same clock owner and changes the interval only when its configured value changes.
 
 ## Context and Orientation
 

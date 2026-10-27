@@ -696,6 +696,26 @@ impl RuntimeState {
             })?
     }
 
+    /// Remove a saved project under the daemon's config-mutation coordinator,
+    /// then publish the exact config returned by the persisted mutation.
+    pub async fn remove_project(&self, bundle_id: String) -> Result<()> {
+        let mut inactivity = self.config_mutation.lock().await;
+        let config =
+            tokio::task::spawn_blocking(move || crate::controller::remove_bundle(&bundle_id))
+                .await
+                .context("project removal task panicked")??;
+        self.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
+        {
+            self.owner().install_config(config.clone());
+            self.review_config
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone_from(&config.review);
+        }
+        self.publish_revision();
+        Ok(())
+    }
+
     /// Hand a changed workspace list to the terminal clients and the web viewer.
     pub(crate) fn publish_workspaces(&self, workspaces: Vec<WorkspaceRecord>) {
         self.workspaces_tx.send_replace(workspaces);
