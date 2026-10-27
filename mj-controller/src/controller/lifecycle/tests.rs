@@ -875,12 +875,9 @@ fn checkpointed_close_keeps_a_child_report_directory() {
     session.checkpoint = Some(checkpoint.clone());
 
     controller
-        .destroy_after_verified_checkpoint_with(
-            session_id,
-            &checkpoint,
-            &ProcessExecutor,
-            |_| Ok(()),
-        )
+        .destroy_after_verified_checkpoint_with(session_id, &checkpoint, &ProcessExecutor, |_| {
+            Ok(())
+        })
         .unwrap();
 
     let closed = &controller.state.sessions[session_id];

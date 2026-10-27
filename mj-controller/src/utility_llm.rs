@@ -806,6 +806,7 @@ mod tests {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         let backend = backend_for_profile(&profile).unwrap().unwrap();
         assert_eq!(backend.list_models().await.unwrap(), vec!["kimi-k2.5"]);
@@ -828,6 +829,7 @@ mod tests {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
             },
         );
         let runtime = UtilityLlmRuntime::default();
@@ -948,6 +950,7 @@ mod tests {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         assert_eq!(utility_family(&profile), Some(UtilityFamily::DeepSeek));
         assert!(

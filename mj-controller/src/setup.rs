@@ -348,6 +348,7 @@ fn probe_profile(kind: HarnessKind, home: &Path, codex_profile: Option<String>) 
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        muse_auto_review: None,
         codex_profile,
     };
     profile.inherit_provider_key();
@@ -582,6 +583,7 @@ pub fn build_config(homes: &[DiscoveredHome], repository: Option<&GithubReposito
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                muse_auto_review: None,
                 codex_profile: home.codex_profile.clone(),
             },
         );

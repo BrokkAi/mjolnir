@@ -28,7 +28,8 @@ startup composer and is outside this change.
 - [x] (2026-10-27 15:40Z) Full touched-crate suites, workspace Clippy, formatting, and diff checks pass. A concurrent-build doctest artifact failure passed its docs-only rerun.
 - [x] (2026-10-27 16:11Z) Commit implementation as `8f49f1413`, merge upstream through `77c0143b7`, and pass focused integration, upgrade, Clippy, and formatting checks.
 - [x] (2026-10-27 16:11Z) Fix the user-reported lifecycle regression call layout; direct pinned rustfmt file check and workspace formatting pass.
-- [ ] Merge the latest upstream updates, finish integration checks, and push current master.
+- [x] (2026-10-27 16:39Z) Merge latest upstream, compose protocol 67, complete missing profile fixture fields, and pass final workspace Clippy, workspace formatting, direct lifecycle-file formatting, and diff checks.
+- [ ] Publish the validated final integration commit to origin/master.
 
 ## Surprises & Discoveries
 
@@ -133,6 +134,17 @@ the pinned rustfmt; its direct edition-2024 check passes.
 Upstream subsequently advanced to `58f8eec8b` with protocol 66. Combine those
 updates at protocol 67 before the final push; the schema floor remains 100.
 
+That merge's focused CLI startup/automatic-away and TUI combined-render checks
+pass, and the requested direct lifecycle-file rustfmt check still passes. Its
+new optional `HarnessProfile.muse_auto_review` field was missing from existing
+fixture literals across the workspace. The missing initializers now use `None`;
+controller Clippy passes after 87 exact field additions in 28 controller files,
+with the other workspace omissions fixed similarly. No feature behavior changed.
+Final workspace Clippy, workspace formatting, the pinned direct lifecycle-file
+formatting check, and staged/unstaged diff checks all pass. The validated
+integration commit is ready for publication. No implementation or validation
+work remains; publication and peer notifications complete delivery.
+
 ## Context and Orientation
 
 `mj-tui/src/dashboard_standby.rs` owns `ChatState` composers for unregistered
@@ -179,7 +191,7 @@ During implementation run focused tests for the changed behavior, such as:
 
     mbx test -p brokk-mj-tui standby
     mbx test -p brokk-mj-chat <affected-filter>
-    mbx test -p brokk-mj-cli <affected-filter>
+    mbx test -p brokk-mjolnir <affected-filter>
 
 After the last change run each touched crate's complete suite once, then:
 
@@ -225,8 +237,8 @@ the saved prompt payload representation, and dashboard background task channels.
 Keep one authoritative draft throughout each transition and avoid additional
 workspace crates or new external dependencies.
 
-The frontend transfers the composer editing state together with its clipboard
-and attachment result receiver. Clipboard reads can start without a real session
+The frontend transfers the composer editing state together with its clipboard,
+attachment, and native submission result receivers. Clipboard reads can start without a real session
 ID; installation waits until registration binds the same composer to its actual
 session. Attach preparation snapshots the draft while the live composer remains
 editable; accepted attachment moves the live composer into the attached chat.

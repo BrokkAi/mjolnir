@@ -684,6 +684,7 @@ mod tests {
             context_window_bytes: None,
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
             legacy_subagents: None,
         };
         let choices = probe_profile(
@@ -749,6 +750,7 @@ mod tests {
                 context_window_bytes: None,
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
                 legacy_subagents: None,
             };
             let choices = probe_profile(
@@ -799,6 +801,7 @@ mod tests {
             context_window_bytes: None,
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
             legacy_subagents: None,
         };
         let key = fingerprint(&profile);
@@ -914,6 +917,7 @@ mod tests {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         let key = || fingerprint(&profile);
 
@@ -958,6 +962,7 @@ mod tests {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         let original = fingerprint(&profile);
         for _ in 0..2 {
@@ -985,6 +990,7 @@ mod tests {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         let resolve = |environment: BTreeMap<String, String>| {
             let mut environment = environment;
@@ -1305,6 +1311,7 @@ mod tests {
             context_window_bytes: None,
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
             legacy_subagents: None,
         };
         let mut config = Config::default();
@@ -1458,6 +1465,7 @@ mod tests {
                     context_window_bytes: None,
                     guardian_review_model: None,
                     codex_profile: None,
+                    muse_auto_review: None,
                     legacy_subagents: None,
                 },
             );
