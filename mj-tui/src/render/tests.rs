@@ -3566,6 +3566,12 @@ fn golden_operator_away_dialog() {
         (mj_core::config::SymbolSet::Unicode, "AFK", 100, 32),
         (mj_core::config::SymbolSet::Ascii, "AFK ASCII", 100, 32),
         (mj_core::config::SymbolSet::Unicode, "AFK small", 32, 12),
+        (
+            mj_core::config::SymbolSet::Unicode,
+            "AFK tall narrow",
+            56,
+            32,
+        ),
         (mj_core::config::SymbolSet::Unicode, "AFK tiny", 10, 5),
     ] {
         let mut config = config();
