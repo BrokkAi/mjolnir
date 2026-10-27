@@ -266,12 +266,6 @@ pub(super) async fn handle_action(
             refresh_runtime_controller(state).await;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::SetSessionAcpTitle { session_id, title } => {
-            blocking(move || crate::database::set_session_acp_title(&session_id, title.as_deref()))
-                .await?;
-            refresh_runtime_controller(state).await;
-            Ok(DaemonReply::Done)
-        }
         DaemonAction::MarkSessionTargetMissing {
             session_id,
             detail,

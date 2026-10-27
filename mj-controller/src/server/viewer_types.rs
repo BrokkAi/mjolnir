@@ -963,6 +963,10 @@ pub struct ViewerQuotaWindow {
     pub banked_resets: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percent_used: Option<u8>,
+    /// Claude's remaining Fable allowance, attached only to the master weekly
+    /// window so surfaces can show both readings without another meter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fable_remaining_percent: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<String>,
     /// Whether this window is on course to run out before it resets. The

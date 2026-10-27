@@ -1052,7 +1052,7 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
             .state
             .sessions
             .get(&parent_id)
-            .map(|session| session.display_title())
+            .map(|session| session.listed_title())
             .unwrap_or(&parent_id);
         let close_width = 3u16.min(inner.width);
         let close_area = Rect::new(

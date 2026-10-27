@@ -706,10 +706,13 @@ async fn the_dictation_chord_reports_why_it_cannot_run_in_the_shared_notices() {
 
 /// Launch finding R5-7: during a session's first turn the Sessions row showed
 /// the harness's title while the conversation header still said "project via
-/// fake", until the turn ended. The worker poll that gives the record its
-/// title now refreshes the open conversation too, so both read the record's
-/// listed title.
+/// fake", until the turn ended. The terminal used to title the record from
+/// its own copy of the worker poll, so the daemon's later record was
+/// identical and refreshed nothing. Now only the daemon titles the record:
+/// the poll leaves the name alone, and the daemon's record carries the new
+/// title to the row and the header together.
 // Hard-won: f2c36f6900: Harness title updates changed the session row but left the open conversation stale until the turn ended; the test checks the title reaches the header immediately.
+// Hard-won: e3e9d9fc21: the terminal titled sessions from its own copy of worker polls, so its names could disagree with the web viewer's.
 #[tokio::test]
 async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row() {
     let session_id = "title-lag";
@@ -766,18 +769,28 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
         },
     };
 
-    let retitled = crate::pollers::apply_worker_poll_update(
-        &mut controller,
-        &mut dashboard,
-        &mut chats,
-        update,
-        None,
-    )
-    .unwrap();
+    let projection =
+        crate::pollers::apply_worker_poll_update(&controller, &mut dashboard, update, None);
 
-    assert!(retitled.is_some());
+    assert!(projection.is_some());
     assert_eq!(
         controller.state.sessions[session_id].listed_title(),
+        "project via fake",
+        "the poll does not name the session"
+    );
+
+    // The daemon's record arrives as `apply_runtime_records` installs it.
+    let mut titled = record;
+    titled.acp_session_title = Some("r5 suspend probe".into());
+    let mut sessions = controller.state.sessions.clone();
+    sessions.insert(session_id.to_owned(), titled);
+    assert_ne!(sessions, controller.state.sessions, "the record changed");
+    controller.state.sessions = sessions;
+    dashboard.set_state(controller.state.clone());
+    crate::dashboard::drains::refresh_open_chats(&mut chats, &controller, &dashboard);
+
+    assert_eq!(
+        dashboard.session_record(session_id).unwrap().listed_title(),
         "r5 suspend probe",
         "the Sessions row's title"
     );

@@ -590,6 +590,22 @@ pub fn ensure_session_start_head(
     Ok(Some(head))
 }
 
+/// Whether every recorded repository retains a valid baseline owned by this session.
+pub fn session_holds_review_baselines(
+    git: &dyn GitCommandRunner,
+    repositories: &[PathBuf],
+    session: &str,
+) -> bool {
+    repositories.iter().all(|root| {
+        review_baseline_ref(git, root)
+            .ok()
+            .is_some_and(|reference| {
+                pinned_baseline(git, root, &reference)
+                    .is_some_and(|(_, point)| point.session.as_deref() == Some(session))
+            })
+    })
+}
+
 /// Pins the current worktree as `session`'s baseline for a fresh worker
 /// workspace.
 ///
