@@ -4248,9 +4248,10 @@ fn staged_muse_settings(body: &str) -> (tempfile::TempDir, PathBuf) {
 }
 
 // Hard-won: a24070f: Muse launches failed when staged settings retained the shipped :auto-review profile.
-// Both policies stage `:ask-me`: `allowAll`/`/:unrestricted` emits no
-// permission requests, so the adapter's client-side auto-review would never
-// fire. Unconstrained Muse differs only by disabling the sandbox.
+// Both policies stage `:ask-me`. Unconstrained Muse additionally runs
+// `allowAll` approvals with auto-review off (plus `--disable-sandbox`), so
+// no permission requests are emitted and the staged profile never matters;
+// a profile with `muse_auto_review = true` opts back into the reviewer.
 #[test]
 fn muse_staged_settings_replace_the_auto_review_profile_under_every_policy() {
     for (policy, profile) in [

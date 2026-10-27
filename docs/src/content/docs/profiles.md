@@ -993,10 +993,12 @@ approvals, and turns on muse-acp's auto-review for every session: a second,
 read-only Muse model reviews each approval request with a Codex-style safety
 policy, and a failed or unusable review denies the action. Muse's own
 `:auto-review` profile is never staged, because `muse serve` refuses it.
-Unconstrained sessions stage `:ask-me` as well, keep `promptUnmatched`
-approvals and auto-review on, and disable only the sandbox
-(`--disable-sandbox`): `allowAll` would emit no permission requests, leaving
-the reviewer nothing to decide.
+Unconstrained sessions stage `:ask-me` as well, but select `allowAll`
+approvals with auto-review off and disable only the sandbox
+(`--disable-sandbox`), so they run without permission checks like OpenCode.
+A Muse profile with `muse_auto_review = true` keeps the reviewer on in
+unconstrained targets too (`promptUnmatched` approvals with auto-review on
+inside the container boundary).
 
 Muse accepts one workspace root, without attached directories. Native import
 and checkpoint restore can relocate that workspace while retaining the session

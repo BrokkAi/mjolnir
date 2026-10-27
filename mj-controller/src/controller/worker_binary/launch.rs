@@ -919,9 +919,7 @@ pub(super) fn worker_launch_config_with_checkout(
     profile
         .kind
         .configure_home_environment(Path::new(&target_profile_home), &mut environment);
-    profile
-        .kind
-        .configure_execution_environment(execution_policy, &mut environment)?;
+    profile.configure_execution_environment(execution_policy, &mut environment)?;
     // The project's identity also keys the shared tool cache and names the
     // Claude project directory, so it is worked out for every session. Only
     // the memory launch config below depends on the session's choice.
