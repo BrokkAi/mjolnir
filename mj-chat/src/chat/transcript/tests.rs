@@ -3963,6 +3963,7 @@ fn golden_conversation_title() {
 }
 
 // Hard-won: d00682c9: expanded send_message details showed only the receipt, omitting its arguments.
+// Hard-won: 464f66ded: raw-output-only failures omitted their error message beside expanded arguments.
 #[test]
 fn golden_rich_transcript_tool_presentation() {
     let mut output = String::new();
@@ -4236,6 +4237,182 @@ fn golden_rich_transcript_tool_presentation() {
         &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 28)),
         &[],
     );
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let mut session = MaterializedSession::empty("raw-output-failure");
+    let diagnostic = "permission denied while contacting peer";
+    for (index, (label, update)) in [
+        (
+            "raw-output failure pending expanded",
+            serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "peer-request",
+                "title": "contact_peer",
+                "status": "pending",
+                "rawInput": {"peer": "peer-session", "message": "Check parser"}
+            }),
+        ),
+        (
+            "raw-output failure running expanded",
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "peer-request",
+                "status": "in_progress",
+                "content": [{"type": "content", "content": {
+                    "type": "text", "text": "peer handshake started"
+                }}]
+            }),
+        ),
+        (
+            "raw-output failure failed expanded",
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "peer-request",
+                "status": "failed",
+                "rawOutput": {"result": null, "error": {"message": diagnostic}}
+            }),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let seq = u64::try_from(index).unwrap() + 1;
+        // Keep the original ACP fields in the durable projection for replay.
+        let mut event = mj_core::relay::RelayEvent {
+            format: mj_core::relay::RELAY_EVENT_FORMAT_V1,
+            ordinal: seq,
+            previous_digest: session.applied_event_digest.clone(),
+            digest: String::new(),
+            recorded_at_ms: started,
+            command_id: None,
+            observation: mj_core::relay::RelayObservation::SessionUpdate {
+                update: Box::new(serde_json::from_value(update.clone()).unwrap()),
+            },
+        };
+        event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
+        let projected = mj_transcript::projection::project_relay_event(&session, &event).unwrap();
+        mj_transcript::projection::apply_committed_projection_event(
+            &mut session,
+            &event,
+            projected.mutation,
+        )
+        .unwrap();
+        chat.apply_session_update_at(seq, Some(started), &update);
+        if index == 0 {
+            let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 24));
+            click_rendered_text(&mut chat, &rows, "contact_peer");
+        }
+        let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 24));
+        if index == 2 {
+            let rendered = rows.join("\n");
+            assert!(rendered.contains("peer-session"), "{rendered}");
+            assert!(rendered.contains("Check parser"), "{rendered}");
+            assert_eq!(
+                rendered.matches("peer handshake started").count(),
+                1,
+                "{rendered}"
+            );
+            assert_eq!(rendered.matches(diagnostic).count(), 1, "{rendered}");
+        }
+        append_transcript_golden_state(&mut output, label, 80, 24, &rows, &[]);
+    }
+    let mut restored = ChatState::from_materialized(&session, &[], &[]);
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut restored, 80, 24));
+    click_rendered_text(&mut restored, &rows, "contact_peer");
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut restored, 80, 24));
+    let rendered = rows.join("\n");
+    assert!(rendered.contains("peer-session"), "{rendered}");
+    assert!(rendered.contains("Check parser"), "{rendered}");
+    assert_eq!(
+        rendered.matches("peer handshake started").count(),
+        1,
+        "{rendered}"
+    );
+    assert_eq!(rendered.matches(diagnostic).count(), 1, "{rendered}");
+    append_transcript_golden_state(
+        &mut output,
+        "raw-output failure replayed and reopened",
+        80,
+        24,
+        &rows,
+        &[],
+    );
+
+    let snapshot_session = mj_transcript::projection::materialized_session_from_entries(
+        "raw-output-failure",
+        &restored.entries,
+        3,
+        mj_core::relay::WorkerPhase::Idle,
+        Default::default(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let mut snapshot_restored = ChatState::from_materialized(&snapshot_session, &[], &[]);
+    let snapshot_rows =
+        crate::golden::buffer_lines(&golden_chat_buffer(&mut snapshot_restored, 80, 24));
+    click_rendered_text(&mut snapshot_restored, &snapshot_rows, "contact_peer");
+    assert_eq!(
+        crate::golden::buffer_lines(&golden_chat_buffer(&mut snapshot_restored, 80, 24)),
+        rows,
+        "the snapshot helper preserves the expanded error with its arguments and progress"
+    );
+
+    // Later partial updates own only the fields they carry. A new raw output
+    // replaces the error rather than accumulating it with earlier failures.
+    let html_error = "<error>peer denied</error>";
+    for (seq, fields, expected_error) in [
+        (4, serde_json::json!({"status": "failed"}), Some(diagnostic)),
+        (
+            5,
+            serde_json::json!({"rawOutput": {"error": "peer retry rejected"}}),
+            Some("peer retry rejected"),
+        ),
+        (
+            6,
+            serde_json::json!({"rawOutput": {"result": null, "error": null}}),
+            None,
+        ),
+        (
+            7,
+            serde_json::json!({
+                "rawOutput": {"error": html_error},
+                "content": [
+                    {"type": "content", "content": {
+                        "type": "text", "text": "peer handshake started"
+                    }},
+                    {"type": "content", "content": {
+                        "type": "text", "text": html_error
+                    }}
+                ]
+            }),
+            Some(html_error),
+        ),
+    ] {
+        let mut update = fields;
+        update["sessionUpdate"] = serde_json::json!("tool_call_update");
+        update["toolCallId"] = serde_json::json!("peer-request");
+        chat.apply_session_update_at(seq, Some(started), &update);
+        assert_eq!(
+            chat.entries[0].tool_error.is_some(),
+            expected_error.is_some()
+        );
+        let rendered =
+            crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 24)).join("\n");
+        assert!(rendered.contains("peer-session"), "{rendered}");
+        assert!(rendered.contains("Check parser"), "{rendered}");
+        assert_eq!(
+            rendered.matches("peer handshake started").count(),
+            1,
+            "{rendered}"
+        );
+        for error in [diagnostic, "peer retry rejected", html_error] {
+            assert_eq!(
+                rendered.matches(error).count(),
+                usize::from(expected_error == Some(error)),
+                "{rendered}"
+            );
+        }
+    }
 
     let session = fallback_terminal_session(terminal_record(Some(0), None));
     let mut chat = ChatState::from_materialized(&session, &[], &[]);
