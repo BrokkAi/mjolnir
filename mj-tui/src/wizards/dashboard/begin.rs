@@ -68,12 +68,13 @@ impl DashboardState {
             .nth_offered_profile(profile)
             .expect("an offered profile was checked above");
         let profile_id = profile_id.as_str();
-        let mut delegation = subagents::SubagentDraft::new(self.state.last_subagent_policy.clone());
+        let remembered = self.state.last_subagent_policy_for(profile_id);
+        let mut delegation = subagents::SubagentDraft::new(remembered.clone());
         delegation.refresh_create(
             profile_id,
             &self.config,
             &self.profile_capabilities,
-            &self.state.last_subagent_policy,
+            &remembered,
         );
         self.mode = Mode::New(NewWizard {
             subagents: Box::new(delegation),

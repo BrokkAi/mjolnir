@@ -201,7 +201,7 @@ fn unavailable_import_explains_why_and_copies_its_id_without_closing() {
 fn state_with(sessions: Vec<SessionRecord>) -> State {
     State {
         operator_presence: Default::default(),
-        last_subagent_policy: Default::default(),
+        last_subagent_policies: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
         sessions: sessions

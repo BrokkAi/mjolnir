@@ -19,9 +19,11 @@ pub struct ViewerSnapshot {
     pub profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
     #[serde(
         default,
-        deserialize_with = "mj_core::subagent::deserialize_launch_policy"
+        alias = "last_subagent_policy",
+        deserialize_with = "mj_core::subagent::deserialize_policy_map"
     )]
-    pub last_subagent_policy: mj_core::subagent::SubagentPolicy,
+    pub last_subagent_policies:
+        std::collections::BTreeMap<String, mj_core::subagent::SubagentPolicy>,
     #[serde(default)]
     pub subagents_configured: bool,
     pub revision: u64,
@@ -398,7 +400,7 @@ impl ViewerSnapshot {
             .collect();
         Self {
             profile_capabilities: Default::default(),
-            last_subagent_policy: state.last_subagent_policy.clone(),
+            last_subagent_policies: state.last_subagent_policies.clone(),
             operator_away: state.operator_presence.away,
             subagents_configured: config.subagents.is_configured(),
             revision,

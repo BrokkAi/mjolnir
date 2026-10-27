@@ -1020,6 +1020,188 @@ subagent selector count: 1
 action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"none"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":4,"memory_bytes":8589934592},"remember_container_size":false}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
+=== beta restores None independently of alpha Mjolnir (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+beta
+Where to run
+container
+Container size
+4 CPU · 8 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Attached directories
+
+Source directories must exist on the selected target’s host.
+
+Host directory
+Container path (optional)
+Access
+read-only
+copy-on-write
+read-write
+
+Add mount
+Delegation
+Native
+Mjolnir
+None
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"none","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"beta","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
+project creation requests: 0
+=== profile-specific delegation and launch (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+beta
+Where to run
+container
+Container size
+4 CPU · 8 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Attached directories
+
+Source directories must exist on the selected target’s host.
+
+Host directory
+Container path (optional)
+Access
+read-only
+copy-on-write
+read-write
+
+Add mount
+Delegation
+Native
+Mjolnir
+None
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"none","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"beta","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"none"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":4,"memory_bytes":8589934592},"remember_container_size":false}]
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"beta","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
+project creation requests: 0
+=== sole remaining beta restores None independently of alpha Mjolnir (390x844) ===
+New session
+
+Step 3 of 3 · Review
+
+Account
+beta
+Where to run
+container
+Container size
+4 CPU · 8 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Attached directories
+
+Source directories must exist on the selected target’s host.
+
+Host directory
+Container path (optional)
+Access
+read-only
+copy-on-write
+read-write
+
+Add mount
+Delegation
+Native
+Mjolnir
+None
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"none","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
+project creation requests: 0
+=== sole remaining profile delegation and launch (390x844) ===
+New session
+
+Step 3 of 3 · Review
+
+Account
+beta
+Where to run
+container
+Container size
+4 CPU · 8 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Attached directories
+
+Source directories must exist on the selected target’s host.
+
+Host directory
+Container path (optional)
+Access
+read-only
+copy-on-write
+read-write
+
+Add mount
+Delegation
+Native
+Mjolnir
+None
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"none","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"beta","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"none"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":4,"memory_bytes":8589934592},"remember_container_size":false}]
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
+project creation requests: 0
 === review for harness without subagent support (390x844) ===
 New session
 

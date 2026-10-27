@@ -715,6 +715,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
     });
     let connection = rusqlite::Connection::open(&path).unwrap();
     schema::restore_github_v84_schema(&connection);
+    schema::restore_pre100_subagent_preference(&connection);
     connection
         .execute_batch(
             "ALTER TABLE sessions ADD COLUMN expected_runtime_identity TEXT;
@@ -785,6 +786,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
     save_session_to(&path, &record).unwrap();
     let connection = rusqlite::Connection::open(&path).unwrap();
     schema::restore_github_v84_schema(&connection);
+    schema::restore_pre100_subagent_preference(&connection);
     connection
         .execute_batch(
         "ALTER TABLE sessions DROP COLUMN checkout_json;
@@ -882,6 +884,7 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
 
     let connection = rusqlite::Connection::open(&database).unwrap();
     schema::restore_github_v84_schema(&connection);
+    schema::restore_pre100_subagent_preference(&connection);
     connection
         .execute_batch(
             "ALTER TABLE sessions DROP COLUMN publication_json;
@@ -5538,6 +5541,7 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
     forget_verified_schema(&path);
     let raw = Connection::open(&path).unwrap();
     schema::restore_github_v84_schema(&raw);
+    schema::restore_pre100_subagent_preference(&raw);
     raw.execute_batch(
         "DROP TABLE quota_reset_cache;
         DELETE FROM schema_migrations WHERE version >= 44;
@@ -6216,6 +6220,7 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
     // Put the store back at revision 52, whose constraint has no `parked`.
     let raw = Connection::open(&database).unwrap();
     schema::restore_github_v84_schema(&raw);
+    schema::restore_pre100_subagent_preference(&raw);
     raw.execute_batch(
         "PRAGMA writable_schema = ON;
          UPDATE sqlite_schema
@@ -6301,6 +6306,13 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     use mj_core::subagent::SubagentPolicy;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("mj.sqlite3");
+    open(&path)
+        .unwrap()
+        .execute(
+            "INSERT INTO subagent_preference(profile_id, policy) VALUES('', ?1)",
+            [serde_json::to_string(&SubagentPolicy::Native).unwrap()],
+        )
+        .unwrap();
     let mut parent = session("fixed-parent", "project");
     let fixed = SubagentPolicy::Mjolnir {
         straightforward: Some(Box::new(mj_core::config::SubagentChoice {
@@ -6312,14 +6324,38 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     parent.subagents = Some(fixed.clone());
     save_new_session_to(&path, &parent, None, true, true).unwrap();
     let state = load_state_from(&path).unwrap();
-    assert_eq!(state.last_subagent_policy, fixed);
+    assert_eq!(state.last_subagent_policies.get("codex"), Some(&fixed));
+    assert_eq!(
+        state.last_subagent_policies.get(""),
+        Some(&SubagentPolicy::Native)
+    );
+    assert_eq!(
+        state.last_subagent_policy_for("unseen-profile"),
+        SubagentPolicy::Native
+    );
     assert_eq!(state.sessions[&parent.id].subagents, Some(fixed.clone()));
+    let mut other_profile = session("other-profile", "project");
+    other_profile.last_profile = "codex-alt".into();
+    other_profile.subagents = Some(SubagentPolicy::Native);
+    save_new_session_to(&path, &other_profile, None, true, true).unwrap();
+    let state = load_state_from(&path).unwrap();
+    assert_eq!(state.last_subagent_policies.get("codex"), Some(&fixed));
+    assert_eq!(
+        state.last_subagent_policies.get("codex-alt"),
+        Some(&SubagentPolicy::Native)
+    );
     let mut child = session("child", "project");
     child.subagents = Some(SubagentPolicy::None);
     save_session_to(&path, &child).unwrap();
     parent.title = "resumed parent".into();
     save_session_to(&path, &parent).unwrap();
-    assert_eq!(load_state_from(&path).unwrap().last_subagent_policy, fixed);
+    assert_eq!(
+        load_state_from(&path)
+            .unwrap()
+            .last_subagent_policies
+            .get("codex"),
+        Some(&fixed)
+    );
     // An explicit unattended create keeps the accepted session policy but
     // cannot replace the interactive choice or host-size preselection.
     let mut unattended = session("unattended", "project");
@@ -6339,7 +6375,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     )
     .unwrap();
     let state = load_state_from(&path).unwrap();
-    assert_eq!(state.last_subagent_policy, fixed);
+    assert_eq!(state.last_subagent_policies.get("codex"), Some(&fixed));
     assert_eq!(
         state.sessions["unattended"].subagents,
         Some(SubagentPolicy::Native)
@@ -6349,6 +6385,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     // Checking the broader launch-choice flag does not opt into saving size.
     let mut interactive_without_size = session("interactive-without-size", "project");
     interactive_without_size.harness_kind = HarnessKind::Dsh;
+    interactive_without_size.last_profile = "dsh".into();
     interactive_without_size.subagents = Some(SubagentPolicy::Native);
     save_new_session_to(
         &path,
@@ -6364,6 +6401,13 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         false,
     )
     .unwrap();
+    assert_eq!(
+        load_state_from(&path)
+            .unwrap()
+            .last_subagent_policies
+            .get("dsh"),
+        Some(&SubagentPolicy::Native)
+    );
     assert!(
         !load_state_from(&path)
             .unwrap()
@@ -6372,6 +6416,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     );
     let mut interactive_with_size = session("interactive-with-size", "project");
     interactive_with_size.harness_kind = HarnessKind::Dsh;
+    interactive_with_size.last_profile = "dsh".into();
     interactive_with_size.subagents = Some(SubagentPolicy::Native);
     save_new_session_to(
         &path,
@@ -6394,28 +6439,51 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
             memory_bytes: 64,
         }
     );
-    // DSH has no sub-agents of its own: its None must not become what the
-    // next Claude or Codex session starts with, but its Mjolnir does.
+    // Each profile remembers its own accepted policy, including DSH choices.
     let mut dsh = session("dsh-none", "project");
     dsh.harness_kind = HarnessKind::Dsh;
+    dsh.last_profile = "dsh".into();
     dsh.subagents = Some(SubagentPolicy::None);
     save_new_session_to(&path, &dsh, None, true, true).unwrap();
-    assert_eq!(load_state_from(&path).unwrap().last_subagent_policy, fixed);
+    assert_eq!(
+        load_state_from(&path)
+            .unwrap()
+            .last_subagent_policies
+            .get("dsh"),
+        Some(&SubagentPolicy::None)
+    );
+    assert_eq!(
+        load_state_from(&path)
+            .unwrap()
+            .last_subagent_policies
+            .get("codex"),
+        Some(&fixed)
+    );
     let plain = SubagentPolicy::Mjolnir {
         straightforward: None,
         subtle: None,
     };
     let mut dsh = session("dsh-mjolnir", "project");
     dsh.harness_kind = HarnessKind::Dsh;
+    dsh.last_profile = "dsh".into();
     dsh.subagents = Some(plain.clone());
     save_new_session_to(&path, &dsh, None, true, true).unwrap();
-    assert_eq!(load_state_from(&path).unwrap().last_subagent_policy, plain);
+    assert_eq!(
+        load_state_from(&path)
+            .unwrap()
+            .last_subagent_policies
+            .get("dsh"),
+        Some(&plain)
+    );
     let mut next = session("next", "project");
     next.subagents = Some(SubagentPolicy::None);
     save_new_session_to(&path, &next, None, true, true).unwrap();
     assert_eq!(
-        load_state_from(&path).unwrap().last_subagent_policy,
-        SubagentPolicy::None
+        load_state_from(&path)
+            .unwrap()
+            .last_subagent_policies
+            .get("codex"),
+        Some(&SubagentPolicy::None)
     );
     assert_eq!(
         load_state_from(&path).unwrap().sessions[&parent.id].subagents,
@@ -6461,14 +6529,175 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
             .unwrap();
         connection
             .execute(
-                "UPDATE subagent_preference SET policy=?1 WHERE singleton=1",
+                "UPDATE subagent_preference SET policy=?1 WHERE profile_id='codex'",
                 [json],
             )
             .unwrap();
         let state = load_state_from(&path).unwrap();
         assert_eq!(state.sessions[&parent.id].subagents, Some(expected.clone()));
-        assert_eq!(state.last_subagent_policy, expected);
+        assert_eq!(state.last_subagent_policies.get("codex"), Some(&expected));
     }
+}
+
+#[test]
+fn profile_rename_moves_remembered_choice_atomically_and_idempotently() {
+    use mj_core::subagent::SubagentPolicy;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("rename-profile.sqlite3");
+    let mut old = session("old-profile-session", "project");
+    old.last_profile = "old-profile".into();
+    old.subagents = Some(SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
+    save_new_session_to(&path, &old, None, true, true).unwrap();
+    let mut destination = session("new-profile-session", "project");
+    destination.last_profile = "new-profile".into();
+    destination.subagents = Some(SubagentPolicy::None);
+    save_new_session_to(&path, &destination, None, true, true).unwrap();
+
+    assert_eq!(
+        rename_profile_references_at(&path, "old-profile", "new-profile").unwrap(),
+        1
+    );
+    let state = load_state_from(&path).unwrap();
+    assert_eq!(state.sessions[&old.id].last_profile, "new-profile");
+    assert_eq!(
+        state.last_subagent_policies.get("new-profile"),
+        old.subagents.as_ref()
+    );
+    assert!(!state.last_subagent_policies.contains_key("old-profile"));
+    assert_eq!(
+        rename_profile_references_at(&path, "old-profile", "new-profile").unwrap(),
+        0
+    );
+    assert_eq!(
+        load_state_from(&path)
+            .unwrap()
+            .last_subagent_policies
+            .get("new-profile"),
+        old.subagents.as_ref()
+    );
+    assert_eq!(
+        rename_profile_references_at(&path, "new-profile", "new-profile").unwrap(),
+        0
+    );
+    assert_eq!(
+        load_state_from(&path)
+            .unwrap()
+            .last_subagent_policies
+            .get("new-profile"),
+        old.subagents.as_ref()
+    );
+}
+
+#[test]
+fn committed_profile_preferences_track_insert_overwrite_rename_rollback_and_delete() {
+    const CHILD: &str = "MJ_COMMITTED_PROFILE_PREFERENCE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "committed_profile_preferences_track_insert_overwrite_rename_rollback_and_delete",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+
+    use mj_core::subagent::SubagentPolicy;
+    let _writer = install_isolated_test_writer();
+    let committed = || committed_state().unwrap().unwrap();
+    submit_database_write("seed_legacy_profile_preference", |connection| {
+        connection.execute(
+            "INSERT INTO subagent_preference(profile_id, policy) VALUES('', ?1)",
+            [serde_json::to_string(&SubagentPolicy::Native)?],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        committed().state.last_subagent_policies.get(""),
+        Some(&SubagentPolicy::Native)
+    );
+
+    let mut first = session("profile-choice-one", "project");
+    first.subagents = Some(SubagentPolicy::None);
+    save_new_session(&first, None, true, false).unwrap();
+    assert_eq!(
+        committed().state.last_subagent_policies.get("codex"),
+        Some(&SubagentPolicy::None)
+    );
+    let mut second = session("profile-choice-two", "project");
+    second.subagents = Some(SubagentPolicy::Native);
+    save_new_session(&second, None, true, false).unwrap();
+    assert_eq!(
+        committed().state.last_subagent_policies.get("codex"),
+        Some(&SubagentPolicy::Native)
+    );
+    assert_eq!(
+        committed().state.last_subagent_policies.get(""),
+        Some(&SubagentPolicy::Native)
+    );
+
+    rename_profile_references("codex", "codex-renamed").unwrap();
+    assert_eq!(
+        committed()
+            .state
+            .last_subagent_policies
+            .get("codex-renamed"),
+        Some(&SubagentPolicy::Native)
+    );
+    assert!(
+        !committed()
+            .state
+            .last_subagent_policies
+            .contains_key("codex")
+    );
+    assert_eq!(
+        committed().state.last_subagent_policies.get(""),
+        Some(&SubagentPolicy::Native)
+    );
+
+    submit_database_write("rollback_profile_preference", |connection| {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE subagent_preference SET policy='true' WHERE profile_id='codex-renamed';
+             ROLLBACK;",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        committed()
+            .state
+            .last_subagent_policies
+            .get("codex-renamed"),
+        Some(&SubagentPolicy::Native)
+    );
+
+    submit_database_write("delete_profile_preference", |connection| {
+        connection.execute(
+            "DELETE FROM subagent_preference WHERE profile_id='codex-renamed'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        !committed()
+            .state
+            .last_subagent_policies
+            .contains_key("codex-renamed")
+    );
+    assert_eq!(
+        committed().state.last_subagent_policy_for("codex-renamed"),
+        SubagentPolicy::Native
+    );
 }
 
 /// A converted session's bundle may already be an alias of another project in

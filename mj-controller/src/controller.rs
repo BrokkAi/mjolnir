@@ -1122,7 +1122,9 @@ impl Controller {
         )?;
         let policy = record.subagents.clone().unwrap_or_default();
         if remember_launch_choices && policy.updates_remembered_choice(record.harness_kind) {
-            self.state.last_subagent_policy = policy;
+            self.state
+                .last_subagent_policies
+                .insert(profile_id.to_owned(), policy);
         }
         self.state.sessions.insert(id.clone(), record);
         if let Some((host, size)) = selected_container_size {
@@ -1271,6 +1273,11 @@ impl Controller {
                 .get_mut(&id)
                 .expect("collected session")
                 .last_profile = new_id.to_owned();
+        }
+        if let Some(policy) = self.state.last_subagent_policies.remove(old_id) {
+            self.state
+                .last_subagent_policies
+                .insert(new_id.to_owned(), policy);
         }
         remove_config_rename_journal()?;
         Ok(())

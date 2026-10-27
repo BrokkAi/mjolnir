@@ -1252,6 +1252,8 @@ const CONFIG_ID_RENAME_CHILD: &str = "MJ_TEST_CONFIG_ID_RENAME_CHILD";
 
 #[test]
 fn configuration_id_rename_rewrites_durable_session_references() {
+    use mj_core::subagent::SubagentPolicy;
+
     if std::env::var_os(CONFIG_ID_RENAME_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         run_registration_child(
@@ -1278,10 +1280,24 @@ fn configuration_id_rename_rewrites_durable_session_references() {
             launch_options(Vec::new()),
         )
         .unwrap();
+    assert_eq!(
+        controller.state.last_subagent_policy_for("codex"),
+        SubagentPolicy::Native
+    );
 
     controller
         .rename_profile_id("codex", "codex-renamed")
         .unwrap();
+    assert_eq!(
+        controller.state.last_subagent_policies.get("codex-renamed"),
+        Some(&SubagentPolicy::Native)
+    );
+    assert!(
+        !controller
+            .state
+            .last_subagent_policies
+            .contains_key("codex")
+    );
     // Hard-won: #1370: a runtime switched off came back on under its new name.
     let (_, ()) = Config::update(|config| {
         config.disabled_targets.insert("podman".into());
@@ -2540,10 +2556,13 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
         config: registration_config(),
         state: State {
             operator_presence: Default::default(),
-            last_subagent_policy: SubagentPolicy::Mjolnir {
-                straightforward: None,
-                subtle: None,
-            },
+            last_subagent_policies: std::collections::BTreeMap::from([(
+                "codex".into(),
+                SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                },
+            )]),
             ..Default::default()
         },
     };

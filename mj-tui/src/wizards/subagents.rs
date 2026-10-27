@@ -20,6 +20,8 @@ pub(crate) struct SubagentDraft {
     pub(crate) discovery: Option<SubagentDiscovery>,
     /// The harness of the profile the choice is for, once known.
     harness: Option<mj_core::config::HarnessKind>,
+    /// The profile whose remembered policy initialized this draft.
+    profile_id: Option<String>,
 }
 
 /// One entry of the delegation combo box.
@@ -218,6 +220,15 @@ impl SubagentDraft {
         snapshot: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
         remembered: &SubagentPolicy,
     ) {
+        if self.profile_id.as_deref() != Some(profile) {
+            self.profile_id = Some(profile.to_owned());
+            self.chosen_policy = None;
+            self.last_mjolnir_policy = remembered
+                .uses_mjolnir()
+                .then(|| Box::new(remembered.clone()));
+            self.policy = remembered.clone();
+            self.combo = ComboBoxState::default();
+        }
         self.update_choices(profile, config, snapshot);
         // Keep the user's intent separate from the available displayed policy.
         let desired = self
@@ -295,12 +306,22 @@ impl DashboardState {
 
     pub(crate) fn take_subagent_discovery(&mut self) -> Option<DashboardAction> {
         let creating = matches!(&self.mode, Mode::New(_));
-        let remembered = self.state.last_subagent_policy.clone();
+        let remembered = if let Mode::New(wizard) = &self.mode {
+            let profile = self.offered_profiles().nth(wizard.profile)?.0.to_owned();
+            Some(self.state.last_subagent_policy_for(&profile))
+        } else {
+            None
+        };
         let config = self.config.clone();
         let snapshot = self.profile_capabilities.clone();
         let (draft, profile) = self.review_subagent_draft()?;
         if creating {
-            draft.refresh_create(&profile, &config, &snapshot, &remembered);
+            draft.refresh_create(
+                &profile,
+                &config,
+                &snapshot,
+                remembered.as_ref().expect("Create preference was resolved"),
+            );
         } else {
             draft.update_choices(&profile, &config, &snapshot);
         }

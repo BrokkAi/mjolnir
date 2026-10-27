@@ -560,9 +560,6 @@ mod delegation_replay_tests {
         );
         config.save().unwrap();
         let workspace = crate::database::create_workspace("launch choices").unwrap();
-        let mut state = crate::database::load_state().unwrap();
-        state.last_subagent_policy = SubagentPolicy::None;
-        crate::database::save_state(&state).unwrap();
         let runtime = crate::daemon::tests::test_runtime_state();
         let path = GoPreferences::path();
         for remember in [false, true, false] {
@@ -572,7 +569,9 @@ mod delegation_replay_tests {
                 .unwrap()
                 .metadata
                 .recent_launch;
-            let policy_before = crate::database::load_state().unwrap().last_subagent_policy;
+            let policy_before = crate::database::load_state()
+                .unwrap()
+                .last_subagent_policy_for("codex");
             let request = mj_client::daemon::CreateSessionRequest {
                 remember_launch_choices: remember,
                 remember_container_size: false,
@@ -621,7 +620,9 @@ mod delegation_replay_tests {
                     })
                 );
                 assert_eq!(
-                    crate::database::load_state().unwrap().last_subagent_policy,
+                    crate::database::load_state()
+                        .unwrap()
+                        .last_subagent_policy_for("codex"),
                     SubagentPolicy::Native
                 );
                 assert_eq!(
@@ -643,7 +644,9 @@ mod delegation_replay_tests {
                     recent_before
                 );
                 assert_eq!(
-                    crate::database::load_state().unwrap().last_subagent_policy,
+                    crate::database::load_state()
+                        .unwrap()
+                        .last_subagent_policy_for("codex"),
                     policy_before
                 );
             }

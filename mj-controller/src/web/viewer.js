@@ -2220,10 +2220,24 @@ function freshDraft() {
     resourceLoading: false,
     resourceError: '',
   };
-  draft.subagents = delegationPolicy(snapshot?.last_subagent_policy);
+  draft.subagents = rememberedDelegationPolicy(draft.profileId);
   if (draft.subagents.mode === 'mjolnir' && !mjolnirAvailable(draft)) draft.subagents = { mode: 'native' };
   setNewTargetSizing(draft, draft.targetId);
   return draft;
+}
+
+function rememberedDelegationPolicy(profileId) {
+  const policies = snapshot?.last_subagent_policies || {};
+  return delegationPolicy(Object.hasOwn(policies, profileId)
+    ? policies[profileId]
+    : Object.hasOwn(policies, '') ? policies[''] : { mode: 'native' });
+}
+
+function selectNewProfile(draft, profileId) {
+  if (draft.profileId === profileId) return;
+  draft.profileId = profileId;
+  draft.subagents = rememberedDelegationPolicy(profileId);
+  if (draft.subagents.mode === 'mjolnir' && !mjolnirAvailable(draft)) draft.subagents = { mode: 'native' };
 }
 
 
@@ -2334,7 +2348,7 @@ function visibleSteps() {
 // may have started on a default that has since stopped being offered.
 function settleSkippedNewSteps(draft) {
   const profileId = soleProfileId();
-  if (profileId) draft.profileId = profileId;
+  if (profileId) selectNewProfile(draft, profileId);
   const targetId = loneNewTargetId();
   if (targetId && draft.targetId !== targetId) {
     draft.targetId = targetId;
@@ -2427,8 +2441,7 @@ function renderNewForm() {
       };
       describe(select.value);
       select.onchange = () => {
-        newDraft.profileId = select.value;
-        if (newDraft.subagents.mode === 'mjolnir' && !mjolnirAvailable(newDraft)) newDraft.subagents = { mode: 'native' };
+        selectNewProfile(newDraft, select.value);
         describe(select.value);
       };
       field.append(select, description);

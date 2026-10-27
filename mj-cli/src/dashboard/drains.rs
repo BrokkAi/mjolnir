@@ -283,7 +283,7 @@ impl DashboardContext {
         self.apply_runtime_records(
             update.records,
             update.subagents,
-            update.last_subagent_policy,
+            update.last_subagent_policies,
         );
         self.dashboard
             .set_native_agent_snapshot(update.native_agents);
@@ -411,7 +411,10 @@ impl DashboardContext {
         &mut self,
         records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
         subagents: mj_core::snapshot_map::SnapshotMap<String, SubagentRecord>,
-        last_subagent_policy: mj_core::subagent::SubagentPolicy,
+        last_subagent_policies: std::collections::BTreeMap<
+            String,
+            mj_core::subagent::SubagentPolicy,
+        >,
     ) {
         let mut sessions = records;
         read_receipts::preserve_read_positions(&mut sessions, &self.controller.state.sessions);
@@ -444,7 +447,7 @@ impl DashboardContext {
         }
         if self.controller.state.sessions == sessions
             && self.controller.state.subagents == subagents
-            && self.controller.state.last_subagent_policy == last_subagent_policy
+            && self.controller.state.last_subagent_policies == last_subagent_policies
         {
             return;
         }
@@ -462,7 +465,7 @@ impl DashboardContext {
         self.departed_records.retain(|id, _| chats.contains_key(id));
         self.controller.state.sessions = sessions;
         self.controller.state.subagents = subagents;
-        self.controller.state.last_subagent_policy = last_subagent_policy;
+        self.controller.state.last_subagent_policies = last_subagent_policies;
         self.dashboard.set_state(self.controller.state.clone());
         self.finish_sessions_stopped_by_suspend();
         self.reconcile_question_drafts();

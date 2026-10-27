@@ -1337,8 +1337,37 @@ function delegationContext(kind = 'codex', configured = true) {
   });
   vm.runInContext(sourceBetween('function subagentChoiceApplies(', '\nfunction targetIsBare('), context);
   vm.runInContext(sourceBetween('function moveSubagentChange(', '\nfunction moveStoppedChildren('), context);
+  vm.runInContext(sourceBetween('function rememberedDelegationPolicy(', '\n// Mirrors HarnessKind::supports_delegation_tools.'), context);
   return context;
 }
+
+test('Create remembers delegation per profile and restores Mjolnir after an unavailable profile', () => {
+  const context = delegationContext('codex', true);
+  context.snapshot.profiles.push({ id: 'claude-profile', harness_kind: 'claude' }, { id: 'grok-profile', harness_kind: 'grok' });
+  context.snapshot.last_subagent_policies = {
+    '': { mode: 'none' },
+    profile: { mode: 'mjolnir', straightforward: { model: 'codex-model' } },
+    'claude-profile': { mode: 'native' },
+    'grok-profile': { mode: 'mjolnir', straightforward: { model: 'grok-model' } },
+  };
+  vm.runInContext(sourceBetween('function rememberedDelegationPolicy(', '\n// Mirrors HarnessKind::supports_delegation_tools.'), context);
+  vm.runInContext(sourceBetween('function selectNewProfile(', '\n\n// Mirrors HarnessKind::supports_delegation_tools.'), context);
+  const result = vm.runInContext(`(() => {
+    const draft = { profileId: 'profile', subagents: rememberedDelegationPolicy('profile') };
+    selectNewProfile(draft, 'claude-profile');
+    const claude = draft.subagents;
+    selectNewProfile(draft, 'grok-profile');
+    const unavailable = draft.subagents;
+    selectNewProfile(draft, 'profile');
+    return JSON.stringify({ claude, unavailable, restored: draft.subagents });
+  })()`, context);
+  assert.deepEqual(JSON.parse(result), {
+    claude: { mode: 'native' },
+    unavailable: { mode: 'native' },
+    restored: { mode: 'mjolnir', straightforward: { model: 'codex-model' } },
+  });
+  assert.deepEqual(JSON.parse(vm.runInContext("JSON.stringify(rememberedDelegationPolicy('missing'))", context)), { mode: 'none' }, 'legacy empty key is the fallback');
+});
 
 test('Create sends the selected delegation policy across the browser action wire', async () => {
   for (const mode of ['native', 'mjolnir', 'none']) {

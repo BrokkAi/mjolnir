@@ -440,12 +440,7 @@ mod tests {
         assert_eq!(monthly.sessions[0].coverage.recorded_turns, 2);
 
         // Renaming a profile carries destroyed children's turns with it.
-        super::super::sessions::rename_session_reference_at(
-            &path,
-            "last_profile",
-            "codex2",
-            "codex-two",
-        )?;
+        super::super::sessions::rename_profile_references_at(&path, "codex2", "codex-two")?;
         assert_eq!(
             on("codex-two", UsagePeriod::Hourly)?.sessions,
             codex2.sessions

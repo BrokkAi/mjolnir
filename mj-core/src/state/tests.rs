@@ -248,7 +248,7 @@ fn sample_state() -> State {
     };
     State {
         operator_presence: Default::default(),
-        last_subagent_policy: Default::default(),
+        last_subagent_policies: Default::default(),
         version: STATE_VERSION,
         sessions: [(session.id.clone(), session)].into_iter().collect(),
         subagents: Default::default(),
@@ -1754,6 +1754,8 @@ fn session_and_remembered_policy_read_legacy_selector_and_boolean_json() {
                 subtle: None,
             },
         ),
+        (serde_json::json!({"mode":"native"}), SubagentPolicy::Native),
+        (serde_json::json!({"mode":"none"}), SubagentPolicy::None),
         (
             serde_json::json!({"mode":"single_model", "model":"chosen", "effort":"high"}),
             SubagentPolicy::Mjolnir {
@@ -1786,12 +1788,65 @@ fn session_and_remembered_policy_read_legacy_selector_and_boolean_json() {
             Some(expected.clone())
         );
         let mut state = serde_json::to_value(sample_state()).unwrap();
+        state
+            .as_object_mut()
+            .unwrap()
+            .remove("last_subagent_policies");
         state["last_subagent_policy"] = policy;
         assert_eq!(
             serde_json::from_value::<State>(state)
                 .unwrap()
-                .last_subagent_policy,
+                .last_subagent_policy_for(""),
             expected
         );
     }
+    for policy in [None, Some(serde_json::Value::Null)] {
+        let mut value = serde_json::json!({"version": STATE_VERSION});
+        if let Some(policy) = policy {
+            value["last_subagent_policy"] = policy;
+        }
+        let state: State = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            state.last_subagent_policy_for("profile"),
+            Default::default()
+        );
+    }
+}
+
+#[test]
+fn remembered_subagent_policy_reads_legacy_policy_objects_and_profile_maps() {
+    let old = serde_json::json!({
+        "version": STATE_VERSION,
+        "last_subagent_policy": {
+            "mode": "mjolnir",
+            "straightforward": {"model": "fast", "effort": "low"}
+        }
+    });
+    let old: State = serde_json::from_value(old).unwrap();
+    assert_eq!(
+        old.last_subagent_policy_for("profile-a"),
+        old.last_subagent_policy_for("")
+    );
+    assert!(old.last_subagent_policies[""].uses_mjolnir());
+
+    let mapped = serde_json::json!({
+        "version": STATE_VERSION,
+        "last_subagent_policies": {
+            "mode": {"mode": "none"},
+            "profile-b": {"mode": "native"}
+        }
+    });
+    let mapped: State = serde_json::from_value(mapped).unwrap();
+    assert_eq!(
+        mapped.last_subagent_policy_for("mode"),
+        crate::subagent::SubagentPolicy::None
+    );
+    assert_eq!(
+        mapped.last_subagent_policy_for("profile-b"),
+        crate::subagent::SubagentPolicy::Native
+    );
+    assert_eq!(
+        mapped.last_subagent_policy_for("unknown"),
+        Default::default()
+    );
 }

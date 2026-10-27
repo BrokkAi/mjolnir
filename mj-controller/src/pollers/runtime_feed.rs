@@ -24,7 +24,8 @@ pub struct RemoteDashboardWorkerPoller {
 pub struct RuntimeStateUpdate {
     pub operator_presence: mj_core::state::OperatorPresence,
     pub session_cpu: SnapshotMap<String, mj_client::runtime_feed::SessionCpuView>,
-    pub last_subagent_policy: mj_core::subagent::SubagentPolicy,
+    pub last_subagent_policies:
+        std::collections::BTreeMap<String, mj_core::subagent::SubagentPolicy>,
     pub native_agents: SnapshotMap<String, mj_core::native_agent::NativeAgentView>,
     pub workspace_names: std::collections::BTreeMap<String, String>,
     pub revision: u64,

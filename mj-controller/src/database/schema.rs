@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 99;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 100;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1827,6 +1827,27 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
     }
 
+    // Breaking: old writers address the singleton preference row and would
+    // silently lose profile-specific choices. Preserve its value as the
+    // empty-profile fallback while replacing the key with profile_id.
+    if version < 100 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE subagent_preference RENAME TO subagent_preference_legacy;
+             CREATE TABLE subagent_preference (
+                 profile_id TEXT PRIMARY KEY NOT NULL,
+                 policy TEXT NOT NULL CHECK(json_valid(policy))
+             ) STRICT;
+             INSERT INTO subagent_preference(profile_id, policy)
+                 SELECT '', policy FROM subagent_preference_legacy WHERE singleton=1;
+             DROP TABLE subagent_preference_legacy;
+             UPDATE schema_compatibility SET minimum_compatible_version = 100 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at) VALUES(100, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 100;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2280,6 +2301,24 @@ pub(super) fn restore_github_v84_schema(connection: &Connection) {
         ).unwrap();
 }
 
+/// Rewinds the preference table in a current-schema database so an ad-hoc
+/// historical fixture has the singleton shape that existed before revision 100.
+#[cfg(test)]
+pub(super) fn restore_pre100_subagent_preference(connection: &Connection) {
+    if !legacy_schema::table_has_column(connection, "subagent_preference", "profile_id").unwrap() {
+        return;
+    }
+    connection
+        .execute_batch(
+            "ALTER TABLE subagent_preference RENAME TO subagent_preference_profiled;
+             CREATE TABLE subagent_preference (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), policy TEXT NOT NULL CHECK(json_valid(policy)));
+             INSERT INTO subagent_preference(singleton, policy)
+                 SELECT 1, policy FROM subagent_preference_profiled WHERE profile_id='';
+             DROP TABLE subagent_preference_profiled;",
+        )
+        .unwrap();
+}
+
 #[cfg(test)]
 mod reader_tests {
     use super::*;
@@ -2322,7 +2361,7 @@ mod reader_tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        assert_eq!(revisions, [93, 94, 95, 96, 97, 98, 99]);
+        assert_eq!(revisions, [93, 94, 95, 96, 97, 98, 99, 100]);
         let fresh = Connection::open_in_memory().unwrap();
         migrate_schema(&fresh).unwrap();
         let schema = |database: &Connection| {
@@ -2571,6 +2610,7 @@ mod reader_tests {
         let path = directory.path().join("move.sqlite");
         let connection = open_writer(&path).unwrap();
         restore_github_v84_schema(&connection);
+        restore_pre100_subagent_preference(&connection);
         connection.execute_batch("DROP TABLE retained_move_sources; DELETE FROM schema_migrations WHERE version>=64; UPDATE schema_compatibility SET minimum_compatible_version=63 WHERE singleton=1; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE session_restart_intents DROP COLUMN container_upgrade_json; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version=63;").unwrap();
         drop(connection);
         forget_verified_schema(&path);
@@ -2937,6 +2977,7 @@ mod reader_tests {
             )
             .unwrap();
         restore_github_v84_schema(&connection);
+        restore_pre100_subagent_preference(&connection);
         // Restore the previous table definition and migration ledger, retaining
         // a real row so the forward migration proves it copies existing data.
         connection
@@ -3084,6 +3125,9 @@ mod reader_tests {
                 connection.execute_batch("ALTER TABLE materialized_sessions DROP COLUMN operator_away_event_frontier;").unwrap();
             }
         }
+        if version < 100 {
+            restore_pre100_subagent_preference(&connection);
+        }
         // Historical fixtures must remove columns introduced by later revisions.
         if version < 94
             && legacy_schema::table_has_column(
@@ -3187,6 +3231,7 @@ mod reader_tests {
         }
         let connection = Connection::open(&path).unwrap();
         restore_github_v84_schema(&connection);
+        restore_pre100_subagent_preference(&connection);
         connection
             .execute_batch(
                 "UPDATE sessions SET mjolnir_subagents = 1 WHERE session_id = 'all';
@@ -3221,7 +3266,69 @@ mod reader_tests {
             Some(SubagentPolicy::Native)
         );
         assert_eq!(state.sessions["unset"].subagents, None);
-        assert_eq!(state.last_subagent_policy, SubagentPolicy::Native);
+        assert_eq!(
+            state.last_subagent_policy_for("codex"),
+            SubagentPolicy::Native
+        );
+    }
+
+    #[test]
+    fn profile_subagent_preference_migration_preserves_fallback_and_refuses_old_writers() {
+        use mj_core::subagent::SubagentPolicy;
+
+        for (name, remembered, fail_first_attempt) in [
+            ("populated", Some(SubagentPolicy::Native), true),
+            ("empty", None, false),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(format!("{name}.sqlite3"));
+            drop(open_writer(&path).unwrap());
+            stamp_schema_version(&path, 99);
+            let legacy = Connection::open(&path).unwrap();
+            if let Some(policy) = &remembered {
+                legacy
+                    .execute(
+                        "INSERT INTO subagent_preference(singleton, policy) VALUES(1, ?1)",
+                        [serde_json::to_string(policy).unwrap()],
+                    )
+                    .unwrap();
+            }
+            if fail_first_attempt {
+                legacy
+                    .execute_batch(
+                        "CREATE TRIGGER fail_profile_preference_migration
+                     BEFORE INSERT ON schema_migrations WHEN NEW.version=100
+                     BEGIN SELECT RAISE(ABORT,'profile preference migration'); END;",
+                    )
+                    .unwrap();
+                assert!(migrate_schema(&legacy).is_err());
+                legacy
+                    .execute_batch("ROLLBACK; DROP TRIGGER fail_profile_preference_migration;")
+                    .unwrap();
+                assert_eq!(read_schema_state(&legacy).unwrap().revision, 99);
+                assert!(
+                    !legacy_schema::table_has_column(&legacy, "subagent_preference", "profile_id")
+                        .unwrap()
+                );
+            }
+            migrate_schema(&legacy).unwrap();
+            let schema = read_schema_state(&legacy).unwrap();
+            assert_eq!(schema.revision, 100);
+            assert_eq!(schema.minimum_compatible, Some(100));
+            assert!(schema.ensure_supported_by(99).is_err());
+            assert!(
+                legacy_schema::table_has_column(&legacy, "subagent_preference", "profile_id")
+                    .unwrap()
+            );
+            assert!(
+                !legacy_schema::table_has_column(&legacy, "subagent_preference", "singleton")
+                    .unwrap()
+            );
+            drop(legacy);
+
+            let state = load_state_from(&path).unwrap();
+            assert_eq!(state.last_subagent_policies.get(""), remembered.as_ref());
+        }
     }
 
     #[test]
@@ -3232,6 +3339,7 @@ mod reader_tests {
         save_session_to(&path, &record).unwrap();
         let connection = Connection::open(&path).unwrap();
         restore_github_v84_schema(&connection);
+        restore_pre100_subagent_preference(&connection);
         connection
             .execute_batch(
                 "DELETE FROM schema_migrations WHERE version >= 48;
@@ -3264,6 +3372,7 @@ mod reader_tests {
         save_session_to(&path, &record).unwrap();
         let connection = Connection::open(&path).unwrap();
         restore_github_v84_schema(&connection);
+        restore_pre100_subagent_preference(&connection);
         connection
             .execute_batch(
                 "ALTER TABLE sessions DROP COLUMN target_runtime_json;
@@ -3295,6 +3404,7 @@ mod reader_tests {
         let path = directory.path().join("mj.sqlite3");
         let connection = open_writer(&path).unwrap();
         restore_github_v84_schema(&connection);
+        restore_pre100_subagent_preference(&connection);
         connection
             .execute_batch(
                 "BEGIN IMMEDIATE;
@@ -3603,10 +3713,10 @@ mod reader_tests {
         assert!(matches!(
             error.downcast_ref::<StoreSchemaMismatch>().unwrap().reason,
             StoreSchemaMismatchReason::Incompatible {
-                minimum_compatible: 99
+                minimum_compatible: 100
             }
         ));
-        assert_eq!(schema.minimum_compatible, Some(99));
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         connection
             .execute("UPDATE operator_away SET away=1,revision=7", [])
             .unwrap();

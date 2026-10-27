@@ -239,7 +239,7 @@ fn dashboard_with_live_sessions(count: usize, per_project: usize) -> DashboardSt
         config(),
         State {
             operator_presence: Default::default(),
-            last_subagent_policy: Default::default(),
+            last_subagent_policies: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
@@ -944,7 +944,7 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
         config(),
         State {
             operator_presence: Default::default(),
-            last_subagent_policy: Default::default(),
+            last_subagent_policies: Default::default(),
             subagents: [(child.id.clone(), relation)].into_iter().collect(),
             version: STATE_VERSION,
             sessions: [
@@ -1048,7 +1048,7 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         config(),
         State {
             operator_presence: Default::default(),
-            last_subagent_policy: Default::default(),
+            last_subagent_policies: Default::default(),
             subagents: [(first_child.id.clone(), first_relation.clone())]
                 .into_iter()
                 .collect(),
@@ -1087,7 +1087,7 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
     };
     dashboard.set_state(State {
         operator_presence: Default::default(),
-        last_subagent_policy: Default::default(),
+        last_subagent_policies: Default::default(),
         subagents: [
             (first_child.id.clone(), first_relation),
             (second_child.id.clone(), second_relation),
@@ -1223,7 +1223,7 @@ fn mouse_wheel_scrolls_the_hovered_pane_without_changing_focus() {
         config(),
         State {
             operator_presence: Default::default(),
-            last_subagent_policy: Default::default(),
+            last_subagent_policies: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
@@ -1309,7 +1309,7 @@ fn dashboard_with_conversations(count: usize) -> DashboardState {
         config(),
         State {
             operator_presence: Default::default(),
-            last_subagent_policy: Default::default(),
+            last_subagent_policies: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
@@ -1341,7 +1341,7 @@ fn newly_ready_session_can_be_selected_after_state_refresh() {
         config(),
         State {
             operator_presence: Default::default(),
-            last_subagent_policy: Default::default(),
+            last_subagent_policies: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions: [(other.id.clone(), other)].into_iter().collect(),
@@ -1715,7 +1715,7 @@ fn dashboard_with_attention_mix() -> DashboardState {
         config(),
         State {
             operator_presence: Default::default(),
-            last_subagent_policy: Default::default(),
+            last_subagent_policies: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,

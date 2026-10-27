@@ -147,6 +147,7 @@ pub(super) mod tests {
         )?;
         connection.execute("UPDATE materialized_sessions SET last_turn_outcome_json='{}' WHERE session_id='session'", [])?;
         super::super::schema::restore_github_v84_schema(&connection);
+        super::super::schema::restore_pre100_subagent_preference(&connection);
         connection.execute_batch("ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; DELETE FROM schema_migrations WHERE version>=82; UPDATE schema_compatibility SET minimum_compatible_version=81; PRAGMA user_version=81;")?;
         let error = super::super::schema::migrate_turn_outcome_schema(&connection).unwrap_err();
         assert!(

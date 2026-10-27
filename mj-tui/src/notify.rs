@@ -361,7 +361,7 @@ mod tests {
             config(),
             State {
                 operator_presence: Default::default(),
-                last_subagent_policy: Default::default(),
+                last_subagent_policies: Default::default(),
                 subagents: Default::default(),
                 version: STATE_VERSION,
                 sessions,

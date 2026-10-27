@@ -290,7 +290,7 @@ impl RuntimeState {
                         operator_presence: controller.state.operator_presence,
                         config: controller.config.clone(),
                         default_targets: controller.config.default_targets.clone(),
-                        last_subagent_policy: controller.state.last_subagent_policy.clone(),
+                        last_subagent_policies: controller.state.last_subagent_policies.clone(),
                         lifecycles,
                         container_capacities: self.container_capacity_projection(&controller.state),
                         ..Default::default()

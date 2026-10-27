@@ -29,7 +29,7 @@ async function mount(page, {
   const state = {
     snapshot: {
       revision: 1, workspaces: [{ id: 'test', name: 'Test' }, { id: 'other', name: 'Other' }], sessions: [],
-      profiles, subagents_configured: false, last_subagent_policy: { mode: 'native' },
+      profiles, subagents_configured: false, last_subagent_policies: {},
       targets: targets || [
         containerTarget,
         { id: 'local', kind: 'local', requires_project_directory: true, recent_project_directories: ['/work/recent', '/work/older'] },
@@ -443,7 +443,7 @@ test('golden_viewer_new_session', async ({ context }) => {
   ]) {
     await withNewSessionPage(context, {}, output, `delegation ${label}`, async (page, state) => {
       state.snapshot.subagents_configured = configured;
-      state.snapshot.last_subagent_policy = { mode: remembered };
+      state.snapshot.last_subagent_policies = { alpha: { mode: remembered } };
       await refresh(page, state);
       // Restart the draft so the remembered policy is read for this creation.
       await page.evaluate(() => { location.hash = '#workspace/test'; });
@@ -462,6 +462,36 @@ test('golden_viewer_new_session', async ({ context }) => {
       await captureNewSessionState(output, page, `review delegation ${label}`, state);
       const release = await startHeldLaunch(page, state);
       expect(state.actions[0].subagents).toEqual({ mode: selected });
+      return release;
+    });
+  }
+
+  for (const automatic of [false, true]) {
+    const label = automatic ? 'sole remaining profile delegation and launch' : 'profile-specific delegation and launch';
+    await withNewSessionPage(context, {}, output, label, async (page, state) => {
+      state.snapshot.subagents_configured = true;
+      state.snapshot.last_subagent_policies = {
+        alpha: { mode: 'mjolnir' },
+        beta: { mode: 'none' },
+      };
+      await refresh(page, state);
+      await page.evaluate(() => { location.hash = '#workspace/test'; });
+      await expect(page.locator('#new-page')).toBeHidden();
+      await page.evaluate(() => { location.hash = '#workspace/test/new'; });
+      if (!automatic) await page.locator('#new-profile').selectOption('beta');
+      await projectStep(page, 'container');
+      await page.getByRole('button', { name: 'existing', exact: true }).click();
+      await expect(page.locator('#new-step')).not.toContainText('Checking project');
+      if (automatic) {
+        await expect(page.locator('#new-subagents')).toHaveValue('mjolnir');
+        state.snapshot.profiles = state.snapshot.profiles.filter(profile => profile.id === 'beta');
+        await refresh(page, state);
+      }
+      await expect(page.locator('#new-subagents')).toHaveValue('none');
+      await captureNewSessionState(output, page, `${automatic ? 'sole remaining ' : ''}beta restores None independently of alpha Mjolnir`, state);
+      const release = await startHeldLaunch(page, state);
+      expect(state.actions[0].profile_id).toBe('beta');
+      expect(state.actions[0].subagents).toEqual({ mode: 'none' });
       return release;
     });
   }

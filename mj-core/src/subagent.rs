@@ -141,13 +141,9 @@ impl SubagentPolicy {
             self.clone()
         }
     }
-    /// Whether a new session with this policy becomes the shared choice the
-    /// next Create starts from. A harness without sub-agents of its own
-    /// changes it only by choosing Mjolnir, so choosing None there never
-    /// takes Native away from the next Claude or Codex session.
+    /// Whether this harness can remember the selected policy for its profile.
     pub fn updates_remembered_choice(&self, harness: crate::config::HarnessKind) -> bool {
         harness.supports_delegation_tools()
-            && (harness.has_native_subagents() || self.uses_mjolnir())
     }
     pub fn for_launch(&self, harness: crate::config::HarnessKind, is_child: bool) -> Self {
         if !harness.supports_delegation_tools() {
@@ -195,6 +191,32 @@ pub fn parse_stored_policy(json: &str) -> serde_json::Result<SubagentPolicy> {
     let policy = deserialize_launch_policy(&mut deserializer)?;
     deserializer.end()?;
     Ok(policy)
+}
+
+/// Read the remembered per-profile choices while accepting the old scalar
+/// field and legacy boolean policy values used by durable snapshots.
+pub fn deserialize_policy_map<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<std::collections::BTreeMap<String, SubagentPolicy>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let mut policies = std::collections::BTreeMap::new();
+    match value {
+        serde_json::Value::Object(values)
+            if !values.get("mode").is_some_and(serde_json::Value::is_string) =>
+        {
+            for (profile, value) in values {
+                let policy =
+                    parse_stored_policy(&value.to_string()).map_err(serde::de::Error::custom)?;
+                policies.insert(profile, policy);
+            }
+        }
+        value => {
+            let policy =
+                parse_stored_policy(&value.to_string()).map_err(serde::de::Error::custom)?;
+            policies.insert(String::new(), policy);
+        }
+    }
+    Ok(policies)
 }
 
 /// The refusal code for an unavailable sub-agent choice. A
