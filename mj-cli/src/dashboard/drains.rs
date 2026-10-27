@@ -196,30 +196,19 @@ impl DashboardContext {
                     None
                 }
             };
-            match apply_worker_poll_update(
-                &mut self.controller,
+            if let Some(materialized) = apply_worker_poll_update(
+                &self.controller,
                 &mut self.dashboard,
-                &mut self.chats,
                 update,
                 Some((&self.dashboard_io_tx, &self.critical_operations)),
             ) {
-                Ok(Some(materialized)) => {
-                    let viewed_through_event_ordinal = self
-                        .controller
-                        .state
-                        .sessions
-                        .get(&session_id)
-                        .map_or(0, |session| session.viewed_through_event_ordinal);
-                    self.request_materialized_projection(
-                        materialized,
-                        viewed_through_event_ordinal,
-                    );
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    self.dashboard
-                        .set_notice(format!("Could not save harness title: {error:#}"));
-                }
+                let viewed_through_event_ordinal = self
+                    .controller
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .map_or(0, |session| session.viewed_through_event_ordinal);
+                self.request_materialized_projection(materialized, viewed_through_event_ordinal);
             }
             if let Some(episode_id) =
                 self.worker_diagnoses
@@ -244,6 +233,10 @@ impl DashboardContext {
         let Some(update) = latest else {
             return;
         };
+        self.auto_afk.configure(
+            self.controller.config.advanced.auto_afk_minutes > 0,
+            update.operator_presence.away,
+        );
         // The serialized runtime feed owns ordering through incarnation-scoped
         // cursors. A replacement daemon's revision can start below the old one.
         let removed_layouts = self
@@ -400,6 +393,8 @@ impl DashboardContext {
         let Some(config) = latest else {
             return;
         };
+        self.auto_afk
+            .set_enabled(config.advanced.auto_afk_minutes > 0);
         // The chat's copy of `[review]` follows the daemon's, so `/review
         // status` and the composer's armed indicator report what is actually
         // running rather than what this process last read from disk.

@@ -842,7 +842,54 @@ fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
     assert_eq!(closed.state, SessionState::Stopped);
     assert!(closed.target.is_none());
     assert!(!worker_root.exists(), "the child's worker root is removed");
-    assert!(!reports.join(session_id).exists());
+    // #1333: close keeps reports parents were told to cite.
+    assert!(
+        reports.join(session_id).is_dir(),
+        "close keeps the child's report directory"
+    );
+    assert!(reports.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_dir());
+}
+
+/// A close of a running child goes through the checkpoint route; reports
+/// survive there too, not only on the no-checkpoint path.
+// Hard-won: #1333: close deleted the child's report_dir that parents were told to cite.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
+fn checkpointed_close_keeps_a_child_report_directory() {
+    if !in_isolated_store("checkpointed_close_keeps_a_child_report_directory") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let worker_root = directory.path().join(session_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let mut controller = failed_subagent_controller(&worker_root, session_id);
+    let reports = seed_child_reports(&mut controller, session_id, directory.path());
+    let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);
+    let session = controller.state.sessions.get_mut(session_id).unwrap();
+    session.state = SessionState::Closing;
+    session.checkpoint = Some(checkpoint.clone());
+
+    controller
+        .destroy_after_verified_checkpoint_with(
+            session_id,
+            &checkpoint,
+            &ProcessExecutor,
+            |_| Ok(()),
+        )
+        .unwrap();
+
+    let closed = &controller.state.sessions[session_id];
+    assert_eq!(closed.state, SessionState::Stopped);
+    assert!(closed.target.is_none());
+    assert!(
+        reports.join(session_id).is_dir(),
+        "checkpointed close keeps the child's report directory"
+    );
     assert!(reports.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_dir());
 }
 
@@ -2070,11 +2117,11 @@ fn destroying_a_stopped_child_removes_reports_through_its_live_parent() {
     assert!(reports.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_dir());
 }
 
-// Hard-won: #1331: report removal is best effort and must never prevent child close.
+// Hard-won: #1331: report removal is best effort and must never prevent child destroy.
 #[cfg(unix)]
 #[test]
-fn report_removal_failure_does_not_fail_child_close() {
-    if !in_isolated_store("report_removal_failure_does_not_fail_child_close") {
+fn report_removal_failure_does_not_fail_child_destroy() {
+    if !in_isolated_store("report_removal_failure_does_not_fail_child_destroy") {
         return;
     }
     struct ReportFailureExecutor;
@@ -2092,12 +2139,13 @@ fn report_removal_failure_does_not_fail_child_close() {
     let mut controller = failed_subagent_controller(&directory.path().join(child_id), child_id);
     let reports = seed_child_reports(&mut controller, child_id, directory.path());
     controller
-        .suspend_session_without_checkpoint_with(child_id, &ReportFailureExecutor, |_| Ok(()))
+        .force_destroy_session_with(
+            child_id,
+            &ReportFailureExecutor,
+            BranchDisposition::Keep,
+            |_| Ok(()),
+        )
         .unwrap();
-    assert_eq!(
-        controller.state.sessions[child_id].state,
-        SessionState::Stopped
-    );
     assert!(
         reports.join(child_id).is_dir(),
         "failure did not secretly delete reports"

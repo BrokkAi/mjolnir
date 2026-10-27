@@ -3257,7 +3257,19 @@ fn golden_dashboard_resource_panels() {
     );
     append_dashboard_golden(&mut output, "expired login quota", 120, 28, &mut dashboard);
 
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    let mut api_config = config();
+    let mut bedrock = api_config.profiles.remove("claude-1").unwrap();
+    bedrock.home = std::path::PathBuf::from("/profiles/bedrock-claude");
+    bedrock
+        .environment
+        .insert("CLAUDE_CODE_USE_BEDROCK".into(), "1".into());
+    api_config.profiles.insert("bedrock-claude".into(), bedrock);
+    let mut dashboard = DashboardState::new(api_config, State::default(), BTreeMap::new());
+    dashboard.apply_quota(ProfileQuota {
+        harness: HarnessKind::Claude,
+        refreshed_at_epoch_seconds: 0,
+        ..api_quota("bedrock-claude")
+    });
     let mut quota = api_quota("codex-1");
     quota.refreshed_at_epoch_seconds = 0;
     dashboard.apply_quota(quota);
@@ -3294,6 +3306,90 @@ fn golden_dashboard_resource_panels() {
         .unwrap()
         .as_secs();
     let now = i64::try_from(now).unwrap();
+    let mut claude_config = config();
+    claude_config.profiles.insert(
+        "claude-2".into(),
+        claude_config.profiles["claude-1"].clone(),
+    );
+    let claude_quota = |profile_id: &str, fable: Option<u8>| ProfileQuota {
+        banked_resets: None,
+        profile_id: profile_id.into(),
+        harness: HarnessKind::Claude,
+        // Fable deliberately precedes the master weekly window: ordering
+        // must not change which value fills the weekly bar.
+        windows: fable
+            .map(|remaining| {
+                vec![QuotaWindow {
+                    label: "Week (Fable)".into(),
+                    remaining_percent: Some(remaining),
+                    duration_seconds: Some(604_800),
+                    model_scope: Some("fable".into()),
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: None,
+                }]
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .chain([
+                QuotaWindow {
+                    label: "Week".into(),
+                    remaining_percent: Some(21),
+                    duration_seconds: Some(604_800),
+                    model_scope: None,
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: Some(now + 2 * 24 * 60 * 60),
+                },
+                QuotaWindow {
+                    label: "5h".into(),
+                    remaining_percent: Some(40),
+                    duration_seconds: Some(18_000),
+                    model_scope: None,
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: Some(now + 60 * 60),
+                },
+            ])
+            .collect(),
+        extra: None,
+        error: None,
+        refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
+    };
+    let mut claude_reports = BTreeMap::from([
+        ("claude-1".into(), claude_quota("claude-1", Some(17))),
+        ("claude-2".into(), claude_quota("claude-2", None)),
+    ]);
+    claude_reports.insert(
+        "codex-1".into(),
+        ProfileQuota {
+            harness: HarnessKind::Codex,
+            windows: vec![QuotaWindow {
+                label: "Week (Fable)".into(),
+                remaining_percent: Some(17),
+                duration_seconds: Some(604_800),
+                model_scope: Some("fable".into()),
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: None,
+            }],
+            ..claude_quota("codex-1", Some(17))
+        },
+    );
+    let mut dashboard = DashboardState::new(claude_config, State::default(), claude_reports);
+    append_dashboard_golden(
+        &mut output,
+        "Claude Fable weekly quota",
+        140,
+        28,
+        &mut dashboard,
+    );
+
     let quota = ProfileQuota {
         banked_resets: None,
         profile_id: "codex-1".into(),

@@ -78,13 +78,25 @@ impl ProfileQuota {
     pub fn weekly_window(&self) -> Option<&QuotaWindow> {
         self.windows
             .iter()
-            .find(|window| is_weekly_quota_window(&window.label))
+            .find(|window| window.model_scope.is_none() && is_weekly_quota_window(&window.label))
     }
 
     pub fn five_hour_window(&self) -> Option<&QuotaWindow> {
         self.windows
             .iter()
-            .find(|window| is_short_quota_window(&window.label))
+            .find(|window| window.model_scope.is_none() && is_short_quota_window(&window.label))
+    }
+
+    /// Claude's model-specific Fable weekly allowance, when the provider
+    /// reports the canonical seven-day scoped window.
+    pub fn fable_weekly_window(&self) -> Option<&QuotaWindow> {
+        if self.harness != HarnessKind::Claude {
+            return None;
+        }
+        self.windows.iter().find(|window| {
+            window.model_scope.as_deref() == Some("fable")
+                && window.duration_seconds == Some(7 * 24 * 60 * 60)
+        })
     }
 
     /// The window that best represents this profile at a glance. Prefer a
@@ -94,7 +106,11 @@ impl ProfileQuota {
     pub fn summary_window(&self) -> Option<&QuotaWindow> {
         self.weekly_window()
             .or_else(|| self.five_hour_window())
-            .or_else(|| self.windows.first())
+            .or_else(|| {
+                self.windows
+                    .iter()
+                    .find(|window| window.model_scope.is_none())
+            })
     }
 
     /// Whether the report says the profile is usage-priced: an API-billed

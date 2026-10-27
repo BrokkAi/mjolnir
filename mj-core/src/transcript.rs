@@ -441,6 +441,10 @@ pub struct ChatEntry {
     /// ACP arguments, kept separately so result updates cannot erase them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_input: Option<serde_json::Value>,
+    /// A diagnostic reported in ACP `rawOutput.error`, kept separate from
+    /// textual tool content so partial result updates can replace it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_error: Option<String>,
     pub tool_content: Vec<String>,
     pub tool_diffstats: Vec<String>,
     pub tool_locations: Vec<String>,
@@ -554,6 +558,7 @@ impl ChatEntry {
             tool_summary: None,
             tool_presentation: None,
             tool_input: None,
+            tool_error: None,
             tool_content: Vec::new(),
             tool_diffstats: Vec::new(),
             tool_locations: Vec::new(),
@@ -589,6 +594,9 @@ impl ChatEntry {
         self.leading_omitted |= truncate_string_start(&mut self.text, TEXT_BYTES);
         // Dashboard summaries do not expand tool arguments.
         self.tool_input = None;
+        if let Some(error) = &mut self.tool_error {
+            truncate_string_start(error, DETAIL_BYTES);
+        }
         for values in [
             &mut self.tool_content,
             &mut self.tool_diffstats,
@@ -637,6 +645,7 @@ impl ChatEntry {
             tool_summary: None,
             tool_presentation: None,
             tool_input: None,
+            tool_error: None,
             tool_content: Vec::new(),
             tool_diffstats: Vec::new(),
             tool_locations: Vec::new(),
@@ -669,6 +678,7 @@ impl ChatEntry {
             tool_summary: None,
             tool_presentation: None,
             tool_input: None,
+            tool_error: None,
             tool_content: Vec::new(),
             tool_diffstats: Vec::new(),
             tool_locations: Vec::new(),

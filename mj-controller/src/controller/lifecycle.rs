@@ -957,7 +957,6 @@ impl Controller {
                 let deferred = if self.state.subagents.contains_key(session_id) {
                     targets::borrowed_worker_cleanup_plan(&backend, session_id)?
                         .execute(executor)?;
-                    self.remove_child_report_directory(session_id, executor);
                     false
                 } else if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
                     plan.execute(executor)?;
@@ -1140,7 +1139,6 @@ impl Controller {
                     if self.state.subagents.contains_key(session_id) {
                         targets::borrowed_worker_cleanup_plan(&backend, session_id)?
                             .execute(executor)?;
-                        self.remove_child_report_directory(session_id, executor);
                     } else if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
                         plan.execute(executor)?;
                         deferred = true;

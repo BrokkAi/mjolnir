@@ -12,6 +12,7 @@
 
 pub(crate) mod actions;
 mod attachment;
+mod auto_afk;
 mod composer_drafts;
 mod help_search;
 pub(crate) mod io;
@@ -325,6 +326,7 @@ pub(crate) struct DashboardContext {
     /// What the two-second keep-alive last saw. It never starts a daemon, so
     /// a daemon that goes away stays away until the user asks for it back.
     daemon_presence: watch::Receiver<crate::daemon::DaemonPresence>,
+    auto_afk: auto_afk::AutoAfkReporter,
 
     /// What the daemon says about quota. The daemon is the only prober; this
     /// process never asks a provider.
@@ -673,10 +675,13 @@ pub(crate) async fn run_dashboard_for_workspace(
                 input = true;
                 pacer.mark_urgent();
                 let Some(event) = event else { break };
+                let mut event = event?;
+                if auto_afk::is_operator_input(&event) {
+                    context.auto_afk.input();
+                }
                 if context.shutdown_requested {
                     continue;
                 }
-                let mut event = event?;
                 // Nothing behind the splash has been seen, so nothing there
                 // should act on input yet.
                 if context.splash.is_some() {
@@ -777,6 +782,9 @@ pub(crate) async fn run_dashboard_for_workspace(
                         break;
                     };
                     event = next?;
+                    if auto_afk::is_operator_input(&event) {
+                        context.auto_afk.input();
+                    }
                 }
             }
             // A drag held past a scrollable surface's edge keeps scrolling it
@@ -856,6 +864,10 @@ pub(crate) async fn run_dashboard_for_workspace(
                         }
                     }
                 }
+            }
+            Some(error) = context.auto_afk.errors.recv() => {
+                context.dashboard.set_failure_notice(error);
+                pacer.mark();
             }
             _ = context.critical_operations_changed.changed(),
                 if context.shutdown_requested => {
@@ -1008,6 +1020,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             break;
         }
     }
+    context.auto_afk.shutdown().await;
     context.cancel_background_work();
     let quit_detached = context.quit_detached;
     // Hand the terminal back before saying anything on it; the warm chat and
@@ -1088,7 +1101,7 @@ mod upgrade;
 pub(crate) use upgrade::UpgradeResume;
 mod drafts;
 mod drains;
-pub(crate) use drains::{refresh_open_chats, refresh_subagent_counts};
+pub(crate) use drains::refresh_subagent_counts;
 mod frame_pacer;
 use frame_pacer::{FRAME_INTERVAL, FramePacer, paced};
 mod session_state;
@@ -1686,6 +1699,8 @@ impl DashboardContext {
             conversation_layouts.clone(),
             notices.clone(),
         );
+        let auto_afk_enabled = controller.config.advanced.auto_afk_minutes > 0;
+        let auto_afk_away = controller.state.operator_presence.away;
 
         let mut context = Self {
             terminal,
@@ -1723,6 +1738,7 @@ impl DashboardContext {
             critical_operations,
             critical_operations_changed,
             daemon_presence,
+            auto_afk: auto_afk::AutoAfkReporter::new(auto_afk_enabled, auto_afk_away),
             quota: Feed::new(quota_rx),
             manual_quota_refresh_cycles: None,
             quota_cycles: 0,

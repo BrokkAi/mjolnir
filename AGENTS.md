@@ -63,15 +63,13 @@ Do not add a new pre-tag checklist or repeat registry authorization audits.
 # Git / version control
 
 After completing and validating requested implementation changes, commit them
-to the current branch without waiting for a separate request to commit. For a
-larger task, also commit each logically distinct, validated set of changes when
-it forms a coherent checkpoint. Treat committing as part of finishing the task
-unless the user explicitly says not to commit. Do not push unless the user
-explicitly asks. Release requests are explicit push authorization as defined
-under Releases above.
+to the current branch and push them to `origin/master` without waiting for a
+separate request. For a larger task, also commit each logically distinct,
+validated set of changes when it forms a coherent checkpoint. Treat committing
+and pushing as part of finishing the task unless the user says not to commit,
+not to push, or to push somewhere else.
 
 Commit directly to the current branch. This rule also applies when the current branch is `master`.
-When explicitly asked to push, push to upstream, even when upstream is `master`.
 
 Do not create a branch, change branches, rebase, or open a pull request unless the user gives an explicit instruction.
 

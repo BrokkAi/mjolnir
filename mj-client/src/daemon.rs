@@ -427,6 +427,7 @@ pub struct DraftPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
+    RecordOperatorActivity,
     SetOperatorAway {
         away: bool,
     },
@@ -524,10 +525,6 @@ pub enum DaemonAction {
         mounts: Vec<AdditionalMount>,
         mount_history: Vec<PathBuf>,
     },
-    SetSessionAcpTitle {
-        session_id: String,
-        title: Option<String>,
-    },
     MarkSessionTargetMissing {
         session_id: String,
         detail: String,
@@ -544,6 +541,9 @@ pub enum DaemonAction {
     },
     CreateProject {
         sources: Vec<String>,
+    },
+    RemoveProject {
+        bundle_id: String,
     },
     WikiSearch {
         query: String,
@@ -1723,20 +1723,6 @@ impl DaemonClient {
         }
     }
 
-    pub async fn set_session_acp_title(
-        &mut self,
-        session_id: String,
-        title: Option<String>,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::SetSessionAcpTitle { session_id, title })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected ACP-title reply {reply:?}"),
-        }
-    }
-
     pub async fn mark_session_target_missing(
         &mut self,
         session_id: String,
@@ -1797,6 +1783,16 @@ impl DaemonClient {
         {
             DaemonReply::ProjectCreated(project) => Ok(project),
             other => bail!("unexpected project creation reply: {other:?}"),
+        }
+    }
+
+    pub async fn remove_project(&mut self, bundle_id: String) -> Result<()> {
+        match self
+            .request(DaemonAction::RemoveProject { bundle_id })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            other => bail!("unexpected project removal reply: {other:?}"),
         }
     }
 
@@ -2423,7 +2419,10 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // New-session creation independently controls whether its container size
 // becomes the host's saved default.
 // Operator-away action and runtime metadata.
-pub const PROTOCOL_VERSION: u32 = 63;
+// Terminals no longer save harness titles; the daemon alone projects them.
+// Human interface activity can reset the daemon's automatic AFK clock.
+// Project removal runs through the daemon-owned database writer.
+pub const PROTOCOL_VERSION: u32 = 66;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

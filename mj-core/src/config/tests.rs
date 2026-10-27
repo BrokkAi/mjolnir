@@ -652,7 +652,21 @@ fn saving_keeps_the_files_comments_and_order() {
 
     let saved = fs::read_to_string(&path).unwrap();
     assert_eq!(saved, original.replace("bell = true", "bell = false"));
+    assert_eq!(config.advanced.auto_afk_minutes, 0);
+    assert!(!saved.contains("auto_afk_minutes"));
     assert_eq!(Config::load_from(&path).unwrap(), config);
+
+    config.advanced.auto_afk_minutes = u32::MAX;
+    config.save_to(&path).unwrap();
+    assert!(
+        fs::read_to_string(&path)
+            .unwrap()
+            .contains("auto_afk_minutes = 4294967295")
+    );
+    assert_eq!(
+        Config::load_from(&path).unwrap().advanced.auto_afk_minutes,
+        u32::MAX
+    );
 
     // A version 12 file is marked as this build's, in place.
     fs::write(&path, "# keep me\nversion = 12 # the file format\n").unwrap();
@@ -980,16 +994,14 @@ fn unconstrained_enforcement_splits_acp_modes_from_launch_controls() {
         .execution_enforcement(ExecutionPolicy::Unconstrained)
         .unwrap();
     // allowAll emits no permission requests, so the adapter's client-side
-    // auto-review would never fire. Unconstrained Muse reviews instead.
-    assert_eq!(muse.acp_mode(), Some("promptUnmatched"));
-    assert_eq!(
-        muse.label(),
-        "promptUnmatched / auto-review / sandbox-off / :ask-me"
-    );
-    assert_eq!(muse.acp_setting(), Some(("auto_review", "on")));
+    // auto-review would have nothing to decide: isolated targets run Muse
+    // without permission checks, like OpenCode's `permission = "allow"`.
+    assert_eq!(muse.acp_mode(), Some("allowAll"));
+    assert_eq!(muse.label(), "allowAll / no-review / sandbox-off / :ask-me");
+    assert_eq!(muse.acp_setting(), Some(("auto_review", "off")));
     assert_eq!(
         muse.launch_environment(),
-        Some(("MUSE_APPROVAL_MODE", "promptUnmatched"))
+        Some(("MUSE_APPROVAL_MODE", "allowAll"))
     );
     assert_eq!(
         muse.launch_argument(),
@@ -1061,6 +1073,116 @@ fn configured_approvals_preserve_other_profiles_and_select_guardians() {
             "{kind:?}"
         );
     }
+}
+
+/// Unconstrained Muse runs without permission checks by default, like
+/// OpenCode's `permission = "allow"`. A Muse profile opts back into
+/// auto-review with `muse_auto_review = true`; guardian targets always
+/// review, so the toggle changes nothing there.
+#[test]
+fn muse_auto_review_defaults_off_and_opts_back_into_review() {
+    let mut muse = sample_config().profiles["codex-1"].clone();
+    muse.kind = HarnessKind::Muse;
+    muse.home = PathBuf::from("/home/test/.config/muse");
+    muse.codex_profile = None;
+    muse.guardian_review_model = None;
+
+    // Default: no permission checks in isolated targets.
+    assert_eq!(muse.muse_auto_review, None);
+    let enforcement = muse
+        .execution_enforcement(ExecutionPolicy::Unconstrained)
+        .expect("Muse enforces an execution policy");
+    assert_eq!(enforcement.acp_mode(), Some("allowAll"));
+    assert_eq!(enforcement.acp_setting(), Some(("auto_review", "off")));
+    assert_eq!(
+        enforcement.label(),
+        "allowAll / no-review / sandbox-off / :ask-me"
+    );
+    assert_eq!(
+        enforcement.launch_environment(),
+        Some(("MUSE_APPROVAL_MODE", "allowAll"))
+    );
+
+    // Explicit false matches the default.
+    muse.muse_auto_review = Some(false);
+    let enforcement = muse
+        .execution_enforcement(ExecutionPolicy::Unconstrained)
+        .expect("Muse enforces an execution policy");
+    assert_eq!(enforcement.acp_mode(), Some("allowAll"));
+    assert_eq!(enforcement.acp_setting(), Some(("auto_review", "off")));
+
+    // Opt-in restores the reviewer inside the container boundary.
+    muse.muse_auto_review = Some(true);
+    assert!(muse.muse_auto_review_unconstrained());
+    let enforcement = muse
+        .execution_enforcement(ExecutionPolicy::Unconstrained)
+        .expect("Muse enforces an execution policy");
+    assert_eq!(enforcement.acp_mode(), Some("promptUnmatched"));
+    assert_eq!(enforcement.acp_setting(), Some(("auto_review", "on")));
+    assert_eq!(
+        enforcement.label(),
+        "promptUnmatched / auto-review / sandbox-off / :ask-me"
+    );
+    assert_eq!(
+        enforcement.launch_environment(),
+        Some(("MUSE_APPROVAL_MODE", "promptUnmatched"))
+    );
+
+    // The launch environment follows the toggle; only the sandbox is ever
+    // disabled.
+    muse.muse_auto_review = None;
+    let mut environment = BTreeMap::new();
+    muse.configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment)
+        .unwrap();
+    assert_eq!(
+        environment.get("MUSE_APPROVAL_MODE").map(String::as_str),
+        Some("allowAll")
+    );
+    assert_eq!(
+        environment.get("MUSE_SERVE_ARGS").map(String::as_str),
+        Some("--disable-sandbox")
+    );
+    muse.muse_auto_review = Some(true);
+    let mut environment = BTreeMap::new();
+    muse.configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment)
+        .unwrap();
+    assert_eq!(
+        environment.get("MUSE_APPROVAL_MODE").map(String::as_str),
+        Some("promptUnmatched")
+    );
+
+    // Guardian targets always review, whatever the toggle says.
+    for review in [None, Some(true), Some(false)] {
+        muse.muse_auto_review = review;
+        let enforcement = muse
+            .execution_enforcement(ExecutionPolicy::ConfiguredApprovals)
+            .expect("Muse guardian enforces an execution policy");
+        assert_eq!(enforcement.acp_mode(), Some("promptUnmatched"));
+        assert_eq!(enforcement.acp_setting(), Some(("auto_review", "on")));
+    }
+}
+
+/// `muse_auto_review` is a Muse-only setting: any other harness rejects it
+/// when the configuration loads.
+#[test]
+fn muse_auto_review_applies_only_to_a_muse_profile() {
+    let text = format!(
+        "version = {CONFIG_VERSION}\n[profiles.muse]\nkind = \"muse\"\n\
+         home = \"/home/test/.config/muse\"\nmuse_auto_review = true\n"
+    );
+    let config: Config = toml::from_str(&text).expect("read the Muse profile");
+    assert_eq!(config.profiles["muse"].muse_auto_review, Some(true));
+    config.validate().expect("Muse accepts the toggle");
+
+    let text = text.replace("kind = \"muse\"", "kind = \"codex\"");
+    let config: Config = toml::from_str(&text).expect("read the Codex profile");
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("applies only to a Muse profile")
+    );
 }
 
 // Hard-won: #1278: guardian Muse kept a stale --disable-sandbox in MUSE_SERVE_ARGS

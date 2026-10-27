@@ -367,7 +367,7 @@ pub(super) async fn serve_session(
 
     // Launch flags and environment are applied before the bridge starts. ACP
     // modes are selected after the session exists, before any prompt can run.
-    let enforcement = spec.harness.execution_enforcement(spec.execution_policy);
+    let enforcement = session_enforcement(spec);
     let mut config_options = config_options.unwrap_or_default();
     let mut modes = modes;
     let mut plan_mode_transition = PlanModeTransition::default();

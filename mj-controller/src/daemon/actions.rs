@@ -8,6 +8,10 @@ pub(super) async fn handle_action(
 ) -> Result<DaemonReply> {
     let _work = upgrade_request_activity(&action)?;
     match action {
+        DaemonAction::RecordOperatorActivity => {
+            state.record_operator_activity().await;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::PrepareUpgrade => {
             if crate::upgrade::gate().try_close() {
                 cancellation.cancel();
@@ -266,12 +270,6 @@ pub(super) async fn handle_action(
             refresh_runtime_controller(state).await;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::SetSessionAcpTitle { session_id, title } => {
-            blocking(move || crate::database::set_session_acp_title(&session_id, title.as_deref()))
-                .await?;
-            refresh_runtime_controller(state).await;
-            Ok(DaemonReply::Done)
-        }
         DaemonAction::MarkSessionTargetMissing {
             session_id,
             detail,
@@ -321,6 +319,10 @@ pub(super) async fn handle_action(
                     project,
                 },
             ))
+        }
+        DaemonAction::RemoveProject { bundle_id } => {
+            state.remove_project(bundle_id).await?;
+            Ok(DaemonReply::Done)
         }
         DaemonAction::WikiSearch { query, limit } => Ok(DaemonReply::WikiRows(
             state.wiki_search(query, limit).await?,
@@ -743,12 +745,16 @@ pub(super) async fn handle_action(
 pub(super) fn upgrade_request_activity(
     action: &DaemonAction,
 ) -> Result<Option<crate::upgrade::Work>> {
+    if matches!(action, DaemonAction::RemoveProject { .. }) {
+        return crate::upgrade::activity("project removal").map(Some);
+    }
     if matches!(action, DaemonAction::SetOperatorAway { .. }) {
         return crate::upgrade::activity("operator away setting").map(Some);
     }
     if matches!(
         action,
-        DaemonAction::Ping
+        DaemonAction::RecordOperatorActivity
+            | DaemonAction::Ping
             | DaemonAction::MoveSession(_)
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade
