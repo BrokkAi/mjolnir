@@ -22,7 +22,7 @@
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 control: None
 
 === dimmed zero count (100x24) ===
@@ -49,7 +49,7 @@ control: None
 │                                                                                                  │
 │                                                                                                  │
 ╰ Subagents · 0 ──────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 control: None
 
 === dimmed zero count in ASCII (100x24) ===
@@ -76,7 +76,7 @@ control: None
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 -------------------------------------------------------- Enter  send   /  commands +
-Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette
 symbol mode: ASCII
 
 === first child enables prompt control (100x24) ===
@@ -103,7 +103,7 @@ symbol mode: ASCII
 │                                                                                                  │
 │                                                                                                  │
 ╰ Subagents · 0 › ────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 control available: true
 
 === active subagent count and preserved draft (100x24) ===
@@ -130,7 +130,7 @@ control available: true
 │                                                                                                  │
 │                                                                                                  │
 ╰ Subagents · 1 › ────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 control: Some(Rect { x: 1, y: 22, width: 17, height: 1 })
 
 === mouse opens subagent panel (100x24) ===
@@ -157,7 +157,7 @@ control: Some(Rect { x: 1, y: 22, width: 17, height: 1 })
 │                                                                                                  │
 │                                                                                                  │
 ╰ Subagents · 1 › ────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: OpenSubagents
 chat surface claims click: true
 
@@ -185,7 +185,7 @@ chat surface claims click: true
 │                                                                                                  │
 │                                                                                                  │
 ╰ Subagents · 1 › ────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: OpenSubagents
 focus action: None
 draft: "keep this draft"

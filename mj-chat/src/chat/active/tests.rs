@@ -1277,8 +1277,8 @@ fn retiring_the_session_feed_keeps_a_closing_phase_in_place() {
 /// carries the same groups the dashboard's row does: the composer's own keys,
 /// then the host's prefix chords.
 /// A-12: the composer's footer dropped the prefix label with the first chord,
-/// so from 100 columns down it read `: palette · ? keys` — plain keys, as far
-/// as the reader could tell. The label must ride on the first chord left.
+/// so from 100 columns down it read `: / ? palette` — plain keys, as far as
+/// the reader could tell. The label must ride on the first chord left.
 // Hard-won: 48c2a9c: narrow composer footers hid the prefix and made a chord look like a plain key
 #[test]
 fn the_composer_footer_names_the_prefix_at_every_width() {
@@ -1290,8 +1290,7 @@ fn the_composer_footer_names_the_prefix_at_every_width() {
         "b panes",
         "q detach",
         "u web",
-        ": palette",
-        "? keys",
+        ": / ? palette",
     ];
     for width in [140_u16, 100, 80] {
         let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("terminal");
@@ -1323,7 +1322,7 @@ fn the_composer_footer_names_the_prefix_at_every_width() {
             chord_group.trim_start().starts_with("ctrl+b then "),
             "{width}: {text:?}"
         );
-        assert!(text.contains(": palette · ? keys"), "{width}: {text:?}");
+        assert!(text.contains(": / ? palette"), "{width}: {text:?}");
         assert!(!text.contains("then:"), "{width}: {text:?}");
     }
 }

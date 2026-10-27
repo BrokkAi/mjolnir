@@ -55,10 +55,6 @@ pub(crate) enum DashboardIoUpdate {
         key: String,
         result: std::result::Result<(), String>,
     },
-    HelpSearchFinished {
-        generation: u64,
-        result: std::result::Result<mj_core::help_search::HelpSearchResponse, String>,
-    },
     SessionUsageFinished {
         generation: u64,
         result: std::result::Result<mj_core::usage::SessionUsageReport, String>,
@@ -651,9 +647,6 @@ impl DashboardContext {
             }
             DashboardIoUpdate::RuntimeConfirmationMissing(error) => {
                 self.dashboard.set_failure_notice(error)
-            }
-            DashboardIoUpdate::HelpSearchFinished { generation, result } => {
-                self.dashboard.apply_help_search_result(generation, result);
             }
             DashboardIoUpdate::SessionUsageFinished { generation, result } => {
                 self.dashboard

@@ -28,7 +28,7 @@
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === Unicode unfiltered Sessions title (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
@@ -69,7 +69,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === Unicode working filter (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
@@ -110,7 +110,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === Unicode blocked filter at wide size (240x40) ===
 ╭ Workspaces ──────────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                                    ≡ ││                                                                                                                                                              │
@@ -151,7 +151,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                              ││  codex-1   Codex        refreshing…                                                                                                                          │
 │                                                                              ││  codex-2   Codex        refreshing…                                                                                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 === Unicode cleared filter (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
@@ -192,7 +192,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 Unicode title markers: ('×', '·')
 === ASCII unfiltered Sessions title (120x40) ===
 + Workspaces -------- * MJOLNIR vX.Y.Z ++ Browse | Conversation ---------------------------------------------- +   .---+
@@ -234,7 +234,7 @@ Unicode title markers: ('×', '·')
 |                                      ||  codex-1   Codex        refreshing..                                         |
 |                                      ||  codex-2   Codex        refreshing..                                         |
 +--------------------------------------++------------------------------------------------------------------------------+
-Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : palette - ? keys
+Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : / ? palette
 === ASCII working filter (120x40) ===
 + Workspaces -------- * MJOLNIR vX.Y.Z ++ Browse | Conversation ---------------------------------------------- +   .---+
 | default                            = ||                                                                              |
@@ -275,7 +275,7 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                      ||  codex-1   Codex        refreshing..                                         |
 |                                      ||  codex-2   Codex        refreshing..                                         |
 +--------------------------------------++------------------------------------------------------------------------------+
-Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : palette - ? keys
+Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : / ? palette
 === ASCII blocked filter at wide size (240x40) ===
 + Workspaces ------------------------------------------------ * MJOLNIR vX.Y.Z ++ Browse | Conversation ------------------------------------------------------------------------------------------------------------------------------ +   .---+
 | default                                                                    = ||                                                                                                                                                              |
@@ -316,7 +316,7 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                                                              ||  codex-1   Codex        refreshing..                                                                                                                         |
 |                                                                              ||  codex-2   Codex        refreshing..                                                                                                                         |
 +------------------------------------------------------------------------------++--------------------------------------------------------------------------------------------------------------------------------------------------------------+
-Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - a read - b panes - q detach - u web - shift+r refresh - s settings - t rendering - : palette - ? keys
+Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - a read - b panes - q detach - u web - shift+r refresh - s settings - t rendering - : / ? palette
 === ASCII cleared filter (120x40) ===
 + Workspaces -------- * MJOLNIR vX.Y.Z ++ Browse | Conversation ---------------------------------------------- +   .---+
 | default                            = ||                                                                              |
@@ -357,7 +357,7 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                      ||  codex-1   Codex        refreshing..                                         |
 |                                      ||  codex-2   Codex        refreshing..                                         |
 +--------------------------------------++------------------------------------------------------------------------------+
-Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : palette - ? keys
+Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : / ? palette
 ASCII title markers: ('x', '-')
 === expanded rows, 80 left (80x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
@@ -399,7 +399,7 @@ ASCII title markers: ('x', '-')
 │  codex-1   Codex        refreshing…                                          │
 │  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
 === expanded rows, 80 right (80x40) ===
 ╭ Browse | Conversation ────── ◇   ⋯───╮╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮
 │                                      ││ default                            ≡ │
@@ -440,7 +440,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                                          │
 │  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
 === expanded rows, 120 left (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
@@ -481,7 +481,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === expanded rows, 120 right (120x40) ===
 ╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮
 │                                                                              ││ default                            ≡ │
@@ -522,7 +522,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  codex-1   Codex        refreshing…                                          ││                                      │
 │  codex-2   Codex        refreshing…                                          ││                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === expanded rows, 180 left (180x40) ===
 ╭ Workspaces ──────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                ≡ ││                                                                                                                      │
@@ -563,7 +563,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                          ││  codex-1   Codex        refreshing…                                                                                  │
 │                                                          ││  codex-2   Codex        refreshing…                                                                                  │
 ╰──────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · : / ? palette
 === expanded rows, 180 right (180x40) ===
 ╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮╭ Workspaces ──────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │                                                                                                                      ││ default                                                ≡ │
@@ -604,7 +604,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  codex-1   Codex        refreshing…                                                                                  ││                                                          │
 │  codex-2   Codex        refreshing…                                                                                  ││                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · : / ? palette
 === minimized rows at 80 columns (80x40) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default        ≡ ││                                                          │
@@ -645,7 +645,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  ││  codex-1   Codex        refreshing…                      │
 │                  ││  codex-2   Codex        refreshing…                      │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
 === expanded session row (120x44) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
@@ -690,7 +690,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === minimized session summaries (120x44) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default        ≡ ││                                                                                                  │
@@ -735,7 +735,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │─ Targets ── none configured ─────────────────────────────────────────────────────────────── ▁   ▄ ─
 ╰──────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ─────────────── ▁   ▄ ─
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === minimized CPU and weekly quota (120x44) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default        ≡ ││                                                                                                  │
@@ -780,7 +780,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │─ Targets ── local 42% ───────────────────────────────────────────────────────────────────── ▁   ▄ ─
 ╰──────────────────╯─ Profiles ── claude-1 63%, codex-1 unavailable, codex-2 unavailable ─────────────────────── ▁   ▄ ─
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === paired weekly and five-hour quota (160x44) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default        ≡ ││                                                                                                                                          │
@@ -825,4 +825,4 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │─ Targets ── none configured ─────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ─
 ╰──────────────────╯─ Profiles ── claude-1 96%/40%, codex-1 100%, codex-2 63% ────────────────────────────────────────────────────────────────────────── ▁   ▄ ─
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette

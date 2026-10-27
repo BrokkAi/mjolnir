@@ -316,42 +316,6 @@ fn delete_with_active_sessions_uses_the_cancellable_suspension_workflow() {
 }
 
 #[test]
-fn manager_load_finishes_behind_help_and_is_restored_when_help_closes() {
-    let mut dashboard = dashboard_with_session(running_session());
-    let DashboardAction::LoadWorkspaceManagement { generation } =
-        dashboard.begin_workspace_manager()
-    else {
-        panic!("manager did not request a load");
-    };
-    assert_eq!(
-        dashboard.dispatch_command(crate::CommandId::Help),
-        DashboardAction::None
-    );
-    assert!(matches!(&dashboard.mode, Mode::Help(_)));
-
-    assert!(
-        !dashboard
-            .finish_workspace_management(generation, Ok(vec![entry("workspace-a", "Workspace A")]),)
-            .foreground
-    );
-    assert!(matches!(
-        &dashboard.mode,
-        Mode::Help(overlay)
-            if matches!(overlay.return_to.as_ref(), Mode::WorkspaceManager(manager) if !manager.loading)
-    ));
-
-    assert_eq!(
-        chord(&mut dashboard, crate::CommandId::Help),
-        DashboardAction::None
-    );
-    assert!(matches!(
-        &dashboard.mode,
-        Mode::WorkspaceManager(manager)
-            if !manager.loading && manager.entries[0].workspace.id == "workspace-a"
-    ));
-}
-
-#[test]
 fn workspace_shortcuts_load_the_active_workspace_and_ignore_stale_replies() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.set_active_workspace(Some("b".into()));

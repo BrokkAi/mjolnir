@@ -1201,16 +1201,17 @@ pub fn footer_group_separator() -> &'static str {
 }
 
 /// The footer row drawn while the prefix key is waiting for the key that
-/// completes a chord. `prefix` is the resolved prefix label and `help_key` the
-/// key that lists the bindings.
-pub fn prefix_banner(prefix: &str, help_key: &str) -> Line<'static> {
+/// completes a chord. `prefix` is the resolved prefix label and
+/// `palette_keys` names the keys that open command search.
+pub fn prefix_banner(prefix: &str, palette_keys: Option<&str>) -> Line<'static> {
     let separator = footer_separator();
+    let mut hint = format!(" esc cancel{separator}{prefix} send");
+    if let Some(palette_keys) = palette_keys {
+        hint.push_str(&format!("{separator}{palette_keys} palette"));
+    }
     Line::from(vec![
         Span::styled(" PREFIX ".to_owned(), focus_control()),
-        Span::styled(
-            format!(" esc cancel{separator}{prefix} send{separator}{help_key} keys"),
-            muted(),
-        ),
+        Span::styled(hint, muted()),
     ])
 }
 
@@ -1242,7 +1243,7 @@ pub fn fit_footer(
 /// and from the right within a group, so the reader keeps the few keys that
 /// work right here and loses the long list that answers from anywhere — a list
 /// the palette holds in full. A hint `protected` accepts is dropped only once
-/// nothing else is left, which is how the palette and the help key stay
+/// nothing else is left, which is how the palette stays
 /// visible on the narrowest terminal.
 pub fn fit_footer_items<T>(
     groups: [Vec<T>; 3],
@@ -1287,8 +1288,8 @@ pub fn fit_footer_items<T>(
 ///
 /// `prefix` — `ctrl+b then ` — is prepended to the chord group's first hint.
 /// That hint is the first unprotected chord the fitter drops, and once it is
-/// gone the survivors would read `: palette · ? keys`, as if `:` alone opened
-/// the palette. So when the labeled hint did not survive, the label moves to
+/// gone the survivor would read `: / ? palette` as if `:` alone opened the
+/// palette. So when the labeled hint did not survive, the label moves to
 /// the first chord that did, and the fit runs again so the label's width is
 /// paid for. A row too narrow for the label and the palette together keeps
 /// the unlabeled palette: a reachable key beats a complete sentence.

@@ -22,7 +22,7 @@
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 
 === advertised value autocomplete (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -48,7 +48,7 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 
 === accepted advertised value (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -74,7 +74,7 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 
 === prompt model chip opens selector (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -100,7 +100,7 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: None
 
 === outside click dismisses selector (100x24) ===
@@ -127,7 +127,7 @@ action: None
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 
 === escape dismisses selector (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -153,7 +153,7 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 
 === bare model command selects current value (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -179,7 +179,7 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 
 === completed bare command opens selector (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -205,7 +205,7 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 
 === filtered selector before applying (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -231,7 +231,7 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 
 === filtered selector applies selected value (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -257,7 +257,7 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: SetConfig { key: "model", value: "gpt-5.6-terra" }
 
 === effort selection stops at final value (100x24) ===
@@ -284,7 +284,7 @@ action: SetConfig { key: "model", value: "gpt-5.6-terra" }
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 selection: max
 
 === effort escape closes without changing current value (100x24) ===
@@ -311,7 +311,7 @@ selection: max
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 
 === bare model command without advertised values (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -337,7 +337,7 @@ The agent does not advertise model values; usage: /model <value>
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 
 === selector anchored at prompt chip (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -363,7 +363,7 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 
 === ASCII selector in Midnight theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
@@ -389,7 +389,7 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
-Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette
 
 === ASCII selector in Light theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
@@ -415,7 +415,7 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
-Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette
 
 === ASCII selector in Darcula theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
@@ -441,7 +441,7 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
-Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette
 
 === ASCII selector in High Contrast theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
@@ -467,7 +467,7 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
-Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette
 
 === ASCII selector in High Contrast Light theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
@@ -493,7 +493,7 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
-Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette
 
 === ASCII selector in Colorblind Dark theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
@@ -519,7 +519,7 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
-Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette
 
 === ASCII selector in Colorblind Light theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
@@ -545,7 +545,7 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
-Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette
 
 === ASCII selector in Catppuccin Mocha theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
@@ -571,7 +571,7 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
-Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette
 
 === ASCII selector in Catppuccin Latte theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
@@ -597,7 +597,7 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
-Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette
 
 === ASCII selector in Campbell theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
@@ -623,7 +623,7 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
-Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette
 
 === ASCII selector in One Half Dark theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
@@ -649,7 +649,7 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
-Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette
 
 === ASCII selector in One Half Light theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
@@ -675,7 +675,7 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
-Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette
 
 === ASCII selector in Solarized Dark theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
@@ -701,7 +701,7 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
-Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette
 
 === ASCII selector in Solarized Light theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
@@ -727,7 +727,7 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
-Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette
 
 === ASCII selector in Terminal Dark theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
@@ -753,7 +753,7 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
-Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette
 
 === ASCII selector in Terminal Light theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
@@ -779,7 +779,7 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
-Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette
 
 === ASCII selector in Monochrome theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
@@ -805,4 +805,4 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 + Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
-Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then q detach - : / ? palette

@@ -618,7 +618,7 @@ fn profile_definition_changes_invalidate_cache_but_review_edits_do_not() {
 }
 
 #[test]
-fn matching_discovery_replies_apply_through_help() {
+fn matching_discovery_replies_apply_to_setup() {
     let mut config = config();
     config.review.profile = Some("codex-1".into());
     let mut dashboard =
@@ -631,7 +631,6 @@ fn matching_discovery_replies_apply_through_help() {
     else {
         panic!("expected discovery")
     };
-    dashboard.begin_help();
     assert!(dashboard.apply_review_settings_choices(
         generation,
         &profile_id,
@@ -642,11 +641,8 @@ fn matching_discovery_replies_apply_through_help() {
             effort_capabilities_discovered: false,
         },
     ));
-    let Mode::Help(overlay) = &dashboard.mode else {
-        panic!("expected help")
-    };
-    let Mode::Setup(setup) = overlay.return_to.as_ref() else {
-        panic!("help must cover review settings")
+    let Mode::Setup(setup) = &dashboard.mode else {
+        panic!("expected setup")
     };
     let dialog = setup.review_editor.as_ref().expect("review child");
     assert!(dialog.model_choices_discovered);

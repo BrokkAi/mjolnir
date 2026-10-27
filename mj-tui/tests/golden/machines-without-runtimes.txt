@@ -32,7 +32,7 @@
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 
 === detection adds each machine's runtimes under it (140x34) ===
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
@@ -68,7 +68,7 @@ Enter open · / searc                                                           
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 
 === only the unreachable machine still lacks a runtime (140x34) ===
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
@@ -104,4 +104,4 @@ Enter open · / searc                                                           
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette

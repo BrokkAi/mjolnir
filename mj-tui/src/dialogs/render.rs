@@ -184,7 +184,6 @@ pub(crate) fn import_progress_status(progress: &ImportProgress) -> Line<'static>
 pub(crate) fn import_progress_mut(mode: &mut Mode) -> Option<&mut ImportProgress> {
     match mode {
         Mode::Importing(progress) => Some(progress),
-        Mode::Help(overlay) => import_progress_mut(overlay.return_to.as_mut()),
         Mode::Confirm(dialog) => match &mut dialog.confirmation {
             Confirmation::Dismiss { mode, .. } => import_progress_mut(mode.as_mut()),
             _ => None,

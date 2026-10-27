@@ -22,7 +22,7 @@
 │                                                                                                  │
 │                                      ││  codex-2   Codex        refreshing…                      │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 cursor: (21, 13)
 source field focused: true
 both actions selected: true
@@ -52,7 +52,7 @@ Cancel action focused: false
 │                                                                                                  │
 │                                      ││  codex-2   Codex        refreshing…                      │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 cursor: hidden
 source field focused: false
 both actions selected: false

@@ -517,7 +517,6 @@ pub(super) fn detection_notice(
 pub(super) fn setup_dialog_mut(mode: &mut Mode) -> Option<&mut SetupDialog> {
     match mode {
         Mode::Setup(dialog) => Some(dialog),
-        Mode::Help(overlay) => setup_dialog_mut(&mut overlay.return_to),
         _ => None,
     }
 }

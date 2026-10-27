@@ -47,7 +47,7 @@ Transient dashboard message
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === footer at Sessions focus (200x24) ===
 ╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                      ≡ ││                                                                                                                                    │
@@ -72,7 +72,7 @@ Transient dashboard message
 │                                                                ││  codex-1   Codex        refreshing…                                                                                                │
 │                                                                ││  codex-2   Codex        refreshing…                                                                                                │
 ╰────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 === footer at Targets focus (200x24) ===
 ╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                      ≡ ││                                                                                                                                    │
@@ -97,7 +97,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                ││  codex-1   Codex        refreshing…                                                                                                │
 │                                                                ││  codex-2   Codex        refreshing…                                                                                                │
 ╰────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 === footer at Quota focus (200x24) ===
 ╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                      ≡ ││                                                                                                                                    │
@@ -122,7 +122,7 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 │                                                                ││  codex-1   Codex        refreshing…                                                                                                │
 │                                                                ││  codex-2   Codex        refreshing…                                                                                                │
 ╰────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys
+Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 === footer at Prompt focus (200x24) ===
 ╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                      ≡ ││                                                                                                                                    │
@@ -147,7 +147,7 @@ Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes
 │                                                                ││  codex-1   Codex        refreshing…                                                                                                │
 │                                                                ││  codex-2   Codex        refreshing…                                                                                                │
 ╰────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 === footer at 0 columns (0x30) ===
 
 
@@ -2038,7 +2038,7 @@ Need at least 60 columns.
 │  codex-1   Codex        refreshing…                      │
 │  codex-2   Codex        refreshing…                      │
 ╰──────────────────────────────────────────────────────────╯
-Enter open │ ctrl+b then : palette · ? keys
+Enter open │ ctrl+b then : / ? palette
 === footer at 61 columns (61x30) ===
 ╭ Workspaces ───────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                 ≡ │
@@ -2069,7 +2069,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                       │
 │  codex-2   Codex        refreshing…                       │
 ╰───────────────────────────────────────────────────────────╯
-Enter open │ ctrl+b then : palette · ? keys
+Enter open │ ctrl+b then : / ? palette
 === footer at 62 columns (62x30) ===
 ╭ Workspaces ────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                  ≡ │
@@ -2100,7 +2100,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                        │
 │  codex-2   Codex        refreshing…                        │
 ╰────────────────────────────────────────────────────────────╯
-Enter open │ ctrl+b then : palette · ? keys
+Enter open │ ctrl+b then : / ? palette
 === footer at 63 columns (63x30) ===
 ╭ Workspaces ─────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                   ≡ │
@@ -2131,7 +2131,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                         │
 │  codex-2   Codex        refreshing…                         │
 ╰─────────────────────────────────────────────────────────────╯
-Enter open │ ctrl+b then : palette · ? keys
+Enter open │ ctrl+b then : / ? palette
 === footer at 64 columns (64x30) ===
 ╭ Workspaces ──────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                    ≡ │
@@ -2162,7 +2162,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                          │
 │  codex-2   Codex        refreshing…                          │
 ╰──────────────────────────────────────────────────────────────╯
-Enter open │ ctrl+b then : palette · ? keys
+Enter open │ ctrl+b then : / ? palette
 === footer at 65 columns (65x30) ===
 ╭ Workspaces ───────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                     ≡ │
@@ -2193,7 +2193,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                           │
 │  codex-2   Codex        refreshing…                           │
 ╰───────────────────────────────────────────────────────────────╯
-Enter open │ ctrl+b then : palette · ? keys
+Enter open │ ctrl+b then : / ? palette
 === footer at 66 columns (66x30) ===
 ╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                      ≡ │
@@ -2224,7 +2224,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                            │
 │  codex-2   Codex        refreshing…                            │
 ╰────────────────────────────────────────────────────────────────╯
-Enter open │ ctrl+b then : palette · ? keys
+Enter open │ ctrl+b then : / ? palette
 === footer at 67 columns (67x30) ===
 ╭ Workspaces ─────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                       ≡ │
@@ -2255,7 +2255,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                             │
 │  codex-2   Codex        refreshing…                             │
 ╰─────────────────────────────────────────────────────────────────╯
-Enter open │ ctrl+b then : palette · ? keys
+Enter open │ ctrl+b then : / ? palette
 === footer at 68 columns (68x30) ===
 ╭ Workspaces ──────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                        ≡ │
@@ -2286,7 +2286,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                              │
 │  codex-2   Codex        refreshing…                              │
 ╰──────────────────────────────────────────────────────────────────╯
-Enter open │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 === footer at 69 columns (69x30) ===
 ╭ Workspaces ───────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                         ≡ │
@@ -2317,7 +2317,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                               │
 │  codex-2   Codex        refreshing…                               │
 ╰───────────────────────────────────────────────────────────────────╯
-Enter open │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 === footer at 70 columns (70x30) ===
 ╭ Workspaces ────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                          ≡ │
@@ -2348,7 +2348,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                                │
 │  codex-2   Codex        refreshing…                                │
 ╰────────────────────────────────────────────────────────────────────╯
-Enter open │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 === footer at 71 columns (71x30) ===
 ╭ Workspaces ─────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                           ≡ │
@@ -2379,7 +2379,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                                 │
 │  codex-2   Codex        refreshing…                                 │
 ╰─────────────────────────────────────────────────────────────────────╯
-Enter open │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 === footer at 72 columns (72x30) ===
 ╭ Workspaces ──────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                            ≡ │
@@ -2410,7 +2410,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                                  │
 │  codex-2   Codex        refreshing…                                  │
 ╰──────────────────────────────────────────────────────────────────────╯
-Enter open │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 === footer at 73 columns (73x30) ===
 ╭ Workspaces ───────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                             ≡ │
@@ -2441,7 +2441,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                                   │
 │  codex-2   Codex        refreshing…                                   │
 ╰───────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 === footer at 74 columns (74x30) ===
 ╭ Workspaces ────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                              ≡ │
@@ -2472,7 +2472,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                                    │
 │  codex-2   Codex        refreshing…                                    │
 ╰────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 === footer at 75 columns (75x30) ===
 ╭ Workspaces ─────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                               ≡ │
@@ -2503,7 +2503,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                                     │
 │  codex-2   Codex        refreshing…                                     │
 ╰─────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 === footer at 76 columns (76x30) ===
 ╭ Workspaces ──────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                                ≡ │
@@ -2534,7 +2534,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                                      │
 │  codex-2   Codex        refreshing…                                      │
 ╰──────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 === footer at 77 columns (77x30) ===
 ╭ Workspaces ───────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                                 ≡ │
@@ -2565,7 +2565,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                                       │
 │  codex-2   Codex        refreshing…                                       │
 ╰───────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 === footer at 78 columns (78x30) ===
 ╭ Workspaces ────────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                                  ≡ │
@@ -2596,7 +2596,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                                        │
 │  codex-2   Codex        refreshing…                                        │
 ╰────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 === footer at 79 columns (79x30) ===
 ╭ Workspaces ─────────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                                   ≡ │
@@ -2627,7 +2627,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                                         │
 │  codex-2   Codex        refreshing…                                         │
 ╰─────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
 === footer at 80 columns (80x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
 │ default                            ≡ ││                                      │
@@ -2658,7 +2658,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │  codex-1   Codex        refreshing…                                          │
 │  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
 Sessions prefix action: Consumed
 === Sessions pending chord (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
@@ -2700,7 +2700,7 @@ Sessions prefix action: Consumed
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
- PREFIX  esc cancel · ctrl+b send · ? keys
+ PREFIX  esc cancel · ctrl+b send · : / ? palette
 === Sessions after cancelling chord (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
@@ -2741,7 +2741,7 @@ Sessions prefix action: Consumed
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 Prompt prefix action: Consumed
 === Prompt pending chord (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
@@ -2783,7 +2783,7 @@ Prompt prefix action: Consumed
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
- PREFIX  esc cancel · ctrl+b send · ? keys
+ PREFIX  esc cancel · ctrl+b send · : / ? palette
 === Prompt after cancelling chord (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
@@ -2824,4 +2824,4 @@ Prompt prefix action: Consumed
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette

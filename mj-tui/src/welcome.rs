@@ -33,7 +33,6 @@ pub(crate) struct WelcomeDialog {
 fn open_welcome(mode: &mut Mode) -> Option<&mut WelcomeDialog> {
     match mode {
         Mode::Welcome(dialog) => Some(dialog),
-        Mode::Help(help) => open_welcome(&mut help.return_to),
         _ => None,
     }
 }

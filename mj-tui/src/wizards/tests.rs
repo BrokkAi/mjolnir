@@ -3905,9 +3905,9 @@ fn availability_answers_change_the_open_picker_only_when_they_differ() {
     );
 }
 
-// Hard-won: #1370: an answer under the help overlay left a stale profile index, one mid-launch closed the wizard, and the startup check raced first-run setup.
+// Hard-won: #1370: an availability answer left a stale profile index, closed a mid-launch wizard, and raced first-run setup.
 #[test]
-fn availability_answers_reach_a_wizard_under_help_and_spare_a_launch() {
+fn availability_answers_update_a_wizard_and_spare_a_launch() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.hold_availability_check();
     assert_eq!(
@@ -3928,17 +3928,15 @@ fn availability_answers_reach_a_wizard_under_help_and_spare_a_launch() {
         Mode::New(wizard) => wizard.profile = last,
         _ => panic!("expected the new-session wizard"),
     }
-    dashboard.begin_help();
     let first = dashboard.nth_offered_profile(0).unwrap();
     let mut answer = crate::test_support::availability_answer(&dashboard, &[], &[]);
     answer.profiles.get_mut(&first).unwrap().1 = Some("gone".into());
     dashboard.apply_availability_check(generation, Ok(answer));
-    dashboard.handle_key(key(KeyCode::Esc));
     let wizard = new_wizard(&dashboard);
     assert_eq!(
         dashboard.nth_offered_profile(wizard.profile).as_deref(),
         Some(chosen.as_str()),
-        "the wizard under help keeps its choice"
+        "the wizard keeps its choice"
     );
     crate::test_support::drawn(&mut dashboard, 140, 40);
 

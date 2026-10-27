@@ -41,11 +41,9 @@ impl DashboardState {
         }
     }
 
-    /// Whether the open mode routes events away from the dashboard. Help is a
-    /// pointer surface but not an event-routing modal: it draws over the mode
-    /// it opened on and keeps that mode's key handling.
+    /// Whether the open mode routes events away from the dashboard.
     pub(crate) fn component_modal_open(&self) -> bool {
-        self.away_dialog().is_some() || !matches!(self.mode, Mode::Dashboard | Mode::Help(_))
+        self.away_dialog().is_some() || !matches!(self.mode, Mode::Dashboard)
     }
 
     /// Whether a form owns this pointer event, ahead of selectable body text.

@@ -1,4 +1,4 @@
-//! The `F2` command palette: every command that applies right now, in one
+//! The searchable command palette: every command that applies right now, in one
 //! searchable list.
 //!
 //! The palette is a renderer over the action registry ([`crate::actions`]).
@@ -37,8 +37,8 @@ mod workspace;
 /// One row of the palette: a command and whether it can be run.
 ///
 /// `Blocked` entries are listed greyed with their reason rather than dropped,
-/// for the same reason the help overlay lists them: a list that hides what
-/// does not apply leaves the reader unable to tell "there is no such command"
+/// because a list that hides what does not apply leaves the reader unable to
+/// tell "there is no such command"
 /// from "not here, not now".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PaletteEntry {
@@ -978,7 +978,7 @@ pub(crate) fn render_palette(
                 // dimmed, not a lowercase fragment in brackets.
                 let reason = match entry.availability {
                     Availability::Blocked(reason) => {
-                        format!(" — {}", crate::help::sentence(reason))
+                        format!(" — {}", crate::actions::sentence(reason))
                     }
                     Availability::Ready | Availability::Hidden => String::new(),
                 };
@@ -1118,7 +1118,8 @@ mod tests {
     use crate::render::render;
     use crate::test_support::{
         buffer_lines, dashboard_with_finished_native_child, dashboard_with_session, drawn, key,
-        mouse_at, open_palette, operation, point, running_session, stopped_session,
+        mouse_at, open_palette, operation, point, prefix_key, route, running_session,
+        stopped_session,
     };
     use crossterm::event::{MouseButton, MouseEventKind};
     use ratatui::Terminal;
@@ -1380,6 +1381,7 @@ mod tests {
         let Mode::Palette(palette) = &dashboard.mode else {
             panic!("the palette chord should leave the palette open")
         };
+        let selected_label = spec(palette.entries[palette.selected].id).label;
         assert_eq!(
             palette.selected,
             palette.entries.len().saturating_sub(1),
@@ -1390,7 +1392,7 @@ mod tests {
             "the selected final command requires scrolling: {lines:#?}"
         );
         assert!(
-            row_of(&lines, "Help").is_some(),
+            row_of(&lines, selected_label).is_some(),
             "the selected row is visible"
         );
     }
@@ -1660,11 +1662,26 @@ mod tests {
     fn golden_command_palette() {
         let mut output = String::new();
 
+        for (label, question) in [("prefix+? alias", true), ("prefix+: alias", false)] {
+            let mut dashboard = dashboard_with_session(running_session());
+            dashboard.focus_sessions();
+            route(
+                &mut dashboard,
+                &[
+                    prefix_key(),
+                    key(KeyCode::Char(if question { '?' } else { ':' })),
+                ],
+            );
+            assert!(matches!(dashboard.mode, Mode::Palette(_)));
+            let lines = drawn(&mut dashboard, 120, 40);
+            append_golden_state(&mut output, label, 120, 40, &lines);
+        }
+
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         open_palette(&mut dashboard);
         let lines = drawn(&mut dashboard, 120, 100);
-        append_golden_state(&mut output, "F2 command palette", 120, 100, &lines);
+        append_golden_state(&mut output, "command palette", 120, 100, &lines);
 
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();

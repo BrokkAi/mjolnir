@@ -28,7 +28,7 @@
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰──────────────────────────────────────────────────────────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 matching paths: [["targets", "podman", "memory"]]
 
 === memory result focuses its inline field (140x30) ===
@@ -61,7 +61,7 @@ matching paths: [["targets", "podman", "memory"]]
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 landed page and focused setting: ["targets", "podman"] / Some(["targets", "podman", "memory"])
 
 === help text finds context budget by compaction (140x30) ===
@@ -94,7 +94,7 @@ landed page and focused setting: ["targets", "podman"] / Some(["targets", "podma
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰──────────────────────────────────────────────────────────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 matching paths: [["profiles", "claude-1", "context_window_bytes"], ["profiles", "codex-1", "context_window_bytes"], ["profiles", "codex-2", "context_window_bytes"]]
 
 === search result includes its section, label, and current value (140x30) ===
@@ -127,5 +127,5 @@ matching paths: [["profiles", "claude-1", "context_window_bytes"], ["profiles", 
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰──────────────────────────────────────────────────────────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 matching paths: [["targets", "podman", "image"], ["targets", "podman", "pull_policy"]]

@@ -1830,7 +1830,7 @@ fn the_search_arrows_reach_the_strip_only_from_the_end_of_the_query() {
 }
 
 /// Escape takes the query before it takes the dialog, then hands the keyboard
-/// back to the list, matching the help overlay and the Sessions pane's filter.
+/// back to the list, matching the palette and the Sessions pane's filter.
 // Hard-won: c82060f6: Escape closed the dialog instead of clearing the query and leaving search focus in layers.
 #[test]
 fn escape_clears_the_query_then_leaves_the_box_then_closes_the_dialog() {
@@ -2634,12 +2634,11 @@ fn the_mjolnir_tab_lists_the_daemons_answer_and_resumes_a_session_the_feed_lacks
 }
 
 #[test]
-fn a_search_answer_arriving_under_help_is_kept_when_the_dialog_returns() {
+fn a_search_answer_updates_the_open_dialog() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     open_resume_dialog(&mut dashboard, 1, Vec::new());
     switch_to_archive(&mut dashboard);
     let request = dashboard.resume_search_request_id().unwrap();
-    dashboard.begin_help();
     assert_eq!(dashboard.resume_search_request_id(), Some(request));
     assert!(dashboard.apply_wiki_search_result(
         request,
@@ -2658,10 +2657,6 @@ fn a_search_answer_arriving_under_help_is_kept_when_the_dialog_returns() {
         }
     );
     dashboard.apply_wiki_brief("answered-under-help".into(), "A retained preview".into());
-    let Mode::Help(overlay) = std::mem::replace(&mut dashboard.mode, Mode::Dashboard) else {
-        panic!("help overlay");
-    };
-    dashboard.mode = *overlay.return_to;
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("resume dialog");
     };

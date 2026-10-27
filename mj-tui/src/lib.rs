@@ -35,7 +35,6 @@ use crate::dialogs::{
     ImportBundleConfirmation, ImportProgress, NoticeLogDialog, RenameEditor,
     RepositoryOriginDialog, TargetActionsDialog, WebDialog,
 };
-use crate::help::HelpOverlay;
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::palette::CommandPalette;
 use crate::resume::ResumeDialog;
@@ -51,7 +50,6 @@ mod availability;
 mod component_events;
 mod dialogs;
 mod go;
-mod help;
 mod ingest;
 mod keybinds;
 mod modal_surface;
@@ -845,10 +843,7 @@ pub(crate) enum Mode {
     Importing(ImportProgress),
     ConfirmImportBundle(ImportBundleConfirmation),
     Confirm(ConfirmDialog),
-    /// The `F1` key reference, drawn over the mode it opened on top of. It
-    /// carries that mode so closing help puts it back untouched.
-    Help(HelpOverlay),
-    /// The `F2` command palette: every command that applies right now.
+    /// The searchable command palette: every command that applies right now.
     Palette(CommandPalette),
     Setup(setup::SetupDialog),
     Welcome(welcome::WelcomeDialog),
@@ -1079,7 +1074,6 @@ pub struct DashboardState {
     /// session row, so the next click can be recognized as a double click.
     last_row_click: Option<(Focus, usize, Instant)>,
     pub(crate) mode: Mode,
-    pub(crate) help_request_generation: u64,
     pub(crate) usage_request_generation: u64,
     pub(crate) go: Option<go::GoMode>,
     simple_mode: bool,
@@ -1330,7 +1324,6 @@ impl DashboardState {
             mode: Mode::Dashboard,
             pending_welcome: None,
             operator_presence: Default::default(),
-            help_request_generation: 0,
             usage_request_generation: 0,
             modal_click_transition: None,
             suppress_modal_release: false,

@@ -58,7 +58,7 @@ action: None
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                                                                              │
@@ -89,7 +89,7 @@ action: None
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                                                                              │
@@ -120,7 +120,7 @@ action: None
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                                                                              │
@@ -151,7 +151,7 @@ action: None
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                                                                              │
@@ -182,7 +182,7 @@ action: None
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 action: None
 action: CreateBundle { sources: ["owner/only"] }
 action: None
@@ -248,7 +248,7 @@ action: None
 │       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
 │                                                                                                  │
 ╰─────                                                                                        ─────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === project_picker_multiple_sources_wait_for_submit_and_remove_selected (100x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ defa                                                                                             │
@@ -279,7 +279,7 @@ action: None
 │       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
 │                                                                                                  │
 ╰─────                                                                                        ─────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 action: CreateBundle { sources: ["owner/main", "owner/shared"] }
 action: None
 selection: keyboard-selected owner/app is submitted
@@ -376,7 +376,7 @@ project request: Github { query: "" }
 │       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
 │                                                                                                  │
 ╰─────                                                                                        ─────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === project_picker_multiple_discovery_selection_toggles_members_and_can_change_primary (100x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ defa                                                                                             │
@@ -407,7 +407,7 @@ project request: Github { query: "" }
 │       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
 │                                                                                                  │
 ╰─────                                                                                        ─────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 action: CreateBundle { sources: ["owner/shared", "owner/app"] }
 action: None
 === project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals (80x24) ===
@@ -1793,7 +1793,7 @@ action: None
 │       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
 │                                                                                                  │
 ╰─────                                                                                        ─────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === directory_completion_lists_every_candidate_and_selects_with_keys (100x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ defa                                                                                             │
@@ -1824,7 +1824,7 @@ action: None
 │       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
 │                                                                                                  │
 ╰─────                                                                                        ─────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 action: None
 === clicking_a_recent_project_fills_the_field_and_enter_validates_it (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -1866,7 +1866,7 @@ action: None
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 === clicking_a_recent_project_fills_the_field_and_enter_validates_it (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
@@ -1907,7 +1907,7 @@ action: None
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 === clicking_a_recent_project_fills_the_field_and_enter_validates_it (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
@@ -1948,5 +1948,5 @@ action: None
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 action: ValidateProjectDirectory { target_template_id: "localhost", directory: "/work/older" }
