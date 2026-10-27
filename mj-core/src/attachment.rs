@@ -169,7 +169,7 @@ impl AttachmentStore {
     pub fn root(&self) -> &Path {
         &self.root
     }
-    fn lock(&self) -> Result<fs::File> {
+    fn lock(&self) -> Result<crate::file_lock::FileLock> {
         let parent = self
             .root
             .parent()
@@ -182,7 +182,7 @@ impl AttachmentStore {
             .truncate(false)
             .open(self.root.with_extension("lock"))?;
         file.lock().context("lock attachment store")?;
-        Ok(file)
+        Ok(crate::file_lock::FileLock::new(file))
     }
     fn ensure_open(&self) -> Result<()> {
         ensure!(

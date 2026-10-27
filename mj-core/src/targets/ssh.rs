@@ -1364,12 +1364,15 @@ fn ensure_master(ssh: &SshTarget, socket: &Path, executor: &dyn CommandExecutor)
 /// The lock file sits beside the socket as `<socket>.lock`; `ssh` binds a
 /// new master at `<socket>.<16 random characters>`, so the names never meet.
 #[cfg(all(unix, test))]
-fn lock_master_opening(socket: &Path) -> Result<fs::File> {
+fn lock_master_opening(socket: &Path) -> Result<crate::file_lock::FileLock> {
     lock_master_opening_unless(socket, &|| false)
 }
 
 #[cfg(unix)]
-fn lock_master_opening_unless(socket: &Path, cancelled: &dyn Fn() -> bool) -> Result<fs::File> {
+fn lock_master_opening_unless(
+    socket: &Path,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<crate::file_lock::FileLock> {
     let mut path = socket.as_os_str().to_owned();
     path.push(".lock");
     let path = PathBuf::from(path);
@@ -1395,10 +1398,11 @@ fn lock_master_opening_unless(socket: &Path, cancelled: &dyn Fn() -> bool) -> Re
                     .with_context(|| format!("lock SSH master lock {}", path.display()));
             }
         }
+        let file = crate::file_lock::FileLock::new(file);
         // The daemon removes stale locks when it starts. A lock taken on a
         // file removed meanwhile serializes nothing, so take the one at the
         // path now.
-        if is_file_at(&file, &path) {
+        if is_file_at(file.file(), &path) {
             return Ok(file);
         }
     }
@@ -1441,7 +1445,8 @@ fn remove_stale_master_locks_in(dir: &Path) {
         if file.try_lock().is_err() {
             continue;
         }
-        if fs::symlink_metadata(&socket).is_ok() || !is_file_at(&file, &lock) {
+        let file = crate::file_lock::FileLock::new(file);
+        if fs::symlink_metadata(&socket).is_ok() || !is_file_at(file.file(), &lock) {
             continue;
         }
         match fs::remove_file(&lock) {

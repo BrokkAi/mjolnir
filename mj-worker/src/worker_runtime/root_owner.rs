@@ -1,13 +1,16 @@
 //! Exclusive ownership of every mutable file in a worker root.
 
-use std::fs::{File, OpenOptions, TryLockError};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::{OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use mj_core::file_lock::FileLock;
 
 pub struct WorkerRootOwner {
     root: PathBuf,
-    _file: File,
+    _file: FileLock,
 }
 
 impl WorkerRootOwner {
@@ -30,6 +33,7 @@ impl WorkerRootOwner {
                 return Err(error).context("lock worker root");
             }
         }
+        let file = FileLock::new(file);
         // Legacy workers do not hold worker.lock. Never take their files away
         // during the first upgrade to a worker that enforces root ownership.
         #[cfg(unix)]
@@ -47,7 +51,7 @@ impl WorkerRootOwner {
     #[cfg(unix)]
     pub fn set_reexec_inheritance(&self, inherit: bool) -> Result<i32> {
         use std::os::fd::AsRawFd;
-        let fd = self._file.as_raw_fd();
+        let fd = self._file.file().as_raw_fd();
         let flags = if inherit { 0 } else { libc::FD_CLOEXEC };
         // SAFETY: this owner keeps fd alive; F_SETFD only changes descriptor flags.
         if unsafe { libc::fcntl(fd, libc::F_SETFD, flags) } < 0 {
@@ -69,15 +73,16 @@ impl WorkerRootOwner {
             "worker root lock descriptor was not inherited"
         );
         // SAFETY: the hidden CLI argument transfers this descriptor exactly once.
-        let file = unsafe { File::from_raw_fd(fd) };
+        let file = FileLock::new(unsafe { File::from_raw_fd(fd) });
         let root = std::fs::canonicalize(root)?;
-        let actual = file.metadata()?;
+        let actual = file.file().metadata()?;
         let expected = std::fs::metadata(root.join("worker.lock"))?;
         anyhow::ensure!(
             actual.dev() == expected.dev() && actual.ino() == expected.ino(),
             "inherited worker lock belongs to another root"
         );
-        file.try_lock()
+        file.file()
+            .try_lock()
             .context("retain inherited worker root ownership")?;
         let owner = Self { root, _file: file };
         owner.set_reexec_inheritance(false)?;
@@ -122,25 +127,6 @@ impl WorkerRootOwner {
             );
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn acquire_after_fork_exec_window(root: &Path) -> Result<WorkerRootOwner> {
-    use std::time::{Duration, Instant};
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        match WorkerRootOwner::acquire(root) {
-            Ok(owner) => return Ok(owner),
-            Err(error) if error.to_string().starts_with("a worker already owns ") => {
-                if Instant::now() >= deadline {
-                    return Err(error).context("worker root stayed busy after a fork/exec window");
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            Err(error) => return Err(error),
-        }
     }
 }
 
@@ -209,7 +195,7 @@ mod tests {
 
     // Hard-won: #1257: a forked pre-exec child keeps the flock after the Rust owner drops.
     #[test]
-    fn root_is_exclusive_before_a_control_socket_exists_and_released_on_exit() {
+    fn root_is_exclusive_before_a_control_socket_exists_and_released_on_drop() {
         let root = tempfile::tempdir().unwrap();
         let owner = WorkerRootOwner::acquire(root.path()).unwrap();
         assert!(WorkerRootOwner::acquire(root.path()).is_err());
@@ -219,15 +205,17 @@ mod tests {
         let acquired = {
             let child = ForkedPreExecChild::start();
             drop(owner);
-            let release = child.release_after(std::time::Duration::from_millis(30));
-            let acquired = acquire_after_fork_exec_window(root.path());
-            release.join().unwrap();
+            let acquired = WorkerRootOwner::acquire(root.path());
+            child
+                .release_after(std::time::Duration::ZERO)
+                .join()
+                .unwrap();
             acquired
         };
         #[cfg(not(unix))]
         let acquired = {
             drop(owner);
-            acquire_after_fork_exec_window(root.path())
+            WorkerRootOwner::acquire(root.path())
         };
         assert!(acquired.is_ok());
     }

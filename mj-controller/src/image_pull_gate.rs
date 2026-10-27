@@ -15,8 +15,8 @@
 //! process while the daemon may be downloading the same image. Two engines
 //! pulling one image at once can fail to extract a layer.
 
+use mj_core::file_lock::FileLock;
 use std::collections::BTreeMap;
-use std::fs::File;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -102,11 +102,11 @@ impl ImagePullLock {
 #[derive(Debug)]
 pub(crate) struct ImagePullGuard<'a> {
     _local: MutexGuard<'a, ()>,
-    _file: Option<File>,
+    _file: Option<FileLock>,
 }
 
 /// Try the file lock once. `None` means another process holds it.
-fn try_lock_file(path: &std::path::Path) -> Result<Option<File>> {
+fn try_lock_file(path: &std::path::Path) -> Result<Option<FileLock>> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| {
             format!("create image download lock directory {}", parent.display())
@@ -119,7 +119,7 @@ fn try_lock_file(path: &std::path::Path) -> Result<Option<File>> {
         .open(path)
         .with_context(|| format!("open image download lock {}", path.display()))?;
     match file.try_lock() {
-        Ok(()) => Ok(Some(file)),
+        Ok(()) => Ok(Some(FileLock::new(file))),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
         Err(std::fs::TryLockError::Error(error)) => {
             Err(error).with_context(|| format!("lock image download lock {}", path.display()))

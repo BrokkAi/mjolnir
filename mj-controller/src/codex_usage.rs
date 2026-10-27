@@ -4,8 +4,8 @@
 //! protocol rather than a one-shot CLI command. Keep the JSONL client isolated
 //! from the UI so protocol parsing and unavailable states remain testable.
 
+use mj_core::file_lock::FileLock;
 use std::collections::{HashMap, VecDeque};
-use std::fs::File;
 #[cfg(unix)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -63,7 +63,7 @@ pub struct CodexUsageWindow {
 
 pub struct CodexUsageClient {
     child: Child,
-    _lease: File,
+    _lease: FileLock,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     stderr: StderrTail,
@@ -234,7 +234,7 @@ impl CodexUsageClient {
         if let Err(error) = self.child.wait().await {
             tracing::warn!(%error, "could not reap the Codex quota process");
         }
-        if let Err(error) = self._lease.unlock() {
+        if let Err(error) = self._lease.release() {
             tracing::warn!(%error, "could not release the managed Codex installation lease");
         }
         self.stderr_reader
@@ -505,7 +505,7 @@ fn spawn_codex(
     cwd: PathBuf,
     env: HashMap<String, String>,
     cache_root: PathBuf,
-) -> Result<(Child, File), QueryError> {
+) -> Result<(Child, FileLock), QueryError> {
     let install = managed_harness_install_dir(&cache_root, HarnessKind::Codex);
 
     #[cfg(not(unix))]
@@ -587,7 +587,7 @@ fn spawn_codex(
 }
 
 #[cfg(unix)]
-fn open_managed_codex_lease(install: &Path) -> Result<File, QueryError> {
+fn open_managed_codex_lease(install: &Path) -> Result<FileLock, QueryError> {
     let lease_path = install.join(LEASE_FILE);
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -605,7 +605,7 @@ fn open_managed_codex_lease(install: &Path) -> Result<File, QueryError> {
             }
         })?;
     match file.try_lock_shared() {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok(FileLock::new(file)),
         Err(std::fs::TryLockError::WouldBlock) => Err(QueryError::NotInstalled {
             expected: Some(install.to_path_buf()),
             detail: Some("managed Codex installation is being repaired".to_owned()),

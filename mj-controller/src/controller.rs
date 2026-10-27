@@ -39,7 +39,7 @@ mod worktree;
 pub(crate) use worktree::RemoteGitExecutor;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -137,7 +137,7 @@ pub struct Controller {
 /// second controller against the same SQLite state and relay sessions.
 #[derive(Debug)]
 pub struct ControllerStoreGuard {
-    file: File,
+    _file: mj_core::file_lock::FileLock,
 }
 
 impl ControllerStoreGuard {
@@ -184,21 +184,15 @@ impl ControllerStoreGuard {
                     .with_context(|| format!("lock controller store {}", directory.display()));
             }
         }
-        Ok(Some(Self { file }))
+        Ok(Some(Self {
+            _file: mj_core::file_lock::FileLock::new(file),
+        }))
     }
 
     /// Start the sole production SQLite writer after controller exclusivity
     /// has been established by this guard.
     pub fn start_database_writer(&self) -> Result<crate::database::DatabaseWriterOwner> {
         crate::database::start_database_writer()
-    }
-}
-
-impl Drop for ControllerStoreGuard {
-    fn drop(&mut self) {
-        // Make release explicit. `File` also unlocks on close, but an explicit
-        // unlock keeps same-process handoff deterministic across platforms.
-        let _ = self.file.unlock();
     }
 }
 

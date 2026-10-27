@@ -38,7 +38,7 @@ pub use ui::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 
 use std::path::{Path, PathBuf};
 
@@ -1575,7 +1575,7 @@ impl Config {
 /// the config because the config itself is replaced atomically after the lock
 /// is acquired.
 pub(crate) struct ConfigLock {
-    _file: File,
+    _file: crate::file_lock::FileLock,
 }
 
 impl ConfigLock {
@@ -1600,7 +1600,9 @@ impl ConfigLock {
             .with_context(|| format!("open config lock {}", lock_path.display()))?;
         file.lock()
             .with_context(|| format!("lock config {}", config_path.display()))?;
-        Ok(Self { _file: file })
+        Ok(Self {
+            _file: crate::file_lock::FileLock::new(file),
+        })
     }
 }
 

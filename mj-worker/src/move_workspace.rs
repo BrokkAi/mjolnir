@@ -219,6 +219,7 @@ pub fn capture(
         .open(destination.with_extension("move-lock"))?;
     lock.try_lock()
         .context("another process owns this Move capture; retry after it finishes")?;
+    let _lock = mj_core::file_lock::FileLock::new(lock);
     if destination.join(MANIFEST).is_file() {
         return verify(destination);
     }

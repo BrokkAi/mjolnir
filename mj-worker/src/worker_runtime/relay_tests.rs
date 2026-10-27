@@ -7088,11 +7088,11 @@ async fn checkpoint_only_start_refuses_missing_or_corrupt_state_without_starting
     assert!(format!("{error:#}").contains("existing relay state"));
     let state = root.join(mj_core::relay::RELAY_STATE_FILE);
     std::fs::write(&state, b"corrupt state").unwrap();
-    let owner = super::root_owner::acquire_after_fork_exec_window(&root).unwrap();
+    let owner = super::WorkerRootOwner::acquire(&root).unwrap();
     let child = super::root_owner::ForkedPreExecChild::start();
     drop(owner);
     let release = child.release_after(std::time::Duration::from_millis(30));
-    let owner = super::root_owner::acquire_after_fork_exec_window(&root).unwrap();
+    let owner = super::WorkerRootOwner::acquire(&root).unwrap();
     let error = unix::run_daemon_owned(&owner, config).await.unwrap_err();
     release.join().unwrap();
     assert!(format!("{error:#}").contains("parse"), "{error:#}");
