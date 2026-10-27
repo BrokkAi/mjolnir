@@ -112,26 +112,49 @@ Discard
 Save
 control Maximum concurrent children: "99" (text, placeholder "6 (default)")
 layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/subagents"}
-=== saving returns the saved draft (390x844) ===
+=== a discovered model offers its own efforts (390x844) ===
 Settings
 Sub-agents
-
-Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.
-
-Maximum concurrent children
 Straightforward
-2 settings
 
 Work with a clear method. Choose a model and its effort.
 
-Subtle
-2 settings
+Model
+Default (Not set)
+opus
+sonnet
+Effort
+Default (Harness default)
+high
+max
 
-Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward.
+Unsaved changes. Save writes them to the configuration file.
+
+Discard
+Save
+control Model: opus
+control Effort: Default (Harness default)
+layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/subagents/straightforward"}
+=== saving returns the saved draft (390x844) ===
+Settings
+Sub-agents
+Straightforward
+
+Work with a clear method. Choose a model and its effort.
+
+Model
+Default (Not set)
+opus
+sonnet
+Effort
+Default (Harness default)
+high
+max
 
 Saved.
 
 Discard
 Save
-control Maximum concurrent children: "6" (text, placeholder "6 (default)")
-layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":false,"menu":"Settings","hash":"#settings/subagents"}
+control Model: opus
+control Effort: Default (Harness default)
+layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":false,"menu":"Settings","hash":"#settings/subagents/straightforward"}

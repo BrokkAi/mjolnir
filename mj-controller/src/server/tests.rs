@@ -4735,7 +4735,24 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
         ),
     )
     .unwrap();
-    let (app, ..) = app();
+    // The daemon has discovered what the profile offers, keyed by its
+    // configured installation, which includes the environment the browser
+    // never sees.
+    let identity = Config::load_from(&path).unwrap().profiles["claude"].capabilities_key("claude");
+    let capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot =
+        serde_json::from_value(serde_json::json!({"profiles": {identity: {
+            "choices": {"status": "ready", "value": {"model": null, "observed_at": 0, "efforts": [],
+                "models": [
+                    {"value": "opus", "name": "Opus", "description": null},
+                    {"value": "sonnet", "name": "Sonnet", "description": null},
+                ]}},
+            "efforts": {"opus": {"status": "ready", "value": [
+                {"value": "high", "name": "High", "description": null},
+                {"value": "max", "name": "Max", "description": null},
+            ]}},
+        }}}))
+        .unwrap();
+    let (app, ..) = app_with_snapshot(move |snapshot| snapshot.profile_capabilities = capabilities);
     let cookie = login_cookie(&app).await;
 
     // The agents' bearer token reaches `/api/v1`, never Settings.
@@ -4816,8 +4833,16 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
             serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "max_concurrent"], "text": "99"}}),
         ),
         (
+            "/api/settings/page",
+            serde_json::json!({"path": ["subagents", "straightforward"]}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents", "straightforward"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "model"], "choice": "opus"}}),
+        ),
+        (
             "/api/settings/save",
-            serde_json::json!({"page": ["subagents"]}),
+            serde_json::json!({"page": ["subagents", "straightforward"]}),
         ),
     ];
     for (uri, sent) in steps {
@@ -4847,7 +4872,12 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
     let saved = std::fs::read_to_string(&path).unwrap();
     assert!(saved.contains(SECRET), "{saved}");
     assert!(saved.contains(RUNTIME_SECRET), "{saved}");
-    assert!(!Config::load_from(&path).unwrap().continuation.enabled);
+    let saved = Config::load_from(&path).unwrap();
+    assert!(!saved.continuation.enabled);
+    assert_eq!(
+        serde_json::to_value(&saved.subagents).unwrap()["straightforward"]["model"],
+        "opus"
+    );
 
     let text = serde_json::to_string_pretty(&exchange)
         .unwrap()

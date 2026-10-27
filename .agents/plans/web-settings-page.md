@@ -18,8 +18,9 @@ To see it working: start an isolated instance, open the viewer, sign in, choose 
 - [x] (2026-10-27 16:40Z) Milestone 1: shared settings model in `mj-client/src/settings/` (`schema`, `page`, `draft`, `edit`, `save`), used by the terminal. `mj-tui` 561 tests pass with no golden changes; the six `mj-cli` save tests pass against the moved `save_at`.
 - [x] (2026-10-27 18:05Z) Milestone 2: daemon settings routes (`GET /api/settings`, `POST /api/settings/page`, `/edit`, `/save`) on the signed-in viewer surface, with `mj_client::settings::{view, hidden}`. Exchange golden `mj-controller/tests/golden/viewer-settings-exchange.txt` and the stale-draft test pass.
 - [x] (2026-10-27 19:30Z) Milestone 3: the web Settings page (`#settings/<path>` routes, one serialized request queue, rows rebuilt only when the page changes). Playwright golden `tests/e2e/web/golden/viewer_settings.txt` replays the Rust exchange in order; full web suite 57 unit + 109 browser tests pass; checked by hand against a real daemon in instance `websettings` (secret absent from every response, save wrote only `[continuation] enabled = false`).
-- [ ] Milestone 4: choices that need discovery (code review and sub-agent model and effort).
-- [ ] Full validation, documentation, retrospective.
+- [x] (2026-10-27 20:20Z) Milestone 4 (sub-agents): Sub-agents › Straightforward and Subtle offer the discovered models, and a chosen model its efforts, from the daemon's capability snapshot through the shared `mj_client::settings::discovery::fill_subagent_options`, which the terminal now calls too. The exchange and browser goldens choose `opus` and see `high` and `max` offered.
+- [ ] Follow-up, not in this plan: the reviewer's model and effort on the web (the terminal's review dialog waits for pending discovery and validates a profile change; port that state with it), and the terminal-only flows named on the pages (detection, sign-in, build cache inspection, archive estimate, remote `~`).
+- [x] (2026-10-27 20:50Z) Full validation: workspace `cargo clippy --all-targets -- -D warnings` clean; full suites pass (`mj-client` 42, `mj-controller` 2149, `mj-tui` 561, `mj` 223 plus its integration tests); web suite passed after Milestone 3 and `settings.spec.js` after Milestone 4. Documentation in `docs/src/content/docs/web-viewer.md`.
 
 
 ## Surprises & Discoveries
@@ -89,9 +90,22 @@ To see it working: start an isolated instance, open the viewer, sign in, choose 
   Date/Author: 2026-10-27, Claude.
 
 
+- Decision: Milestone 4 covers the sub-agent choices only; the reviewer's model and effort stay read-only on the web, with the page saying so.
+  Rationale: sub-agent choices are a pure function of the capability snapshot the daemon already publishes, so sharing the terminal's function was enough. The terminal's Code Review dialog (`mj-tui/src/review_settings.rs`) also waits for pending discovery, warns about cleanup and revalidates when the profile changes; doing that faithfully means moving that state machine too, which deserves its own change.
+  Date/Author: 2026-10-27, Claude.
+
+- Decision: discovered choices are computed on a copy of the browser's draft with the hidden values put back from the file, and only `_subagent_options` is copied into the browser's draft.
+  Rationale: a profile's capability identity includes its environment sources, so the browser's masked draft would never match the daemon's catalog; the choices themselves are model names and hold no secrets.
+  Date/Author: 2026-10-27, Claude.
+
+
 ## Outcomes & Retrospective
 
-Nothing yet.
+(2026-10-27) The web viewer now has Menu › Settings with the terminal's sections, summaries and fields, editable and saved through the same model and save path as the terminal. One settings model in `mj_client::settings` serves both surfaces: the terminal kept only its drawing, focus and the checks only it can make. Literal environment values never reach a browser, which the exchange test checks on every response, and the routes are unreachable with the agents' API token.
+
+What remains is listed under Progress as a follow-up: the reviewer's model and effort, and the flows that need the terminal itself, which the web pages name in place.
+
+Lessons: rendering pages in the daemon and treating the draft as opaque in the browser kept JavaScript free of configuration knowledge, and let one recorded exchange drive both the Rust golden and the browser golden, so the two sides cannot drift unnoticed.
 
 
 ## Context and Orientation
@@ -165,7 +179,7 @@ In `viewer.html` add `<button role="menuitem" data-route="settings">Settings</bu
 
 ### Milestone 4: choices that need discovery
 
-The terminal offers model and effort choices for Code Review (from the daemon's profile capability snapshot, `mj-controller/src/review_settings.rs::discover_review_settings`) and for sub-agents (`_subagent_options`, from `mj-controller/src/controller/profile_config.rs::subagent_options_with`). Give `render_page` an optional `SettingsDiscovery` argument that supplies those choice lists; the daemon fills it from what it already has in memory, and until it has an answer the rows render as `ReadOnly` with "Discovering models…" exactly as the terminal does. Edits validate the chosen value against the same lists.
+As built, this milestone covers sub-agents only; see the Decision Log for why the reviewer's choices wait. The terminal offers model and effort choices for Code Review (from the daemon's profile capability snapshot, `mj-controller/src/review_settings.rs::discover_review_settings`) and for sub-agents (`_subagent_options`, from `mj-controller/src/controller/profile_config.rs::subagent_options_with`). Give `render_page` an optional `SettingsDiscovery` argument that supplies those choice lists; the daemon fills it from what it already has in memory, and until it has an answer the rows render as `ReadOnly` with "Discovering models…" exactly as the terminal does. Edits validate the chosen value against the same lists.
 
 
 ## Concrete Steps

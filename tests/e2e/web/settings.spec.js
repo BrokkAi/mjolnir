@@ -153,6 +153,12 @@ test('golden_viewer_settings', async ({ page }) => {
   await expect(page.locator('#settings .error')).toHaveText('Enter a whole number from 1 to 64.');
   await capture('a refused edit keeps what was typed beside the reason');
 
+  await page.locator('.settings-link', { hasText: 'Straightforward' }).click();
+  await expect(page.locator('#settings-heading')).toHaveText('Straightforward');
+  await page.locator('#settings').getByLabel('Model').selectOption({ label: 'opus' });
+  await expect(page.locator('#settings').getByLabel('Effort')).toContainText('high');
+  await capture('a discovered model offers its own efforts');
+
   await page.locator('#settings-save').click();
   await expect(page.locator('#settings-status')).toHaveText('Saved.');
   await capture('saving returns the saved draft');

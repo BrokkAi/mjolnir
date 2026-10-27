@@ -8,7 +8,8 @@
 //! Literal environment values never reach the browser; see
 //! `mj_client::settings::hidden`.
 use super::*;
-use mj_client::settings::{draft, hidden, save, view};
+use mj_client::settings::{discovery, draft, hidden, save, view};
+use mj_core::profile_capabilities::ProfileCapabilitiesSnapshot;
 use serde_json::Value;
 
 /// A whole draft and its original travel with every save.
@@ -64,12 +65,17 @@ pub(super) struct SettingsSaveRequest {
     page: Vec<String>,
 }
 
-fn document(config: &Config, page: &[String]) -> SettingsDocument {
+fn document(
+    config: &Config,
+    page: &[String],
+    capabilities: &ProfileCapabilitiesSnapshot,
+) -> SettingsDocument {
     let (mut original, mut draft) = draft::open(config);
     hidden::hide(&mut original);
     hidden::hide(&mut draft);
-    let page = view::render_page(&draft, page)
-        .or_else(|_| view::render_page(&draft, &[]))
+    let unreachable = discover(&mut draft, capabilities);
+    let page = render(&draft, page, unreachable.as_deref())
+        .or_else(|_| render(&draft, &[], None))
         .expect("the first settings page always renders");
     SettingsDocument {
         original,
@@ -95,37 +101,93 @@ fn check_draft(value: &Value) -> Result<(), ApiError> {
 }
 
 pub(super) async fn read_settings(
-    State(_): State<ServerState>,
+    State(state): State<ServerState>,
 ) -> Result<Json<SettingsDocument>, ApiError> {
-    let config = tokio::task::spawn_blocking(Config::load)
-        .await
-        .map_err(unreadable)?
-        .map_err(|error| unreadable(format!("{error:#}")))?;
-    Ok(Json(document(&config, &[])))
+    let capabilities = capabilities(&state);
+    tokio::task::spawn_blocking(move || {
+        let config = Config::load().map_err(|error| unreadable(format!("{error:#}")))?;
+        Ok(document(&config, &[], &capabilities))
+    })
+    .await
+    .map_err(unreadable)?
+    .map(Json)
+}
+
+/// Fill in what the daemon has discovered for `draft`: the sub-agent model
+/// and effort choices. Their identity includes each profile's environment,
+/// which the browser's draft carries hidden, so they are computed on a copy
+/// with the stored values put back, and only the choices, which hold no
+/// secrets, are copied over. Returns what discovery could not reach.
+fn discover(draft: &mut Value, capabilities: &ProfileCapabilitiesSnapshot) -> Option<String> {
+    let discovered = (|| {
+        let stored = serde_json::to_value(Config::load().ok()?).ok()?;
+        let mut real = draft.clone();
+        hidden::restore(&mut real, &stored).ok()?;
+        let unreachable = discovery::fill_subagent_options(&mut real, capabilities).ok()?;
+        Some((real["_subagent_options"].take(), unreachable))
+    })();
+    let (options, unreachable) = discovered.unwrap_or((Value::Null, None));
+    draft["_subagent_options"] = options;
+    unreachable
+}
+
+/// Render `path` of a discovered draft, naming on the Sub-agents pages what
+/// discovery could not reach.
+fn render(
+    draft: &Value,
+    path: &[String],
+    unreachable: Option<&str>,
+) -> Result<view::SettingsPage, String> {
+    let mut page = view::render_page(draft, path)?;
+    if let Some(unreachable) = unreachable
+        && path.first().is_some_and(|section| section == "subagents")
+    {
+        page.notices.push(unreachable.to_owned());
+    }
+    Ok(page)
+}
+
+fn capabilities(state: &ServerState) -> ProfileCapabilitiesSnapshot {
+    state.snapshot_rx.borrow().profile_capabilities.clone()
 }
 
 pub(super) async fn render_settings_page(
-    State(_): State<ServerState>,
+    State(state): State<ServerState>,
     Json(request): Json<SettingsPageRequest>,
 ) -> Result<Json<SettingsPageResponse>, ApiError> {
     check_draft(&request.draft)?;
-    let page = view::render_page(&request.draft, &request.path).map_err(ApiError::not_found)?;
-    Ok(Json(SettingsPageResponse { page }))
+    let capabilities = capabilities(&state);
+    // Discovery reads the configuration file.
+    tokio::task::spawn_blocking(move || {
+        let mut draft = request.draft;
+        let unreachable = discover(&mut draft, &capabilities);
+        let page =
+            render(&draft, &request.path, unreachable.as_deref()).map_err(ApiError::not_found)?;
+        Ok(SettingsPageResponse { page })
+    })
+    .await
+    .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+    .map(Json)
 }
 
 pub(super) async fn edit_settings(
-    State(_): State<ServerState>,
+    State(state): State<ServerState>,
     Json(request): Json<SettingsEditRequest>,
 ) -> Result<Json<SettingsEditResponse>, ApiError> {
     check_draft(&request.draft)?;
-    // An edit may expand `~` against this user's home directory, which reads
-    // the environment and the password database.
+    let capabilities = capabilities(&state);
+    // Discovery reads the configuration file, and an edit may expand `~`
+    // against this user's home directory.
     tokio::task::spawn_blocking(move || {
-        let mut draft = request.draft.clone();
+        let mut before = request.draft;
+        let unreachable = discover(&mut before, &capabilities);
+        let mut draft = before.clone();
         match view::apply(&mut draft, &request.page, request.edit) {
             Ok(result) => {
-                let page = view::render_page(&draft, &result.page)
-                    .or_else(|_| view::render_page(&draft, &request.page))
+                // A new model offers its own efforts.
+                let unreachable = discover(&mut draft, &capabilities);
+                let page = render(&draft, &result.page, unreachable.as_deref())
+                    .or_else(|_| render(&draft, &request.page, unreachable.as_deref()))
                     .map_err(ApiError::not_found)?;
                 Ok(SettingsEditResponse {
                     draft,
@@ -135,10 +197,10 @@ pub(super) async fn edit_settings(
                 })
             }
             Err(refusal) => {
-                let page = view::render_page(&request.draft, &request.page)
+                let page = render(&before, &request.page, unreachable.as_deref())
                     .map_err(ApiError::not_found)?;
                 Ok(SettingsEditResponse {
-                    draft: request.draft,
+                    draft: before,
                     page,
                     notice: None,
                     error: Some(refusal),
@@ -170,13 +232,16 @@ pub(super) async fn save_settings(
         )
             .into_response();
     };
-    match save_draft_settings(request).await {
+    match save_draft_settings(request, capabilities(&state)).await {
         Ok(document) => Json(document).into_response(),
         Err(error) => error.into_response(),
     }
 }
 
-async fn save_draft_settings(request: SettingsSaveRequest) -> Result<SettingsDocument, ApiError> {
+async fn save_draft_settings(
+    request: SettingsSaveRequest,
+    capabilities: ProfileCapabilitiesSnapshot,
+) -> Result<SettingsDocument, ApiError> {
     let SettingsSaveRequest {
         mut original,
         draft,
@@ -212,7 +277,7 @@ async fn save_draft_settings(request: SettingsSaveRequest) -> Result<SettingsDoc
             &sessions,
         )
         .map_err(refused)?;
-        Ok(document(&saved.with_local_targets(), &page))
+        Ok(document(&saved.with_local_targets(), &page, &capabilities))
     })
     .await
     .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?

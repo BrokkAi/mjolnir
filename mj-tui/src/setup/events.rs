@@ -189,27 +189,14 @@ impl DashboardState {
         let Mode::Setup(dialog) = &mut self.mode else {
             return None;
         };
-        let config = config_from_draft(dialog.draft.clone()).ok()?;
-        for task in ["straightforward", "subtle"] {
-            let model = dialog.draft["subagents"][task]["model"].as_str();
-            let mut options = self.profile_capabilities.options(&config, None);
-            if let Some(options) = &mut options
-                && let Some(efforts) = self.profile_capabilities.options(&config, model)
-            {
-                options.efforts = efforts.efforts;
-                options.unavailable = efforts.unavailable;
-            }
-            if let Some(options) = options {
-                if !options.unavailable.is_empty()
-                    && dialog.path.first().is_some_and(|p| p == "subagents")
-                {
-                    dialog.notice = Some(format!("Discovery: {}", options.unavailable.join("; ")));
-                }
-                dialog.draft["_subagent_options"][task] =
-                    serde_json::to_value(options).expect("options serialize");
-            } else {
-                dialog.draft["_subagent_options"][task] = Value::Null;
-            }
+        let Ok(unreachable) = mj_client::settings::discovery::fill_subagent_options(
+            &mut dialog.draft,
+            &self.profile_capabilities,
+        ) else {
+            return None;
+        };
+        if unreachable.is_some() && dialog.path.first().is_some_and(|p| p == "subagents") {
+            dialog.notice = unreachable;
         }
         dialog.prepare();
         None
