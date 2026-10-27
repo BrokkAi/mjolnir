@@ -144,8 +144,7 @@ else
 fi
 exec gh "$@"
 "#;
-    mj_core::config::atomic_write_existing(wrapper, WRAPPER.as_bytes())?;
-    std::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o700))?;
+    crate::worker_runtime::shell_environment::write_executable(wrapper, WRAPPER)?;
 
     prepend_github_cli_path(bin, environment)?;
     environment.insert(
