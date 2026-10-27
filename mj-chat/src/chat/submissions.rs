@@ -7,11 +7,20 @@ pub(super) struct PendingSubmission {
     kind: SubmissionKind,
     payload: PromptPayload,
     status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    startup_origin: Option<StartupRetryOrigin>,
     represented: bool,
     finished: bool,
     recorded_at_ms: i64,
     #[serde(skip)]
     started_at: Option<std::time::Instant>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StartupRetryOrigin {
+    #[serde(default)]
+    inherited_draft: Option<String>,
+    move_operation_id: Option<String>,
 }
 
 /// "Delivery unconfirmed: <why>", without repeating the words when the error
@@ -48,6 +57,59 @@ impl PendingSubmission {
 }
 
 impl ChatState {
+    /// Preserve exact startup identity across bounded shutdown without making it resendable.
+    pub fn retain_startup_receipt(
+        &mut self,
+        prompt: super::StartupPrompt,
+        inherited_draft: Option<String>,
+    ) {
+        if self
+            .pending_submissions
+            .iter()
+            .any(|pending| pending.id == prompt.command_id)
+        {
+            return;
+        }
+        self.pending_submissions.push(PendingSubmission {
+            represented: self
+                .queued_prompts
+                .iter()
+                .any(|queued| queued.id == prompt.command_id),
+            id: prompt.command_id,
+            kind: SubmissionKind::Prompt,
+            payload: prompt.payload,
+            status: "Delivery unconfirmed: checking queued prompt".into(),
+            finished: true,
+            startup_origin: Some(StartupRetryOrigin {
+                inherited_draft,
+                move_operation_id: prompt.move_operation_id,
+            }),
+            recorded_at_ms: mj_core::clock::epoch_millis(),
+            started_at: None,
+        });
+    }
+    pub fn startup_retry_prompts(&self) -> Vec<(super::StartupPrompt, Option<String>)> {
+        self.pending_submissions
+            .iter()
+            .filter_map(|pending| {
+                pending.startup_origin.as_ref().map(|origin| {
+                    (
+                        super::StartupPrompt {
+                            command_id: pending.id.clone(),
+                            payload: pending.payload.clone(),
+                            move_operation_id: origin.move_operation_id.clone(),
+                        },
+                        origin.inherited_draft.clone(),
+                    )
+                })
+            })
+            .collect()
+    }
+    pub(super) fn settle_startup_receipt(&mut self, command_id: &str) {
+        self.pending_submissions
+            .retain(|pending| pending.id != command_id || pending.startup_origin.is_none());
+    }
+
     pub(super) fn restore_submissions(&mut self, pending: Vec<PendingSubmission>) {
         self.pending_submissions = pending;
         for pending in &mut self.pending_submissions {
@@ -81,6 +143,7 @@ impl ChatState {
             kind,
             payload,
             status: status.into(),
+            startup_origin: None,
             represented: false,
             finished: false,
             recorded_at_ms: mj_core::clock::epoch_millis(),

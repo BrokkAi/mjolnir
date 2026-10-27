@@ -1347,6 +1347,22 @@ pub fn tool_content_details(
     details
 }
 
+/// Read a textual diagnostic from an ACP provider-specific `rawOutput.error`.
+/// Other raw output is deliberately not exposed here: successful result
+/// payloads can contain arbitrary data and belong to the tool-specific view.
+pub fn tool_error_detail(raw_output: Option<&Value>) -> Option<String> {
+    let error = raw_output?.get("error")?;
+    if error.is_null() {
+        return None;
+    }
+    let text = match error {
+        Value::String(text) => text.clone(),
+        _ => serde_json::to_string_pretty(error)
+            .expect("tool diagnostics are serializable JSON values"),
+    };
+    (!text.is_empty()).then(|| sanitize_terminal_text(&text))
+}
+
 /// The output codex reports for a terminal it ran itself. Codex names its own
 /// server-side terminal, which hel never opened and has no record for, and
 /// puts the text in `rawOutput`; reading it here keeps such a call from
@@ -1497,6 +1513,7 @@ pub fn apply_session_update_to_entries(
             entry.tool_summary = Some(presentation.summary.clone());
             entry.tool_presentation = Some(presentation);
             entry.tool_input = call.raw_input;
+            entry.tool_error = tool_error_detail(call.raw_output.as_ref());
             entry.tool_content = tool_content_details(&call.content, &[], call.raw_output.as_ref());
             entry.tool_diffstats = tool_diff_paths(&call.content);
             entry.tool_locations = tool_location_details(&call.locations);
@@ -1515,6 +1532,9 @@ pub fn apply_session_update_to_entries(
             if let Some(input) = &raw_input {
                 entry.tool_input = Some(input.clone());
             }
+            if let Some(raw_output) = &raw_output {
+                entry.tool_error = tool_error_detail(Some(raw_output));
+            }
             if let Some(title) = update.fields.title {
                 entry.text = sanitize_terminal_text(&title);
             }
@@ -1523,8 +1543,7 @@ pub fn apply_session_update_to_entries(
                 mark_tool_end(entry, recorded_at_ms);
             }
             if let Some(content) = update.fields.content {
-                entry.tool_content =
-                    tool_content_details(&content, &[], update.fields.raw_output.as_ref());
+                entry.tool_content = tool_content_details(&content, &[], raw_output.as_ref());
                 entry.tool_diffstats = tool_diff_paths(&content);
             }
             if let Some(locations) = update.fields.locations {

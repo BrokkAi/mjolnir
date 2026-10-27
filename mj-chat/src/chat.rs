@@ -10,7 +10,9 @@
 mod active;
 mod attachments;
 mod autocomplete;
+mod composer;
 mod config_picker;
+pub use composer::{LiveComposer, StartupPrompt};
 mod earlier;
 mod elicitation;
 mod feedback;
@@ -245,6 +247,13 @@ pub enum ChatEventOutcome {
         reverse: bool,
     },
     OpenSubagents,
+    /// The host decides whether the durable startup queue or the worker owns this ID.
+    RecallQueuedPrompt {
+        session_id: String,
+        id: String,
+        text: String,
+        kind: QueuedCommandKind,
+    },
     /// Put `text` on the clipboard and then show `notice`. The host owns the
     /// clipboard, including the terminal clipboard used over SSH.
     CopyText {
@@ -479,6 +488,8 @@ pub struct ChatState {
     /// while no session is live, and no command completion is offered because
     /// no session can answer commands.
     standby: bool,
+    composer_forward: Option<tokio::sync::mpsc::UnboundedSender<composer::ComposerIoUpdate>>,
+    composer_runtime: composer::ComposerRuntime,
     input: String,
     input_cursor: usize,
     /// Image bytes belong to tracked marker ranges in the composer text.
@@ -696,6 +707,8 @@ impl ChatState {
             prefix_seam: None,
             transcript_loading: false,
             standby: false,
+            composer_forward: None,
+            composer_runtime: composer::ComposerRuntime::default(),
             input: String::new(),
             input_cursor: 0,
             input_images: Vec::new(),
@@ -860,6 +873,7 @@ impl ChatState {
         let mut state = Self::new(&snapshot, &[]);
         state.notices = notices;
         state.standby = true;
+        state.bind_composer_session(Some(session_id));
         state.set_subagent_count(header.subagent_count);
         state.set_header_summary(header.target, header.profile, header.title);
         if let Some(harness_kind) = header.harness_kind {

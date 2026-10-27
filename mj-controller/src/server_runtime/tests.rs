@@ -325,6 +325,7 @@ fn golden_phone_new_session_preflight() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     config.review.trigger = mj_core::config::ReviewTrigger::Turn;
@@ -1361,6 +1362,7 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
                             legacy_subagents: Default::default(),
                             guardian_review_model: None,
                             codex_profile: None,
+                            muse_auto_review: None,
                             kind: HarnessKind::Codex,
                             home: PathBuf::from("/home/agent").join(id),
                             environment: Default::default(),

@@ -260,6 +260,7 @@ impl RuntimeState {
             .filter(|(_, active)| active.is_visible())
             .map(|(session_id, active)| RuntimeLifecycleView {
                 operation_id: active.operation_id.clone(),
+                move_operation_id: active.move_operation_id.clone(),
                 cancellable: active
                     .cancellable_by_person(durable_session_state(controller, session_id)),
                 session_id: session_id.clone(),

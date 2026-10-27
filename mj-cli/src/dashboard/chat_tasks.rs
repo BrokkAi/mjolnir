@@ -146,6 +146,30 @@ impl DashboardContext {
                 };
                 self.open_subagents(parent_id);
             }
+            mj_chat::chat::ChatEventOutcome::RecallQueuedPrompt {
+                session_id,
+                id,
+                text,
+                kind,
+            } => {
+                if self
+                    .startup_prompts
+                    .known_prompt(&session_id, &id)
+                    .is_some()
+                {
+                    if let Some(chat) = self.chats.get(&session_id) {
+                        let prompt = chat.recalled_startup_prompt(&id, &text);
+                        self.startup_prompts.withdraw(
+                            session_id,
+                            prompt,
+                            self.dashboard_io_tx.clone(),
+                            self.critical_operations.clone(),
+                        );
+                    }
+                } else if let Some(chat) = self.chats.get_mut(&session_id) {
+                    chat.remove_worker_queued_prompt(id, text, kind);
+                }
+            }
             mj_chat::chat::ChatEventOutcome::CopyText { text, notice } => {
                 if let Err(error) = self.copy_text(&text, &notice) {
                     tracing::warn!(error = %format!("{error:#}"), "copying chat text failed");
@@ -202,6 +226,13 @@ impl DashboardContext {
     /// value it inherited. The text remains process-local until an explicit
     /// detach persistence task archives it.
     pub(crate) fn capture_composer_draft(&mut self, session_id: &str) {
+        if let Some(text) = self.dashboard.standby_prompt_draft(session_id) {
+            let inherited = self
+                .chat_session_record(session_id)
+                .map_or_else(String::new, |session| session.draft_input.clone());
+            self.composer_drafts.capture(session_id, text, &inherited);
+            return;
+        }
         let Some((session_id, text)) = self
             .chats
             .get(session_id)

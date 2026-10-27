@@ -790,6 +790,7 @@ mod tests {
                 context_window_bytes: None,
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
                 legacy_subagents: None,
             },
         );

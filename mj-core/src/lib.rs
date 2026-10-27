@@ -15,6 +15,7 @@ pub mod confined_path;
 pub mod credentials;
 pub mod diagnostic;
 pub mod diff;
+pub mod draft;
 pub mod elicitation;
 pub mod event_outcome;
 pub mod github_item;

@@ -69,6 +69,7 @@ fn podman_controller(state: SessionState) -> Controller {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     config.targets.insert(
@@ -394,6 +395,9 @@ fn probeless_request(id: &str) -> QuotaRefreshRequest {
     QuotaRefreshRequest {
         profile_id: id.into(),
         harness: mj_core::config::HarnessKind::Codex,
+        auth_scheme: mj_core::config::AuthScheme::ApiKey {
+            env_key: "PROVIDER_API_KEY".into(),
+        },
         source_home: PathBuf::from("/nonexistent-quota-home"),
         environment: Default::default(),
         cwd: PathBuf::from("."),
@@ -1098,6 +1102,7 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
             },
         );
         controller.config.targets.insert(
@@ -1185,6 +1190,7 @@ fn credential_sync_skips_a_local_login_file_linked_to_the_profile() {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
             },
         );
         controller.config.targets.insert(
@@ -1247,6 +1253,7 @@ fn every_live_session_of_a_profile_is_synced_including_a_child_in_a_remote_conta
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     controller.config.targets.insert(

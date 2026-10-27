@@ -243,7 +243,7 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     // Hard-won: 803c9fe1: rewound upgrade fixtures retained the later mailbox failure column.
     // Hard-won: #1302: the old-store fixture must also remove the notification epoch.
     // Hard-won: 5f5e74082: kept current GitHub watch tables, so migration 85 found no v84 columns to drop.
-    // Restore the singleton preference table used before schema 100.
+    // Restore the singleton preference table used before schema 101.
     connection
         .execute_batch(
             "ALTER TABLE subagent_sessions DROP COLUMN notification_epoch;

@@ -111,6 +111,12 @@ pub(super) fn save_move_operation_with(
     connection: &Connection,
     operation: &MoveOperation,
 ) -> Result<()> {
+    if connection.is_autocommit() {
+        let tx = connection.unchecked_transaction()?;
+        save_move_operation_with(&tx, operation)?;
+        tx.commit()?;
+        return Ok(());
+    }
     connection.execute(
         "INSERT INTO session_moves(session_id, operation_id, operation_json) VALUES (?1, ?2, ?3)
          ON CONFLICT(session_id) DO UPDATE SET operation_id=excluded.operation_id,
@@ -123,6 +129,10 @@ pub(super) fn save_move_operation_with(
             operation.operation_id,
             serde_json::to_string(operation)?
         ],
+    )?;
+    super::startup::reject_failed_move_startup_prompts_with(
+        connection,
+        &operation.selection.session_id,
     )?;
     Ok(())
 }

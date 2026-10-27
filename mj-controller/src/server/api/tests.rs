@@ -2342,6 +2342,7 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
     assert_eq!(followups[0].1.prompt.as_deref(), Some("go"));
 }
 
+// Hard-won: 4b84c75cf: weighted draws made the valid Codex winner nondeterministic.
 #[tokio::test]
 async fn subagent_model_selection_uses_any_enabled_profile() {
     let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend {
@@ -2370,7 +2371,8 @@ async fn subagent_model_selection_uses_any_enabled_profile() {
         }),
         subagent_model_candidates: Some(SubagentCandidates {
             offered: vec![
-                model_candidate("codex-1", 5, "luna"),
+                // Keep the cross-profile assertion independent of the weighted random draw.
+                model_candidate("codex-1", 0, "luna"),
                 model_candidate_for_harness(
                     "claude4",
                     98,

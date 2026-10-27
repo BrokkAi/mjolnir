@@ -95,6 +95,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
                 kind: HarnessKind::Codex,
                 home: "/highly/secret/codex".into(),
                 environment: BTreeMap::from([("GH_TOKEN".into(), "secret-token".into())]).into(),
@@ -1490,6 +1491,22 @@ async fn operator_away_action_is_sessionless_and_reaches_controller() {
         request.action,
         ControllerAction::SetOperatorAway { away: true }
     );
+    request.reply.send(ActionOutcome::accepted()).unwrap();
+    assert_eq!(posted.await.unwrap().status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn operator_activity_action_is_sessionless_and_reaches_controller() {
+    let (app, mut actions, _, _, _) =
+        app_with_snapshot(|snapshot| snapshot.sessions = Default::default());
+    let cookie = login_cookie(&app).await;
+    let posted = tokio::spawn(post_action(
+        app,
+        cookie,
+        r#"{"action":"record-operator-activity"}"#.into(),
+    ));
+    let request = actions.recv().await.unwrap();
+    assert_eq!(request.action, ControllerAction::RecordOperatorActivity);
     request.reply.send(ActionOutcome::accepted()).unwrap();
     assert_eq!(posted.await.unwrap().status(), StatusCode::ACCEPTED);
 }
@@ -2898,6 +2915,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
             kind: HarnessKind::Claude,
             home: "/secret/claude".into(),
             environment: Default::default(),

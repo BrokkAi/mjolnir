@@ -836,7 +836,7 @@ fn tool_definitions_with_options(
         send_message_tool(),
         tool(
             "close",
-            "Stop one child session and retain its conversation. Closing a child deletes its report directory, so read the files you need first. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, use list_agents after close and confirm the closing child is stopped before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
+            "Stop one child session and retain its conversation. Closing a child keeps its report directory; only destroying the child or its parent removes it. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, use list_agents after close and confirm the closing child is stopped before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
             child,
         ),
     ];

@@ -136,19 +136,26 @@ impl DashboardState {
         }
     }
 
+    /// Lifecycle transitions which retain an editable prompt.
+    pub fn transition_accepts_prompts(kind: SessionTransitionKind) -> bool {
+        matches!(
+            kind,
+            SessionTransitionKind::Starting
+                | SessionTransitionKind::Resuming
+                | SessionTransitionKind::Moving
+        )
+    }
     /// The selected session whose prompt band shows the standby composer: a
-    /// Starting or Resuming transition parks the conversation behind it, or
-    /// an attach for the session is in flight. Retiring transitions (Moving/
-    /// Stopping/Destroying) and failed ones keep the status panel instead:
+    /// Starting, Resuming, or Moving transitions park the conversation
+    /// behind it, or an attach for the session is in flight. Stopping,
+    /// Destroying, and failed transitions keep the status panel instead:
     /// there is no conversation to type toward.
     pub(crate) fn standby_prompt_session(&self) -> Option<&str> {
         let session_id = self.current_session_id()?;
-        let parked = self.transition_kind(session_id).is_some_and(|kind| {
-            matches!(
-                kind,
-                SessionTransitionKind::Starting | SessionTransitionKind::Resuming
-            )
-        }) || self.opening_session.as_deref() == Some(session_id);
+        let parked = self
+            .transition_kind(session_id)
+            .is_some_and(Self::transition_accepts_prompts)
+            || self.opening_session.as_deref() == Some(session_id);
         parked.then_some(session_id)
     }
 
@@ -205,6 +212,10 @@ impl DashboardState {
             header,
             self.notices.clone(),
         ));
+        self.launch_standby
+            .as_mut()
+            .expect("launch composer exists")
+            .bind_composer_session(None);
         self.focus_pane(self.browse_pane());
         self.set_current_session(None);
         self.focus_prompt();
@@ -255,51 +266,6 @@ impl DashboardState {
         self.standby_prompt_mut(session_id).set_draft(text);
     }
 
-    /// Puts a queued prompt back into the standby composer after the daemon
-    /// refused it: the preview goes away and the text returns in front of
-    /// whatever has since been typed.
-    pub fn restore_standby_prompt(&mut self, session_id: &str, text: &str) {
-        let standby = self.standby_prompt_mut(session_id);
-        standby.remove_queued_prompt_text(text);
-        let draft = standby.draft();
-        let restored = if draft.is_empty() {
-            text.to_owned()
-        } else {
-            format!("{text}\n{draft}")
-        };
-        standby.set_draft(restored);
-    }
-
-    /// The daemon had already started delivering a prompt that was recalled
-    /// for editing: it was sent. The composer's copy is dropped when the
-    /// person has not changed it, so Enter does not send it a second time.
-    /// Returns whether the composer's text was dropped.
-    pub fn standby_prompt_was_sent(&mut self, session_id: &str, text: &str) -> bool {
-        // A standby that is gone was adopted by the live chat, which holds
-        // the text now; nothing here to drop.
-        let Some(standby) = self.standby_prompts.get_mut(session_id) else {
-            return false;
-        };
-        if standby.draft() != text {
-            return false;
-        }
-        standby.clear_draft();
-        true
-    }
-
-    /// The daemon could not confirm that a recalled prompt was withdrawn, so
-    /// it may still be delivered. The composer shows it as queued again and
-    /// drops its own unchanged copy, so the prompt has one owner in view.
-    pub fn standby_prompt_withdrawal_unconfirmed(&mut self, session_id: &str, text: &str) {
-        let Some(standby) = self.standby_prompts.get_mut(session_id) else {
-            return;
-        };
-        if standby.draft() == text {
-            standby.clear_draft();
-        }
-        standby.restore_queued_prompt_text(text);
-    }
-
     /// Removes a session's standby composer and returns its draft, for the
     /// chat open that adopts it as the composer's starting input.
     pub fn take_standby_prompt_draft(&mut self, session_id: &str) -> Option<String> {
@@ -308,7 +274,121 @@ impl DashboardState {
             .map(|standby| standby.draft())
     }
 
-    /// Keys for the standby composer shown while a Starting/Resuming
+    pub fn retain_startup_receipt(
+        &mut self,
+        session_id: &str,
+        prompt: mj_chat::chat::StartupPrompt,
+        inherited_draft: Option<String>,
+    ) {
+        self.standby_prompt_mut(session_id)
+            .retain_startup_receipt(prompt, inherited_draft);
+    }
+    pub fn settle_startup_preview(&mut self, session_id: &str, command_id: &str) {
+        if let Some(chat) = self.standby_prompts.get_mut(session_id) {
+            chat.settle_startup_preview(command_id);
+        }
+    }
+    pub fn restore_startup_prompt(
+        &mut self,
+        session_id: &str,
+        prompt: mj_chat::chat::StartupPrompt,
+    ) -> anyhow::Result<()> {
+        self.standby_prompt_mut(session_id)
+            .restore_startup_prompt(prompt)
+    }
+    pub fn startup_prompt_withdrawn(
+        &mut self,
+        session_id: &str,
+        prompt: mj_chat::chat::StartupPrompt,
+        result: Result<bool, String>,
+    ) -> anyhow::Result<bool> {
+        self.standby_prompt_mut(session_id)
+            .startup_prompt_withdrawn(prompt, result)
+    }
+    pub fn set_standby_move_origin(
+        &mut self,
+        session_id: &str,
+        origin: Option<(u64, Option<String>)>,
+    ) {
+        self.standby_prompt_mut(session_id)
+            .set_composer_move_origin(origin);
+    }
+    pub fn settle_standby_move_origin(
+        &mut self,
+        session_id: &str,
+        generation: u64,
+        id: Option<&str>,
+        succeeded: bool,
+    ) {
+        if let Some(chat) = self.standby_prompts.get_mut(session_id) {
+            chat.settle_deferred_move_origin(generation, id, succeeded);
+        }
+    }
+    pub fn keep_standby_submission_as_draft(&mut self, session_id: &str) {
+        if let Some(chat) = self.standby_prompts.get_mut(session_id) {
+            chat.keep_deferred_submission_as_draft();
+        }
+    }
+    pub fn standby_session_ids(&self) -> Vec<String> {
+        self.standby_prompts.keys().cloned().collect()
+    }
+    pub fn has_standby_composer(&self, session_id: &str) -> bool {
+        self.standby_prompts.contains_key(session_id)
+    }
+    /// Snapshot without disturbing pending reads or image processing.
+    pub fn standby_prompt_draft(&self, session_id: &str) -> Option<String> {
+        self.standby_prompts.get(session_id).map(ChatState::draft)
+    }
+    pub fn take_standby_composer(
+        &mut self,
+        session_id: &str,
+    ) -> Option<mj_chat::chat::LiveComposer> {
+        self.standby_prompts
+            .remove(session_id)
+            .and_then(|mut chat| chat.take_live_composer())
+    }
+    pub fn adopt_standby_composer(
+        &mut self,
+        session_id: &str,
+        composer: mj_chat::chat::LiveComposer,
+    ) {
+        self.standby_prompt_mut(session_id)
+            .adopt_live_composer(composer);
+    }
+    pub fn standby_startup_prompts(&self, session_id: &str) -> Vec<mj_chat::chat::StartupPrompt> {
+        self.standby_prompts
+            .get(session_id)
+            .map(ChatState::startup_prompts)
+            .unwrap_or_default()
+    }
+    /// Drain every composer, including those hidden by navigation. A result belongs to its original owner.
+    pub fn drain_standby_composers(&mut self) -> (bool, Vec<DashboardAction>) {
+        let mut changed = false;
+        let mut actions = Vec::new();
+        for (session_id, chat) in &mut self.standby_prompts {
+            changed |= chat.has_composer_updates();
+            for prompt in chat.take_prepared_startup_prompts() {
+                actions.push(DashboardAction::QueueStartupPrompt {
+                    session_id: session_id.clone(),
+                    prompt,
+                });
+                changed = true;
+            }
+            if let Some(prompt) = chat.drain_composer() {
+                actions.push(DashboardAction::QueueStartupPrompt {
+                    session_id: session_id.clone(),
+                    prompt,
+                });
+            }
+        }
+        if let Some(chat) = self.launch_standby.as_mut() {
+            changed |= chat.has_composer_updates();
+            chat.drain_composer();
+        }
+        (changed, actions)
+    }
+
+    /// Keys for the standby composer shown while a Starting/Resuming/Moving
     /// transition or an in-flight attach owns the selected session. It is the
     /// real composer, so the whole readline chord set edits the draft; only
     /// the dashboard's own pane keys are reserved. Everything configurable is
@@ -351,16 +431,20 @@ impl DashboardState {
             ChatAction::CycleFocus { reverse } => {
                 self.cycle_focus(reverse);
             }
-            ChatAction::Prompt(text) => {
+            ChatAction::Prompt(_) => {
                 self.record_event_handled();
                 let Some(session_id) = session_id else {
                     // The launch standby has kept the text as a preview; it is
                     // handed to the daemon when the session registers.
                     return Some(DashboardAction::None);
                 };
-                return Some(DashboardAction::QueueStartupPrompt { session_id, text });
+                let prompt = self
+                    .standby_prompt_mut(&session_id)
+                    .latest_startup_prompt()
+                    .expect("submitted standby prompt has a preview");
+                return Some(DashboardAction::QueueStartupPrompt { session_id, prompt });
             }
-            ChatAction::RemoveQueuedPrompt { text, .. } => {
+            ChatAction::RemoveQueuedPrompt { id, text, .. } => {
                 // Up recalled the newest queued prompt into the composer. The
                 // preview is gone here already; the daemon must drop its copy
                 // too, or it would send the original when the session is ready.
@@ -370,15 +454,22 @@ impl DashboardState {
                     // daemon, so recalling one changes nothing there.
                     return Some(DashboardAction::None);
                 };
-                return Some(DashboardAction::WithdrawStartupPrompt { session_id, text });
+                let prompt = self
+                    .standby_prompt_mut(&session_id)
+                    .recalled_startup_prompt(&id, &text);
+                return Some(DashboardAction::WithdrawStartupPrompt { session_id, prompt });
             }
-            ChatAction::PasteFromClipboard => {
-                // Clipboard reads and image attachments belong to the attached
-                // chat; until then the chord is answered honestly instead of
-                // silently doing nothing.
-                self.set_notice(
-                    "Pasting from the clipboard opens when the session is live; the draft is kept.",
-                );
+            action @ (ChatAction::PasteFromClipboard | ChatAction::AttachPaste { .. }) => {
+                match session_id {
+                    Some(session_id) => self
+                        .standby_prompt_mut(&session_id)
+                        .dispatch_composer_action(action),
+                    None => self
+                        .launch_standby
+                        .as_mut()
+                        .expect("launch composer exists")
+                        .dispatch_composer_action(action),
+                }
             }
             _ => {}
         }

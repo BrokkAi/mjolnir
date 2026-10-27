@@ -29,6 +29,7 @@ fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     }
 }
 
@@ -107,6 +108,33 @@ async fn a_provider_without_a_quota_endpoint_reports_usage_pricing() {
     assert!(outcome.report.windows.is_empty());
     assert!(outcome.report.is_usage_priced());
     assert_eq!(outcome.report.compact(), API_LABEL);
+}
+
+// Hard-won: bd326e2b: Bedrock Claude probed subscription quota despite using AWS credentials.
+#[tokio::test]
+async fn bedrock_claude_reports_usage_pricing_without_an_oauth_login() {
+    let home = tempfile::tempdir().unwrap();
+    let profile: HarnessProfile = serde_json::from_value(serde_json::json!({
+        "kind": "claude",
+        "home": home.path(),
+        "environment": {
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "PATH": home.path(),
+        },
+    }))
+    .unwrap();
+    let request =
+        QuotaRefreshRequest::for_profile("aws-model", &profile, home.path().to_path_buf());
+    let (outcome, client) = refresh_profile_with_cache_root(request, None, None).await;
+
+    assert_eq!(outcome.report.profile_id, "aws-model");
+    assert_eq!(outcome.report.harness, HarnessKind::Claude);
+    assert_eq!(outcome.report.error, None);
+    assert!(outcome.report.windows.is_empty());
+    assert!(outcome.report.is_usage_priced());
+    assert_eq!(outcome.report.compact(), API_LABEL);
+    assert!(!outcome.credentials_changed);
+    assert!(client.is_none());
 }
 
 #[test]
@@ -350,6 +378,7 @@ fn codex_quota_request(
     QuotaRefreshRequest {
         profile_id: "codex".into(),
         harness: HarnessKind::Codex,
+        auth_scheme: AuthScheme::NativeLogin,
         source_home: directory.to_path_buf(),
         environment,
         cwd: directory.to_path_buf(),
@@ -706,6 +735,7 @@ async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
         QuotaRefreshRequest {
             profile_id: "grok".into(),
             harness: HarnessKind::Grok,
+            auth_scheme: AuthScheme::NativeLogin,
             source_home: directory.path().to_path_buf(),
             environment: BTreeMap::from([(
                 "PATH".to_owned(),
@@ -769,6 +799,7 @@ async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
     let request = QuotaRefreshRequest {
         profile_id: "muse".into(),
         harness: HarnessKind::Muse,
+        auth_scheme: AuthScheme::NativeLogin,
         source_home: directory.path().to_path_buf(),
         environment: BTreeMap::from([("TBH_MINT_BASE_URL".into(), format!("http://{address}"))]),
         cwd: directory.path().to_path_buf(),
@@ -871,6 +902,7 @@ async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::Captur
     let request = QuotaRefreshRequest {
         profile_id: "muse".into(),
         harness: HarnessKind::Muse,
+        auth_scheme: AuthScheme::NativeLogin,
         source_home: directory.path().to_path_buf(),
         environment: BTreeMap::from([("TBH_MINT_BASE_URL".into(), format!("http://{address}"))]),
         cwd: directory.path().to_path_buf(),
@@ -1041,6 +1073,7 @@ async fn expired_claude_credentials_report_login_expired() {
         QuotaRefreshRequest {
             profile_id: "claude2".into(),
             harness: HarnessKind::Claude,
+            auth_scheme: AuthScheme::NativeLogin,
             source_home: directory.path().to_path_buf(),
             environment: BTreeMap::new(),
             cwd: directory.path().to_path_buf(),
@@ -1372,6 +1405,7 @@ while IFS= read -r line; do :; done
     let request = QuotaRefreshRequest {
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,
+        auth_scheme: AuthScheme::NativeLogin,
         source_home: directory.path().to_path_buf(),
         environment: BTreeMap::from([
             (

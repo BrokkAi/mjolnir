@@ -426,6 +426,7 @@ fn sample_config() -> Config {
                 environment: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                muse_auto_review: None,
                 codex_profile: None,
             },
         )]),

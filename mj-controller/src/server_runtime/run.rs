@@ -259,6 +259,7 @@ pub(crate) async fn run_server(
         let (move_prepared_tx, mut move_prepared_rx) =
             tokio::sync::mpsc::unbounded_channel::<MovePrepared>();
         let mut archive_jobs = tokio::task::JoinSet::new();
+        let mut operator_activity_jobs = tokio::task::JoinSet::new();
         let mut bundle_jobs = tokio::task::JoinSet::new();
         let mut preflight_jobs = tokio::task::JoinSet::new();
         let mut move_preparation_jobs = tokio::task::JoinSet::new();
@@ -1135,7 +1136,12 @@ pub(crate) async fn run_server(
                         }
                     }
                 }
-                action = action_rx.recv() => {
+                completed = operator_activity_jobs.join_next(), if !operator_activity_jobs.is_empty() => {
+                    if let Some(Err(error)) = completed {
+                        tracing::warn!(%error, "operator activity task failed");
+                    }
+                }
+                action = action_rx.recv(), if operator_activity_jobs.len() < 32 => {
                     let Some(request) = action else {
                         failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering actions");
                         break;
@@ -1144,6 +1150,14 @@ pub(crate) async fn run_server(
                     // no session slot and starts no lifecycle work, so it is
                     // answered here rather than admitted as an action.
                     match &request.action {
+                        ControllerAction::RecordOperatorActivity => {
+                            let runtime = daemon_runtime.clone();
+                            operator_activity_jobs.spawn(async move {
+                                runtime.record_operator_activity().await;
+                                let _ = request.reply.send(ActionOutcome::accepted());
+                            });
+                            continue;
+                        }
                         ControllerAction::RefreshCapacity { target_id } => {
                             let known = capacity_state.contains_key(target_id);
                             // One queued nudge refreshes every target. Do not
@@ -1557,6 +1571,7 @@ pub(crate) async fn run_server(
         }
         // Bundle jobs are supervised so shutdown never leaves a detached
         // request task behind holding the config mutation lock.
+        operator_activity_jobs.shutdown().await;
         bundle_jobs.shutdown().await;
         // Preflight jobs own cancellation guards for their blocking Git
         // probes. Aborting them here signals those probes before the server's

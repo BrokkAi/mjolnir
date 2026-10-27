@@ -16,6 +16,8 @@ pub struct ViewerSnapshot {
     #[serde(default)]
     pub operator_away: bool,
     #[serde(default)]
+    pub auto_afk_minutes: u32,
+    #[serde(default)]
     pub profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
     #[serde(
         default,
@@ -402,6 +404,7 @@ impl ViewerSnapshot {
             profile_capabilities: Default::default(),
             last_subagent_policies: state.last_subagent_policies.clone(),
             operator_away: state.operator_presence.away,
+            auto_afk_minutes: config.advanced.auto_afk_minutes,
             subagents_configured: config.subagents.is_configured(),
             revision,
             generated_at: now_unix().to_string(),

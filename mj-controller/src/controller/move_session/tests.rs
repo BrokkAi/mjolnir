@@ -59,6 +59,7 @@ fn add_codex_profile(config: &mut Config, home: &Path) {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
 }
@@ -2534,6 +2535,7 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
                     legacy_subagents: Default::default(),
                     guardian_review_model: None,
                     codex_profile: None,
+                    muse_auto_review: None,
                 },
             );
         }

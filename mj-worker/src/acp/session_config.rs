@@ -553,6 +553,25 @@ pub(super) async fn enforce_execution_mode(
     bail!("ACP bridge does not expose required execution mode {desired}")
 }
 
+/// The ACP enforcement for this launch, honoring the Muse profile's
+/// `muse_auto_review` choice as the controller resolved it into the launch
+/// environment's `MUSE_APPROVAL_MODE`: `promptUnmatched` keeps the reviewer,
+/// `allowAll` runs without permission checks. Guardian Muse always reviews,
+/// so the environment only matters while unconstrained.
+pub(super) fn session_enforcement(spec: &LaunchSpec) -> Option<ExecutionEnforcement> {
+    if spec.harness == HarnessKind::Muse && spec.execution_policy == ExecutionPolicy::Unconstrained
+    {
+        let review = spec
+            .environment
+            .get("MUSE_APPROVAL_MODE")
+            .is_some_and(|mode| mode == "promptUnmatched");
+        spec.harness
+            .resolve_execution_enforcement(spec.execution_policy, review)
+    } else {
+        spec.harness.execution_enforcement(spec.execution_policy)
+    }
+}
+
 /// Select a config option an execution policy requires besides its mode,
 /// such as Muse's auto-review. A bridge without it cannot realize the policy.
 pub(super) async fn enforce_policy_setting(

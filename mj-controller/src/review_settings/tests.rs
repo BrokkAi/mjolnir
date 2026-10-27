@@ -18,6 +18,7 @@ async fn settings_wait_for_selected_model_efforts_and_ignore_other_profile_ident
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     let identity = config.profiles["reviewer"].capabilities_key("reviewer");
@@ -104,6 +105,7 @@ async fn cancelling_a_pending_catalog_read_does_not_wait_for_another_publication
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     let (_publisher, mut catalog) = watch::channel(ProfileCapabilitiesSnapshot::default());

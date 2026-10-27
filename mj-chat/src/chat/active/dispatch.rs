@@ -24,13 +24,36 @@ impl ActiveChat {
         let consumed = self.state.event_consumed(&event, &action);
         let dispatched = self.dispatch(action);
         self.dispatch_abandoned_prompt_request();
-        dispatch_history_search_request(self.session.clone(), &mut self.state, &self.chat_io_tx);
+        dispatch_history_search_request(self.session.clone(), &mut self.state);
         self.dispatch_earlier_history();
         let action = (!matches!(dispatched, ChatEventOutcome::None)).then_some(dispatched);
         EventResult {
             consumed: consumed || action.is_some(),
             action,
         }
+    }
+
+    /// Called only after the host's startup owner says this is a worker queue item.
+    pub fn remove_worker_queued_prompt(
+        &mut self,
+        id: String,
+        text: String,
+        kind: mj_core::state::QueuedCommandKind,
+    ) {
+        let Some(command_id) = self.command_id("remove-prompt") else {
+            self.state.fail_queued_prompt_removal(id, text, kind);
+            return;
+        };
+        queue_chat_remote_operation(
+            self.remote.operations(),
+            ChatRemoteOperation::RemoveQueuedPrompt {
+                command_id,
+                id,
+                text,
+                kind,
+            },
+            &mut self.state,
+        );
     }
 
     fn dispatch_earlier_history(&mut self) {
@@ -116,26 +139,8 @@ impl ActiveChat {
                     &mut self.state,
                 );
             }
-            ChatAction::Attach { path, command } => {
-                self.queue_attachment(
-                    AttachmentSource::Path(path),
-                    AttachmentFallback::Command(command),
-                );
-            }
-            ChatAction::AttachPaste { text, images } => {
-                let mut cursor = 0;
-                for image in images {
-                    self.state.paste_plain(&text[cursor..image.range.start]);
-                    let pasted = &text[image.range.clone()];
-                    if !self.queue_attachment(
-                        AttachmentSource::Path(image.path),
-                        AttachmentFallback::Text(pasted.to_owned()),
-                    ) {
-                        self.state.paste_plain(pasted);
-                    }
-                    cursor = image.range.end;
-                }
-                self.state.paste_plain(&text[cursor..]);
+            action @ (ChatAction::Attach { .. } | ChatAction::AttachPaste { .. }) => {
+                self.state.dispatch_composer_action(action);
             }
             ChatAction::RunShell(command) => {
                 let Some(command_id) = self.command_id("shell") else {
@@ -153,21 +158,12 @@ impl ActiveChat {
                 );
             }
             ChatAction::RemoveQueuedPrompt { id, text, kind } => {
-                let Some(command_id) = self.command_id("remove-prompt") else {
-                    self.state.fail_queued_prompt_removal(id, text, kind);
-                    return ChatEventOutcome::Handled;
+                return ChatEventOutcome::RecallQueuedPrompt {
+                    session_id: self.session_id().to_owned(),
+                    id,
+                    text,
+                    kind,
                 };
-
-                queue_chat_remote_operation(
-                    self.remote.operations(),
-                    ChatRemoteOperation::RemoveQueuedPrompt {
-                        command_id,
-                        id,
-                        text,
-                        kind,
-                    },
-                    &mut self.state,
-                );
             }
             ChatAction::StopBackgroundTask { id } => {
                 queue_chat_remote_operation(
@@ -341,40 +337,10 @@ impl ActiveChat {
                 return ChatEventOutcome::CopyText { text: url, notice };
             }
             ChatAction::PasteFromClipboard => {
-                if self.paste_in_flight {
-                    self.state.set_notice("Clipboard read already in progress…");
-                    return ChatEventOutcome::Handled;
-                }
-                self.paste_in_flight = true;
-                self.state.set_notice("Reading clipboard…");
-                let updates = self.chat_io_tx.clone();
-                let text_only = self.state.clipboard_is_text_only();
-                let generation = self.state.input_generation();
-                let target = self.state.clipboard_target();
-                tokio::spawn(async move {
-                    let result = match tokio::task::spawn_blocking(move || {
-                        if text_only {
-                            crate::clipboard::read_text()
-                                .map(ClipboardContent::Text)
-                                .map_err(|error| format!("{error:#}"))
-                        } else {
-                            crate::clipboard::read().map_err(|error| format!("{error:#}"))
-                        }
-                    })
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(error) => Err(format!("clipboard task failed: {error}")),
-                    };
-                    if let Err(error) = updates.send(ChatIoUpdate::Clipboard {
-                        generation,
-                        target,
-                        result,
-                    }) {
-                        tracing::debug!(%error, "clipboard result dropped because the chat closed");
-                    }
-                });
+                self.state
+                    .dispatch_composer_action(ChatAction::PasteFromClipboard);
             }
+
             ChatAction::ToggleVoice => {
                 if let Some(cancel) = self.voice_cancel.as_ref() {
                     let (command, notice) = if self.voice_finishing {

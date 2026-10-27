@@ -208,9 +208,21 @@ pub(crate) fn exclude_from_harness_environment(
 /// method on [`WorkerLaunchConfig`] in the crate that defines it.
 #[cfg(unix)]
 pub(crate) fn enforce_execution_policy(config: &mut WorkerLaunchConfig) -> Result<()> {
+    // The controller already resolved the Muse profile's `muse_auto_review`
+    // choice into `MUSE_APPROVAL_MODE`. Keep it: repeating kind-default
+    // enforcement here would clobber an opt-in to review, and would flip a
+    // launch written before the no-review default back to it. A launch
+    // without the variable still acquires the current default below.
+    let muse_approval = (config.harness == HarnessKind::Muse)
+        .then(|| config.environment.get("MUSE_APPROVAL_MODE").cloned())
+        .flatten();
     config
         .harness
-        .configure_execution_environment(config.execution_policy, &mut config.environment)
+        .configure_execution_environment(config.execution_policy, &mut config.environment)?;
+    if let Some(mode) = muse_approval {
+        config.environment.insert("MUSE_APPROVAL_MODE".into(), mode);
+    }
+    Ok(())
 }
 
 /// Environment variable codex-acp reads as its startup configuration.

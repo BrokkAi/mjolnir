@@ -915,6 +915,7 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
     state.owner().lifecycle.insert(
         "session-a".into(),
         ActiveLifecycle {
+            move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
@@ -942,6 +943,7 @@ async fn checkpoint_lifecycle_guard_is_per_session() {
     state.owner().lifecycle.insert(
         "session-b".into(),
         ActiveLifecycle {
+            move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
@@ -2438,6 +2440,7 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
     let operation = |kind: LifecycleKind, control: LifecycleControl| {
         let (_completed, result) = tokio::sync::watch::channel(None);
         ActiveLifecycle {
+            move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
@@ -2488,6 +2491,7 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
     state.owner().lifecycle.insert(
         "cleanup-gap".into(),
         ActiveLifecycle {
+            move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
@@ -4336,10 +4340,25 @@ fn empty_archive_snapshot() -> mj_core::archive::CanonicalSessionSnapshot {
 
 fn queued_prompt_action(text: &str) -> DaemonAction {
     DaemonAction::QueueStartupPrompt {
+        move_operation_id: None,
         session_id: "session-1".into(),
+        command_id: format!("startup-{text}"),
         text: text.into(),
+        prompt: vec![ContentBlock::Text(TextContent::new(text))],
+        encoded_draft: text.into(),
         inherited_draft: None,
     }
+}
+
+fn queued_move_prompt_action(text: &str, origin: &str) -> DaemonAction {
+    let mut action = queued_prompt_action(text);
+    if let DaemonAction::QueueStartupPrompt {
+        move_operation_id, ..
+    } = &mut action
+    {
+        *move_operation_id = Some(origin.to_owned());
+    }
+    action
 }
 
 fn submitted_prompt_text(command: &RelayCommand) -> String {
@@ -4496,6 +4515,9 @@ async fn a_queued_hand_off_runs_before_the_prompt_behind_it() {
         .queue_startup_step(
             "session-1",
             StartupStep::Prompt {
+                move_operation_id: None,
+                prompt: None,
+                encoded_draft: None,
                 text: "after the hand-off".into(),
                 inherited_draft: None,
             },
@@ -4655,6 +4677,9 @@ async fn startup_restart_reuses_the_durable_command_identity_after_a_lost_reply(
         .queue_startup_step(
             "session-1",
             StartupStep::Prompt {
+                move_operation_id: None,
+                prompt: None,
+                encoded_draft: None,
                 text: "once".into(),
                 inherited_draft: None,
             },
@@ -4794,6 +4819,9 @@ async fn startup_batch_identity_rejects_changed_payload_and_keeps_order() {
             (
                 "request-first".into(),
                 StartupStep::Prompt {
+                    move_operation_id: None,
+                    prompt: None,
+                    encoded_draft: None,
                     text: "first".into(),
                     inherited_draft: None,
                 },
@@ -4801,6 +4829,9 @@ async fn startup_batch_identity_rejects_changed_payload_and_keeps_order() {
             (
                 "request-second".into(),
                 StartupStep::Prompt {
+                    move_operation_id: None,
+                    prompt: None,
+                    encoded_draft: None,
                     text: "second".into(),
                     inherited_draft: None,
                 },
@@ -4875,7 +4906,7 @@ async fn withdrawing_a_queued_startup_prompt_before_delivery_cancels_it() {
     let reply = handle_action(
         DaemonAction::WithdrawStartupPrompt {
             session_id: "session-1".into(),
-            text: "edit me".into(),
+            command_id: "startup-edit me".into(),
         },
         &metadata,
         &state,
@@ -4953,7 +4984,7 @@ async fn withdrawing_a_startup_prompt_after_delivery_started_is_refused() {
     let answer = handle_action(
         DaemonAction::WithdrawStartupPrompt {
             session_id: "session-1".into(),
-            text: "already going".into(),
+            command_id: "startup-already going".into(),
         },
         &metadata,
         &state,
@@ -5385,6 +5416,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             context_window_bytes: None,
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
             legacy_subagents: None,
         },
     );
@@ -6626,6 +6658,7 @@ fn seed_live_session(directory: &Path, relay_root: &Path) {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
             },
         );
         Ok(())
@@ -7596,6 +7629,7 @@ async fn move_destination_ownership_is_typed_and_survives_cancellation() {
     state.owner().lifecycle.insert(
         "moving".into(),
         ActiveLifecycle {
+            move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
@@ -8083,6 +8117,9 @@ async fn startup_retry_keeps_earlier_uncertain_input_ahead_of_new_input() {
         .queue_startup_step(
             "session-1",
             StartupStep::Prompt {
+                move_operation_id: None,
+                prompt: None,
+                encoded_draft: None,
                 text: "first".into(),
                 inherited_draft: None,
             },
@@ -8105,6 +8142,9 @@ async fn startup_retry_keeps_earlier_uncertain_input_ahead_of_new_input() {
         .queue_startup_step(
             "session-1",
             StartupStep::Prompt {
+                move_operation_id: None,
+                prompt: None,
+                encoded_draft: None,
                 text: "second".into(),
                 inherited_draft: None,
             },
@@ -8648,4 +8688,1049 @@ async fn published_transcripts_reach_a_client_as_item_changes() {
         .apply(state.runtime_changes(Some(newest), false).await.unwrap())
         .unwrap();
     assert!(replica.projection.transcripts.is_empty());
+}
+
+/// Move admission and startup delivery share one reservation: an earlier
+/// acceptance finishes before source work, and source readiness cannot admit
+/// anything queued during Move ahead of its archived queue disposition.
+#[tokio::test]
+async fn startup_delivery_and_move_source_sealing_are_serialized() {
+    const NAME: &str = "startup_delivery_and_move_source_sealing_are_serialized";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    handle_action(
+        queued_prompt_action("before move"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    let (text, accepted) = next_submit(&mut manager).await;
+    assert_eq!(text, "before move");
+    manager
+        .publisher
+        .publish("session-1".into(), ManagedSessionView::default())
+        .await
+        .unwrap();
+    handle_action(
+        queued_prompt_action("waiting before move"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    let source_started = Arc::new(tokio::sync::Notify::new());
+    let destination_ready = Arc::new(tokio::sync::Notify::new());
+    let watch = state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Move, {
+            let source_started = source_started.clone();
+            let destination_ready = destination_ready.clone();
+            move |state, id, _| async move {
+                source_started.notify_one();
+                destination_ready.notified().await;
+                // The Move owns archive disposition while holding the reservation.
+                let handle = state.session_manager.session(&id).await?;
+                handle
+                    .submit(
+                        "archived-move-command".into(),
+                        RelayCommand::Prompt {
+                            prompt: vec![ContentBlock::Text(TextContent::new("archived queue"))],
+                        },
+                    )
+                    .await?;
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    handle_action(
+        queued_prompt_action("during move"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), source_started.notified())
+            .await
+            .is_err(),
+        "Move source sealing overtook an already admitted startup submit"
+    );
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    accepted.send(Ok(1)).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), source_started.notified())
+        .await
+        .unwrap();
+    // A still-ready source never receives the newly queued prompt.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err()
+    );
+    destination_ready.notify_one();
+    let (text, archived) = next_submit(&mut manager).await;
+    assert_eq!(text, "archived queue");
+    archived.send(Ok(2)).unwrap();
+    RuntimeState::wait_lifecycle_result(watch).await.unwrap();
+    let (text, delivered) = next_submit(&mut manager).await;
+    assert_eq!(text, "waiting before move");
+    delivered.send(Ok(3)).unwrap();
+    let (text, delivered) = next_submit(&mut manager).await;
+    assert_eq!(text, "during move");
+    delivered.send(Ok(4)).unwrap();
+    state.cancel_and_join_startup_prompts().await.unwrap();
+}
+
+#[tokio::test]
+async fn startup_delivery_waits_for_durable_move_after_daemon_restart() {
+    const NAME: &str = "startup_delivery_waits_for_durable_move_after_daemon_restart";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let session = state.session_record("session-1").unwrap();
+    let mut operation = retained_startup_test_move(&session);
+    crate::database::save_move_operation(&operation).unwrap();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    handle_action(
+        queued_prompt_action("queued before move"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    handle_action(
+        queued_move_prompt_action("destination only", &operation.operation_id),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err()
+    );
+    state.cancel_and_join_startup_prompts().await.unwrap();
+    let restarted = test_runtime_state_with_manager(&manager);
+    restarted
+        .restore_startup_deliveries(&CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err(),
+        "restored startup work was sent before durable archived queue admission"
+    );
+    operation.destination_store_id = Some("destination-store".into());
+    operation.phase = mj_core::state::MovePhase::Completed;
+    operation.queue_admission_finished = true;
+    crate::database::save_move_operation(&operation).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err(),
+        "completed Move admitted a stale ready source actor"
+    );
+    let mut destination = ready_startup_view();
+    destination.snapshot.as_mut().unwrap().operational.store_id = Some("destination-store".into());
+    manager
+        .publisher
+        .publish("session-1".into(), destination.clone())
+        .await
+        .unwrap();
+    let (text, delivered) = next_submit(&mut manager).await;
+    assert_eq!(text, "queued before move");
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    delivered.send(Ok(9)).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err(),
+        "Move-origin input admitted a stale ready source actor"
+    );
+    manager
+        .publisher
+        .publish("session-1".into(), destination)
+        .await
+        .unwrap();
+    let (text, delivered) = next_submit(&mut manager).await;
+    assert_eq!(text, "destination only");
+    delivered.send(Ok(10)).unwrap();
+    restarted.cancel_and_join_startup_prompts().await.unwrap();
+}
+
+fn retained_startup_test_move(
+    session: &mj_core::state::SessionRecord,
+) -> mj_core::state::MoveOperation {
+    mj_core::state::MoveOperation {
+        prepared_destination: None,
+        accepted_preparation: None,
+        acknowledge_interruption: false,
+        workspace_transfer: None,
+        handoff: None,
+        source_checkpoint_only: false,
+        in_place: false,
+        operation_id: "startup-durable-move".into(),
+        selection: MoveSelection {
+            subagents: None,
+            workspace: Default::default(),
+            session_id: session.id.clone(),
+            profile_id: Some(session.last_profile.clone()),
+            target_template_id: Some(session.target_template_id.clone()),
+            additional_mounts: None,
+            resource_allocation: None,
+            clear_resource_allocation: false,
+        },
+        source_profile_id: session.last_profile.clone(),
+        source_target_template_id: session.target_template_id.clone(),
+        source_target: None,
+        source_native_session_id: None,
+        source_additional_mounts: Vec::new(),
+        source_resource_allocation: None,
+        destination_target: None,
+        destination_native_session_id: None,
+        destination_store_id: None,
+        configuration_fingerprint: "test".into(),
+        checkpoint: None,
+        recovery_session: Some(session.clone()),
+        queue: mj_core::state::ResumeQueueDisposition::Start,
+        phase: mj_core::state::MovePhase::StartingQueue,
+        queue_admission_started: true,
+        queue_admission_finished: false,
+        cancellation_requested: false,
+        created_at: session.created_at.clone(),
+        updated_at: session.updated_at.clone(),
+        error: None,
+    }
+}
+
+fn startup_image_draft(label: &str, reference: &mj_core::attachment::AttachmentRef) -> String {
+    let text = format!("{label}[image 1]");
+    format!(
+        "{}{}",
+        mj_core::draft::CHAT_DRAFT_PREFIX,
+        serde_json::json!({
+            "text": text,
+            "images": [{"range": {"start": label.len(), "end": text.len()}, "number": 1,
+                "image": {"mime_type": reference.mime_type, "reference": reference}}],
+            "retained_metadata": {"revision": 1}
+        })
+    )
+}
+
+#[tokio::test]
+async fn startup_image_refusal_recovers_complete_drafts_and_invalid_merges_stay_durable() {
+    const NAME: &str =
+        "startup_image_refusal_recovers_complete_drafts_and_invalid_merges_stay_durable";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let reference =
+        mj_core::attachment::AttachmentRef::new(b"\x89PNG\r\n\x1a\n", "image/png".into(), 1, 1)
+            .unwrap();
+    let recovered = startup_image_draft("queued ", &reference);
+    let existing = startup_image_draft("existing 🐈 ", &reference);
+    let mut saved: serde_json::Value = serde_json::from_str(
+        existing
+            .strip_prefix(mj_core::draft::CHAT_DRAFT_PREFIX)
+            .unwrap(),
+    )
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(
+        recovered
+            .strip_prefix(mj_core::draft::CHAT_DRAFT_PREFIX)
+            .unwrap(),
+    )
+    .unwrap();
+    let pending = |id: &str, startup: bool| {
+        let mut submission = serde_json::json!({
+            "id": id, "kind": "Prompt", "payload": payload,
+            "status": "Delivery unconfirmed", "represented": false,
+            "finished": true, "recorded_at_ms": 1
+        });
+        if startup {
+            submission["startup_origin"] = serde_json::json!({
+                "move_operation_id": null, "inherited_draft": null
+            });
+        }
+        submission
+    };
+    saved["pending"] = serde_json::json!([
+        pending("image-startup", true),
+        pending("unrelated-native", false),
+        pending("unrelated-startup", true)
+    ]);
+    let existing = format!("{}{}", mj_core::draft::CHAT_DRAFT_PREFIX, saved);
+    crate::database::set_session_draft_input("session-1", &existing).unwrap();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    let action = DaemonAction::QueueStartupPrompt {
+        move_operation_id: None,
+        session_id: "session-1".into(),
+        command_id: "image-startup".into(),
+        text: "queued [image 1]".into(),
+        prompt: vec![reference.content_block()],
+        inherited_draft: None,
+        encoded_draft: recovered.clone(),
+    };
+    // Stable retries persist one structured row, rather than another text row.
+    for _ in 0..2 {
+        handle_action(action.clone(), &metadata, &state, &cancellation)
+            .await
+            .unwrap();
+    }
+    assert_eq!(crate::database::load_startup_deliveries().unwrap().len(), 1);
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !crate::database::load_startup_deliveries()
+            .unwrap()
+            .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let before_retry = session_draft_input(&state);
+    handle_action(action.clone(), &metadata, &state, &cancellation)
+        .await
+        .unwrap();
+    assert_eq!(
+        session_draft_input(&state),
+        before_retry,
+        "settled enqueue retry restored input twice"
+    );
+    let mut changed = action.clone();
+    if let DaemonAction::QueueStartupPrompt { text, .. } = &mut changed {
+        text.push_str(" changed");
+    }
+    assert!(matches!(
+        handle_action(changed, &metadata, &state, &cancellation)
+            .await
+            .unwrap(),
+        DaemonReply::StartupPromptIdentityConflict
+    ));
+    let outcomes = handle_action(
+        DaemonAction::StartupPromptOutcomes {
+            session_id: "session-1".into(),
+            command_ids: vec!["image-startup".into(), "missing".into()],
+        },
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    let DaemonReply::StartupPromptOutcomes(outcomes) = outcomes else {
+        panic!("expected outcome receipts");
+    };
+    assert_eq!(outcomes.len(), 1);
+    assert!(
+        matches!(&outcomes["image-startup"], mj_client::daemon::StartupPromptOutcome::Refused { encoded_draft, reason }
+        if encoded_draft == &recovered && reason.contains("does not support image prompts"))
+    );
+    let draft = session_draft_input(&state);
+    let envelope: serde_json::Value = serde_json::from_str(
+        draft
+            .strip_prefix(mj_core::draft::CHAT_DRAFT_PREFIX)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        envelope["text"],
+        "existing 🐈 [image 1]\n\nqueued [image 2]"
+    );
+    for image in envelope["images"].as_array().unwrap() {
+        let text = envelope["text"].as_str().unwrap();
+        let start = image["range"]["start"].as_u64().unwrap() as usize;
+        let end = image["range"]["end"].as_u64().unwrap() as usize;
+        assert_eq!(&text[start..end], format!("[image {}]", image["number"]));
+        assert_eq!(
+            image["image"]["reference"],
+            serde_json::to_value(&reference).unwrap()
+        );
+    }
+    assert_eq!(
+        envelope["retained_metadata"],
+        serde_json::json!({"revision": 1})
+    );
+    assert_eq!(
+        envelope["pending"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|submission| submission["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["unrelated-native", "unrelated-startup"],
+        "reopening a recovered draft must not retry its already restored startup payload"
+    );
+    assert!(
+        notice_texts(&state)
+            .iter()
+            .any(|notice| notice.contains("does not support image prompts"))
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), manager.requests.recv())
+            .await
+            .is_err(),
+        "unsupported image reached the worker"
+    );
+    // Duplicate visible text has distinct caller identities. Recall only the
+    // chosen message, then deliver the remaining installed image unchanged.
+    manager
+        .publisher
+        .publish("session-1".into(), ManagedSessionView::default())
+        .await
+        .unwrap();
+    for command_id in ["image-keep", "image-recall"] {
+        handle_action(
+            DaemonAction::QueueStartupPrompt {
+                move_operation_id: None,
+                session_id: "session-1".into(),
+                command_id: command_id.into(),
+                text: "queued [image 1]".into(),
+                prompt: vec![reference.content_block()],
+                encoded_draft: recovered.clone(),
+                inherited_draft: None,
+            },
+            &metadata,
+            &state,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+    }
+    let withdrawn = handle_action(
+        DaemonAction::WithdrawStartupPrompt {
+            session_id: "session-1".into(),
+            command_id: "image-recall".into(),
+        },
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(withdrawn, DaemonReply::PromptWithdrawn(true)));
+    let mut supported = ready_startup_view();
+    supported
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .agent_capabilities = Some(Box::new(
+        serde_json::from_value(serde_json::json!({"promptCapabilities": {"image": true}})).unwrap(),
+    ));
+    manager
+        .publisher
+        .publish("session-1".into(), supported)
+        .await
+        .unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(10), manager.requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let RemoteSessionRequest::Submit {
+        command_id,
+        command,
+        reply,
+        ..
+    } = request
+    else {
+        panic!("expected structured prompt");
+    };
+    assert_eq!(command_id, "image-keep");
+    assert_eq!(
+        serde_json::to_value(command).unwrap(),
+        serde_json::to_value(RelayCommand::Prompt {
+            prompt: vec![reference.content_block()]
+        })
+        .unwrap()
+    );
+    reply.send(Ok(12)).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !crate::database::load_startup_deliveries()
+            .unwrap()
+            .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    crate::database::prune_settled_startup_deliveries().unwrap();
+    let outcomes = crate::database::startup_prompt_outcomes(
+        "session-1",
+        &["image-keep".into(), "image-recall".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        outcomes["image-keep"],
+        mj_client::daemon::StartupPromptOutcome::Accepted
+    );
+    assert_eq!(
+        outcomes["image-recall"],
+        mj_client::daemon::StartupPromptOutcome::Withdrawn
+    );
+    let recovered_before_conflict = session_draft_input(&state);
+    let conflict = handle_action(
+        DaemonAction::QueueStartupPrompt {
+            move_operation_id: None,
+            session_id: "session-1".into(),
+            command_id: "image-keep".into(),
+            text: "queued [image 1]".into(),
+            prompt: vec![reference.content_block()],
+            encoded_draft: recovered.clone(),
+            inherited_draft: Some("different inherited draft".into()),
+        },
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        conflict,
+        DaemonReply::StartupPromptIdentityConflict
+    ));
+    assert_eq!(
+        crate::database::startup_prompt_outcomes("session-1", &["image-keep".into()]).unwrap()["image-keep"],
+        mj_client::daemon::StartupPromptOutcome::Accepted,
+        "a conflicting replay must retain the original accepted receipt"
+    );
+    assert_eq!(session_draft_input(&state), recovered_before_conflict);
+    // Store integration also covers plain/encoded in both directions and an
+    // invalid envelope retaining the entire refused durable payload.
+    for (left, right) in [
+        ("new typing", recovered.as_str()),
+        (recovered.as_str(), "more typing"),
+    ] {
+        crate::database::set_session_draft_input("session-1", left).unwrap();
+        state.append_draft_input("session-1", right).await.unwrap();
+        mj_core::draft::validate_reference_draft(&session_draft_input(&state)).unwrap();
+    }
+    crate::database::set_session_draft_input("session-1", "mjolnir-chat-draft-v1:broken").unwrap();
+    crate::database::enqueue_startup_deliveries(vec![crate::database::StartupDelivery {
+        session_id: "session-1".into(),
+        command_id: "recover-invalid".into(),
+        step_json: serde_json::to_string(&StartupStep::Prompt {
+            move_operation_id: None,
+            text: "queued [image 1]".into(),
+            prompt: Some(vec![reference.content_block()]),
+            encoded_draft: Some(recovered.clone()),
+            inherited_draft: None,
+        })
+        .unwrap(),
+        phase: "pending".into(),
+        group_id: None,
+        accepted_ordinal: None,
+        error: None,
+    }])
+    .unwrap();
+    crate::database::reject_startup_prompt("recover-invalid", "unsupported image").unwrap();
+    assert!(crate::database::recover_startup_prompt("recover-invalid", &recovered).is_err());
+    let rows = crate::database::load_startup_deliveries().unwrap();
+    assert_eq!(rows[0].phase, "rejecting");
+    assert!(rows[0].step_json.contains("queued [image 1]"));
+    assert_eq!(session_draft_input(&state), "mjolnir-chat-draft-v1:broken");
+    state.cancel_and_join_startup_prompts().await.unwrap();
+    crate::database::delete_session("session-1").unwrap();
+    assert!(
+        crate::database::startup_prompt_outcomes(
+            "session-1",
+            &[
+                "image-startup".into(),
+                "image-keep".into(),
+                "image-recall".into()
+            ]
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn startup_delivery_reservation_wait_does_not_prevent_move_cancellation() {
+    const NAME: &str = "startup_delivery_reservation_wait_does_not_prevent_move_cancellation";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let session_id = "session-1";
+    let reservation = state.startup_delivery_gate(session_id).lock_owned().await;
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    handle_action(
+        queued_move_prompt_action("cancelled before source", "pre-reservation-origin"),
+        &metadata,
+        &state,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let entered_source = Arc::new(AtomicBool::new(false));
+    let control = LifecycleControl::default();
+    let watch = state
+        .admit_lifecycle(
+            session_id.into(),
+            LifecycleKind::Move,
+            super::lifecycle::LifecycleStart {
+                resume_workspace_id: None,
+                request_key: None,
+                control: Some(control.clone()),
+                phase: LifecyclePhase::Executing,
+                move_operation_id: Some("pre-reservation-origin".into()),
+                deferrable_admission: None,
+            },
+            {
+                let entered_source = entered_source.clone();
+                move |_, _, _| async move {
+                    entered_source.store(true, Ordering::Release);
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        state.active_lifecycles()[0].move_operation_id.as_deref(),
+        Some("pre-reservation-origin")
+    );
+    assert!(control.request_cancel());
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        RuntimeState::wait_lifecycle_result(watch),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        !entered_source.load(Ordering::Acquire),
+        "cancelled Move started source work"
+    );
+    assert_eq!(session_draft_input(&state), "cancelled before source");
+    let outcomes = crate::database::startup_prompt_outcomes(
+        session_id,
+        &["startup-cancelled before source".into()],
+    )
+    .unwrap();
+    assert!(matches!(
+        outcomes.values().next(),
+        Some(mj_client::daemon::StartupPromptOutcome::Refused { .. })
+    ));
+    drop(reservation);
+    state.cancel_and_join_startup_prompts().await.unwrap();
+    // A stale frontend finishes enqueueing after cancellation and after the
+    // ephemeral owner has disappeared. No durable Move ever existed.
+    state.owner().lifecycle.remove(session_id);
+    assert!(
+        crate::database::load_move_operation(session_id)
+            .unwrap()
+            .is_none()
+    );
+    manager
+        .publisher
+        .publish(session_id.into(), ready_startup_view())
+        .await
+        .unwrap();
+    handle_action(
+        queued_move_prompt_action("late destination draft", "pre-reservation-origin"),
+        &metadata,
+        &state,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                crate::database::startup_prompt_outcomes(
+                    session_id,
+                    &["startup-late destination draft".into()]
+                )
+                .unwrap()
+                .values()
+                .next(),
+                Some(mj_client::daemon::StartupPromptOutcome::Refused { .. })
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(session_draft_input(&state).contains("late destination draft"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), manager.requests.recv())
+            .await
+            .is_err(),
+        "late cancelled-origin enqueue reached the ready source"
+    );
+    state.cancel_and_join_startup_prompts().await.unwrap();
+    manager
+        .publisher
+        .publish(session_id.into(), ManagedSessionView::default())
+        .await
+        .unwrap();
+    // A daemon handoff interrupts resumable work; it is not a user refusal.
+    crate::database::set_session_draft_input(session_id, "").unwrap();
+    let reservation = state.startup_delivery_gate(session_id).lock_owned().await;
+    handle_action(
+        queued_prompt_action("keep through handoff"),
+        &metadata,
+        &state,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let control = LifecycleControl::default();
+    // Clear the earlier completed operation as an ordinary caller does.
+    state.owner().lifecycle.remove(session_id);
+    let watch = state
+        .start_or_join_lifecycle_controlled(
+            session_id.into(),
+            LifecycleKind::Move,
+            None,
+            None,
+            Some(control.clone()),
+            |_, _, _| async { panic!("handoff interrupted before source work") },
+        )
+        .unwrap();
+    assert!(control.cancel_for_shutdown());
+    RuntimeState::wait_lifecycle_result(watch).await.unwrap();
+    assert_eq!(session_draft_input(&state), "");
+    assert!(
+        crate::database::load_startup_deliveries()
+            .unwrap()
+            .iter()
+            .any(
+                |step| step.command_id == "startup-keep through handoff" && step.phase == "pending"
+            )
+    );
+    drop(reservation);
+    state.cancel_and_join_startup_prompts().await.unwrap();
+}
+
+#[tokio::test]
+async fn startup_failed_and_cancelled_moves_restore_images_instead_of_using_retained_source() {
+    const NAME: &str =
+        "startup_failed_and_cancelled_moves_restore_images_instead_of_using_retained_source";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let reference =
+        mj_core::attachment::AttachmentRef::new(b"\x89PNG\r\n\x1a\n", "image/png".into(), 1, 1)
+            .unwrap();
+    let draft = startup_image_draft("destination image ", &reference);
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    for (index, phase) in [
+        mj_core::state::MovePhase::Failed,
+        mj_core::state::MovePhase::Cancelled,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        crate::database::set_session_draft_input("session-1", "").unwrap();
+        let mut session = state.session_record("session-1").unwrap();
+        session.state = SessionState::Running;
+        crate::database::save_session(&session).unwrap();
+        let mut operation = retained_startup_test_move(&session);
+        operation.in_place = true;
+        operation.queue_admission_started = index != 0;
+        operation.phase = mj_core::state::MovePhase::Preparing;
+        crate::database::save_move_operation(&operation).unwrap();
+        manager
+            .publisher
+            .publish("session-1".into(), ready_startup_view())
+            .await
+            .unwrap();
+        let command_id = format!("failed-move-image-{index}");
+        handle_action(
+            DaemonAction::QueueStartupPrompt {
+                move_operation_id: Some(operation.operation_id.clone()),
+                session_id: "session-1".into(),
+                command_id: command_id.clone(),
+                text: "destination image [image 1]".into(),
+                prompt: vec![reference.content_block()],
+                encoded_draft: draft.clone(),
+                inherited_draft: None,
+            },
+            &metadata,
+            &state,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), manager.requests.recv())
+                .await
+                .is_err()
+        );
+        operation.phase = phase;
+        operation.error = Some("test destination failure".into());
+        crate::database::save_move_operation(&operation).unwrap();
+        assert_eq!(session_draft_input(&state), draft);
+        let outcomes =
+            crate::database::startup_prompt_outcomes("session-1", &[command_id]).unwrap();
+        assert!(
+            matches!(outcomes.values().next(), Some(mj_client::daemon::StartupPromptOutcome::Refused { encoded_draft, reason })
+            if encoded_draft == &draft && reason.contains("test destination failure"))
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+                .await
+                .is_err(),
+            "failed Move delivered destination input to source"
+        );
+    }
+    state.cancel_and_join_startup_prompts().await.unwrap();
+}
+
+#[tokio::test]
+async fn startup_retry_exhaustion_preserves_uncertain_command_identity() {
+    const NAME: &str = "startup_retry_exhaustion_preserves_uncertain_command_identity";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    handle_action(
+        queued_prompt_action("uncertain original"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    for attempt in 0..=super::state::STARTUP_STEP_ATTEMPTS {
+        let request = tokio::time::timeout(Duration::from_secs(20), manager.requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let RemoteSessionRequest::Submit {
+            command_id, reply, ..
+        } = request
+        else {
+            panic!("expected receipt reconciliation");
+        };
+        assert_eq!(command_id, "startup-uncertain original");
+        assert_eq!(
+            session_draft_input(&state),
+            "",
+            "uncertain acceptance became editable input"
+        );
+        if attempt == super::state::STARTUP_STEP_ATTEMPTS {
+            reply.send(Ok(77)).unwrap();
+        } else {
+            reply
+                .send(Err(unconfirmed(
+                    "receipt lookup unavailable after original acceptance",
+                )))
+                .unwrap();
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !crate::database::load_startup_deliveries()
+            .unwrap()
+            .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(session_draft_input(&state), "");
+    assert_eq!(
+        crate::database::startup_prompt_outcomes(
+            "session-1",
+            &["startup-uncertain original".into()]
+        )
+        .unwrap()["startup-uncertain original"],
+        mj_client::daemon::StartupPromptOutcome::Accepted
+    );
+    state.cancel_and_join_startup_prompts().await.unwrap();
+}
+
+#[tokio::test]
+async fn startup_without_move_origin_ignores_historical_failed_move_after_resume() {
+    const NAME: &str = "startup_without_move_origin_ignores_historical_failed_move_after_resume";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let mut session = state.session_record("session-1").unwrap();
+    let mut historical = retained_startup_test_move(&session);
+    historical.phase = mj_core::state::MovePhase::Failed;
+    historical.queue_admission_started = false;
+    historical.queue_admission_finished = false;
+    historical.error = Some("historical destination failed".into());
+    crate::database::save_move_operation(&historical).unwrap();
+    // Ordinary Resume installs its current state without erasing old Move history.
+    session.state = SessionState::Running;
+    session.native_session_id = Some("resumed-native".into());
+    crate::database::save_session(&session).unwrap();
+    let mut ready = ready_startup_view();
+    ready
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .native_session_id = Some("resumed-native".into());
+    manager
+        .publisher
+        .publish("session-1".into(), ready)
+        .await
+        .unwrap();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    handle_action(
+        queued_prompt_action("ordinary resumed startup"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    let (text, reply) = next_submit(&mut manager).await;
+    assert_eq!(text, "ordinary resumed startup");
+    reply.send(Ok(91)).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                crate::database::startup_prompt_outcomes(
+                    "session-1",
+                    &["startup-ordinary resumed startup".into()]
+                )
+                .unwrap()
+                .values()
+                .next(),
+                Some(mj_client::daemon::StartupPromptOutcome::Accepted)
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(session_draft_input(&state), "");
+    assert_eq!(
+        crate::database::load_move_operation("session-1")
+            .unwrap()
+            .unwrap()
+            .phase,
+        mj_core::state::MovePhase::Failed
+    );
+    // Retrying that same Move is a current owner, even while its older
+    // failure is still the committed durable snapshot.
+    let control = LifecycleControl::default();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let entered = started.clone();
+    let released = release.clone();
+    let watch = state
+        .admit_lifecycle(
+            "session-1".into(),
+            LifecycleKind::Move,
+            super::lifecycle::LifecycleStart {
+                resume_workspace_id: None,
+                request_key: None,
+                control: Some(control.clone()),
+                phase: LifecyclePhase::Executing,
+                move_operation_id: Some(historical.operation_id.clone()),
+                deferrable_admission: None,
+            },
+            move |_, _, _| async move {
+                entered.notify_one();
+                released.notified().await;
+                Err(anyhow!("matching Move retry cancelled"))
+            },
+        )
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
+    handle_action(
+        queued_move_prompt_action("matching active retry", &historical.operation_id),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), manager.requests.recv())
+            .await
+            .is_err()
+    );
+    assert!(
+        crate::database::startup_prompt_outcomes(
+            "session-1",
+            &["startup-matching active retry".into()]
+        )
+        .unwrap()
+        .is_empty(),
+        "old durable failure overrode the matching current Move owner"
+    );
+    assert_eq!(session_draft_input(&state), "");
+    assert!(control.request_cancel());
+    release.notify_one();
+    assert!(RuntimeState::wait_lifecycle_result(watch).await.is_err());
+    assert_eq!(session_draft_input(&state), "matching active retry");
+    state.cancel_and_join_startup_prompts().await.unwrap();
 }

@@ -59,7 +59,7 @@ controls:
 | Claude Code | `bypassPermissions` with its sandbox disabled |
 | Kimi Code | `auto` |
 | Grok Build | always approve with its sandbox disabled |
-| Muse Code | the `:ask-me` permission profile in its staged settings, `promptUnmatched` approvals with auto-review on, and `--disable-sandbox` (the reviewer can still deny) |
+| Muse Code | the `:ask-me` permission profile in its staged settings, `allowAll` approvals with auto-review off, and `--disable-sandbox` (no permission checks; set `muse_auto_review = true` on the profile to restore the reviewer, which can still deny) |
 | OpenCode | `"permission": "allow"` in the staged `opencode.json` |
 | MiMo Code | `MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS=1` |
 | DSH | dsh-acp's `permission_mode` `allow`, selected on every session open |
@@ -71,8 +71,10 @@ Codex, Claude Code, Grok Build, and Muse Code can preserve guardian-style
 approvals on a bare runtime. Muse's guardian is muse-acp's auto-review: Mjolnir
 stages the `:ask-me` permission profile, selects `promptUnmatched` approvals,
 and turns auto-review on, so a read-only Muse reviewer answers each approval
-and a failed review denies the action. Muse keeps that review in containers
-too and disables only the sandbox there; with guardian approvals the sandbox
+and a failed review denies the action. In containers Muse instead runs without
+permission checks (`allowAll` approvals with auto-review off) and disables
+only the sandbox there; a profile with `muse_auto_review = true` keeps the
+review in containers too. With guardian approvals the sandbox
 stays on, even when a profile's `MUSE_SERVE_ARGS` passes `--disable-sandbox`.
 Kimi Code cannot preserve approvals. OpenCode and MiMo Code ask before tools
 according to their permission rules, but run every command directly on the

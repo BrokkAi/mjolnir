@@ -14,6 +14,7 @@ impl ActiveChat {
         enum Wakeup {
             Remote(Option<ChatRemoteResult>),
             Io(ChatIoUpdate),
+            Composer(ComposerIoUpdate),
             Voice(VoiceUpdate),
             // Boxed: a view carries the whole session snapshot, and the enum
             // is built on every wakeup.
@@ -24,6 +25,7 @@ impl ActiveChat {
         let wakeup = tokio::select! {
             result = chat.remote.recv(), if chat.remote_open => Wakeup::Remote(result),
             Some(update) = chat.chat_io_rx.recv() => Wakeup::Io(update),
+            Some(update) = chat.state.composer_runtime.rx.recv() => Wakeup::Composer(update),
             Some(update) = chat.voice_updates_rx.recv() => Wakeup::Voice(update),
             view = chat.session.changed(), if chat.session_open => Wakeup::View(Box::new(view)),
         };
@@ -31,6 +33,7 @@ impl ActiveChat {
             Wakeup::Remote(Some(result)) => chat.apply_remote_result(result),
             Wakeup::Remote(None) => chat.remote_open = false,
             Wakeup::Io(update) => chat.apply_io_update(update),
+            Wakeup::Composer(update) => chat.state.apply_composer_update(update),
             Wakeup::Voice(update) => chat.apply_voice_update(update),
             Wakeup::View(view) => chat.apply_session_view(*view),
         }
@@ -39,6 +42,12 @@ impl ActiveChat {
     }
 
     pub(crate) async fn drain(&mut self) {
+        if let Some(prompt) = self.state.drain_composer() {
+            self.state
+                .composer_runtime
+                .prepared_startup
+                .push_back(prompt);
+        }
         self.refresh_voice_availability();
         while let Ok(result) = self.remote.try_recv() {
             self.apply_remote_result(result);
@@ -175,13 +184,10 @@ impl ActiveChat {
         let Some(result) = self.remote.take_finished().await else {
             return;
         };
-        apply_chat_remote_result(
-            &mut self.state,
-            ChatRemoteResult::WorkerFailed(match result {
-                Err(error) => format!("Chat background worker failed: {error}"),
-                Ok(()) => "Chat background worker stopped unexpectedly".into(),
-            }),
-        );
+        self.apply_remote_result(ChatRemoteResult::WorkerFailed(match result {
+            Err(error) => format!("Chat background worker failed: {error}"),
+            Ok(()) => "Chat background worker stopped unexpectedly".into(),
+        }));
     }
 
     pub(super) fn apply_io_update(&mut self, update: ChatIoUpdate) {
@@ -204,51 +210,6 @@ impl ActiveChat {
                 self.apply_turn_review_role_events(role, result);
                 return;
             }
-            ChatIoUpdate::Clipboard {
-                generation,
-                target,
-                result,
-            } => {
-                self.paste_in_flight = false;
-                if generation != self.state.input_generation()
-                    || target != self.state.clipboard_target()
-                {
-                    return;
-                }
-                match result {
-                    Ok(ClipboardContent::Image(image)) => {
-                        self.queue_attachment(
-                            AttachmentSource::Clipboard(image),
-                            AttachmentFallback::FailedMarker,
-                        );
-                    }
-                    // Copied files arrive as their paths, which attach the
-                    // way a pasted path does.
-                    Ok(ClipboardContent::Text(text))
-                        if target == super::super::input_state::ClipboardTarget::Composer =>
-                    {
-                        let action = self.state.paste_or_attach(&text);
-                        self.dispatch(action);
-                    }
-                    Ok(content) => self.state.handle_clipboard_content(content),
-                    Err(error) => {
-                        tracing::warn!(%error, "clipboard read failed and was shown in the UI");
-                        let policy = if self.state.prompt_images_supported {
-                            ""
-                        } else {
-                            "; this agent accepts only clipboard text"
-                        };
-                        self.state
-                            .set_notice(format!("Paste failed: {error}{policy}"));
-                    }
-                }
-                return;
-            }
-            ChatIoUpdate::AttachmentFinished(result) => {
-                self.apply_attachment_result(result);
-                self.pump_attachment_queue();
-                return;
-            }
             update => update,
         };
         if matches!(&update, ChatIoUpdate::ToolDiffstats { .. }) {
@@ -257,71 +218,12 @@ impl ActiveChat {
         if let PrefixRebuild::Needed { attempt } = apply_chat_io_update(&mut self.state, update) {
             self.rebuild_transcript_prefix(attempt);
         }
-        dispatch_history_search_request(self.session.clone(), &mut self.state, &self.chat_io_tx);
+        dispatch_history_search_request(self.session.clone(), &mut self.state);
         dispatch_diffstat_requests(
             &mut self.state,
             &self.chat_io_tx,
             &mut self.diffstats_in_flight,
         );
-    }
-
-    /// Reserve a marker at the cursor and read the attachment behind it.
-    /// `false` when no marker could be reserved; the notice says why.
-    pub(super) fn queue_attachment(
-        &mut self,
-        source: AttachmentSource,
-        fallback: AttachmentFallback,
-    ) -> bool {
-        let sequence = self.next_attachment_sequence;
-        if !self.state.reserve_attachment(sequence) {
-            return false;
-        }
-        self.next_attachment_sequence = self.next_attachment_sequence.wrapping_add(1);
-        self.attachment_queue
-            .push_back((sequence, source, fallback));
-        self.pump_attachment_queue();
-        true
-    }
-
-    pub(crate) fn pump_attachment_queue(&mut self) {
-        while self.attachment_tasks_in_flight < MAX_ATTACHMENT_TASKS {
-            let Some((sequence, source, fallback)) = self.attachment_queue.pop_front() else {
-                break;
-            };
-            self.attachment_tasks_in_flight += 1;
-            let session_id = self.session.session_id().to_owned();
-            let updates = self.chat_io_tx.clone();
-            tokio::spawn(async move {
-                let result = match tokio::task::spawn_blocking(move || match source {
-                    AttachmentSource::Clipboard(image) => {
-                        attachments::install_clipboard_image(&session_id, image)
-                    }
-                    AttachmentSource::Path(path) => path
-                        .resolve()
-                        .and_then(|path| attachments::install_path(&session_id, &path)),
-                })
-                .await
-                {
-                    Ok(result) => result.map_err(|error| format!("{error:#}")),
-                    Err(error) => Err(format!("attachment task failed: {error}")),
-                };
-                if let Err(error) =
-                    updates.send(ChatIoUpdate::AttachmentFinished(AttachmentResult {
-                        sequence,
-                        fallback,
-                        result,
-                    }))
-                {
-                    tracing::debug!(%error, "attachment result dropped because the chat closed");
-                }
-            });
-        }
-    }
-
-    pub(super) fn apply_attachment_result(&mut self, result: AttachmentResult) {
-        self.attachment_tasks_in_flight = self.attachment_tasks_in_flight.saturating_sub(1);
-        self.state
-            .finish_attachment(result.sequence, result.result, result.fallback);
     }
 
     /// Restarts the history conversion against the session's current snapshot,
@@ -463,6 +365,12 @@ impl ActiveChat {
     }
 
     pub(super) fn apply_remote_result(&mut self, result: ChatRemoteResult) {
+        if let Some(destination) = &self.state.composer_forward {
+            if let Err(error) = destination.send(ComposerIoUpdate::Remote(result)) {
+                tracing::warn!(%error, "could not deliver a result to the transferred composer");
+            }
+            return;
+        }
         let sync_succeeded = matches!(&result, ChatRemoteResult::Sync(Ok(())));
         let sync_finished = matches!(&result, ChatRemoteResult::Sync(_));
         apply_chat_remote_result(&mut self.state, result);

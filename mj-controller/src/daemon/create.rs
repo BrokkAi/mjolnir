@@ -551,6 +551,7 @@ mod delegation_replay_tests {
                 context_window_bytes: None,
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
                 legacy_subagents: None,
             },
         );
@@ -688,6 +689,7 @@ mod delegation_replay_tests {
                 context_window_bytes: None,
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
                 legacy_subagents: None,
             },
         );

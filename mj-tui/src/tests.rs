@@ -402,13 +402,14 @@ fn enter_during_a_starting_transition_queues_the_prompt_for_delivery() {
     dashboard.focus_prompt();
     dashboard.handle_key(key(KeyCode::Char('h')));
 
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::QueueStartupPrompt {
-            session_id: "session-1".into(),
-            text: "h".into(),
+    match dashboard.handle_key(key(KeyCode::Enter)) {
+        DashboardAction::QueueStartupPrompt { session_id, prompt } => {
+            assert_eq!(session_id, "session-1");
+            assert_eq!(prompt.payload.text, "h");
+            assert!(!prompt.command_id.is_empty());
         }
-    );
+        other => panic!("unexpected action: {other:?}"),
+    }
     assert_eq!(
         dashboard
             .standby_prompts
@@ -438,33 +439,36 @@ fn recalling_a_queued_startup_prompt_withdraws_it_and_enter_requeues_the_edit() 
     for character in "first".chars() {
         dashboard.handle_key(key(KeyCode::Char(character)));
     }
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::QueueStartupPrompt {
-            session_id: "session-1".into(),
-            text: "first".into(),
+    match dashboard.handle_key(key(KeyCode::Enter)) {
+        DashboardAction::QueueStartupPrompt { session_id, prompt } => {
+            assert_eq!(session_id, "session-1");
+            assert_eq!(prompt.payload.text, "first");
+            assert!(!prompt.command_id.is_empty());
         }
-    );
+        other => panic!("unexpected action: {other:?}"),
+    }
 
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Up)),
-        DashboardAction::WithdrawStartupPrompt {
-            session_id: "session-1".into(),
-            text: "first".into(),
+    match dashboard.handle_key(key(KeyCode::Up)) {
+        DashboardAction::WithdrawStartupPrompt { session_id, prompt } => {
+            assert_eq!(session_id, "session-1");
+            assert_eq!(prompt.payload.text, "first");
+            assert!(!prompt.command_id.is_empty());
         }
-    );
+        other => panic!("unexpected action: {other:?}"),
+    }
     let standby = dashboard.standby_prompts.get("session-1").expect("standby");
     assert!(standby.queued_prompt_texts().is_empty());
     assert_eq!(standby.draft(), "first");
 
     dashboard.handle_key(key(KeyCode::Char('!')));
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::QueueStartupPrompt {
-            session_id: "session-1".into(),
-            text: "first!".into(),
+    match dashboard.handle_key(key(KeyCode::Enter)) {
+        DashboardAction::QueueStartupPrompt { session_id, prompt } => {
+            assert_eq!(session_id, "session-1");
+            assert_eq!(prompt.payload.text, "first!");
+            assert!(!prompt.command_id.is_empty());
         }
-    );
+        other => panic!("unexpected action: {other:?}"),
+    }
     let standby = dashboard.standby_prompts.get("session-1").expect("standby");
     assert_eq!(standby.queued_prompt_texts(), vec!["first!".to_owned()]);
 }
@@ -480,11 +484,24 @@ fn a_recalled_prompt_that_was_already_sent_is_not_kept_as_an_unchanged_draft() {
     dashboard.focus_prompt();
     dashboard.handle_paste("sent");
 
-    assert!(dashboard.standby_prompt_was_sent("session-1", "sent"));
+    let prompt = mj_chat::chat::StartupPrompt {
+        move_operation_id: None,
+        command_id: "sent-id".into(),
+        payload: mj_chat::chat::PromptPayload::text("sent"),
+    };
+    assert!(
+        dashboard
+            .startup_prompt_withdrawn("session-1", prompt.clone(), Ok(false))
+            .unwrap()
+    );
     assert_eq!(dashboard.standby_prompts["session-1"].draft(), "");
 
     dashboard.handle_paste("sent and edited");
-    assert!(!dashboard.standby_prompt_was_sent("session-1", "sent"));
+    assert!(
+        !dashboard
+            .startup_prompt_withdrawn("session-1", prompt, Ok(false))
+            .unwrap()
+    );
     assert_eq!(
         dashboard.standby_prompts["session-1"].draft(),
         "sent and edited"
@@ -502,17 +519,24 @@ fn an_unconfirmed_withdrawal_shows_the_prompt_as_queued_again() {
     dashboard.focus_prompt();
     dashboard.handle_paste("maybe");
     dashboard.handle_key(key(KeyCode::Enter));
+    let prompt = dashboard
+        .standby_startup_prompts("session-1")
+        .pop()
+        .unwrap();
     dashboard.handle_key(key(KeyCode::Up));
 
-    dashboard.standby_prompt_withdrawal_unconfirmed("session-1", "maybe");
+    assert!(
+        dashboard
+            .startup_prompt_withdrawn("session-1", prompt, Err("offline".into()))
+            .is_err()
+    );
 
     let standby = dashboard.standby_prompts.get("session-1").expect("standby");
     assert_eq!(standby.queued_prompt_texts(), vec!["maybe".to_owned()]);
     assert_eq!(standby.draft(), "");
 }
 
-/// A prompt the daemon refused comes back as the draft, ahead of anything
-/// typed since, and its preview goes away.
+/// A prompt the daemon refused is merged into the newer draft and its preview goes away.
 #[test]
 fn a_refused_startup_prompt_returns_to_the_standby_draft() {
     let mut session = stopped_session();
@@ -528,13 +552,19 @@ fn a_refused_startup_prompt_returns_to_the_standby_draft() {
         dashboard.handle_key(key(KeyCode::Char(character)));
     }
 
-    dashboard.restore_standby_prompt("session-1", "first");
+    let prompt = dashboard
+        .standby_startup_prompts("session-1")
+        .pop()
+        .unwrap();
+    dashboard
+        .restore_startup_prompt("session-1", prompt)
+        .unwrap();
 
     let standby = dashboard
         .standby_prompts
         .get("session-1")
         .expect("standby composer");
-    assert_eq!(standby.draft(), "first\nnext");
+    assert_eq!(standby.draft(), "next\n\nfirst");
     assert!(standby.queued_prompt_texts().is_empty());
 }
 
@@ -696,6 +726,49 @@ fn a_stopping_transition_offers_no_standby_composer() {
         DashboardAction::None
     );
     assert!(!dashboard.standby_prompts.contains_key("session-1"));
+}
+
+/// Moving keeps the composer available; Enter and recall emit the same queue
+/// actions as they do during startup.
+#[test]
+fn a_moving_transition_edits_and_recalls_queued_standby_prompts() {
+    let mut session = stopped_session();
+    session.state = SessionState::Running;
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Moving, None);
+    dashboard.focus_prompt();
+
+    dashboard.handle_paste("first");
+    dashboard.handle_key(key(KeyCode::Char('!')));
+    match dashboard.handle_key(key(KeyCode::Enter)) {
+        DashboardAction::QueueStartupPrompt { session_id, prompt } => {
+            assert_eq!(session_id, "session-1");
+            assert_eq!(prompt.payload.text, "first!");
+            assert!(!prompt.command_id.is_empty());
+        }
+        other => panic!("unexpected action: {other:?}"),
+    }
+    match dashboard.handle_key(key(KeyCode::Up)) {
+        DashboardAction::WithdrawStartupPrompt { session_id, prompt } => {
+            assert_eq!(session_id, "session-1");
+            assert_eq!(prompt.payload.text, "first!");
+            assert!(!prompt.command_id.is_empty());
+        }
+        other => panic!("unexpected action: {other:?}"),
+    }
+    dashboard.handle_key(key(KeyCode::Char('?')));
+    match dashboard.handle_key(key(KeyCode::Enter)) {
+        DashboardAction::QueueStartupPrompt { session_id, prompt } => {
+            assert_eq!(session_id, "session-1");
+            assert_eq!(prompt.payload.text, "first!?");
+            assert!(!prompt.command_id.is_empty());
+        }
+        other => panic!("unexpected action: {other:?}"),
+    }
+
+    let standby = dashboard.standby_prompts.get("session-1").expect("standby");
+    assert_eq!(standby.draft(), "");
+    assert_eq!(standby.queued_prompt_texts(), vec!["first!?".to_owned()]);
 }
 
 /// A paste into the parked composer lands in the draft with terminal line
@@ -3743,4 +3816,84 @@ fn a_subagent_the_worker_reports_as_running_counts_as_working_for_its_parent() {
         "the child's own row reads it as working"
     );
     assert_eq!(dashboard.working_subagent_count_for(&parent), 1);
+}
+
+#[tokio::test]
+async fn launch_clipboard_shortcuts_and_empty_terminal_paste_use_the_composer_pipeline() {
+    // With no await on this current-thread runtime, the spawned native reader never runs.
+    // This tests event routing and its immediate in-flight UI, not a particular clipboard provider.
+    for terminal_paste in [false, true] {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_launch_standby(mj_chat::chat::SessionHeaderIdentity::default());
+        if terminal_paste {
+            dashboard.handle_event_result(Event::Paste(String::new()));
+        } else {
+            let action =
+                dashboard.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+            assert_eq!(
+                action,
+                DashboardAction::None,
+                "the dashboard text-only reader must not own this paste"
+            );
+        }
+        let standby = dashboard.launch_standby.as_ref().unwrap();
+        assert_eq!(standby.notice().as_deref(), Some("Reading clipboard…"));
+        assert!(standby.draft().is_empty());
+    }
+}
+
+#[test]
+fn a_dashboard_clipboard_reply_cannot_follow_focus_into_a_new_launch() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let target = dashboard.paste_target();
+    dashboard.begin_launch_standby(mj_chat::chat::SessionHeaderIdentity::default());
+    assert!(!dashboard.apply_clipboard_text(&target, "belongs to the old field"));
+    assert!(
+        dashboard
+            .launch_standby
+            .as_ref()
+            .unwrap()
+            .draft()
+            .is_empty()
+    );
+    dashboard.handle_key(key(KeyCode::Char('n')));
+    let target = dashboard.paste_target();
+    dashboard.handle_key(key(KeyCode::Char('e')));
+    assert!(!dashboard.apply_clipboard_text(&target, "stale read"));
+    assert_eq!(dashboard.launch_standby.as_ref().unwrap().draft(), "ne");
+}
+
+#[test]
+fn pasted_image_paths_stage_in_a_launch_without_a_session_attachment_store() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_launch_standby(mj_chat::chat::SessionHeaderIdentity::default());
+    let path = if cfg!(windows) {
+        r"C:\shots\before-start.png"
+    } else {
+        "/shots/before-start.png"
+    };
+    dashboard.handle_event_result(Event::Paste(path.to_owned()));
+    let draft = dashboard.launch_standby.as_ref().unwrap().draft();
+    let payload = mj_chat::chat::PromptPayload::decode_draft(&draft).unwrap();
+    assert_eq!(payload.text, "[image 1]");
+    assert!(payload.images[0].image.data_base64.is_empty());
+    assert!(payload.images[0].image.reference.is_none());
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert_eq!(
+        dashboard.launch_standby.as_ref().unwrap().draft(),
+        draft,
+        "Enter must wait for registration and installation before durable enqueue"
+    );
+    assert!(
+        dashboard
+            .launch_standby
+            .as_ref()
+            .unwrap()
+            .notice()
+            .unwrap()
+            .contains("Preparing images")
+    );
 }

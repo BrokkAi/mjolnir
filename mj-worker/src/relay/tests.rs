@@ -127,7 +127,7 @@ fn classifier_input_handoff_preserves_running_children_and_stop_controls() {
         .claude_background_tasks_changed(vec![claude_task("build", "Independent build")])
         .unwrap();
     relay
-        .claude_async_task_control_changed("build".into(), true, false)
+        .claude_async_task_control_changed("build".into(), true, false, false, false)
         .unwrap();
     let before = relay.operational_state();
     assert_eq!(before.native_agent_count, 1);
@@ -2798,6 +2798,315 @@ fn claude_relay(root: &std::path::Path) -> DurableRelay {
     relay
 }
 
+#[test]
+fn autonomous_spawn_and_output_share_one_durable_turn_in_either_order() {
+    for output_first in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(temp.path());
+        if output_first {
+            relay.record_session_update(tool_call_update()).unwrap();
+        }
+        relay
+            .claude_async_task_control_changed("turn-a".into(), true, true, false, false)
+            .unwrap();
+        let turn = relay.snapshot.harness_turn.unwrap();
+        assert_eq!(
+            relay.claude_autonomous_turn_tasks["turn-a"],
+            Some(turn.first_ordinal)
+        );
+        assert!(matches!(
+            mj_core::activity::classify(&relay.activity_facts()),
+            mj_core::activity::ActivityState::Turn { .. }
+        ));
+        if !output_first {
+            assert!(matches!(
+                observations(&relay).as_slice(),
+                [RelayObservation::HarnessTurnStarted { .. }]
+            ));
+            relay.record_session_update(tool_call_update()).unwrap();
+        }
+        relay
+            .claude_async_task_control_changed("turn-a".into(), true, true, false, false)
+            .unwrap();
+        assert_eq!(
+            relay.snapshot.harness_turn.unwrap().first_ordinal,
+            turn.first_ordinal
+        );
+        assert_eq!(
+            observations(&relay)
+                .iter()
+                .filter(|event| matches!(event, RelayObservation::HarnessTurnStarted { .. }))
+                .count(),
+            1
+        );
+        relay
+            .claude_turn_result(&cycle_result("task-notification"))
+            .unwrap();
+        // A later autonomous cycle starts before the old task end arrives.
+        relay
+            .claude_async_task_control_changed("turn-b".into(), true, true, false, false)
+            .unwrap();
+        let next = relay.snapshot.harness_turn.unwrap().first_ordinal;
+        relay
+            .claude_async_task_control_changed("turn-a".into(), true, true, false, false)
+            .unwrap();
+        relay
+            .claude_async_task_control_changed("turn-a".into(), false, false, true, false)
+            .unwrap();
+        assert_eq!(relay.snapshot.harness_turn.unwrap().first_ordinal, next);
+        assert!(relay.task_settled_at_ms.is_none());
+        relay
+            .claude_async_task_control_changed("turn-b".into(), false, false, true, false)
+            .unwrap();
+        assert!(relay.snapshot.harness_turn.is_none());
+    }
+}
+
+#[test]
+fn a_silent_autonomous_task_end_releases_its_queued_prompt_once() {
+    for completed in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(temp.path());
+        relay
+            .claude_async_task_control_changed("silent-turn".into(), true, true, false, false)
+            .unwrap();
+        submit_relay(&mut relay, "next-prompt", prompt("answer next"));
+        assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+        // Both completed/failed and stopped are boundaries, without any output.
+        relay
+            .claude_async_task_control_changed("silent-turn".into(), false, false, completed, false)
+            .unwrap();
+        // Repeated terminal edges still name an autonomous task, never a new
+        // background-task completion or a second completion boundary.
+        relay
+            .claude_async_task_control_changed("silent-turn".into(), false, false, true, false)
+            .unwrap();
+        relay
+            .claude_turn_result(&cycle_result("task-notification"))
+            .unwrap();
+        assert!(relay.snapshot.harness_turn.is_none());
+        assert!(relay.task_settled_at_ms.is_none());
+        assert_eq!(
+            relay.claim_pending_commands(true).unwrap()[0].command_id,
+            "next-prompt"
+        );
+        assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+        assert!(matches!(
+            observations(&relay)[0],
+            RelayObservation::HarnessTurnStarted { .. }
+        ));
+        assert_eq!(
+            observations(&relay)
+                .iter()
+                .filter(|event| matches!(event, RelayObservation::HarnessTurnSettled { .. }))
+                .count(),
+            1
+        );
+    }
+}
+
+// Hard-won: agentclientprotocol/claude-agent-acp#1390: a num_turns 0 placeholder result closed an announced autonomous turn early.
+#[test]
+fn autonomous_placeholder_keeps_the_turn_and_queued_prompt_until_the_real_result() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay
+        .claude_async_task_control_changed("turn".into(), true, true, false, false)
+        .unwrap();
+    let ordinal = relay.snapshot.harness_turn.unwrap().first_ordinal;
+    submit_relay(&mut relay, "queued-prompt", prompt("next"));
+    let mut placeholder = cycle_result("task-notification");
+    placeholder.num_turns = 0;
+    relay.claude_turn_result(&placeholder).unwrap();
+    assert_eq!(relay.snapshot.harness_turn.unwrap().first_ordinal, ordinal);
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    relay.record_session_update(tool_call_update()).unwrap();
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    assert!(relay.snapshot.harness_turn.is_none());
+    assert_eq!(
+        relay.claim_pending_commands(true).unwrap()[0].command_id,
+        "queued-prompt"
+    );
+    let events = observations(&relay);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, RelayObservation::HarnessTurnStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, RelayObservation::HarnessTurnSettled { .. }))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn autonomous_placeholder_without_output_settles_on_task_end() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay
+        .claude_async_task_control_changed("turn".into(), true, true, false, false)
+        .unwrap();
+    let mut placeholder = cycle_result("task-notification");
+    placeholder.num_turns = 0;
+    relay.claude_turn_result(&placeholder).unwrap();
+    assert!(relay.snapshot.harness_turn.is_some());
+    relay
+        .claude_async_task_control_changed("turn".into(), false, false, true, false)
+        .unwrap();
+    assert!(relay.snapshot.harness_turn.is_none());
+    assert_eq!(
+        observations(&relay)
+            .iter()
+            .filter(|event| matches!(event, RelayObservation::HarnessTurnSettled { .. }))
+            .count(),
+        1
+    );
+}
+
+// Hard-won: agentclientprotocol/claude-agent-acp#1453: a lagging idle ended the next autonomous turn's task while it still ran.
+#[test]
+fn a_lagging_idle_task_end_cannot_settle_the_next_turn_after_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay
+        .claude_async_task_control_changed("turn-a".into(), true, true, false, false)
+        .unwrap();
+    relay.record_session_update(tool_call_update()).unwrap();
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    // B's first output can precede the synthetic spawn and A's trailing idle.
+    relay.record_session_update(tool_call_update()).unwrap();
+    let ordinal = relay.snapshot.harness_turn.unwrap().first_ordinal;
+    relay
+        .claude_async_task_control_changed("turn-b".into(), true, true, false, false)
+        .unwrap();
+    assert_eq!(relay.claude_autonomous_turn_tasks["turn-b"], Some(ordinal));
+    submit_relay(&mut relay, "queued-prompt", prompt("next"));
+    relay
+        .claude_async_task_control_changed("turn-b".into(), false, false, true, false)
+        .unwrap();
+    assert_eq!(relay.snapshot.harness_turn.unwrap().first_ordinal, ordinal);
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    assert!(relay.snapshot.harness_turn.is_none());
+    assert_eq!(
+        observations(&relay)
+            .iter()
+            .filter(|event| matches!(event, RelayObservation::HarnessTurnSettled { .. }))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn replayed_autonomous_spawn_and_untyped_end_leave_no_imminent_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay.acp_ready = true;
+    relay
+        .claude_async_task_control_changed("replayed".into(), true, true, false, true)
+        .unwrap();
+    assert_eq!(relay.claude_autonomous_turn_tasks["replayed"], None);
+    relay
+        .claude_async_task_control_changed("replayed".into(), false, false, true, false)
+        .unwrap();
+    assert!(relay.snapshot.harness_turn.is_none());
+    assert!(relay.task_settled_at_ms.is_none());
+    assert!(relay.operational_state().is_quiet());
+    assert!(!observations(&relay).iter().any(|event| matches!(
+        event,
+        RelayObservation::HarnessTurnStarted { .. } | RelayObservation::HarnessTurnSettled { .. }
+    )));
+}
+
+#[test]
+fn zero_turn_results_still_settle_unbound_turns_and_autonomous_errors() {
+    for bound in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(temp.path());
+        if bound {
+            relay
+                .claude_async_task_control_changed("turn".into(), true, true, false, false)
+                .unwrap();
+        } else {
+            relay.record_session_update(tool_call_update()).unwrap();
+        }
+        let mut result = cycle_result("task-notification");
+        result.num_turns = 0;
+        result.is_error = bound;
+        relay.claude_turn_result(&result).unwrap();
+        assert!(relay.snapshot.harness_turn.is_none());
+    }
+}
+
+#[test]
+fn an_autonomous_task_end_leaves_a_prompt_that_took_ownership_running() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay
+        .claude_async_task_control_changed("turn-a".into(), true, true, false, false)
+        .unwrap();
+    // Legacy overlap: a queued mj prompt has already reached the bridge.
+    submit_relay(&mut relay, "owner-prompt", prompt("continue"));
+    relay
+        .record_observation(RelayObservation::CommandStarted {
+            command_id: "owner-prompt".into(),
+            started_at_ms: 42,
+        })
+        .unwrap();
+    relay
+        .claude_async_task_control_changed("turn-b".into(), true, true, false, false)
+        .unwrap();
+    assert_eq!(relay.claude_autonomous_turn_tasks["turn-b"], None);
+    relay
+        .claude_async_task_control_changed("turn-b".into(), false, false, true, false)
+        .unwrap();
+    relay
+        .claude_async_task_control_changed("turn-a".into(), false, false, true, false)
+        .unwrap();
+    assert_eq!(
+        relay.snapshot.active_prompt.as_ref().unwrap().command_id,
+        "owner-prompt"
+    );
+    assert!(relay.snapshot.harness_turn.is_some());
+    assert_eq!(relay.snapshot.execution, RelayExecutionState::Running);
+    assert!(
+        !observations(&relay)
+            .iter()
+            .any(|event| matches!(event, RelayObservation::HarnessTurnSettled { .. }))
+    );
+}
+
+#[test]
+fn restarting_a_silent_autonomous_turn_clears_its_process_local_binding() {
+    let temp = tempfile::tempdir().unwrap();
+    let ordinal = {
+        let mut relay = claude_relay(temp.path());
+        relay
+            .claude_async_task_control_changed("old-turn".into(), true, true, false, false)
+            .unwrap();
+        relay.snapshot.harness_turn.unwrap().first_ordinal
+    };
+    let mut relay = claude_relay(temp.path());
+    assert_eq!(relay.snapshot.harness_turn.unwrap().first_ordinal, ordinal);
+    assert!(relay.claude_autonomous_turn_tasks.is_empty());
+    relay
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    assert!(relay.snapshot.harness_turn.is_none());
+    assert_eq!(relay.snapshot.execution, RelayExecutionState::Idle);
+}
+
 fn tool_call_update() -> SessionUpdate {
     SessionUpdate::ToolCall(agent_client_protocol::schema::v1::ToolCall::new(
         "call-1", "Bash",
@@ -3011,7 +3320,7 @@ fn stop_during_a_claude_harness_turn_is_dispatched_and_the_interrupted_result_en
     );
 
     relay
-        .record_session_update(agent_text_chunk("Summarizing the agent's findings"))
+        .claude_async_task_control_changed("silent-turn".into(), true, true, false, false)
         .unwrap();
     assert!(relay.operational_state().harness_turn.is_some());
     submit_relay(&mut relay, "cancel-harness-turn", RelayCommand::Cancel);
@@ -3065,6 +3374,12 @@ fn text_that_answers_a_model_change_opens_no_harness_turn() {
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].command_id, "model-haiku");
 
+    relay
+        .claude_async_task_control_changed("config-turn".into(), true, true, false, false)
+        .unwrap();
+    relay
+        .claude_async_task_control_changed("config-turn".into(), false, false, true, false)
+        .unwrap();
     relay
         .record_session_update(agent_text_chunk(CLAUDE_AUTO_MODE_FALLBACK_TEXT))
         .unwrap();
@@ -3222,7 +3537,9 @@ fn a_harness_turn_holds_the_checkpoint_barrier_until_it_settles() {
 fn a_prompt_queued_during_a_harness_turn_waits_then_dispatches_once() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
-    relay.record_session_update(tool_call_update()).unwrap();
+    relay
+        .claude_async_task_control_changed("autonomous-turn".into(), true, true, false, false)
+        .unwrap();
 
     submit_relay(&mut relay, "typed-mid-turn", prompt("answer this too"));
     assert!(relay.claim_pending_commands(true).unwrap().is_empty());
@@ -3315,7 +3632,9 @@ fn a_prompt_result_settles_a_lingering_harness_turn() {
 fn a_restart_clears_a_harness_turn() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
-    relay.record_session_update(tool_call_update()).unwrap();
+    relay
+        .claude_async_task_control_changed("autonomous-turn".into(), true, true, false, false)
+        .unwrap();
 
     relay
         .record_observation(RelayObservation::SessionRestarted)
@@ -3895,7 +4214,7 @@ fn background_task_stop_targets_are_live_capability_checked_and_namespaced() {
     );
 
     relay
-        .claude_async_task_control_changed("shared-id".into(), true, false)
+        .claude_async_task_control_changed("shared-id".into(), true, false, false, false)
         .unwrap();
     assert_eq!(
         relay
@@ -3914,7 +4233,7 @@ fn background_task_stop_targets_are_live_capability_checked_and_namespaced() {
     );
 
     relay
-        .claude_async_task_control_changed("shared-id".into(), false, false)
+        .claude_async_task_control_changed("shared-id".into(), false, false, false, false)
         .unwrap();
     assert!(
         relay
@@ -3950,7 +4269,7 @@ fn claude_relay_with_stoppable_task(root: &std::path::Path) -> DurableRelay {
         .claude_background_tasks_changed(vec![claude_task("sleeper", "Sleep 600")])
         .unwrap();
     relay
-        .claude_async_task_control_changed("sleeper".into(), true, false)
+        .claude_async_task_control_changed("sleeper".into(), true, false, false, false)
         .unwrap();
     relay
 }
@@ -5702,6 +6021,13 @@ fn output_while_a_resumed_session_is_set_up_is_a_notice_and_opens_no_turn() {
             agent_info: None,
             runtime: None,
         })
+        .unwrap();
+    relay
+        .claude_async_task_control_changed("setup-turn".into(), true, true, false, false)
+        .unwrap();
+    assert_eq!(relay.claude_autonomous_turn_tasks["setup-turn"], None);
+    relay
+        .claude_async_task_control_changed("setup-turn".into(), false, false, true, false)
         .unwrap();
     relay
         .record_session_update(agent_text_chunk(CLAUDE_AUTO_MODE_FALLBACK_TEXT))

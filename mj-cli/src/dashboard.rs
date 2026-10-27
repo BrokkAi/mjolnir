@@ -12,10 +12,12 @@
 
 pub(crate) mod actions;
 mod attachment;
+mod auto_afk;
 mod composer_drafts;
 mod help_search;
 pub(crate) mod io;
 mod read_receipts;
+mod startup_prompts;
 mod usage_report;
 mod workspace_settings;
 
@@ -325,6 +327,7 @@ pub(crate) struct DashboardContext {
     /// What the two-second keep-alive last saw. It never starts a daemon, so
     /// a daemon that goes away stays away until the user asks for it back.
     daemon_presence: watch::Receiver<crate::daemon::DaemonPresence>,
+    auto_afk: auto_afk::AutoAfkReporter,
 
     /// What the daemon says about quota. The daemon is the only prober; this
     /// process never asks a provider.
@@ -401,6 +404,7 @@ pub(crate) struct DashboardContext {
     /// request itself runs on a blocking worker; this flag keeps repeated
     /// Ctrl-V key repeats from creating an unbounded queue of reads.
     pub(crate) clipboard_read_in_flight: bool,
+    startup_prompts: startup_prompts::StartupPrompts,
     /// Pane-scoped text selection, driven by the mouse events this loop
     /// intercepts before the views see them.
     selection: SelectionState,
@@ -673,10 +677,13 @@ pub(crate) async fn run_dashboard_for_workspace(
                 input = true;
                 pacer.mark_urgent();
                 let Some(event) = event else { break };
+                let mut event = event?;
+                if auto_afk::is_operator_input(&event) {
+                    context.auto_afk.input();
+                }
                 if context.shutdown_requested {
                     continue;
                 }
-                let mut event = event?;
                 // Nothing behind the splash has been seen, so nothing there
                 // should act on input yet.
                 if context.splash.is_some() {
@@ -777,6 +784,9 @@ pub(crate) async fn run_dashboard_for_workspace(
                         break;
                     };
                     event = next?;
+                    if auto_afk::is_operator_input(&event) {
+                        context.auto_afk.input();
+                    }
                 }
             }
             // A drag held past a scrollable surface's edge keeps scrolling it
@@ -856,6 +866,10 @@ pub(crate) async fn run_dashboard_for_workspace(
                         }
                     }
                 }
+            }
+            Some(error) = context.auto_afk.errors.recv() => {
+                context.dashboard.set_failure_notice(error);
+                pacer.mark();
             }
             _ = context.critical_operations_changed.changed(),
                 if context.shutdown_requested => {
@@ -1008,6 +1022,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             break;
         }
     }
+    context.auto_afk.shutdown().await;
     context.cancel_background_work();
     let quit_detached = context.quit_detached;
     // Hand the terminal back before saying anything on it; the warm chat and
@@ -1188,6 +1203,16 @@ impl DashboardContext {
         self.record_detach(session_id, ordinal);
     }
 
+    /// Keep pending input jobs alive when navigation drops a worker-facing view.
+    pub(crate) fn park_chat_composer(&mut self, session_id: &str) {
+        if !self.dashboard.has_standby_composer(session_id)
+            && let Some(chat) = self.chats.get_mut(session_id)
+            && let Some(composer) = chat.take_live_composer()
+        {
+            self.dashboard.adopt_standby_composer(session_id, composer);
+        }
+    }
+
     /// Drops the warm chats no pane shows any more, saving each one first.
     pub(crate) fn retire_chats_outside_the_layout(&mut self) {
         let shown = self.dashboard.pane_session_ids();
@@ -1198,6 +1223,7 @@ impl DashboardContext {
             .cloned()
             .collect::<Vec<_>>()
         {
+            self.park_chat_composer(&session_id);
             self.save_question_draft(&session_id);
             self.record_chat_detach(&session_id);
             self.chats.remove(&session_id);
@@ -1303,6 +1329,7 @@ impl DashboardContext {
         self.opening_chat_sessions.remove(&pane);
         self.attachments.remove(&pane);
         if let Some(session_id) = self.dashboard.close_pane(pane) {
+            self.park_chat_composer(&session_id);
             self.record_chat_detach(&session_id);
             self.chats.remove(&session_id);
             self.selection.clear();
@@ -1440,6 +1467,22 @@ impl DashboardContext {
     fn begin_shutdown(&mut self, detached: bool) {
         if self.shutdown_requested {
             return;
+        }
+        self.collect_prepared_startup_prompts();
+        self.startup_prompts
+            .cancel_unadmitted(&mut self.dashboard, &mut self.chats);
+        self.startup_prompts
+            .retain_unconfirmed(&mut self.dashboard, &mut self.chats);
+        for session_id in self.dashboard.standby_session_ids() {
+            if !self.chats.contains_key(&session_id) {
+                let viewed = self
+                    .controller
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .map_or(0, |session| session.viewed_through_event_ordinal);
+                self.record_detach(&session_id, viewed);
+            }
         }
         // A warm chat may be hidden while another session opens. Every
         // shutdown path must save every one of them, including global quit
@@ -1686,6 +1729,8 @@ impl DashboardContext {
             conversation_layouts.clone(),
             notices.clone(),
         );
+        let auto_afk_enabled = controller.config.advanced.auto_afk_minutes > 0;
+        let auto_afk_away = controller.state.operator_presence.away;
 
         let mut context = Self {
             terminal,
@@ -1723,6 +1768,7 @@ impl DashboardContext {
             critical_operations,
             critical_operations_changed,
             daemon_presence,
+            auto_afk: auto_afk::AutoAfkReporter::new(auto_afk_enabled, auto_afk_away),
             quota: Feed::new(quota_rx),
             manual_quota_refresh_cycles: None,
             quota_cycles: 0,
@@ -1771,6 +1817,7 @@ impl DashboardContext {
             next_import_task_id: 0,
             active_import: None,
             clipboard_read_in_flight: false,
+            startup_prompts: startup_prompts::StartupPrompts::default(),
             selection: SelectionState::new(),
             selection_text: None,
             dashboard_io_tx,

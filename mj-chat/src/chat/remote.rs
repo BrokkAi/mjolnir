@@ -251,9 +251,27 @@ fn publish_chat_remote_result(
     }
 }
 
+struct RemoteResults {
+    receiver: tokio::sync::mpsc::UnboundedReceiver<ChatRemoteResult>,
+    attached: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl Drop for RemoteResults {
+    fn drop(&mut self) {
+        self.attached
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.receiver.close();
+        while let Ok(result) = self.receiver.try_recv() {
+            if let Some(error) = result.failure_message() {
+                tracing::error!(%error, "chat operation failed while detaching");
+            }
+        }
+    }
+}
+
 pub(super) struct ChatRemoteSupervisor {
     operations: Option<tokio::sync::mpsc::Sender<ChatRemoteOperation>>,
-    results: tokio::sync::mpsc::UnboundedReceiver<ChatRemoteResult>,
+    results: Option<RemoteResults>,
+    results_tx: tokio::sync::mpsc::UnboundedSender<ChatRemoteResult>,
     attached: std::sync::Arc<std::sync::atomic::AtomicBool>,
     worker: Option<tokio::task::JoinHandle<()>>,
 }
@@ -271,12 +289,16 @@ impl ChatRemoteSupervisor {
             session,
             session_manager,
             operations_rx,
-            results_tx,
+            results_tx.clone(),
             worker_attached,
         ));
         Self {
             operations: Some(operations_tx),
-            results: results_rx,
+            results: Some(RemoteResults {
+                receiver: results_rx,
+                attached: attached.clone(),
+            }),
+            results_tx,
             attached,
             worker: Some(worker),
         }
@@ -291,14 +313,44 @@ impl ChatRemoteSupervisor {
     pub(super) fn try_recv(
         &mut self,
     ) -> std::result::Result<ChatRemoteResult, tokio::sync::mpsc::error::TryRecvError> {
-        self.results.try_recv()
+        self.results.as_mut().map_or(
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty),
+            |results| results.receiver.try_recv(),
+        )
     }
 
     /// Waits for the next result. `None` means the worker is gone and no
     /// further result can arrive, so the caller must stop awaiting this feed.
     /// Cancel safe: an unfinished `recv` takes no message.
     pub(super) async fn recv(&mut self) -> Option<ChatRemoteResult> {
-        self.results.recv().await
+        match &mut self.results {
+            Some(results) => results.receiver.recv().await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// The receiver follows accepted work, even when the worker-facing view is dropped.
+    pub(super) fn transfer_results(
+        &mut self,
+        updates: tokio::sync::mpsc::UnboundedSender<super::composer::ComposerIoUpdate>,
+    ) -> Option<super::composer::RemoteResultForwarder> {
+        let mut results = self.results.take()?;
+        Some(super::composer::RemoteResultForwarder(Some(tokio::spawn(
+            async move {
+                while let Some(result) = results.receiver.recv().await {
+                    if let Err(error) =
+                        updates.send(super::composer::ComposerIoUpdate::Remote(result))
+                    {
+                        if let super::composer::ComposerIoUpdate::Remote(result) = error.0
+                            && let Some(error) = result.failure_message()
+                        {
+                            tracing::error!(%error, "chat operation failed after its composer closed");
+                        }
+                        break;
+                    }
+                }
+            },
+        ))))
     }
 
     pub(super) async fn take_finished(
@@ -322,23 +374,24 @@ impl ChatRemoteSupervisor {
 
 impl Drop for ChatRemoteSupervisor {
     fn drop(&mut self) {
-        self.attached
-            .store(false, std::sync::atomic::Ordering::Release);
-        self.results.close();
-        while let Ok(result) = self.results.try_recv() {
-            if let Some(error) = result.failure_message() {
-                tracing::error!(%error, "chat operation failed while detaching");
-            }
-        }
+        drop(self.results.take());
         drop(self.operations.take());
         let Some(worker) = self.worker.take() else {
             return;
         };
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => {
+                let results = self.results_tx.clone();
+                let attached = self.attached.clone();
                 runtime.spawn(async move {
                     if let Err(error) = worker.await {
-                        tracing::error!(%error, "detached chat background worker failed");
+                        publish_chat_remote_result(
+                            &results,
+                            &attached,
+                            ChatRemoteResult::WorkerFailed(format!(
+                                "detached chat background worker failed: {error}"
+                            )),
+                        );
                     }
                 });
             }

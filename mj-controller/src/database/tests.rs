@@ -715,7 +715,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
     });
     let connection = rusqlite::Connection::open(&path).unwrap();
     schema::restore_github_v84_schema(&connection);
-    schema::restore_pre100_subagent_preference(&connection);
+    schema::restore_pre101_subagent_preference(&connection);
     connection
         .execute_batch(
             "ALTER TABLE sessions ADD COLUMN expected_runtime_identity TEXT;
@@ -786,7 +786,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
     save_session_to(&path, &record).unwrap();
     let connection = rusqlite::Connection::open(&path).unwrap();
     schema::restore_github_v84_schema(&connection);
-    schema::restore_pre100_subagent_preference(&connection);
+    schema::restore_pre101_subagent_preference(&connection);
     connection
         .execute_batch(
         "ALTER TABLE sessions DROP COLUMN checkout_json;
@@ -884,7 +884,7 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
 
     let connection = rusqlite::Connection::open(&database).unwrap();
     schema::restore_github_v84_schema(&connection);
-    schema::restore_pre100_subagent_preference(&connection);
+    schema::restore_pre101_subagent_preference(&connection);
     connection
         .execute_batch(
             "ALTER TABLE sessions DROP COLUMN publication_json;
@@ -5541,7 +5541,7 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
     forget_verified_schema(&path);
     let raw = Connection::open(&path).unwrap();
     schema::restore_github_v84_schema(&raw);
-    schema::restore_pre100_subagent_preference(&raw);
+    schema::restore_pre101_subagent_preference(&raw);
     raw.execute_batch(
         "DROP TABLE quota_reset_cache;
         DELETE FROM schema_migrations WHERE version >= 44;
@@ -6220,7 +6220,7 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
     // Put the store back at revision 52, whose constraint has no `parked`.
     let raw = Connection::open(&database).unwrap();
     schema::restore_github_v84_schema(&raw);
-    schema::restore_pre100_subagent_preference(&raw);
+    schema::restore_pre101_subagent_preference(&raw);
     raw.execute_batch(
         "PRAGMA writable_schema = ON;
          UPDATE sqlite_schema

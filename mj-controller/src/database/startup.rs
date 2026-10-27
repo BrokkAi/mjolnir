@@ -70,7 +70,7 @@ pub fn enqueue_startup_deliveries(
                 )?;
                 ensure!(
                     existing == (delivery.session_id, delivery.step_json, delivery.group_id),
-                    "startup command ID was reused with a different payload"
+                    mj_client::daemon::StartupPromptIdentityConflict
                 );
             }
         }
@@ -133,11 +133,12 @@ pub fn set_startup_delivery_phase(
             )? == 1,
             "startup delivery disappeared"
         );
-        // A step outside an API group has no status reader: once it is
-        // settled nothing looks at it again, so it does not stay in the table.
+        // Legacy ungrouped work has no status reader. Structured user prompts
+        // retain terminal receipts for caller retries and preview reconciliation.
         connection.execute(
             "DELETE FROM startup_steps WHERE command_id=?1 AND group_id IS NULL
-               AND phase IN ('done','failed','dismissed')",
+               AND phase IN ('done','failed','dismissed')
+               AND json_type(step_json, '$.Prompt.prompt') IS NOT 'array'",
             [command_id],
         )?;
         Ok(())
@@ -157,45 +158,212 @@ pub fn claim_startup_delivery(command_id: &str) -> Result<bool> {
     })
 }
 
-/// Withdraws the newest prompt queued for `session_id` with exactly this
-/// text, if delivery has not started. The step goes to `cancelling`, which
-/// the drain settles without submitting. Returns whether one was withdrawn.
-pub fn withdraw_startup_prompt(session_id: &str, text: &str) -> Result<bool> {
+/// Withdraw exactly one caller-owned prompt before worker delivery claims it.
+pub fn withdraw_startup_prompt(session_id: &str, command_id: &str) -> Result<bool> {
     let session_id = session_id.to_owned();
-    let text = text.to_owned();
+    let command_id = command_id.to_owned();
     submit_database_write("withdraw startup prompt", move |connection| {
-        let tx = connection.transaction()?;
-        let candidates = {
-            let mut statement = tx.prepare(
-                "SELECT command_id,step_json FROM startup_steps WHERE session_id=?1 AND group_id IS NULL AND phase='pending' ORDER BY sequence DESC",
-            )?;
-            statement
-                .query_map([&session_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        for (command_id, step_json) in candidates {
-            let Ok(serde_json::Value::Object(step)) = serde_json::from_str(&step_json) else {
-                continue;
-            };
-            let matches = step
-                .get("Prompt")
-                .and_then(|prompt| prompt.get("text"))
-                .and_then(serde_json::Value::as_str)
-                == Some(text.as_str());
-            if matches
-                && tx.execute(
-                    "UPDATE startup_steps SET phase='cancelling',error=NULL WHERE command_id=?1 AND phase='pending'",
-                    [command_id],
-                )? == 1
-            {
-                tx.commit()?;
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(connection.execute(
+            "UPDATE startup_steps SET phase='cancelling',error=NULL
+             WHERE session_id=?1 AND command_id=?2 AND group_id IS NULL AND phase='pending'
+             AND json_type(step_json, '$.Prompt')='object'",
+            params![session_id, command_id],
+        )? == 1)
     })
+}
+
+/// Keep a definite refusal durable until its complete draft is restored. The
+/// writer commits draft recovery and row retirement together, so a crash never
+/// loses input or restores it twice.
+pub fn reject_startup_prompt(command_id: &str, reason: &str) -> Result<()> {
+    let command_id = command_id.to_owned();
+    let reason = reason.to_owned();
+    submit_database_write("reject startup prompt", move |connection| {
+        ensure!(connection.execute(
+            "UPDATE startup_steps SET phase='rejecting',error=?2 WHERE command_id=?1 AND group_id IS NULL AND phase IN ('pending','delivering','rejecting')",
+            params![command_id, reason],
+        )? == 1, "startup prompt no longer available for recovery");
+        Ok(())
+    })
+}
+
+pub fn recover_startup_prompt(command_id: &str, draft: &str) -> Result<()> {
+    let command_id = command_id.to_owned();
+    let draft = draft.to_owned();
+    submit_database_write("recover startup prompt", move |connection| {
+        let tx = connection.transaction()?;
+        recover_startup_prompt_with(&tx, &command_id, &draft)?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
+fn recover_startup_prompt_with(
+    connection: &Connection,
+    command_id: &str,
+    draft: &str,
+) -> Result<()> {
+    let (session_id, existing, step_json): (String, String, String) = connection.query_row(
+        "SELECT startup_steps.session_id,sessions.draft_input,startup_steps.step_json FROM startup_steps JOIN sessions USING(session_id) WHERE command_id=?1 AND group_id IS NULL AND phase='rejecting'",
+        [command_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let step: serde_json::Value = serde_json::from_str(&step_json)?;
+    let inherited = step
+        .pointer("/Prompt/inherited_draft")
+        .and_then(serde_json::Value::as_str);
+    let preceding = if inherited == Some(existing.as_str()) {
+        ""
+    } else {
+        &existing
+    };
+    let preceding = mj_core::draft::remove_startup_receipt(preceding, command_id)?;
+    let recovered = mj_core::draft::remove_startup_receipt(draft, command_id)?;
+    let merged = mj_core::draft::merge_drafts(&preceding, &recovered)?;
+    connection.execute(
+        "UPDATE sessions SET draft_input=?2 WHERE session_id=?1",
+        params![session_id, merged],
+    )?;
+    connection.execute(
+        "UPDATE startup_steps SET phase='failed' WHERE command_id=?1 AND phase='rejecting'",
+        [command_id],
+    )?;
+    connection.execute("DELETE FROM startup_steps WHERE command_id=?1 AND phase='failed' AND json_type(step_json, '$.Prompt.prompt') IS NOT 'array'", [command_id])?;
+    Ok(())
+}
+
+/// The Move record and pending queue share the writer transaction: only work
+/// never claimed by a worker is turned into a recoverable draft.
+pub(super) fn reject_failed_move_startup_prompts_with(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<usize> {
+    let Some(operation) = super::session_move::load_move_operation_with(connection, session_id)?
+    else {
+        return Ok(0);
+    };
+    if !matches!(
+        operation.phase,
+        mj_core::state::MovePhase::Failed | mj_core::state::MovePhase::Cancelled
+    ) {
+        return Ok(0);
+    }
+    let reason = format!(
+        "Move {}: {}",
+        if operation.phase == mj_core::state::MovePhase::Cancelled {
+            "was cancelled"
+        } else {
+            "failed"
+        },
+        operation
+            .error
+            .as_deref()
+            .unwrap_or("the destination was not ready")
+    );
+    reject_pending_move_startup_prompts_with(
+        connection,
+        session_id,
+        &operation.operation_id,
+        &reason,
+    )
+}
+
+fn reject_pending_move_startup_prompts_with(
+    connection: &Connection,
+    session_id: &str,
+    move_operation_id: &str,
+    reason: &str,
+) -> Result<usize> {
+    let changed = connection.execute("UPDATE startup_steps SET phase='rejecting',error=?2 WHERE session_id=?1 AND group_id IS NULL AND phase='pending' AND json_type(step_json, '$.Prompt')='object' AND json_extract(step_json, '$.Prompt.move_operation_id')=?3", params![session_id, reason, move_operation_id])?;
+    let rows = {
+        let mut statement = connection.prepare("SELECT command_id,step_json FROM startup_steps WHERE session_id=?1 AND group_id IS NULL AND phase='rejecting' AND json_type(step_json, '$.Prompt')='object' AND json_extract(step_json, '$.Prompt.move_operation_id')=?2 ORDER BY sequence")?;
+        statement
+            .query_map(params![session_id, move_operation_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (id, step) in rows {
+        let step: serde_json::Value = serde_json::from_str(&step)?;
+        let prompt = &step["Prompt"];
+        let draft = prompt
+            .get("encoded_draft")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| prompt.get("text").and_then(serde_json::Value::as_str))
+            .context("Move prompt is missing draft")?;
+        if let Err(error) = recover_startup_prompt_with(connection, &id, draft) {
+            if error.downcast_ref::<rusqlite::Error>().is_some() {
+                return Err(error);
+            }
+            tracing::error!(session_id, command_id = %id, %error, "Move draft recovery remains saved");
+        }
+    }
+    Ok(changed)
+}
+
+pub fn reject_pending_move_startup_prompts(
+    session_id: &str,
+    move_operation_id: &str,
+    reason: &str,
+) -> Result<()> {
+    let session_id = session_id.to_owned();
+    let reason = reason.to_owned();
+    let move_operation_id = move_operation_id.to_owned();
+    submit_database_write("reject pending Move startup prompts", move |connection| {
+        let tx = connection.transaction()?;
+        reject_pending_move_startup_prompts_with(&tx, &session_id, &move_operation_id, &reason)?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
+pub fn startup_prompt_outcomes(
+    session_id: &str,
+    command_ids: &[String],
+) -> Result<std::collections::BTreeMap<String, mj_client::daemon::StartupPromptOutcome>> {
+    use mj_client::daemon::StartupPromptOutcome;
+    ensure!(
+        command_ids.len() <= 128,
+        "request at most 128 startup prompt outcomes"
+    );
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare("SELECT command_id,phase,step_json,error FROM startup_steps WHERE session_id=?1 AND command_id IN (SELECT value FROM json_each(?2)) AND group_id IS NULL AND json_type(step_json, '$.Prompt')='object'")?;
+    let rows = statement.query_map(
+        params![session_id, serde_json::to_string(command_ids)?],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        },
+    )?;
+    let mut outcomes = std::collections::BTreeMap::new();
+    for row in rows {
+        let (id, phase, step, error) = row?;
+        let outcome = match phase.as_str() {
+            "accepted" | "done" => StartupPromptOutcome::Accepted,
+            "cancelling" | "dismissed" => StartupPromptOutcome::Withdrawn,
+            "failed" => {
+                let step: serde_json::Value = serde_json::from_str(&step)?;
+                let Some(prompt) = step.get("Prompt") else {
+                    continue;
+                };
+                let draft = prompt
+                    .get("encoded_draft")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| prompt.get("text").and_then(serde_json::Value::as_str))
+                    .context("refused startup prompt is missing its draft")?;
+                StartupPromptOutcome::Refused {
+                    encoded_draft: draft.to_owned(),
+                    reason: error.unwrap_or_else(|| "prompt refused".into()),
+                }
+            }
+            _ => continue,
+        };
+        outcomes.insert(id, outcome);
+    }
+    Ok(outcomes)
 }
 
 /// A session's latest startup group, the only one the API reports on. The
@@ -281,14 +449,15 @@ pub fn dismiss_startup_group(session_id: &str, group_id: &str) -> Result<()> {
         )?;
         connection.execute(
             "DELETE FROM startup_steps WHERE session_id=?1 AND group_id=?2
-               AND phase IN ('done','failed','dismissed')",
+               AND phase IN ('done','failed','dismissed')
+               AND json_type(step_json, '$.Prompt.prompt') IS NOT 'array'",
             params![session_id, group_id],
         )?;
         Ok(())
     })
 }
 
-/// Rows that nothing will read again: dismissed groups, settled steps
+/// Rows that nothing will read again: dismissed groups, settled legacy steps
 /// outside any group, and settled groups that a newer group for the same
 /// session has superseded (the API reads only a session's latest group).
 /// Run at daemon start so a store upgraded from a build that kept them does
@@ -296,8 +465,9 @@ pub fn dismiss_startup_group(session_id: &str, group_id: &str) -> Result<()> {
 pub fn prune_settled_startup_deliveries() -> Result<usize> {
     submit_database_write("prune settled startup deliveries", move |connection| {
         let mut removed = connection.execute(
-            "DELETE FROM startup_steps WHERE phase='dismissed'
-               OR (group_id IS NULL AND phase IN ('done','failed'))",
+            "DELETE FROM startup_steps WHERE (phase='dismissed'
+               OR (group_id IS NULL AND phase IN ('done','failed')))
+               AND json_type(step_json, '$.Prompt.prompt') IS NOT 'array'",
             [],
         )?;
         removed += connection.execute(

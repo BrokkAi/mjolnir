@@ -879,6 +879,7 @@ fn config_with_profiles(profiles: &[(&str, mj_core::config::HarnessKind)]) -> Co
                         context_window_bytes: None,
                         legacy_subagents: Default::default(),
                         guardian_review_model: None,
+                        muse_auto_review: None,
                         codex_profile: None,
                     },
                 )
@@ -2192,14 +2193,15 @@ fn clipboard_test_chat() -> ActiveChat {
     );
     // Hold processing at the queue boundary so tests control completion order
     // and never write to an actual session's attachment store.
-    chat.attachment_tasks_in_flight = MAX_ATTACHMENT_TASKS;
+    chat.state.composer_runtime.attachment_tasks_in_flight = MAX_ATTACHMENT_TASKS;
     chat
 }
 
-fn clipboard_result(chat: &ActiveChat, content: ClipboardContent) -> ChatIoUpdate {
-    ChatIoUpdate::Clipboard {
+fn clipboard_result(chat: &ActiveChat, content: ClipboardContent) -> ComposerIoUpdate {
+    ComposerIoUpdate::Clipboard {
         generation: chat.state.input_generation(),
         target: chat.state.clipboard_target(),
+        staging: false,
         result: Ok(content),
     }
 }
@@ -2208,19 +2210,19 @@ fn clipboard_result(chat: &ActiveChat, content: ClipboardContent) -> ChatIoUpdat
 async fn clipboard_completion_requires_image_support_and_preserves_plain_text() {
     let mut chat = clipboard_test_chat();
     assert!(!chat.state.prompt_images_supported);
-    chat.apply_io_update(clipboard_result(
+    chat.state.apply_composer_update(clipboard_result(
         &chat,
         ClipboardContent::Image(super::super::tests::test_image()),
     ));
     assert!(chat.draft().is_empty());
-    assert!(chat.attachment_queue.is_empty());
+    assert!(chat.state.composer_runtime.attachment_queue.is_empty());
     assert!(
         chat.state
             .notice()
             .unwrap()
             .contains("advertised image support")
     );
-    chat.apply_io_update(clipboard_result(
+    chat.state.apply_composer_update(clipboard_result(
         &chat,
         ClipboardContent::Text("ordinary text".into()),
     ));
@@ -2228,11 +2230,16 @@ async fn clipboard_completion_requires_image_support_and_preserves_plain_text() 
 
     chat.state.set_prompt_images_supported(true);
     let image = super::super::tests::test_image();
-    chat.apply_io_update(clipboard_result(
+    chat.state.apply_composer_update(clipboard_result(
         &chat,
         ClipboardContent::Image(image.clone()),
     ));
-    let (sequence, _, _) = chat.attachment_queue.pop_front().unwrap();
+    let (sequence, _, _) = chat
+        .state
+        .composer_runtime
+        .attachment_queue
+        .pop_front()
+        .unwrap();
     assert_eq!(chat.state.input, "ordinary text[image 1]");
     chat.apply_attachment_result(AttachmentResult {
         sequence,
@@ -2258,8 +2265,18 @@ async fn pasted_image_paths_attach_and_a_failed_one_returns_as_pasted_text() {
     };
     chat.handle_event(Event::Paste(pasted.into()));
     assert_eq!(chat.state.input, "[image 1]\n[image 2]");
-    let (first, _, _) = chat.attachment_queue.pop_front().unwrap();
-    let (second, _, _) = chat.attachment_queue.pop_front().unwrap();
+    let (first, _, _) = chat
+        .state
+        .composer_runtime
+        .attachment_queue
+        .pop_front()
+        .unwrap();
+    let (second, _, _) = chat
+        .state
+        .composer_runtime
+        .attachment_queue
+        .pop_front()
+        .unwrap();
     // The user keeps typing while both files are read.
     chat.state.paste_plain(" look");
 
@@ -2309,10 +2326,10 @@ async fn stale_clipboard_results_do_not_cross_capability_or_input_context_change
             }
         }
         let before = chat.state.draft_payload();
-        chat.apply_io_update(pending);
+        chat.state.apply_composer_update(pending);
         assert_eq!(chat.state.draft_payload(), before);
-        assert!(chat.attachment_queue.is_empty());
-        assert!(!chat.paste_in_flight);
+        assert!(chat.state.composer_runtime.attachment_queue.is_empty());
+        assert!(!chat.state.composer_runtime.paste_in_flight);
     }
 }
 
@@ -2321,11 +2338,16 @@ async fn capability_loss_during_attachment_processing_keeps_draft_but_blocks_sen
     let mut chat = clipboard_test_chat();
     chat.state.set_prompt_images_supported(true);
     let image = super::super::tests::test_image();
-    chat.apply_io_update(clipboard_result(
+    chat.state.apply_composer_update(clipboard_result(
         &chat,
         ClipboardContent::Image(image.clone()),
     ));
-    let (sequence, _, _) = chat.attachment_queue.pop_front().unwrap();
+    let (sequence, _, _) = chat
+        .state
+        .composer_runtime
+        .attachment_queue
+        .pop_front()
+        .unwrap();
     chat.state.set_prompt_images_supported(false);
     chat.apply_attachment_result(AttachmentResult {
         sequence,
@@ -2344,11 +2366,13 @@ async fn capability_loss_during_attachment_processing_keeps_draft_but_blocks_sen
 async fn clipboard_errors_keep_the_draft_and_report_the_underlying_failure() {
     let mut chat = clipboard_test_chat();
     chat.state.set_input("keep me".into());
-    chat.apply_io_update(ChatIoUpdate::Clipboard {
-        generation: chat.state.input_generation(),
-        target: chat.state.clipboard_target(),
-        result: Err("clipboard provider disconnected".into()),
-    });
+    chat.state
+        .apply_composer_update(ComposerIoUpdate::Clipboard {
+            generation: chat.state.input_generation(),
+            target: chat.state.clipboard_target(),
+            staging: false,
+            result: Err("clipboard provider disconnected".into()),
+        });
     assert_eq!(chat.draft(), "keep me");
     let notice = chat.state.notice().unwrap();
     assert!(notice.contains("clipboard provider disconnected"));
@@ -2398,10 +2422,10 @@ async fn a_question_opened_during_clipboard_read_receives_no_stray_content() {
             tool_permission: None,
         });
         assert!(chat.state.clipboard_is_text_only());
-        chat.apply_io_update(pending);
+        chat.state.apply_composer_update(pending);
         assert!(chat.state.input_images.is_empty());
         assert!(chat.state.input.is_empty());
-        assert!(chat.attachment_queue.is_empty());
+        assert!(chat.state.composer_runtime.attachment_queue.is_empty());
         chat.state.elicitation = None;
     }
 }
@@ -2462,7 +2486,10 @@ async fn empty_paste_without_image_support_reports_it_without_reading_the_clipbo
     chat.state.set_prompt_images_supported(false);
     chat.state.input = "draft".into();
     chat.handle_event_result(crossterm::event::Event::Paste(String::new()));
-    assert!(!chat.paste_in_flight, "the clipboard must not be read");
+    assert!(
+        !chat.state.composer_runtime.paste_in_flight,
+        "the clipboard must not be read"
+    );
     assert_eq!(
         chat.state.notice().as_deref(),
         Some(super::super::input_state::IMAGE_PASTE_UNSUPPORTED_NOTICE)
@@ -3141,4 +3168,528 @@ async fn golden_active_chat_render() {
         "active-chat-render",
         &output,
     );
+}
+
+#[tokio::test]
+async fn clipboard_and_attachment_results_follow_the_live_composer_across_registration_and_attach()
+{
+    let config: Config = serde_json::from_str(r#"{"version":0}"#).unwrap();
+    let mut launch = ChatState::standby(
+        "launching",
+        &config,
+        SessionHeaderIdentity::default(),
+        Notices::default(),
+    );
+    launch.bind_composer_session(None);
+    // Hold the installation boundary; a launch must not install in the placeholder store.
+    launch.composer_runtime.attachment_tasks_in_flight = MAX_ATTACHMENT_TASKS;
+    let destination = launch.composer_runtime.tx.clone();
+    let read = ComposerIoUpdate::Clipboard {
+        generation: launch.input_generation(),
+        target: launch.clipboard_target(),
+        staging: true,
+        result: Ok(ClipboardContent::Image(super::super::tests::test_image())),
+    };
+    launch.begin_submission(
+        "accepted-before-parking".into(),
+        super::super::SubmissionKind::Prompt,
+        PromptPayload::text("already accepted"),
+        "Sending",
+    );
+    launch.adopt_session_id("test-clipboard-owner");
+    let saved = launch.draft();
+    let mut unrelated = clipboard_test_chat();
+    unrelated.state.set_input("another session".into());
+    let mut attached = clipboard_test_chat();
+    attached.adopt_live_composer(launch.take_live_composer().unwrap());
+    assert_eq!(
+        attached.draft(),
+        saved,
+        "saved pending-submission metadata travels with the composer"
+    );
+    // The worker still has not advertised images: accepted staging work survives this handoff.
+    assert!(!attached.state.prompt_images_supported);
+    destination.send(read).unwrap();
+    attached.state.drain_composer();
+    assert_eq!(attached.state.input, "[image 1]");
+    assert_eq!(unrelated.state.input, "another session");
+    let (sequence, _, _) = attached
+        .state
+        .composer_runtime
+        .attachment_queue
+        .pop_front()
+        .unwrap();
+    let image = super::super::tests::test_image();
+    destination
+        .send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
+            sequence,
+            fallback: AttachmentFallback::FailedMarker,
+            result: Ok(image.clone()),
+        }))
+        .unwrap();
+    attached.state.drain_composer();
+    assert_eq!(attached.state.input_images[0].image, image);
+    assert_eq!(attached.state.submit_input(), ChatAction::None);
+    assert_eq!(
+        attached.state.input, "[image 1]",
+        "unsupported worker retains the draft"
+    );
+    attached.state.set_prompt_images_supported(true);
+    assert!(matches!(
+        attached.state.submit_input(),
+        ChatAction::Prompt(_)
+    ));
+    assert_eq!(attached.state.take_submitting_images()[0].image, image);
+}
+
+#[tokio::test]
+async fn pending_image_submission_and_deleted_markers_survive_a_live_composer_transfer() {
+    use super::super::test_support::{ctrl, key};
+    let config: Config = serde_json::from_str(r#"{"version":0}"#).unwrap();
+    let mut standby = ChatState::standby(
+        "test-transfer",
+        &config,
+        SessionHeaderIdentity::default(),
+        Notices::default(),
+    );
+    standby.composer_runtime.attachment_tasks_in_flight = MAX_ATTACHMENT_TASKS;
+    standby.handle_clipboard_content(ClipboardContent::Text("describe ".into()));
+    assert!(standby.reserve_attachment(17));
+    assert_eq!(standby.handle_key(key(KeyCode::Enter)), ChatAction::None);
+    let destination = standby.composer_runtime.tx.clone();
+    let mut receiver = ChatState::standby(
+        "test-transfer",
+        &config,
+        SessionHeaderIdentity::default(),
+        Notices::default(),
+    );
+    receiver.adopt_live_composer(standby.take_live_composer().unwrap());
+    destination
+        .send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
+            sequence: 17,
+            fallback: AttachmentFallback::FailedMarker,
+            result: Ok(super::super::tests::test_image()),
+        }))
+        .unwrap();
+    assert_eq!(
+        receiver.drain_composer().unwrap().payload.text,
+        "describe [image 1]"
+    );
+    let queued = receiver.latest_startup_prompt().unwrap();
+    assert_eq!(queued.payload.images.len(), 1);
+    let recalled = receiver.handle_key(key(KeyCode::Up));
+    assert!(matches!(recalled, ChatAction::RemoveQueuedPrompt {id, ..} if id == queued.command_id));
+    assert_eq!(receiver.draft_payload(), queued.payload);
+
+    receiver.handle_key(ctrl('a'));
+    receiver.handle_key(ctrl('k'));
+    assert!(receiver.reserve_attachment(18));
+    receiver.clear_input();
+    let mut attached = clipboard_test_chat();
+    attached.state.set_input("old warm text".into());
+    attached.adopt_live_composer(receiver.take_live_composer().unwrap());
+    destination
+        .send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
+            sequence: 18,
+            fallback: AttachmentFallback::FailedMarker,
+            result: Ok(super::super::tests::test_image()),
+        }))
+        .unwrap();
+    attached.state.drain_composer();
+    assert!(
+        attached.draft().is_empty(),
+        "empty authoritative composer must beat old warm text"
+    );
+}
+
+#[tokio::test]
+async fn refused_startup_images_merge_without_retiring_newer_pending_attachment_jobs() {
+    let mut chat = clipboard_test_chat();
+    chat.state.set_prompt_images_supported(true);
+    assert!(chat.state.reserve_attachment(12));
+    let current_number = chat.state.input_images[0].number;
+    let refused = super::super::StartupPrompt {
+        move_operation_id: None,
+        command_id: "refused-image".into(),
+        payload: PromptPayload::with_image("earlier ", super::super::tests::test_image()),
+    };
+    chat.restore_startup_prompt(refused).unwrap();
+    assert_eq!(chat.state.input_images.len(), 2);
+    assert_eq!(
+        chat.state.pending_attachment_markers.get(&12),
+        Some(&current_number)
+    );
+    let image = super::super::tests::test_image();
+    chat.apply_attachment_result(AttachmentResult {
+        sequence: 12,
+        fallback: AttachmentFallback::FailedMarker,
+        result: Ok(image.clone()),
+    });
+    assert_eq!(chat.state.input_images[0].image, image);
+    assert!(!chat.state.input_images[0].image.is_pending());
+}
+
+#[tokio::test]
+async fn late_prompt_refusal_from_a_parked_worker_view_reaches_the_live_composer() {
+    let mut worker_view = clipboard_test_chat();
+    worker_view.state.begin_submission(
+        "parked-command".into(),
+        super::super::SubmissionKind::Prompt,
+        PromptPayload::text("old prompt"),
+        "Sending",
+    );
+    worker_view.state.set_input("newer text".into());
+    let config: Config = serde_json::from_str(r#"{"version":0}"#).unwrap();
+    let mut standby = ChatState::standby(
+        "test-parked-result",
+        &config,
+        SessionHeaderIdentity::default(),
+        Notices::default(),
+    );
+    standby.adopt_live_composer(worker_view.take_live_composer().unwrap());
+    assert!(!worker_view.has_live_composer());
+    worker_view.apply_remote_result(ChatRemoteResult::Prompt {
+        command_id: "parked-command".into(),
+        text: "old prompt".into(),
+        images: Vec::new(),
+        result: Err("worker refused before move".into()),
+    });
+    standby.drain_composer();
+    assert!(worker_view.draft().is_empty());
+    assert!(standby.draft().contains("old prompt"));
+    assert!(standby.draft().contains("newer text"));
+    assert!(standby.pending_submissions.is_empty());
+}
+
+#[derive(Clone)]
+struct DelayedNativeSession {
+    delegate: mj_client::session::SessionHandle,
+    replies: tokio::sync::mpsc::UnboundedSender<(
+        mj_core::relay::RelayCommand,
+        tokio::sync::oneshot::Sender<anyhow::Result<u64>>,
+    )>,
+}
+impl mj_client::session::SessionHandleBackend for DelayedNativeSession {
+    fn clone_box(&self) -> Box<dyn mj_client::session::SessionHandleBackend> {
+        Box::new(self.clone())
+    }
+    fn session_id(&self) -> &str {
+        self.delegate.session_id()
+    }
+    fn view(&self) -> mj_client::session::ManagedSessionView {
+        self.delegate.view()
+    }
+    fn is_stopped(&self) -> bool {
+        false
+    }
+    fn has_changed(&self) -> anyhow::Result<bool> {
+        self.delegate.has_changed()
+    }
+    fn changed(
+        &mut self,
+    ) -> mj_client::session::BoxFuture<'_, anyhow::Result<mj_client::session::ManagedSessionView>>
+    {
+        Box::pin(self.delegate.changed())
+    }
+    fn search_prompts(
+        &self,
+        bundle: String,
+        scope: mj_core::storage::HistoryScope,
+        query: String,
+    ) -> mj_client::session::BoxFuture<'_, anyhow::Result<Vec<mj_core::storage::PromptHistoryEntry>>>
+    {
+        Box::pin(self.delegate.search_prompts(bundle, scope, query))
+    }
+    fn config_result(
+        &self,
+        _: String,
+    ) -> mj_client::session::BoxFuture<'_, anyhow::Result<Option<Option<String>>>> {
+        Box::pin(async { Ok(Some(None)) })
+    }
+    fn enqueue_submit(
+        &self,
+        _: String,
+        command: mj_core::relay::RelayCommand,
+    ) -> mj_client::session::BoxFuture<'_, anyhow::Result<mj_client::session::PendingRelaySubmit>>
+    {
+        let replies = self.replies.clone();
+        Box::pin(async move {
+            let (reply, receive) = tokio::sync::oneshot::channel();
+            replies
+                .send((command, reply))
+                .map_err(|_| anyhow::anyhow!("test observer closed"))?;
+            Ok(mj_client::session::PendingRelaySubmit::new(Box::pin(
+                async move {
+                    receive
+                        .await
+                        .map_err(|_| anyhow::anyhow!("test reply closed"))?
+                },
+            )))
+        })
+    }
+    fn enqueue_sync(
+        &self,
+    ) -> mj_client::session::BoxFuture<'_, anyhow::Result<mj_client::session::PendingRelaySync>>
+    {
+        Box::pin(self.delegate.enqueue_sync())
+    }
+    fn respond_elicitation(
+        &self,
+        id: String,
+        response: mj_core::elicitation::ElicitationResponse,
+    ) -> mj_client::session::BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(self.delegate.respond_elicitation(id, response))
+    }
+    fn stop_background_task(
+        &self,
+        id: String,
+    ) -> mj_client::session::BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(self.delegate.stop_background_task(id))
+    }
+    fn reviewer(
+        &self,
+        _role: Option<String>,
+        action: mj_client::session::ReviewerAction,
+    ) -> mj_client::session::BoxFuture<'_, anyhow::Result<mj_client::session::ReviewerOutcome>>
+    {
+        Box::pin(self.delegate.reviewer(action))
+    }
+}
+
+#[tokio::test]
+async fn native_acknowledgements_survive_dropping_the_view_that_submitted_them() {
+    use super::super::SubmissionKind;
+    for plan in [false, true] {
+        for unconfirmed in [false, true] {
+            let fixture =
+                mj_client::session::replacement_session_test_fixture("test-native-transfer", 1);
+            let mut view = managed_view(MaterializedSession::empty("test-native-transfer"));
+            view.snapshot
+                .as_mut()
+                .unwrap()
+                .operational
+                .agent_capabilities = Some(Box::new(
+                serde_json::from_value(serde_json::json!({"promptCapabilities":{"image":true}}))
+                    .unwrap(),
+            ));
+            fixture.replacement_view.send_replace(view);
+            let delegate = fixture
+                .control
+                .session("test-native-transfer")
+                .await
+                .unwrap();
+            let (replies, mut observed) = tokio::sync::mpsc::unbounded_channel();
+            let session =
+                mj_client::session::SessionHandle::new(DelayedNativeSession { delegate, replies });
+            let mut source = ActiveChat::open(
+                session,
+                "bundle",
+                None,
+                fixture.control,
+                SessionHeaderIdentity::default(),
+                String::new(),
+                Notices::default(),
+            );
+            let reference = mj_core::attachment::AttachmentRef::new(
+                &base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    super::super::tests::test_image().data_base64.as_bytes(),
+                )
+                .unwrap(),
+                "image/png".into(),
+                2,
+                2,
+            )
+            .unwrap();
+            let image = crate::clipboard::ClipboardImage::from_reference(reference).unwrap();
+            let payload = if plan {
+                PromptPayload::text("/plan original prompt")
+            } else {
+                PromptPayload::with_image("original ", image.clone())
+            };
+            let command_id = if plan {
+                "native-plan-prompt"
+            } else {
+                "native-image"
+            };
+            source.state.begin_submission(
+                command_id.into(),
+                SubmissionKind::Prompt,
+                payload.clone(),
+                "Sending",
+            );
+            if plan {
+                source
+                    .remote
+                    .operations()
+                    .send(ChatRemoteOperation::PlanCommand {
+                        command_id: "native-plan".into(),
+                        original: payload.text.clone(),
+                        control: mj_core::acp::PlanControl::SetConfig {
+                            key: "mode".into(),
+                            value: "plan".into(),
+                        },
+                        requested_active: true,
+                        prompt: Some("original prompt".into()),
+                    })
+                    .await
+                    .unwrap();
+                let (_, mode_reply) = tokio::time::timeout(Duration::from_secs(2), observed.recv())
+                    .await
+                    .expect("mode command reached the session")
+                    .unwrap();
+                mode_reply.send(Ok(2)).unwrap();
+            } else {
+                source
+                    .remote
+                    .operations()
+                    .send(ChatRemoteOperation::Prompt {
+                        command_id: command_id.into(),
+                        text: payload.text.clone(),
+                        images: payload.images.clone(),
+                    })
+                    .await
+                    .unwrap();
+            }
+            let (command, reply) = tokio::time::timeout(Duration::from_secs(2), observed.recv())
+                .await
+                .expect("prompt reached the session")
+                .unwrap();
+            assert!(matches!(
+                command,
+                mj_core::relay::RelayCommand::Prompt { .. }
+            ));
+            let config: Config = serde_json::from_str(r#"{"version":0}"#).unwrap();
+            let mut owner = ChatState::standby(
+                "test-native-transfer",
+                &config,
+                SessionHeaderIdentity::default(),
+                Notices::default(),
+            );
+            owner.adopt_live_composer(source.take_live_composer().unwrap());
+            drop(source);
+            reply
+                .send(if unconfirmed {
+                    Err(mj_client::session::DeliveryUnconfirmed.into())
+                } else {
+                    Err(anyhow::anyhow!("definite worker refusal"))
+                })
+                .unwrap();
+            loop {
+                let result =
+                    tokio::time::timeout(Duration::from_secs(2), owner.composer_runtime.rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let submitted = matches!(
+                    &result,
+                    ComposerIoUpdate::Remote(
+                        ChatRemoteResult::Prompt { .. }
+                            | ChatRemoteResult::PlanCommand { .. }
+                            | ChatRemoteResult::DeliveryUnconfirmed { .. }
+                            | ChatRemoteResult::FollowupUnconfirmed { .. }
+                    )
+                );
+                owner.apply_composer_update(result);
+                if submitted {
+                    break;
+                }
+            }
+            if unconfirmed {
+                assert!(
+                    owner.input.is_empty(),
+                    "unknown acceptance must not create a resendable draft"
+                );
+                assert!(owner.draft().contains("Delivery unconfirmed"));
+            } else {
+                assert_eq!(owner.input, payload.text);
+                assert!(owner.pending_submissions.is_empty());
+                if !plan {
+                    assert_eq!(owner.input_images[0].image, image);
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn deferred_move_prompts_keep_their_original_operation_through_attach_and_cancel() {
+    let config: Config = serde_json::from_str(r#"{"version":0}"#).unwrap();
+    let mut moving = ChatState::standby(
+        "test-origin",
+        &config,
+        SessionHeaderIdentity::default(),
+        Notices::default(),
+    );
+    moving.set_composer_move_origin(Some((1, Some("move-a".into()))));
+    moving.composer_runtime.attachment_tasks_in_flight = MAX_ATTACHMENT_TASKS;
+    assert!(moving.reserve_attachment(1));
+    assert_eq!(moving.handle_key(key(KeyCode::Enter)), ChatAction::None);
+    let mut attached = clipboard_test_chat();
+    attached.adopt_live_composer(moving.take_live_composer().unwrap());
+    attached.set_composer_move_origin(Some((2, Some("move-b".into()))));
+    attached.apply_attachment_result(AttachmentResult {
+        sequence: 1,
+        fallback: AttachmentFallback::FailedMarker,
+        result: Ok(super::super::tests::test_image()),
+    });
+    attached.drain().await;
+    let prompt = attached.take_prepared_startup_prompts().pop().unwrap();
+    assert_eq!(prompt.move_operation_id.as_deref(), Some("move-a"));
+    assert_eq!(prompt.payload.images.len(), 1);
+
+    let mut preparing = ChatState::standby(
+        "test-preparing",
+        &config,
+        SessionHeaderIdentity::default(),
+        Notices::default(),
+    );
+    preparing.set_composer_move_origin(Some((3, None)));
+    preparing.paste("do not send toward the source");
+    assert_eq!(preparing.handle_key(key(KeyCode::Enter)), ChatAction::None);
+    assert!(preparing.drain_composer().is_none());
+    preparing.keep_deferred_submission_as_draft();
+    preparing.set_composer_move_origin(None);
+    assert!(preparing.drain_composer().is_none());
+    assert_eq!(preparing.draft(), "do not send toward the source");
+    assert!(matches!(
+        preparing.handle_key(key(KeyCode::Enter)),
+        ChatAction::Prompt(_)
+    ));
+    assert!(
+        preparing
+            .latest_startup_prompt()
+            .unwrap()
+            .move_operation_id
+            .is_none(),
+        "a later ordinary Enter must not inherit a failed Move identity"
+    );
+    let mut unresolved = ChatState::standby(
+        "test-unresolved",
+        &config,
+        SessionHeaderIdentity::default(),
+        Notices::default(),
+    );
+    unresolved.set_composer_move_origin(Some((4, None)));
+    unresolved.paste("finish on the original destination");
+    unresolved.handle_key(key(KeyCode::Enter));
+    unresolved.set_composer_move_origin(None);
+    unresolved.settle_deferred_move_origin(4, Some("completed-move"), true);
+    assert_eq!(
+        unresolved
+            .drain_composer()
+            .unwrap()
+            .move_operation_id
+            .as_deref(),
+        Some("completed-move")
+    );
+
+    unresolved.set_composer_move_origin(Some((5, None)));
+    unresolved.paste("do not rebind this deferred prompt");
+    unresolved.handle_key(key(KeyCode::Enter));
+    unresolved.set_composer_move_origin(Some((6, Some("different-move".into()))));
+    assert!(unresolved.drain_composer().is_none());
+    unresolved.settle_deferred_move_origin(5, Some("cancelled-original"), false);
+    assert!(unresolved.drain_composer().is_none());
+    assert_eq!(unresolved.draft(), "do not rebind this deferred prompt");
 }

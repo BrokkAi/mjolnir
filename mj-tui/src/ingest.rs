@@ -920,6 +920,25 @@ impl DashboardState {
     /// Whether the daemon still owns an active Move intent for this session.
     /// Surfaces use this to keep the transition row while intermediate durable
     /// records (Stopped/Provisioning/Running) catch up.
+    pub fn move_prompt_origins(&self) -> Vec<(String, String, Option<bool>)> {
+        self.move_operations
+            .values()
+            .map(|operation| {
+                let terminal = match operation.phase {
+                    mj_core::state::MovePhase::Completed => Some(true),
+                    mj_core::state::MovePhase::Failed | mj_core::state::MovePhase::Cancelled => {
+                        Some(false)
+                    }
+                    _ => None,
+                };
+                (
+                    operation.selection.session_id.clone(),
+                    operation.operation_id.clone(),
+                    terminal,
+                )
+            })
+            .collect()
+    }
     pub fn move_operation_active(&self, session_id: &str) -> bool {
         self.move_operations
             .get(session_id)
