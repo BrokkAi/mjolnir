@@ -915,7 +915,20 @@ async fn run_abandonable<T: Send + 'static>(
 /// on every open rather than once, so an index whose setting is absent stays
 /// on summaries if SessionWiki's default changes. Setting the mode starts its
 /// own transaction, so it must run before any sync does.
+///
+/// Opening an index an older SessionWiki built rebuilds its cache. That is
+/// said out loud: it costs a full pass, and an older `sessionwiki` command
+/// still in use rebuilds it back the next time it runs.
 fn open_for_sync() -> Result<rusqlite::Connection> {
+    if let IndexVersion::Older(found) = index_version() {
+        tracing::warn!(
+            found,
+            expected = sessionwiki::index::SCHEMA_VERSION,
+            "an older SessionWiki wrote the session index; rebuilding it at this build's schema. \
+             If a sessionwiki command did this, install the version the Mjolnir docs name \
+             so the two stop rebuilding each other"
+        );
+    }
     let connection = sessionwiki::index::open().context("open the SessionWiki index")?;
     sessionwiki::index::set_tool_output_mode(
         &connection,
@@ -951,6 +964,14 @@ fn sync_blocking(since: Option<i64>, cache: &crate::import::NativeScanCache) -> 
         .ownership
         .clone();
     let mut connection = open_for_sync()?;
+    // An incremental pass skips sessions older than `since` that the cache
+    // does not hold, so it is only sound on the cache the last full pass
+    // filled. Opening may itself have rebuilt the cache, and so may another
+    // program at any time; the stamp read here, after opening, is what
+    // decides.
+    let marker = full_pass_marker();
+    let generation = IndexStamp::of(&connection).context("read the SessionWiki index header")?;
+    let since = since.filter(|_| full_pass_holds(&marker, generation));
     top_level::prune(&mut connection, &BTreeSet::new(), &ownership)?;
     sessionwiki::index::sync_with(&mut connection, &owned, since)
         .context("sync Mjolnir sessions into SessionWiki")?;
@@ -962,11 +983,14 @@ fn sync_blocking(since: Option<i64>, cache: &crate::import::NativeScanCache) -> 
     write_session_tags(&mut connection, &mjolnir.indexed_tags())
         .context("store Mjolnir's session metadata in the SessionWiki index")?;
     provenance::backfill(&mut connection, &mjolnir).context("backfill Mjolnir file provenance")?;
-    if since.is_none() {
-        // A full pass has walked every store, so the index is complete enough
-        // for a search to be trusted. The marker is what a later daemon reads
-        // instead of walking the corpus again to find out.
-        record_first_build();
+    // A full pass has walked every store, so the index is complete enough for
+    // a search to be trusted. The marker is what a later daemon reads instead
+    // of walking the corpus again to find out. A cache rebuilt during the pass
+    // lost what the pass wrote before the rebuild, so it is not recorded.
+    if since.is_none()
+        && IndexStamp::of(&connection).context("read the SessionWiki index header")? == generation
+    {
+        record_full_pass(&marker, generation);
     }
     Ok(true)
 }
@@ -1088,74 +1112,144 @@ fn index_is_isolated() -> bool {
     false
 }
 
-/// Whether the index on disk was written by a SessionWiki at another schema
-/// version.
-///
-/// SessionWiki's own `open` drops and rebuilds its whole cache when the file's
-/// `user_version` differs from the version it was built with, which on a large
-/// corpus costs tens of minutes. Mjolnir will not do that to a user who also
-/// runs the `sessionwiki` command: it reads the version without SessionWiki and
-/// stands aside.
-fn index_version_mismatch() -> bool {
-    static SAID: AtomicBool = AtomicBool::new(false);
-    let Ok(path) = sessionwiki::index::db_path() else {
-        return false;
-    };
-    if !path.exists() {
-        return false;
+/// The two numbers in an index file's header that say what its cache is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IndexStamp {
+    /// The schema SessionWiki built the cache at (`user_version`). Zero is an
+    /// index SessionWiki has not finished creating.
+    schema: i64,
+    /// SQLite's schema cookie, which moves whenever a table is created or
+    /// dropped. A cache rebuilt at the same schema keeps `schema` and moves
+    /// this, so together they name one generation of the cache.
+    cookie: i64,
+}
+
+impl IndexStamp {
+    fn of(connection: &rusqlite::Connection) -> rusqlite::Result<Self> {
+        Ok(Self {
+            schema: connection.pragma_query_value(None, "user_version", |row| row.get(0))?,
+            cookie: connection.pragma_query_value(None, "schema_version", |row| row.get(0))?,
+        })
     }
-    let version = rusqlite::Connection::open_with_flags(
+
+    fn version(self) -> IndexVersion {
+        match self.schema {
+            0 => IndexVersion::Current,
+            schema if schema < sessionwiki::index::SCHEMA_VERSION => IndexVersion::Older(schema),
+            schema if schema > sessionwiki::index::SCHEMA_VERSION => IndexVersion::Newer(schema),
+            _ => IndexVersion::Current,
+        }
+    }
+}
+
+/// How the cache on disk relates to the SessionWiki this build links.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexVersion {
+    /// This build's schema, or an index not yet stamped with one.
+    Current,
+    /// An older SessionWiki built it. This build cannot read it, and the next
+    /// write rebuilds the cache at this build's schema; SessionWiki keeps the
+    /// durable tables (tags, notes, summaries, archive) across the rebuild.
+    Older(i64),
+    /// A newer SessionWiki built it. Rebuilding it down would only make the
+    /// newer program rebuild it back, so Mjolnir neither reads nor writes it.
+    Newer(i64),
+}
+
+/// The stamp of the index file, or `None` when there is no file yet or its
+/// header cannot be read. Opens nothing through SessionWiki, whose `open`
+/// would rebuild the cache and whose `db_path` creates directories.
+fn on_disk_stamp() -> Option<IndexStamp> {
+    let path = sessionwiki::index::existing_db_path()?;
+    let stamp = rusqlite::Connection::open_with_flags(
         &path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )
-    .and_then(|connection| connection.pragma_query_value(None, "user_version", |row| row.get(0)));
-    let version: i64 = match version {
-        Ok(version) => version,
+    .and_then(|connection| IndexStamp::of(&connection));
+    match stamp {
+        Ok(stamp) => Some(stamp),
         Err(error) => {
-            tracing::debug!(%error, "could not read the SessionWiki index schema version");
-            return false;
+            tracing::debug!(%error, path = %path.display(), "could not read the SessionWiki index header");
+            None
         }
-    };
-    // Zero is an index SessionWiki has not finished creating; it is not a
-    // different version.
-    let mismatch = version != 0 && version != sessionwiki::index::SCHEMA_VERSION;
-    if mismatch && !SAID.swap(true, Ordering::AcqRel) {
+    }
+}
+
+fn index_version() -> IndexVersion {
+    static SAID: AtomicBool = AtomicBool::new(false);
+    let version = on_disk_stamp().map_or(IndexVersion::Current, IndexStamp::version);
+    if let IndexVersion::Newer(found) = version
+        && !SAID.swap(true, Ordering::AcqRel)
+    {
         tracing::warn!(
-            found = version,
+            found,
             expected = sessionwiki::index::SCHEMA_VERSION,
-            path = %path.display(),
-            "the SessionWiki index was written by another version;              Mjolnir will not open it, because opening it would rebuild it.              Install the matching sessionwiki command"
+            "a newer SessionWiki wrote the session index; Mjolnir leaves it alone until Mjolnir is upgraded"
         );
     }
-    mismatch
+    version
 }
 
+/// Whether this process may write the index. Only a newer index is refused:
+/// writing an older one is what brings it to this build's schema.
 fn index_is_writable() -> bool {
-    index_is_isolated() && !index_version_mismatch()
+    index_is_isolated() && !matches!(index_version(), IndexVersion::Newer(_))
 }
 
-/// The file recording that one full sync has completed, holding the schema
-/// version it completed at.
-fn first_build_marker() -> PathBuf {
+/// Open the index for reading, or `None` when this process has no index of
+/// its own or the cache is at another schema. The schema is read on the
+/// connection the caller then queries, not beside it; a rebuild that lands
+/// after that read fails the query instead of answering from it.
+/// [`index_state`] says which case it was.
+fn readable_index() -> Result<Option<rusqlite::Connection>> {
+    if !index_is_isolated() {
+        return Ok(None);
+    }
+    let connection = open_readonly()?;
+    let stamp = IndexStamp::of(&connection).context("read the SessionWiki index header")?;
+    Ok((stamp.version() == IndexVersion::Current).then_some(connection))
+}
+
+/// Why [`readable_index`] answered `None`, in words an agent can act on.
+fn unreadable_reason() -> &'static str {
+    if !index_is_isolated() {
+        return "session index location has not been configured";
+    }
+    match index_version() {
+        IndexVersion::Newer(_) => {
+            "a newer SessionWiki wrote the session index; upgrade Mjolnir to search it"
+        }
+        IndexVersion::Older(_) => {
+            "the session index is being rebuilt for this SessionWiki version; retry in a few minutes"
+        }
+        IndexVersion::Current => "the session index changed while it was opened; retry",
+    }
+}
+
+/// The file recording the cache generation the last complete full pass
+/// indexed into. A cache rebuilt since, by this process or another program,
+/// has another generation, so the marker no longer holds and the next pass is
+/// a full one.
+fn full_pass_marker() -> PathBuf {
     mj_core::config::data_dir().join("sessionwiki-built")
 }
 
-fn record_first_build() {
-    let path = first_build_marker();
-    let version = sessionwiki::index::SCHEMA_VERSION.to_string();
-    if std::fs::read_to_string(&path).is_ok_and(|held| held.trim() == version) {
-        return;
-    }
-    if let Err(error) = std::fs::write(&path, &version) {
-        tracing::warn!(%error, path = %path.display(), "could not record the first SessionWiki build");
-    }
+fn marker_text(stamp: IndexStamp) -> String {
+    format!("{} {}", stamp.schema, stamp.cookie)
 }
 
-/// Whether this index has completed a full build at this schema version.
-fn first_build_is_done() -> bool {
-    std::fs::read_to_string(first_build_marker())
-        .is_ok_and(|held| held.trim() == sessionwiki::index::SCHEMA_VERSION.to_string())
-        && sessionwiki::index::db_path().is_ok_and(|path| path.exists())
+fn full_pass_holds(marker: &Path, stamp: IndexStamp) -> bool {
+    stamp.schema == sessionwiki::index::SCHEMA_VERSION
+        && std::fs::read_to_string(marker).is_ok_and(|held| held.trim() == marker_text(stamp))
+}
+
+fn record_full_pass(marker: &Path, stamp: IndexStamp) {
+    if full_pass_holds(marker, stamp) {
+        return;
+    }
+    if let Err(error) = std::fs::write(marker, marker_text(stamp)) {
+        tracing::warn!(%error, path = %marker.display(), "could not record the full SessionWiki pass");
+    }
 }
 
 /// What a surface should say about this index right now.
@@ -1163,13 +1257,16 @@ pub fn index_state() -> WikiIndexState {
     if !index_is_isolated() {
         return WikiIndexState::Indexing;
     }
-    if index_version_mismatch() {
-        return WikiIndexState::VersionMismatch;
-    }
-    if first_build_is_done() {
-        WikiIndexState::Ready
-    } else {
-        WikiIndexState::Indexing
+    let Some(stamp) = on_disk_stamp() else {
+        return WikiIndexState::Indexing;
+    };
+    match stamp.version() {
+        IndexVersion::Newer(_) => WikiIndexState::VersionMismatch,
+        IndexVersion::Older(_) => WikiIndexState::Indexing,
+        IndexVersion::Current if full_pass_holds(&full_pass_marker(), stamp) => {
+            WikiIndexState::Ready
+        }
+        IndexVersion::Current => WikiIndexState::Indexing,
     }
 }
 
@@ -1260,8 +1357,8 @@ fn unwritable_reason() -> Option<&'static str> {
     if !index_is_isolated() {
         return Some("this process did not resolve a SessionWiki index of its own");
     }
-    if index_version_mismatch() {
-        return Some("the SessionWiki index was written by another SessionWiki version");
+    if let IndexVersion::Newer(_) = index_version() {
+        return Some("a newer SessionWiki wrote the SessionWiki index");
     }
     None
 }
@@ -1350,8 +1447,9 @@ fn unindexed(adapter: &MjolnirAdapter, session_ids: &[String]) -> Result<Vec<Str
         .store()
         .map(|store| store.keys.into_iter().collect())
         .unwrap_or_default();
-    // No index yet holds nothing.
-    let connection = open_readonly().ok();
+    // No index yet holds nothing, and neither does an older cache: writing
+    // these rows is what rebuilds it, so a row it holds now is about to go.
+    let connection = readable_index().ok().flatten();
     let mut pending = Vec::new();
     for session_id in session_ids {
         let key = adapter.key_for(session_id);
@@ -1620,13 +1718,12 @@ pub fn query_rows(
     include_tool_matches: bool,
 ) -> Result<Vec<WikiRow>> {
     let limit = limit.clamp(1, MAX_WIKI_LIMIT);
-    if !index_is_writable() {
+    let Some(connection) = readable_index()? else {
         // Nothing to answer from: either this process has no index of its own
         // or the one on disk is at another version. The status beside the rows
         // says which.
         return Ok(Vec::new());
-    }
-    let connection = open_readonly()?;
+    };
     let ownership = top_level::current_snapshot()?;
     let cache = crate::import::NativeScanCache::shared();
     query_rows_from(
@@ -1721,10 +1818,12 @@ const TEXT_SEARCH_MESSAGE_LIMIT: i64 = 20_000;
 /// runtime wrap it in `spawn_blocking`.
 pub fn session_text_matches(query: &str, live: &BTreeSet<String>) -> Result<Vec<SessionTextMatch>> {
     let query = query.trim();
-    if query.is_empty() || !index_is_writable() {
+    if query.is_empty() {
         return Ok(Vec::new());
     }
-    let connection = open_readonly()?;
+    let Some(connection) = readable_index()? else {
+        return Ok(Vec::new());
+    };
     let ownership = top_level::current_snapshot()?;
     text_matches_in(&connection, query, live, &ownership)
 }
@@ -1887,10 +1986,9 @@ fn named_like(
 
 /// The briefing for one indexed session, or `None` when the id names none.
 pub fn brief(id: &str, max_chars: usize) -> Result<Option<String>> {
-    if !index_is_writable() {
+    let Some(connection) = readable_index()? else {
         return Ok(None);
-    }
-    let connection = open_readonly()?;
+    };
     let ownership = top_level::current_snapshot()?;
     let cache = crate::import::NativeScanCache::shared();
     let Some(row) = visible_row_by_id(&connection, id, &ownership, &cache)? else {
@@ -1916,10 +2014,9 @@ pub fn transcript_hits(
     context_messages: usize,
     per_message_chars: usize,
 ) -> Result<Option<WikiHitTranscript>> {
-    if !index_is_writable() {
+    let Some(connection) = readable_index()? else {
         return Ok(None);
-    }
-    let connection = open_readonly()?;
+    };
     let ownership = top_level::current_snapshot()?;
     let cache = crate::import::NativeScanCache::shared();
     let Some(row) = visible_row_by_id(&connection, id, &ownership, &cache)? else {
@@ -1995,10 +2092,9 @@ pub struct ArchivedSession {
 
 /// Load one indexed session for restore, or `None` when the id names none.
 pub fn archived_session(id: &str) -> Result<Option<ArchivedSession>> {
-    if !index_is_writable() {
+    let Some(connection) = readable_index()? else {
         return Ok(None);
-    }
-    let connection = open_readonly()?;
+    };
     let ownership = top_level::current_snapshot()?;
     let cache = crate::import::NativeScanCache::shared();
     let Some(row) = visible_row_by_id(&connection, id, &ownership, &cache)? else {
@@ -2230,12 +2326,11 @@ fn session_bytes(sessions_root: &Path, session_id: &str, record: &SessionRecord)
 /// own copy of a conversation SessionWiki has actually stored. Runs SQLite
 /// work, so callers on the async runtime wrap it in `spawn_blocking`.
 pub fn indexed_with_messages(session_ids: &[String]) -> Result<BTreeSet<String>> {
-    if !index_is_writable() {
-        // An index this daemon will not open holds nothing it may act on, and
+    let Some(connection) = readable_index()? else {
+        // An index this daemon cannot read holds nothing it may act on, and
         // the archive job deletes data, so it must find nothing here.
         return Ok(BTreeSet::new());
-    }
-    let connection = open_readonly()?;
+    };
     let sessions_dir = mj_core::config::sessions_dir();
     let mut indexed = BTreeSet::new();
     for session_id in session_ids {
@@ -2511,10 +2606,9 @@ pub fn wiki_session(
     wiki_id: &str,
     known_sessions: &BTreeSet<String>,
 ) -> Result<Option<WikiSessionInfo>> {
-    if !index_is_writable() {
+    let Some(connection) = readable_index()? else {
         return Ok(None);
-    }
-    let connection = open_readonly()?;
+    };
     let ownership = top_level::current_snapshot()?;
     let cache = crate::import::NativeScanCache::shared();
     wiki_session_from(&connection, wiki_id, known_sessions, &ownership, &cache)
@@ -3110,6 +3204,88 @@ mod tests {
             tool_output_mode(&connection).unwrap(),
             ToolOutputMode::Summary
         );
+    }
+
+    /// An older `sessionwiki` command rebuilt the shared index at its own
+    /// schema after Mjolnir's last full pass, through SessionWiki's real
+    /// rebuild.
+    // Hard-won: 4ce2f9a78: an index an older SessionWiki wrote was refused for good, and nothing else rebuilt it.
+    #[test]
+    fn an_index_an_older_sessionwiki_wrote_is_rebuilt_and_needs_a_full_pass() {
+        use sessionwiki::index::SCHEMA_VERSION;
+        let _held = tags::testing::lock();
+        let (_index_dir, mut connection) = tags::testing::isolated_index();
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        write_archive(directory.path(), session_id, 1);
+        let source = Arc::new(adapter(directory.path(), session_id));
+        let marker = directory.path().join("sessionwiki-built");
+        sync_adapter(&mut connection, &source);
+        let filled = IndexStamp::of(&connection).unwrap();
+        record_full_pass(&marker, filled);
+        sync_adapter(&mut connection, &source);
+        provenance::backfill(&mut connection, &source).unwrap();
+        assert_eq!(
+            IndexStamp::of(&connection).unwrap(),
+            filled,
+            "a pass must not move the generation incremental passes are judged by"
+        );
+        assert!(full_pass_holds(&marker, filled));
+
+        connection
+            .pragma_update(None, "user_version", SCHEMA_VERSION - 1)
+            .unwrap();
+        drop(connection);
+        assert_eq!(index_version(), IndexVersion::Older(SCHEMA_VERSION - 1));
+        assert_eq!(index_state(), WikiIndexState::Indexing);
+        assert!(readable_index().unwrap().is_none());
+        assert_eq!(
+            unindexed(&source, &[session_id.to_owned()]).unwrap(),
+            [session_id],
+            "a row in a cache the next write drops does not count as indexed"
+        );
+        assert!(index_is_writable());
+
+        let connection = open_for_sync().unwrap();
+        let rebuilt = IndexStamp::of(&connection).unwrap();
+        assert_eq!(rebuilt.schema, SCHEMA_VERSION);
+        assert!(
+            !full_pass_holds(&marker, rebuilt),
+            "the rebuilt cache lost every row, so an incremental pass would skip old sessions"
+        );
+        assert!(
+            wiki_session_for_test(session_id, &BTreeSet::new())
+                .unwrap()
+                .is_none()
+        );
+
+        // A newer index is the one case left alone.
+        connection
+            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        drop(connection);
+        assert_eq!(index_state(), WikiIndexState::VersionMismatch);
+        assert!(!index_is_writable());
+        assert!(readable_index().unwrap().is_none());
+    }
+
+    // Hard-won: a0eaab301: the documented install stayed at schema-8 sessionwiki 0.33.1, which rebuilt the daemon's schema-9 index down.
+    #[test]
+    fn the_documented_sessionwiki_install_is_the_linked_version() {
+        const LOCK: &str = include_str!("../../Cargo.lock");
+        const DOCS: &str = include_str!("../../docs/src/content/docs/sessions.md");
+        let linked = LOCK
+            .split("[[package]]\n")
+            .find_map(|package| package.strip_prefix("name = \"sessionwiki\"\nversion = \""))
+            .and_then(|rest| rest.split('"').next())
+            .expect("Cargo.lock resolves sessionwiki");
+        for line in [
+            format!("This build links the `sessionwiki` crate, version {linked}."),
+            format!("cargo install --locked sessionwiki@{linked}\n"),
+            format!("npm install --global @youdie006/sessionwiki@{linked}\n"),
+        ] {
+            assert!(DOCS.contains(&line), "sessions.md must say {line:?}");
+        }
     }
 
     #[test]

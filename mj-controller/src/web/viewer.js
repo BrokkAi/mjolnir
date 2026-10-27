@@ -3723,7 +3723,7 @@ function wikiSearchPlaceholder() {
   if (wikiState.unavailable) return 'Search is unavailable';
   if (wikiState.status.state === 'indexing') return 'Indexing…';
   if (wikiState.status.state === 'version_mismatch') {
-    return 'SessionWiki index is at a different version';
+    return 'SessionWiki index is from a newer version';
   }
   return null;
 }

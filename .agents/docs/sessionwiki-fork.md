@@ -6,8 +6,8 @@ SessionWiki index.
 
 ## Current state
 
-Since 139726d84 (2026-10-07), Mjolnir depends on the upstream crate:
-`sessionwiki = "0.33.1"` in the root `Cargo.toml`. It no longer depends on the
+Since 139726d84 (2026-10-07), Mjolnir depends on the upstream crate, now
+`sessionwiki = "0.34.5"` in the root `Cargo.toml`. It no longer depends on the
 fork's `brokk-sessionwiki` package, which stopped at 0.30.2.
 
 The user contributes to SessionWiki through the fork
@@ -31,10 +31,19 @@ What the fork used to add, and where it is now:
 
 - **Schema version.** SessionWiki drops and rebuilds its derived cache when the
   index file's `user_version` differs from the version it was built with.
-  `index_version_mismatch` in `mj-controller/src/sessionwiki.rs` makes Mjolnir
-  stand aside rather than rebuild an index written at another version. Check
+  `IndexVersion` in `mj-controller/src/sessionwiki.rs` classifies the file:
+  Mjolnir leaves a newer index alone and rebuilds an older one on its next
+  write, with a full pass. Standing aside from an older index too stranded it
+  for good, since nothing else would ever bring it forward. Check
   `sessionwiki::index::SCHEMA_VERSION` on every bump. 0.30.1 to 0.33.1 kept
-  version 8.
+  version 8; 0.34.0 to 0.34.19 keep version 9. SessionWiki itself refuses to
+  rebuild a newer index from 0.34.1 on, so only a `sessionwiki` command older
+  than that rebuilds Mjolnir's index back down.
+- **Full-pass marker.** `<data_dir>/sessionwiki-built` records the cache
+  generation (`user_version` and SQLite's `schema_version` cookie) the last
+  complete full pass filled. An incremental pass is only sound on that
+  generation; any rebuild moves the cookie, so the next pass is full and the
+  index reads as indexing until it finishes.
 - **Documented install command.** Keep the install command in
   `docs/src/content/docs/sessions.md` pointing at the version Mjolnir links,
   and change it in the same commit as the dependency.
