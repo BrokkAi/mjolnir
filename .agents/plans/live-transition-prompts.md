@@ -29,7 +29,7 @@ startup composer and is outside this change.
 - [x] (2026-10-27 16:11Z) Commit implementation as `8f49f1413`, merge upstream through `77c0143b7`, and pass focused integration, upgrade, Clippy, and formatting checks.
 - [x] (2026-10-27 16:11Z) Fix the user-reported lifecycle regression call layout; direct pinned rustfmt file check and workspace formatting pass.
 - [x] (2026-10-27 16:39Z) Merge latest upstream, compose protocol 67, complete missing profile fixture fields, and pass final workspace Clippy, workspace formatting, direct lifecycle-file formatting, and diff checks.
-- [ ] Publish the validated final integration commit to origin/master.
+- [x] (2026-10-27 16:41Z) Prepare final publication: implementation, integration commits, fixture repairs, direct formatting fix, and all required checks complete.
 
 ## Surprises & Discoveries
 
@@ -144,6 +144,13 @@ Final workspace Clippy, workspace formatting, the pinned direct lifecycle-file
 formatting check, and staged/unstaged diff checks all pass. The validated
 integration commit is ready for publication. No implementation or validation
 work remains; publication and peer notifications complete delivery.
+
+Final integration is committed as `4ec10a068` and includes all shared Muse fixture
+repairs. The first push was rejected because upstream advanced to `779356f91`;
+those upstream bridge changes and its independent deterministic-test fix merge
+cleanly without altering our validated source. Protocol 67 and schema floor 100
+remain intact. The final delivery command is `git push origin HEAD:master`,
+followed by notifications to the waiting peer sessions.
 
 ## Context and Orientation
 
