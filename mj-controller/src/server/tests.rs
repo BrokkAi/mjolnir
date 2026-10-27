@@ -4752,7 +4752,8 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
              PROXY_TOKEN = {{ from_secret = \"PROXY_TOKEN\" }}\n\n\
              [targets.lab]\nkind = \"podman\"\nimage = \"example.test/lab:1\"\n\n\
              [targets.lab.environment]\nLAB_TOKEN = \"{RUNTIME_SECRET}\"\n\n\
-             [targets.apple-container]\nkind = \"apple-container\"\nimage = \"example.test/apple:1\"\n",
+             [targets.apple-container]\nkind = \"apple-container\"\nimage = \"example.test/apple:1\"\n\n\
+             [targets.localhost]\nkind = \"bare\"\n",
             version = mj_core::config::CONFIG_VERSION,
         ),
     )
@@ -4901,9 +4902,11 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
         "opus"
     );
 
+    let rendered_home = serde_json::to_string(&home.display().to_string()).unwrap();
+    let rendered_home = rendered_home.trim_matches('"');
     let text = serde_json::to_string_pretty(&exchange)
         .unwrap()
-        .replace(&home.display().to_string(), "<home>");
+        .replace(rendered_home, "<home>");
     mj_core::golden::assert_golden(
         env!("CARGO_MANIFEST_DIR"),
         "viewer-settings-exchange",
