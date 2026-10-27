@@ -5669,13 +5669,19 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
         let id = workspace.id.clone();
         async move { state.close_workspace(id).await }
     });
+    // Cancel only once the close has joined both stops. A cancel before that
+    // ends the close without submitting them, which is not this case.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while state.cancel_workspace_close(&workspace.id).is_err() {
+        while !["past-commit", "before-commit"]
+            .into_iter()
+            .all(|id| state.close_is_requested(id))
+        {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("the workspace close never started");
+    .expect("the workspace close never joined both stops");
+    state.cancel_workspace_close(&workspace.id).unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while state
             .owner()
