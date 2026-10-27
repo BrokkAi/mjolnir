@@ -59,6 +59,7 @@ for line in sys.stdin:
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let runtime = tokio::spawn(run(
         LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -188,6 +189,7 @@ for line in sys.stdin:
 #[test]
 fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
     let mut spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -761,6 +763,7 @@ fn only_updates_for_tool_calls_created_on_the_live_connection_are_relayed() {
 #[test]
 fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
     let mut spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -850,6 +853,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
 #[test]
 fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
     let mut spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -957,6 +961,7 @@ fn worker_socket(role: SubagentMcpRole) -> SubagentMcpSocket {
 #[test]
 fn a_child_socket_serves_handback_and_hides_native_tools() {
     let mut spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::None,
@@ -1122,6 +1127,7 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
         let step_clock = crate::acp::StepClock::default();
         let observed_step_clock = step_clock.clone();
         let spec = LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             tools_in_flight: Default::default(),
@@ -1567,6 +1573,7 @@ async fn answer_to_ext_request(
     // Drain events so a full channel can never be mistaken for silence.
     let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -1812,6 +1819,7 @@ async fn answer_architecture_form(
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -2329,6 +2337,7 @@ async fn policy_is_enforced_before_session_is_reported(
     let (request_tx, mut request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -2527,6 +2536,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
     let (request_tx, mut request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -2793,6 +2803,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -3199,6 +3210,7 @@ async fn silent_after_prompt_bridge_with_late_reply(
 
 pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -> LaunchSpec {
     LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -3686,6 +3698,7 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -3896,6 +3909,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -4038,6 +4052,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -4134,6 +4149,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
 async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
     fn scripted_spec(resume_session: Option<String>) -> LaunchSpec {
         LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -4472,6 +4488,7 @@ mod terminals {
             }
         });
         let spec = LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -4912,6 +4929,7 @@ for line in sys.stdin:
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let runtime = tokio::spawn(run(
         LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -5093,6 +5111,7 @@ for line in sys.stdin:
     let (request_tx, request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -5257,6 +5276,7 @@ while True:
     let (request_tx, request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -5406,6 +5426,7 @@ while True:
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -5517,6 +5538,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
     let (_request_tx, request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -5600,6 +5622,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
         let (_request_tx, request_rx) = mpsc::channel(1);
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let spec = LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -5839,6 +5862,7 @@ async fn session_reload_rejecting_bridge(
 
 fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
     LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -5924,6 +5948,7 @@ async fn codex_still_fails_when_the_recorded_session_cannot_be_reloaded() {
 fn resume_failures_report_a_missing_native_session_per_harness() {
     fn spec(harness: HarnessKind) -> LaunchSpec {
         LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -6064,6 +6089,7 @@ fn missing_native_session_spec(
     native_session_may_have_history: bool,
 ) -> LaunchSpec {
     LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -6438,6 +6464,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
         let (event_tx, mut event_rx) = mpsc::channel(32);
         let step_clock = crate::acp::StepClock::default();
         let spec = LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             tools_in_flight: Default::default(),
@@ -6880,6 +6907,7 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
     let (commands, mut requests) = mpsc::channel(16);
     let (event_tx, mut events) = mpsc::channel(256);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -7150,6 +7178,7 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
     let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     let opened = Arc::new(Mutex::new(None));
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,

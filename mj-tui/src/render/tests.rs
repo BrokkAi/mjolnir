@@ -1078,6 +1078,7 @@ fn minimized_sessions_dashboard(projects: usize, per_project: usize) -> Dashboar
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            operator_presence: Default::default(),
             last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
@@ -3293,6 +3294,90 @@ fn golden_dashboard_resource_panels() {
         .unwrap()
         .as_secs();
     let now = i64::try_from(now).unwrap();
+    let mut claude_config = config();
+    claude_config.profiles.insert(
+        "claude-2".into(),
+        claude_config.profiles["claude-1"].clone(),
+    );
+    let claude_quota = |profile_id: &str, fable: Option<u8>| ProfileQuota {
+        banked_resets: None,
+        profile_id: profile_id.into(),
+        harness: HarnessKind::Claude,
+        // Fable deliberately precedes the master weekly window: ordering
+        // must not change which value fills the weekly bar.
+        windows: fable
+            .map(|remaining| {
+                vec![QuotaWindow {
+                    label: "Week (Fable)".into(),
+                    remaining_percent: Some(remaining),
+                    duration_seconds: Some(604_800),
+                    model_scope: Some("fable".into()),
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: None,
+                }]
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .chain([
+                QuotaWindow {
+                    label: "Week".into(),
+                    remaining_percent: Some(21),
+                    duration_seconds: Some(604_800),
+                    model_scope: None,
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: Some(now + 2 * 24 * 60 * 60),
+                },
+                QuotaWindow {
+                    label: "5h".into(),
+                    remaining_percent: Some(40),
+                    duration_seconds: Some(18_000),
+                    model_scope: None,
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: Some(now + 60 * 60),
+                },
+            ])
+            .collect(),
+        extra: None,
+        error: None,
+        refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
+    };
+    let mut claude_reports = BTreeMap::from([
+        ("claude-1".into(), claude_quota("claude-1", Some(17))),
+        ("claude-2".into(), claude_quota("claude-2", None)),
+    ]);
+    claude_reports.insert(
+        "codex-1".into(),
+        ProfileQuota {
+            harness: HarnessKind::Codex,
+            windows: vec![QuotaWindow {
+                label: "Week (Fable)".into(),
+                remaining_percent: Some(17),
+                duration_seconds: Some(604_800),
+                model_scope: Some("fable".into()),
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: None,
+            }],
+            ..claude_quota("codex-1", Some(17))
+        },
+    );
+    let mut dashboard = DashboardState::new(claude_config, State::default(), claude_reports);
+    append_dashboard_golden(
+        &mut output,
+        "Claude Fable weekly quota",
+        140,
+        28,
+        &mut dashboard,
+    );
+
     let quota = ProfileQuota {
         banked_resets: None,
         profile_id: "codex-1".into(),
@@ -3460,4 +3545,59 @@ fn a_long_disks_dropdown_keeps_the_target_row_one_line_and_scrolls() {
     let rendered = drawn_dashboard(&mut dashboard, 160);
     assert!(rendered.contains("/srv/volume-29 40.0G free"), "{rendered}");
     assert_eq!(capacity_table_lines(&dashboard), 1);
+}
+
+#[test]
+fn golden_operator_away_dialog() {
+    let mut output = String::new();
+    for (symbols, label, width, height) in [
+        (mj_core::config::SymbolSet::Unicode, "AFK", 100, 32),
+        (mj_core::config::SymbolSet::Ascii, "AFK ASCII", 100, 32),
+        (mj_core::config::SymbolSet::Unicode, "AFK small", 32, 12),
+        (mj_core::config::SymbolSet::Unicode, "AFK tiny", 10, 5),
+    ] {
+        let mut config = config();
+        config.advanced.symbols = Some(symbols);
+        let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+        for index in 0..4 {
+            let mut session = running_session();
+            session.id = format!("waiting-{index}");
+            session.title = format!("Waiting session {index}");
+            session.acp_session_title = None;
+            dashboard.session_details.insert(
+                session.id.clone(),
+                SessionDetail {
+                    pending_elicitations: vec![question(&session.id)],
+                    ..Default::default()
+                },
+            );
+            dashboard.state.sessions.insert(session.id.clone(), session);
+        }
+        dashboard.set_operator_presence(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 1,
+        });
+        append_dashboard_golden(&mut output, label, width, height, &mut dashboard);
+        if label == "AFK" {
+            dashboard.session_details.clear();
+            append_dashboard_golden(
+                &mut output,
+                "AFK waiting requests cleared",
+                width,
+                height,
+                &mut dashboard,
+            );
+        }
+        if label == "AFK small" {
+            dashboard.handle_key(key(KeyCode::End));
+            append_dashboard_golden(
+                &mut output,
+                "AFK small scrolled",
+                width,
+                height,
+                &mut dashboard,
+            );
+        }
+    }
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "operator-away-dialog", &output);
 }

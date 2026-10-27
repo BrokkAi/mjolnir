@@ -28,6 +28,9 @@ const bootStatus = document.querySelector('#boot-status'),
   menuButton = document.querySelector('#menu-button'),
   menu = document.querySelector('#menu'),
   menuVersion = document.querySelector('#menu-version'),
+  operatorAwayIndicator = document.querySelector('#operator-away-indicator'),
+  operatorAwayToggle = document.querySelector('#operator-away-toggle'),
+  operatorAwayError = document.querySelector('#operator-away-error'),
   announcer = document.querySelector('#announcer'),
   workspaceStrip = document.querySelector('#workspaces'),
   workspaceSelect = document.querySelector('#workspace-select'),
@@ -44,6 +47,18 @@ const bootStatus = document.querySelector('#boot-status'),
   resumeDetailBack = document.querySelector('#resume-detail-back'),
   targetsPanel = document.querySelector('#targets'),
   quotaPanel = document.querySelector('#quota'),
+  settingsPanel = document.querySelector('#settings'),
+  settingsTrail = document.querySelector('#settings-trail'),
+  settingsHeading = document.querySelector('#settings-heading'),
+  settingsHelp = document.querySelector('#settings-help'),
+  settingsNotices = document.querySelector('#settings-notices'),
+  settingsEntryActions = document.querySelector('#settings-entry-actions'),
+  settingsError = document.querySelector('#settings-error'),
+  settingsSavebar = document.querySelector('#settings-savebar'),
+  settingsStatus = document.querySelector('#settings-status'),
+  settingsSave = document.querySelector('#settings-save'),
+  settingsDiscard = document.querySelector('#settings-discard'),
+  menuSettings = document.querySelector('#menu-settings'),
   logout = document.querySelector('#logout'),
   newForm = document.querySelector('#new-form'),
   newStep = document.querySelector('#new-step'),
@@ -107,6 +122,7 @@ const PAGES = {
   move: document.querySelector('#move-page'),
   targets: document.querySelector('#targets-page'),
   quota: document.querySelector('#quota-page'),
+  settings: document.querySelector('#settings-page'),
   conversation: document.querySelector('#conversation'),
 };
 
@@ -253,7 +269,18 @@ const ROUTE_PATTERNS = [
   [new RegExp(`^#conversation/(${ID})$`), ([id]) => ({ name: 'conversation', sessionId: id })],
   [/^#targets$/, () => ({ name: 'targets' })],
   [/^#quota$/, () => ({ name: 'quota' })],
+  // A settings path names keys the user chose, such as an environment
+  // variable, so each segment is URI-encoded rather than limited to an id.
+  [/^#settings((?:\/[^/]*)*)$/, ([rest]) => ({ name: 'settings', path: settingsPathFromHash(rest) })],
 ];
+
+function settingsPathFromHash(rest) {
+  try {
+    return rest.split('/').slice(1).map(decodeURIComponent);
+  } catch {
+    return [];
+  }
+}
 
 function parseRoute(hash) {
   for (const [pattern, build] of ROUTE_PATTERNS) {
@@ -285,6 +312,8 @@ function routeHash(next) {
       return '#targets';
     case 'quota':
       return '#quota';
+    case 'settings':
+      return `#settings${(next.path || []).map(key => `/${encodeURIComponent(key)}`).join('')}`;
     default:
       return next.workspaceId ? `#workspace/${next.workspaceId}` : '';
   }
@@ -384,6 +413,7 @@ function applyRoute() {
       move: 'Move session',
       targets: 'Targets',
       quota: 'Quota',
+      settings: 'Settings',
       conversation: 'Conversation',
     }[name] || 'MJ';
 
@@ -400,6 +430,7 @@ function applyRoute() {
     newDraft = null;
   }
   if (name !== 'move') moveDraft = null;
+  if (name === 'settings') syncSettingsRoute();
   renderRoute();
   // A screen reader should land at the top of the page it just moved to
   // rather than wherever it happened to be.
@@ -443,10 +474,390 @@ function renderRoute() {
     case 'quota':
       renderQuota();
       break;
+    case 'settings':
+      renderSettings();
+      break;
     case 'conversation':
       break;
     default:
       renderSessions();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+/// The Settings page's state, owned here alone. The daemon renders every
+/// page and applies every edit; the draft is opaque to this file and only
+/// travels back with the next request. Every request waits its turn in one
+/// queue, so an edit applies to the draft the edit before it returned and
+/// two quick clicks can never overwrite each other.
+const settingsState = {
+  original: null,
+  draft: null,
+  page: null,
+  /// Whether an accepted edit changed the draft since it was opened or saved.
+  dirty: false,
+  pending: 0,
+  saving: false,
+  status: '',
+  error: '',
+  /// A refused edit's reason and the text it refused, by row path, so the
+  /// field keeps what was typed beside the reason.
+  refused: new Map(),
+  /// Bumped by Discard and sign-out: work queued before it is dropped.
+  epoch: 0,
+  /// Bumped when the page, draft or refusals change. A snapshot redraws the
+  /// route every few seconds; rows are rebuilt only when this moves, so a
+  /// field someone is typing in survives.
+  contentVersion: 0,
+  queue: Promise.resolve(),
+};
+
+function settingsKey(path) {
+  return JSON.stringify(path || []);
+}
+
+function settingsChanged(content = false) {
+  if (content) settingsState.contentVersion += 1;
+  if (route.name === 'settings') renderSettings();
+  menuSettings.textContent = settingsState.dirty ? 'Settings (unsaved)' : 'Settings';
+}
+
+/// Run `work` after everything queued before it, unless what it was queued
+/// for has been discarded by then.
+function enqueueSettings(work) {
+  const epoch = settingsState.epoch;
+  settingsState.pending += 1;
+  settingsChanged();
+  settingsState.queue = settingsState.queue
+    .then(async () => {
+      if (epoch !== settingsState.epoch) return;
+      try {
+        await work();
+      } catch (failure) {
+        if (epoch !== settingsState.epoch) return;
+        settingsState.error = failure.message;
+        settingsState.status = '';
+        if (failure.status === 404 && route.name === 'settings' && route.path?.length) {
+          navigate({ name: 'settings', path: [] });
+        }
+      }
+    })
+    .finally(() => {
+      settingsState.pending -= 1;
+      settingsChanged(true);
+    });
+  return settingsState.queue;
+}
+
+function adoptSettingsDocument(document) {
+  settingsState.original = document.original;
+  settingsState.draft = document.draft;
+  settingsState.page = document.page;
+  settingsState.dirty = false;
+  settingsState.refused.clear();
+  settingsState.error = '';
+}
+
+function forgetSettings() {
+  settingsState.epoch += 1;
+  settingsState.original = null;
+  settingsState.draft = null;
+  settingsState.page = null;
+  settingsState.dirty = false;
+  settingsState.refused.clear();
+  settingsState.status = '';
+  settingsState.error = '';
+  settingsChanged(true);
+}
+
+/// Show the page the route names: open a draft if there is none, then ask
+/// the daemon to render that page of it. Queued, so it reads the route and
+/// the draft as they are when its turn comes.
+function syncSettingsRoute() {
+  enqueueSettings(async () => {
+    if (!settingsState.draft) adoptSettingsDocument(await request('/api/settings'));
+    if (route.name !== 'settings' || settingsKey(settingsState.page?.path) === settingsKey(route.path)) {
+      return;
+    }
+    const reply = await request('/api/settings/page', {
+      method: 'POST',
+      body: JSON.stringify({ draft: settingsState.draft, path: route.path || [] }),
+    });
+    settingsState.page = reply.page;
+    settingsState.error = '';
+  });
+}
+
+/// Send one edit made on the page `pagePath`.
+function editSettings(pagePath, edit) {
+  return enqueueSettings(async () => {
+    const reply = await request('/api/settings/edit', {
+      method: 'POST',
+      body: JSON.stringify({ draft: settingsState.draft, page: pagePath, edit }),
+    });
+    settingsState.draft = reply.draft;
+    settingsState.page = reply.page;
+    const fieldEdit = edit.kind === 'set' || edit.kind === 'toggle';
+    if (reply.error) {
+      if (fieldEdit) settingsState.refused.set(settingsKey(edit.path), { message: reply.error, text: edit.text });
+      else settingsState.error = reply.error;
+      settingsState.status = '';
+    } else {
+      if (fieldEdit) settingsState.refused.delete(settingsKey(edit.path));
+      settingsState.dirty = true;
+      settingsState.error = '';
+      settingsState.status = reply.notice || '';
+    }
+    if (route.name === 'settings' && settingsKey(reply.page.path) !== settingsKey(route.path)) {
+      navigate({ name: 'settings', path: reply.page.path });
+    }
+  });
+}
+
+function saveSettings() {
+  return enqueueSettings(async () => {
+    settingsState.saving = true;
+    settingsChanged();
+    try {
+      const document = await request('/api/settings/save', {
+        method: 'POST',
+        body: JSON.stringify({
+          original: settingsState.original,
+          draft: settingsState.draft,
+          page: settingsState.page?.path || [],
+        }),
+      });
+      adoptSettingsDocument(document);
+      settingsState.status = 'Saved.';
+      if (route.name === 'settings' && settingsKey(document.page.path) !== settingsKey(route.path)) {
+        navigate({ name: 'settings', path: document.page.path });
+      }
+    } finally {
+      settingsState.saving = false;
+    }
+  });
+}
+
+settingsSave.onclick = () => saveSettings();
+settingsDiscard.onclick = () => {
+  forgetSettings();
+  settingsState.status = 'Discarded unsaved changes.';
+  syncSettingsRoute();
+};
+// A draft lives only in this tab. Leaving with one unsaved asks first.
+window.addEventListener('beforeunload', event => {
+  if (settingsState.dirty) event.preventDefault();
+});
+
+/// A typed field sends its text when it is committed: on Enter, or when
+/// focus leaves it.
+function settingsTextInput(row, pagePath, refused) {
+  const input = el('input');
+  input.dataset.settingsPath = settingsKey(row.path);
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  let sent;
+  if (row.control === 'hidden') {
+    // The value is never sent here; typing one replaces it.
+    input.type = 'password';
+    input.autocomplete = 'new-password';
+    input.placeholder = 'Hidden · type to replace';
+    sent = '';
+  } else {
+    input.type = 'text';
+    input.placeholder = row.placeholder;
+    if (row.number) input.inputMode = 'numeric';
+    sent = refused?.text ?? row.value;
+    input.value = sent;
+  }
+  const commit = () => {
+    if (input.value === sent) return;
+    sent = input.value;
+    editSettings(pagePath, { kind: 'set', path: row.path, text: input.value });
+  };
+  input.addEventListener('change', commit);
+  input.addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      commit();
+    }
+  });
+  return input;
+}
+
+function settingsRow(row, pagePath) {
+  const refused = settingsState.refused.get(settingsKey(row.path));
+  const item = el('div', `settings-row settings-${row.control.replace('_', '-')}`);
+  switch (row.control) {
+    case 'page': {
+      const link = button('', 'settings-link');
+      link.type = 'button';
+      link.append(
+        el('span', 'settings-label', row.label),
+        el('span', 'settings-summary', row.summary),
+      );
+      link.onclick = () => navigate({ name: 'settings', path: row.path });
+      item.append(link);
+      break;
+    }
+    case 'checkbox': {
+      const field = el('label', 'settings-check');
+      const input = el('input');
+      input.type = 'checkbox';
+      input.checked = row.checked;
+      input.dataset.settingsPath = settingsKey(row.path);
+      input.onchange = () => editSettings(pagePath, { kind: 'toggle', path: row.path });
+      field.append(input, el('span', 'settings-label', row.label));
+      item.append(field);
+      break;
+    }
+    case 'choice': {
+      const field = el('label', 'field');
+      const select = el('select');
+      select.dataset.settingsPath = settingsKey(row.path);
+      const current = JSON.stringify(row.value);
+      row.choices.forEach((choice, index) => {
+        const option = new Option(choice.label, String(index));
+        option.selected = JSON.stringify(choice.value) === current;
+        select.append(option);
+      });
+      select.onchange = () => editSettings(pagePath, {
+        kind: 'set',
+        path: row.path,
+        choice: row.choices[Number(select.value)].value,
+      });
+      field.append(el('span', 'settings-label', row.label), select);
+      item.append(field);
+      break;
+    }
+    case 'text':
+    case 'hidden': {
+      const field = el('label', 'field');
+      field.append(el('span', 'settings-label', row.label), settingsTextInput(row, pagePath, refused));
+      item.append(field);
+      break;
+    }
+    default: {
+      const field = el('div', 'field');
+      field.append(el('span', 'settings-label', row.label), el('span', 'settings-value', row.text ?? ''));
+      item.append(field);
+    }
+  }
+  if (pagePath.length && row.help) item.append(el('p', 'dim settings-row-help', row.help));
+  if (refused) {
+    const reason = el('p', 'error', refused.message);
+    reason.setAttribute('role', 'alert');
+    item.append(reason);
+  }
+  return item;
+}
+
+function renderSettingsEntryActions(page) {
+  const actions = [];
+  if (page.add) {
+    if (page.add.named) {
+      const name = el('input');
+      name.type = 'text';
+      name.id = 'settings-new-name';
+      name.placeholder = 'Name';
+      name.setAttribute('aria-label', 'Name of the new entry');
+      name.autocomplete = 'off';
+      name.spellcheck = false;
+      const add = button(page.add.label, 'secondary');
+      add.type = 'button';
+      const submit = () => editSettings(page.path, { kind: 'add', path: page.path, name: name.value });
+      add.onclick = submit;
+      name.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          submit();
+        }
+      });
+      actions.push(name, add);
+    } else {
+      const add = button(page.add.label, 'secondary');
+      add.type = 'button';
+      add.onclick = () => editSettings(page.path, { kind: 'add', path: page.path });
+      actions.push(add);
+    }
+  }
+  if (page.removable) {
+    const remove = button('Remove', 'danger');
+    remove.type = 'button';
+    remove.onclick = () => editSettings(page.path, { kind: 'remove', path: page.path });
+    actions.push(remove);
+  }
+  settingsEntryActions.replaceChildren(...actions);
+}
+
+function renderSettingsSavebar() {
+  const busy = settingsState.pending > 0;
+  const status = settingsState.saving
+    ? 'Saving…'
+    : settingsState.status || (settingsState.dirty ? 'Unsaved changes. Save writes them to the configuration file.' : '');
+  settingsStatus.textContent = status;
+  settingsSavebar.classList.toggle('hidden', !settingsState.dirty && !settingsState.saving && !settingsState.status);
+  settingsSave.disabled = !settingsState.dirty || busy;
+  settingsDiscard.disabled = !settingsState.dirty && !settingsState.error;
+}
+
+function renderSettings() {
+  renderSettingsSavebar();
+  settingsError.replaceChildren();
+  if (settingsState.error) {
+    settingsError.append(document.createTextNode(settingsState.error));
+    if (!settingsState.draft && !settingsState.pending) {
+      const retry = button('Retry', 'secondary');
+      retry.type = 'button';
+      retry.onclick = () => syncSettingsRoute();
+      settingsError.append(document.createTextNode(' '), retry);
+    }
+  }
+  const page = settingsState.page;
+  const current = page && settingsKey(page.path) === settingsKey(route.path);
+  if (settingsPanel.dataset.version === `${settingsState.contentVersion}:${current}`) return;
+  settingsPanel.dataset.version = `${settingsState.contentVersion}:${current}`;
+  if (!current) {
+    settingsTrail.replaceChildren();
+    settingsHeading.textContent = 'Settings';
+    settingsHelp.textContent = '';
+    settingsNotices.replaceChildren();
+    settingsEntryActions.replaceChildren();
+    settingsPanel.replaceChildren(el('p', 'dim', settingsState.pending ? 'Loading settings…' : ''));
+    return;
+  }
+  // Keep the field being typed in, with its caret, across the rebuild.
+  const focused = settingsPanel.contains(document.activeElement) ? document.activeElement : null;
+  const kept = focused?.dataset.settingsPath && focused.matches('input[type="text"], input[type="password"]')
+    ? { path: focused.dataset.settingsPath, value: focused.value, start: focused.selectionStart, end: focused.selectionEnd }
+    : null;
+  settingsTrail.replaceChildren(...page.breadcrumb.slice(0, -1).map((name, depth) => {
+    const crumb = button(name, 'settings-crumb');
+    crumb.type = 'button';
+    crumb.onclick = () => navigate({ name: 'settings', path: page.path.slice(0, depth) });
+    return crumb;
+  }));
+  settingsHeading.textContent = page.breadcrumb[page.breadcrumb.length - 1];
+  settingsHelp.textContent = page.help;
+  settingsNotices.replaceChildren(...(page.notices || []).map(notice => el('p', 'settings-notice', notice)));
+  settingsPanel.replaceChildren(...page.groups.map(group => {
+    const section = el('section', 'settings-group card');
+    if (group.heading) section.append(el('h3', '', group.heading));
+    section.append(...group.rows.map(row => settingsRow(row, page.path)));
+    return section;
+  }));
+  renderSettingsEntryActions(page);
+  if (kept) {
+    const input = [...settingsPanel.querySelectorAll('input[data-settings-path]')]
+      .find(node => node.dataset.settingsPath === kept.path);
+    if (input) {
+      input.value = kept.value;
+      input.focus({ preventScroll: true });
+      input.setSelectionRange?.(kept.start, kept.end);
+    }
   }
 }
 
@@ -1513,34 +1924,54 @@ function parseMemoryGiB(text) {
 }
 
 function containerAllocationFromDraft(draft, target) {
+  const invalid = error => ({ allocation: null, error, warning: '' });
   const cpuText = draft.resourceCpuText.trim();
-  if (!/^\d+$/.test(cpuText)) return { allocation: null, error: 'CPU must be a positive whole number.' };
+  if (!/^\d+$/.test(cpuText)) return invalid('CPU must be a positive whole number.');
   const cpusBig = BigInt(cpuText);
   if (cpusBig < 1n || cpusBig > BigInt(Number.MAX_SAFE_INTEGER)) {
-    return { allocation: null, error: 'CPU must be a positive whole number.' };
+    return invalid('CPU must be a positive whole number.');
   }
   if (cpusBig < BigInt(MIN_CONTAINER_CPUS)) {
-    return { allocation: null, error: `CPU must be at least ${MIN_CONTAINER_CPUS}.` };
+    return invalid(`CPU must be at least ${MIN_CONTAINER_CPUS}.`);
   }
   const memoryBytes = parseMemoryGiB(draft.resourceMemoryText);
-  if (memoryBytes === null) return { allocation: null, error: 'MEM must be a positive number of GiB (up to 30 decimal places).' };
+  if (memoryBytes === null) return invalid('MEM must be a positive number of GiB (up to 30 decimal places).');
   if (BigInt(memoryBytes) < MIN_CONTAINER_MEMORY_BYTES) {
-    return { allocation: null, error: 'RAM must be at least 4 GiB.' };
+    return invalid('RAM must be at least 4 GiB.');
   }
   const capacity = target?.container_capacity;
-  if (capacity && !capacity.complete) {
-    return { allocation: null, error: 'A live container has no recorded sizing, so RAM left cannot be calculated safely.' };
+  const total = capacity?.total ?? target?.container_host_limits;
+  if (total && cpusBig > BigInt(total.cpus)) {
+    return invalid(`CPU exceeds the ${total.cpus} CPUs on this host.`);
   }
-  const limits = capacity?.remaining ?? target?.container_host_limits;
-  if (limits && cpusBig > BigInt(limits.cpus)) {
-    return { allocation: null, error: `CPU exceeds the ${limits.cpus} CPUs left on this host.` };
+  if (total && BigInt(memoryBytes) > BigInt(total.memory_bytes)) {
+    return invalid(`RAM exceeds the ${capacityGiBText(total.memory_bytes)} GiB on this host.`);
   }
-  if (limits && BigInt(memoryBytes) > BigInt(limits.memory_bytes)) {
-    return { allocation: null, error: `RAM exceeds the ${capacityGiBText(limits.memory_bytes)} GiB left on this host.` };
+  const allocation = { kind: 'container', cpus: Number(cpusBig), memory_bytes: memoryBytes };
+  let error = '';
+  if (target?.container_memory_hard_limit && (!capacity || !capacity.complete || BigInt(memoryBytes) > BigInt(capacity.remaining.memory_bytes))) {
+    error = !capacity || !capacity.complete
+      ? 'a live container on this Mac has no recorded RAM size, so Mjolnir cannot work out the RAM left safely'
+      : `this session asks for ${capacityGiBText(memoryBytes)} GiB of RAM, but this Mac has ${capacityGiBText(capacity.remaining.memory_bytes)} GiB left after the macOS reserve and live containers. Apple containers do not give freed memory back to macOS, so Mjolnir does not overcommit RAM on a Mac. Suspend or stop a session on this Mac, or choose less RAM. Mjolnir does not stop sessions automatically`;
+  }
+  const remaining = capacity?.remaining ?? target?.container_host_limits;
+  const overcommitsCpu = Boolean(remaining && cpusBig > BigInt(remaining.cpus));
+  const overcommitsMemory = Boolean(remaining && BigInt(memoryBytes) > BigInt(remaining.memory_bytes));
+  let warning = '';
+  if ((overcommitsCpu || overcommitsMemory) && capacity && !error) {
+    if (!capacity.complete) {
+      warning = 'A live container on this host has no recorded size, so Mjolnir cannot tell how much CPU and RAM is left. The session will still start.';
+    } else {
+      const parts = [];
+      if (overcommitsCpu) parts.push(`more CPUs than the ${capacity.remaining.cpus} left, so busy sessions may run slower`);
+      if (overcommitsMemory) parts.push(`more RAM than the ${capacityGiBText(capacity.remaining.memory_bytes)} GiB left, so the host may stop processes if sessions use all their RAM`);
+      warning = `This session asks for ${parts.join(', and ')}. It will still start.`;
+    }
   }
   return {
-    allocation: { kind: 'container', cpus: Number(cpusBig), memory_bytes: memoryBytes },
-    error: '',
+    allocation,
+    error,
+    warning,
   };
 }
 
@@ -1620,6 +2051,12 @@ function ensureNewTargetResourceOptions(draft) {
 function syncNewSizingState(draft) {
   const error = newResourceAllocationError(draft);
   if (newError) newError.textContent = error;
+  const target = snapshot?.targets.find(item => item.id === draft?.targetId);
+  const warning = targetResourceKind(draft?.targetId) === 'container'
+    ? containerAllocationFromDraft(draft, target).warning
+    : '';
+  const warningElement = document.querySelector('#new-resource-warning');
+  if (warningElement) warningElement.textContent = warning;
   if (newNextButton && visibleSteps()[draft.step]?.key === 'target') {
     newNextButton.disabled = Boolean(error) || draft.committing === true || draft.creatingBundle;
   }
@@ -1641,6 +2078,8 @@ function renderNewTargetSizingControls(draft, host) {
       syncNewSizingState(draft);
       const message = host.querySelector('#new-resource-error');
       if (message) message.textContent = result.error;
+      const warning = host.querySelector('#new-resource-warning');
+      if (warning) warning.textContent = result.warning;
     });
     const cpuInput = cpu.querySelector('input');
     cpuInput.type = 'number';
@@ -1654,6 +2093,8 @@ function renderNewTargetSizingControls(draft, host) {
       syncNewSizingState(draft);
       const message = host.querySelector('#new-resource-error');
       if (message) message.textContent = result.error;
+      const warning = host.querySelector('#new-resource-warning');
+      if (warning) warning.textContent = result.warning;
     });
     const memoryInput = memory.querySelector('input');
     memoryInput.type = 'number';
@@ -1692,6 +2133,9 @@ function renderNewTargetSizingControls(draft, host) {
     const error = el('p', 'error', newResourceAllocationError(draft));
     error.id = 'new-resource-error';
     host.append(error);
+    const warning = el('p', 'move-warning', containerAllocationFromDraft(draft, target).warning);
+    warning.id = 'new-resource-warning';
+    host.append(warning);
   } else if (kind === 'aws-ec2') {
     if (draft.resourceLoading) {
       host.append(el('p', 'dim', 'Loading EC2 size choices…'));
@@ -1935,7 +2379,7 @@ function renderNewForm() {
     profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
     targets: step.key === 'target' ? [
       launchableTargets(snapshot.targets).map(t => [t.id, t.kind, targetStatus(t), t.resource_allocation_kind,
-        t.default_resource_allocation, t.container_host_limits, t.container_capacity]),
+        t.default_resource_allocation, t.container_host_limits, t.container_capacity, t.container_memory_hard_limit]),
       newDraft.resourceCpuText, newDraft.resourceMemoryText, newDraft.resourceAllocation,
       newDraft.rememberContainerSize,
       newDraft.resourceLoading, newDraft.resourceError,
@@ -3279,7 +3723,7 @@ function wikiSearchPlaceholder() {
   if (wikiState.unavailable) return 'Search is unavailable';
   if (wikiState.status.state === 'indexing') return 'Indexing…';
   if (wikiState.status.state === 'version_mismatch') {
-    return 'SessionWiki index is at a different version';
+    return 'SessionWiki index is from a newer version';
   }
   return null;
 }
@@ -4472,9 +4916,12 @@ function renderQuota() {
           const used = window?.percent_used;
           const remaining = used == null ? null : 100 - used;
           const warning = window?.projects_exhaustion_before_reset;
-          const value = window ? remaining === null ? '?' : `${remaining}%` : '—';
+          const fable = window?.fable_remaining_percent;
+          const value = window
+            ? `${remaining === null ? '?' : `${remaining}%`}${fable == null ? '' : ` (${fable}%)`}`
+            : '—';
           const cell = el('span', `quota-value ${band(remaining)}`, value + (warning ? ' !' : ''));
-          const description = `${label}: ${window ? remaining === null ? 'unknown' : `${remaining}% left` : 'not reported'}${warning ? ', projected to run out before reset' : ''}`;
+          const description = `${label}: ${window ? remaining === null ? 'unknown' : `${remaining}% left` : 'not reported'}${fable == null ? '' : `; Fable weekly ${fable}% left`}${warning ? ', projected to run out before reset' : ''}`;
           cell.title = description;
           summary.append(cell);
           spoken.push(description);
@@ -4507,7 +4954,8 @@ function renderQuota() {
       for (const window of windows) {
         const row = el('div', 'quota-window');
         const label = el('div', 'quota-label');
-        label.append(el('span', '', window.label));
+        const fable = window.fable_remaining_percent;
+        label.append(el('span', '', fable == null ? window.label : `${window.label} (Fable ${fable}% left)`));
         const used = window.percent_used;
         label.append(
           el(
@@ -4946,6 +5394,7 @@ function showLogin() {
   elicitationCards.clear();
   sentElicitations.clear();
   clearPromptImages();
+  forgetSettings();
   bootStatus.classList.add('hidden');
   login.classList.remove('hidden');
   app.classList.add('hidden');
@@ -5407,6 +5856,7 @@ function presentSnapshot(detailChangedIds = []) {
   snapshotReceivedAtMs = Date.now();
   reconcileLifecycleActions();
   renderMenuVersion();
+  renderOperatorAway();
   bootStatus.classList.add('hidden');
   login.classList.add('hidden');
   app.classList.remove('hidden');
@@ -7904,6 +8354,38 @@ function renderMenuVersion() {
     : 'Mjolnir';
 }
 
+let operatorAwayPending = null;
+
+function renderOperatorAway() {
+  const away = operatorAwayPending ?? snapshot?.operator_away === true;
+  operatorAwayIndicator.classList.toggle('hidden', !away);
+  operatorAwayToggle.textContent = operatorAwayPending === null
+    ? (away ? 'End AFK' : 'Go AFK')
+    : (operatorAwayPending ? 'Going AFK…' : 'Ending AFK…');
+  operatorAwayToggle.disabled = operatorAwayPending !== null;
+}
+
+async function setOperatorAway(away) {
+  if (operatorAwayPending !== null) return;
+  operatorAwayPending = away;
+  operatorAwayError.textContent = '';
+  operatorAwayError.classList.add('hidden');
+  renderOperatorAway();
+  try {
+    await request('/api/actions', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'set-operator-away', away }),
+    });
+    await refresh();
+  } catch (err) {
+    operatorAwayError.textContent = `Could not ${away ? 'go' : 'end'} AFK: ${err.message}`;
+    operatorAwayError.classList.remove('hidden');
+  } finally {
+    operatorAwayPending = null;
+    renderOperatorAway();
+  }
+}
+
 menuButton.onclick = () => {
   const open = menu.classList.toggle('hidden');
   menuButton.setAttribute('aria-expanded', String(!open));
@@ -7929,11 +8411,17 @@ document.addEventListener('keydown', event => {
 });
 
 menu.onclick = event => {
+  if (event.target.closest('#operator-away-toggle')) {
+    void setOperatorAway(!(operatorAwayPending ?? snapshot?.operator_away === true));
+    return;
+  }
   const target = event.target.closest('button[data-route]');
   if (!target) return;
   closeMenu();
   navigate({ name: target.dataset.route });
 };
+
+operatorAwayIndicator.onclick = () => void setOperatorAway(false);
 
 logout.onclick = async () => {
   await request('/auth/session', { method: 'DELETE' });
@@ -7942,6 +8430,10 @@ logout.onclick = async () => {
 };
 
 backButton.onclick = () => {
+  if (route.name === 'settings' && route.path?.length) {
+    navigate({ name: 'settings', path: route.path.slice(0, -1) });
+    return;
+  }
   if (route.name === 'resume' && route.sessionId) {
     navigate({ name: 'resume', workspaceId: route.workspaceId });
     return;

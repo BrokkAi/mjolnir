@@ -12,23 +12,39 @@ use mj_core::config::{
 use mj_core::state::SessionState;
 
 #[test]
-fn web_restart_uses_the_lifecycle_cancellation_control() {
-    let action = ControllerAction::Restart {
-        session_id: "restart-web-session".into(),
-        acknowledge_container_recreation: false,
-    };
-    let control = PhoneActionControl::for_action(&action);
-    let lifecycle_control = control
-        .create
-        .as_ref()
-        .expect("web Restart is admitted as a cancellable daemon lifecycle");
-    assert!(Arc::ptr_eq(
-        &control.cancelled,
-        &lifecycle_control.cancelled
-    ));
-    assert!(control.request_cancel());
-    assert!(control.cancelled.load(Ordering::Acquire));
-    assert!(lifecycle_control.cancelled.load(Ordering::Acquire));
+fn web_restart_and_move_use_the_lifecycle_cancellation_control() {
+    let move_request = serde_json::from_value(serde_json::json!({
+        "preparation": {
+            "selection": {"session_id": "move-web-session"},
+            "source_profile_id": "codex", "source_target_template_id": "podman",
+            "cross_harness": false, "active": false, "queued_commands": [],
+            "fingerprint": "prepared", "operation_id": "move-operation"
+        },
+        "queue": null, "acknowledge_interruption": true
+    }))
+    .unwrap();
+    for action in [
+        ControllerAction::Restart {
+            session_id: "restart-web-session".into(),
+            acknowledge_container_recreation: false,
+        },
+        ControllerAction::Move {
+            request: Box::new(move_request),
+        },
+    ] {
+        let control = PhoneActionControl::for_action(&action);
+        let lifecycle_control = control
+            .lifecycle
+            .as_ref()
+            .expect("web Restart and Move share their lifecycle cancellation control");
+        assert!(Arc::ptr_eq(
+            &control.cancelled,
+            &lifecycle_control.cancelled
+        ));
+        assert!(control.request_cancel());
+        assert!(control.cancelled.load(Ordering::Acquire));
+        assert!(lifecycle_control.cancelled.load(Ordering::Acquire));
+    }
 }
 
 #[test]
@@ -1203,6 +1219,113 @@ fn golden_phone_session_snapshot() {
         }),
     );
 
+    let mut quota_controller = controller_with_profiles(&["claude", "claude-unknown", "codex"]);
+    quota_controller
+        .config
+        .profiles
+        .get_mut("claude")
+        .unwrap()
+        .kind = HarnessKind::Claude;
+    quota_controller
+        .config
+        .profiles
+        .get_mut("claude-unknown")
+        .unwrap()
+        .kind = HarnessKind::Claude;
+    let quota_window = |label: &str,
+                        remaining_percent: Option<u8>,
+                        model_scope: Option<&str>,
+                        duration_seconds: i64| crate::quota::QuotaWindow {
+        label: label.into(),
+        remaining_percent,
+        duration_seconds: Some(duration_seconds),
+        model_scope: model_scope.map(str::to_owned),
+        used: None,
+        limit: None,
+        resets: None,
+        resets_at_epoch_seconds: Some(2_000_000_000),
+    };
+    let quota_report = |profile_id: &str, harness: HarnessKind, windows| ProfileQuota {
+        banked_resets: None,
+        profile_id: profile_id.into(),
+        harness,
+        windows,
+        extra: None,
+        error: None,
+        refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
+    };
+    let quota_reports = BTreeMap::from([
+        (
+            "claude".into(),
+            quota_report(
+                "claude",
+                HarnessKind::Claude,
+                vec![
+                    quota_window("Week", Some(21), None, 7 * 24 * 60 * 60),
+                    quota_window("Week (Fable)", Some(17), Some("fable"), 7 * 24 * 60 * 60),
+                    quota_window("5H", Some(63), None, 5 * 60 * 60),
+                ],
+            ),
+        ),
+        (
+            "claude-unknown".into(),
+            quota_report(
+                "claude-unknown",
+                HarnessKind::Claude,
+                vec![
+                    quota_window("Week", None, None, 7 * 24 * 60 * 60),
+                    quota_window("Week (Fable)", Some(17), Some("fable"), 7 * 24 * 60 * 60),
+                    quota_window("5H", Some(63), None, 5 * 60 * 60),
+                ],
+            ),
+        ),
+        (
+            "codex".into(),
+            quota_report(
+                "codex",
+                HarnessKind::Codex,
+                vec![
+                    quota_window("Week", Some(70), None, 7 * 24 * 60 * 60),
+                    quota_window("5H", Some(80), None, 5 * 60 * 60),
+                ],
+            ),
+        ),
+    ]);
+    let quota_snapshot = viewer_snapshot(
+        &quota_controller,
+        &[],
+        &quota_reports,
+        &PhoneSessionViews {
+            native_agents: &Default::default(),
+            conversations: &Default::default(),
+            queued_prompts: &Default::default(),
+            active_user_shells: &Default::default(),
+            pending_elicitations: &Default::default(),
+            prompt_images: &Default::default(),
+            operational: &Default::default(),
+            materialized_activity: &Default::default(),
+            project_sources: &PhoneProjectSources::default(),
+            operations: &Default::default(),
+            move_recoveries: &Default::default(),
+            capacity: &[],
+            launch_failures: &[],
+            reviews: &Default::default(),
+        },
+        1,
+    );
+    section(
+        &mut out,
+        "viewer quota windows",
+        "Claude, unknown Claude, and Codex profiles",
+        &serde_json::json!({
+            "profiles": quota_snapshot.profiles.iter().map(|profile| serde_json::json!({
+                "id": profile.id,
+                "quota": profile.quota,
+            })).collect::<Vec<_>>(),
+        }),
+    );
+
     mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "phone-session-snapshot", &out);
 }
 
@@ -2103,11 +2226,11 @@ fn a_later_successful_action_clears_a_session_s_recorded_failure() {
 fn phone_cancel_targets_the_matching_background_action() {
     let first = PhoneActionControl {
         cancelled: Arc::new(AtomicBool::new(false)),
-        create: None,
+        lifecycle: None,
     };
     let second = PhoneActionControl {
         cancelled: Arc::new(AtomicBool::new(false)),
-        create: None,
+        lifecycle: None,
     };
     let action_sessions =
         std::collections::BTreeMap::from([(1, "session-1".into()), (2, "session-2".into())]);
@@ -2133,7 +2256,7 @@ fn phone_new_cancel_and_running_commit_have_one_atomic_winner() {
         let create = LifecycleControl::default();
         let control = PhoneActionControl {
             cancelled: create.cancelled.clone(),
-            create: Some(create),
+            lifecycle: Some(create),
         };
         let cancelling = control.clone();
         let committing = control.clone();

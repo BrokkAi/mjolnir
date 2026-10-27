@@ -1,4 +1,5 @@
 //! One erased view of whichever modal is open.
+//! The daemon presence overlay takes precedence while preserving the local mode.
 //!
 //! Every [`Mode`] variant except [`Mode::Dashboard`] carries a payload, and the
 //! dashboard asks each of them the same short list of questions: is a
@@ -453,10 +454,18 @@ mode_surfaces!(
 
 impl DashboardState {
     pub(crate) fn active_modal(&self) -> Option<&dyn ModalSurface> {
+        if let Some(dialog) = self.away_dialog() {
+            return Some(dialog);
+        }
         self.mode.surface()
     }
 
     pub(crate) fn active_modal_mut(&mut self) -> Option<&mut dyn ModalSurface> {
+        if let crate::operator_away::OperatorPresence::Away { dialog, .. } =
+            &mut self.operator_presence
+        {
+            return Some(dialog.as_mut());
+        }
         self.mode.surface_mut()
     }
 }

@@ -23,6 +23,8 @@ pub(crate) struct ContainerCapacityCommitment {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ContainerCapacityReservation {
+    leases: usize,
+    hard_memory: bool,
     /// Destination deployment target and allocation.
     pub(crate) target_ids: Vec<String>,
     pub(crate) allocation: mj_core::state::SessionResourceAllocation,
@@ -31,21 +33,40 @@ pub(crate) struct ContainerCapacityReservation {
 }
 
 /// Owns one in-memory resume or move reservation until the lifecycle either
-/// publishes its durable `Provisioning` record or ends.
+/// publishes its durable `Provisioning` record or ends. Joined holders retain
+/// that reservation until the last holder finishes.
 pub(crate) struct ContainerCapacityLease {
     state: Arc<RuntimeState>,
     session_id: String,
-    owner: bool,
+}
+
+/// Keeps create admission locked until its durable record exists, or owns an
+/// existing session's reservation through its lifecycle.
+pub(crate) struct ContainerAdmission<'a> {
+    _guard: Option<tokio::sync::MutexGuard<'a, ()>>,
+    _lease: Option<ContainerCapacityLease>,
+    pub(crate) warning: Option<String>,
+}
+
+impl ContainerAdmission<'_> {
+    pub(crate) fn into_lease(self) -> Option<ContainerCapacityLease> {
+        self._lease
+    }
 }
 
 impl Drop for ContainerCapacityLease {
     fn drop(&mut self) {
-        if self.owner {
-            self.state
-                .container_reservations
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&self.session_id);
+        let mut reservations = self
+            .state
+            .container_reservations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let reservation = reservations
+            .get_mut(&self.session_id)
+            .expect("a live capacity lease retains its reservation");
+        reservation.leases -= 1;
+        if reservation.leases == 0 {
+            reservations.remove(&self.session_id);
         }
     }
 }
@@ -153,39 +174,6 @@ impl RuntimeState {
         }))
     }
 
-    /// A cached host budget for callers on latency-sensitive control paths.
-    pub(crate) fn cached_container_capacity_input(
-        &self,
-        target_id: &str,
-    ) -> Option<ContainerCapacityInput> {
-        let (target, usage) = self.capacity_feed()?.reading_for_target(target_id)?;
-        (target.kind == crate::targets::DeploymentCapacityKind::Host).then_some(
-            ContainerCapacityInput {
-                target_ids: target.target_ids,
-                total: mj_core::state::HostContainerSize {
-                    cpus: usage.logical_cores,
-                    memory_bytes: usage.memory_total_bytes,
-                },
-            },
-        )
-    }
-
-    /// Capacity after overlaying resume reservations. A reserved session's
-    /// durable state may still be `Stopped` or `Error`, so exclude that record
-    /// and charge its reservation once instead.
-    pub(crate) fn capacity_with_reservations<'a>(
-        &self,
-        input: &ContainerCapacityInput,
-        sessions: impl IntoIterator<Item = &'a SessionRecord>,
-    ) -> mj_core::state::HostContainerCapacity {
-        let reservations = self
-            .container_reservations
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        capacity_with_reservations(input, sessions, &reservations)
-    }
-
     pub(crate) fn container_capacity_reservations(
         &self,
     ) -> BTreeMap<String, ContainerCapacityReservation> {
@@ -195,15 +183,17 @@ impl RuntimeState {
             .clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn reserve_container_capacity(
         self: &Arc<Self>,
         session_id: &str,
         input: &ContainerCapacityInput,
         allocation: mj_core::state::SessionResourceAllocation,
     ) -> ContainerCapacityLease {
-        self.reserve_container_capacity_with_source(session_id, input, allocation, None)
+        self.reserve_move_capacity_lease(session_id, input, allocation, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn reserve_move_capacity_lease(
         self: &Arc<Self>,
         session_id: &str,
@@ -211,24 +201,44 @@ impl RuntimeState {
         allocation: mj_core::state::SessionResourceAllocation,
         source: Option<ContainerCapacityCommitment>,
     ) -> ContainerCapacityLease {
-        self.reserve_container_capacity_with_source(session_id, input, allocation, source)
+        self.joined_container_capacity_lease(session_id, input, &allocation, false)
+            .unwrap()
+            .unwrap_or_else(|| {
+                self.reserve_container_capacity_with_source(
+                    session_id, input, allocation, source, false,
+                )
+            })
     }
 
-    pub(crate) fn joined_container_capacity_lease(
+    /// Joining and retaining the reservation are one decision with its release.
+    /// A different launch must not inherit a prior operation's admission.
+    fn joined_container_capacity_lease(
         self: &Arc<Self>,
         session_id: &str,
-    ) -> ContainerCapacityLease {
-        debug_assert!(
-            self.container_reservations
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .contains_key(session_id)
-        );
-        ContainerCapacityLease {
+        input: &ContainerCapacityInput,
+        allocation: &mj_core::state::SessionResourceAllocation,
+        hard_memory: bool,
+    ) -> Result<Option<ContainerCapacityLease>> {
+        let mut reservations = self
+            .container_reservations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(reservation) = reservations.get_mut(session_id) else {
+            return Ok(None);
+        };
+        if !same_target_group(&reservation.target_ids, &input.target_ids)
+            || reservation.allocation != *allocation
+            || reservation.hard_memory != hard_memory
+        {
+            return Err(anyhow::Error::new(Refusal::precondition(
+                "another container launch with different sizing or a different target is already in progress; wait for it to finish and retry",
+            )));
+        }
+        reservation.leases += 1;
+        Ok(Some(ContainerCapacityLease {
             state: self.clone(),
             session_id: session_id.to_owned(),
-            owner: false,
-        }
+        }))
     }
 
     fn reserve_container_capacity_with_source(
@@ -237,102 +247,158 @@ impl RuntimeState {
         input: &ContainerCapacityInput,
         allocation: mj_core::state::SessionResourceAllocation,
         source: Option<ContainerCapacityCommitment>,
+        hard_memory: bool,
     ) -> ContainerCapacityLease {
         let mut reservations = self
             .container_reservations
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let owner = if let std::collections::btree_map::Entry::Vacant(entry) =
-            reservations.entry(session_id.to_owned())
-        {
-            entry.insert(ContainerCapacityReservation {
-                target_ids: input.target_ids.clone(),
-                allocation,
-                source,
-            });
-            true
-        } else {
-            false
-        };
+        match reservations.entry(session_id.to_owned()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(ContainerCapacityReservation {
+                    leases: 1,
+                    hard_memory,
+                    target_ids: input.target_ids.clone(),
+                    allocation,
+                    source,
+                });
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {
+                unreachable!("serialized launch admission already joined any existing reservation");
+            }
+        }
         ContainerCapacityLease {
             state: self.clone(),
             session_id: session_id.to_owned(),
-            owner,
         }
     }
 
-    /// Reserve host capacity for any accepted operation that will create or
-    /// replace an owning container. New sessions hold the admission lock until
-    /// their durable record exists; resume and move hold this lease until the
-    /// corresponding lifecycle ends.
-    pub(crate) async fn reserve_container_capacity_for_launch(
+    /// One serialized decision for create, resume and Move. Create under a hard
+    /// RAM limit retains the guard until registration; existing sessions
+    /// install a lease before unlock.
+    pub(crate) async fn admit_container_launch(
         self: &Arc<Self>,
-        session_id: &str,
         target_id: &str,
         allocation: Option<mj_core::state::SessionResourceAllocation>,
-    ) -> Result<Option<ContainerCapacityLease>> {
+        session_id: Option<&str>,
+        replaced: BTreeSet<String>,
+        source: Option<ContainerCapacityCommitment>,
+    ) -> Result<ContainerAdmission<'_>> {
         let checked_target_id = target_id.to_owned();
-        let container_target = blocking(move || {
+        let (container, hard_memory) = blocking(move || {
             let controller = Controller::load()?;
             let template = controller
                 .config
                 .targets
                 .get(&checked_target_id)
                 .with_context(|| format!("unknown target {checked_target_id:?}"))?;
-            Ok(mj_core::config::is_container_target(template))
+            Ok((
+                mj_core::config::is_container_target(template),
+                mj_core::config::container_memory_is_hard_limit(template),
+            ))
         })
         .await?;
-        if !container_target || self.capacity_feed().is_none() {
-            return Ok(None);
+        let empty = || ContainerAdmission {
+            _guard: None,
+            _lease: None,
+            warning: None,
+        };
+        if !container {
+            return Ok(empty());
         }
-        let Some(input) = self
-            .container_capacity_input(target_id)
-            .await
-            .context(Refusal::precondition(
-                "Mjolnir could not read this host's CPU and RAM capacity; check the target and retry",
-            ))?
-        else {
-            return Err(anyhow::Error::new(
-                Refusal::precondition(
-                    "this target's host capacity is not ready yet; refresh the target and retry",
-                )
-                .with_code("container-capacity-unavailable"),
-            ));
+        let input = match self.container_capacity_input(target_id).await {
+            Ok(Some(input)) => input,
+            result if hard_memory => {
+                return Err(match result {
+                    Err(error) => error.context(Refusal::precondition(
+                        "Mjolnir could not read this host's CPU and RAM capacity; check the target and retry")),
+                    _ => anyhow::Error::new(Refusal::precondition(
+                        "this target's host capacity is not ready yet; refresh the target and retry")
+                        .with_code("container-capacity-unavailable")),
+                });
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target_id,
+                    error = format!("{error:#}"),
+                    "host capacity is unavailable; allowing container launch"
+                );
+                return Ok(empty());
+            }
+            Ok(None) => return Ok(empty()),
         };
         let Some(allocation) = allocation else {
-            return Err(anyhow::Error::new(
-                Refusal::unusable(
-                    "this container session has no recorded CPU and RAM allocation; choose a size before continuing",
-                )
-                .with_code("container-size-required"),
-            ));
+            return Err(anyhow::Error::new(Refusal::unusable(
+                "container sessions require an explicit CPU and RAM allocation; choose a size before continuing")
+                .with_code("container-size-required")));
         };
         let admission = self.container_admission.lock().await;
-        if self
-            .container_reservations
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains_key(session_id)
+        if let Some(session_id) = session_id
+            && let Some(lease) =
+                self.joined_container_capacity_lease(session_id, &input, &allocation, hard_memory)?
         {
-            let lease = self.reserve_container_capacity(session_id, &input, allocation);
-            drop(admission);
-            return Ok(Some(lease));
+            return Ok(ContainerAdmission {
+                _guard: None,
+                _lease: Some(lease),
+                warning: None,
+            });
         }
         let admission_state = self.clone();
         let checked_input = input.clone();
         let capacity = blocking(move || {
             let controller = Controller::load()?;
-            Ok(admission_state
-                .capacity_with_reservations(&checked_input, controller.state.sessions.values()))
+            Ok(capacity_with_reservations_after(
+                &checked_input,
+                controller.state.sessions.values(),
+                &admission_state.container_capacity_reservations(),
+                &replaced,
+            ))
         })
         .await?;
-        if !capacity.fits(&allocation) {
-            return Err(super::create::capacity_refusal(capacity, &allocation));
+        if capacity.refuses(&allocation, hard_memory) {
+            return Err(capacity_refusal(capacity, &allocation));
         }
-        let lease = self.reserve_container_capacity(session_id, &input, allocation);
-        drop(admission);
-        Ok(Some(lease))
+        let warning = capacity.overcommit(&allocation).warning(&capacity);
+        if let Some(warning) = &warning {
+            tracing::warn!(target_id, session_id, "{warning}");
+            if let Some(session_id) = session_id {
+                self.push_notice(session_id, warning.clone());
+            }
+        }
+        let (guard, lease) = match session_id {
+            Some(session_id) => (
+                None,
+                Some(self.reserve_container_capacity_with_source(
+                    session_id,
+                    &input,
+                    allocation,
+                    source,
+                    hard_memory,
+                )),
+            ),
+            // Only a hard limit needs the check and the durable record to be one
+            // decision; a warning may be computed concurrently, so batches of
+            // other launches do not wait on each other's registration.
+            None => (hard_memory.then_some(admission), None),
+        };
+        Ok(ContainerAdmission {
+            _guard: guard,
+            _lease: lease,
+            warning,
+        })
     }
+}
+
+fn capacity_refusal(
+    capacity: mj_core::state::HostContainerCapacity,
+    allocation: &mj_core::state::SessionResourceAllocation,
+) -> anyhow::Error {
+    let code = if capacity.complete {
+        "container-capacity-exceeded"
+    } else {
+        "container-capacity-unknown"
+    };
+    anyhow::Error::new(Refusal::unusable(capacity.refusal_message(allocation)).with_code(code))
 }
 
 pub(crate) fn capacity_with_reservations<'a>(
@@ -645,6 +711,348 @@ mod tests {
     use super::*;
 
     #[test]
+    fn capacity_refusal_names_remaining_ram_and_never_promises_automatic_stop() {
+        let capacity = mj_core::state::HostContainerCapacity {
+            total: mj_core::state::HostContainerSize {
+                cpus: 24,
+                memory_bytes: 64 << 30,
+            },
+            reserved: mj_core::state::HostContainerSize {
+                cpus: 0,
+                memory_bytes: 12 << 30,
+            },
+            committed: mj_core::state::HostContainerSize {
+                cpus: 20,
+                memory_bytes: 44 << 30,
+            },
+            remaining: mj_core::state::HostContainerSize {
+                cpus: 4,
+                memory_bytes: (8 << 30) - 1,
+            },
+            complete: true,
+        };
+        let allocation = mj_core::state::SessionResourceAllocation::Container {
+            cpus: 4,
+            memory_bytes: 16 << 30,
+        };
+
+        let error = capacity_refusal(capacity, &allocation);
+        let refusal = mj_core::refusal::Refusal::of(&error).expect("user-facing refusal");
+
+        assert_eq!(refusal.code(), Some("container-capacity-exceeded"));
+        assert!(refusal.message().contains("7.9 GiB left"));
+        assert!(
+            refusal
+                .message()
+                .contains("does not stop sessions automatically")
+        );
+    }
+
+    // Hard-won: #1375: summed cgroup ceilings refused idle Podman hosts.
+    #[tokio::test]
+    async fn shared_admission_preserves_apple_ram_and_warns_for_cgroup_overcommit() {
+        use crate::controller::test_support::{IsolatedTest, test_name};
+        use mj_core::state::SessionResourceAllocation;
+        const NAME: &str = "shared_admission_preserves_apple_ram_and_warns_for_cgroup_overcommit";
+        const CHILD: &str = "MJ_TEST_SHARED_CONTAINER_ADMISSION";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(module_path!(), NAME))
+                .env(CHILD, "1")
+                .env("MJ_INSTANCE", "shared-container-admission")
+                .isolated_store(directory.path())
+                .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut config = Config::default();
+        let container = serde_json::from_value::<mj_core::config::ContainerTemplate>(
+            serde_json::json!({"image": "unused-test-image"}),
+        )
+        .unwrap();
+        config.targets.insert(
+            "podman".into(),
+            mj_core::config::TargetTemplate::LocalPodman {
+                container: container.clone(),
+            },
+        );
+        config.targets.insert(
+            "apple".into(),
+            mj_core::config::TargetTemplate::AppleContainer { container },
+        );
+        config.profiles.insert(
+            "codex".into(),
+            mj_core::config::HarnessProfile {
+                enabled: true,
+                kind: mj_core::config::HarnessKind::Codex,
+                home: mj_core::config::data_dir().join("unused-capacity-profile"),
+                environment: Default::default(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+                codex_profile: None,
+                legacy_subagents: None,
+            },
+        );
+        config.save().unwrap();
+        let state = crate::daemon::tests::test_runtime_state();
+        let target_ids = vec!["podman".into(), "apple".into()];
+        let target = crate::targets::DeploymentCapacityTarget {
+            id: "local".into(),
+            host: "local".into(),
+            target_ids: target_ids.clone(),
+            kind: crate::targets::DeploymentCapacityKind::Host,
+            local: true,
+            probes: Vec::new(),
+            local_storage_paths: Vec::new(),
+            probe_error: None,
+        };
+        let usage = crate::targets::DeploymentCapacityUsage {
+            cpu_percent: Some(0),
+            memory_used_bytes: 0,
+            memory_total_bytes: 40 << 30,
+            logical_cores: 4,
+            disk_total_bytes: None,
+            storage: Vec::new(),
+        };
+        let (targets, _) = tokio::sync::watch::channel(vec![target]);
+        let (updates, _) = tokio::sync::broadcast::channel(1);
+        let (_latest, latest) =
+            tokio::sync::watch::channel(BTreeMap::from([("local".into(), usage)]));
+        let (refresh, _) = tokio::sync::mpsc::channel(1);
+        assert!(
+            state
+                .capacity
+                .set(CapacityFeed {
+                    targets: targets.subscribe(),
+                    updates,
+                    latest,
+                    refresh
+                })
+                .is_ok()
+        );
+        let allocation = |memory_gib: u64| SessionResourceAllocation::Container {
+            cpus: 4,
+            memory_bytes: memory_gib << 30,
+        };
+        let initial = state
+            .admit_container_launch("apple", Some(allocation(24)), None, BTreeSet::new(), None)
+            .await
+            .unwrap();
+        assert!(
+            state.container_admission.try_lock().is_err(),
+            "create holds admission until registration"
+        );
+        let workspace = crate::database::create_workspace("capacity").unwrap();
+        let mut busy = crate::daemon::tests::runtime_test_session(
+            "busy",
+            &workspace.id,
+            SessionState::Provisioning,
+        );
+        busy.target_template_id = "apple".into();
+        busy.target = None;
+        busy.resource_allocation = Some(allocation(24));
+        crate::database::save_session(&busy).unwrap();
+        drop(initial);
+
+        for session_id in [None, Some("resume"), Some("move")] {
+            let replaced = if session_id == Some("move") {
+                BTreeSet::from(["move".into()])
+            } else {
+                BTreeSet::new()
+            };
+            let result = state
+                .admit_container_launch("apple", Some(allocation(16)), session_id, replaced, None)
+                .await;
+            let error = result
+                .err()
+                .expect("Apple RAM overcommit must refuse create, resume and move");
+            assert_eq!(
+                Refusal::of(&error).unwrap().code(),
+                Some("container-capacity-exceeded")
+            );
+        }
+        // Drive the actual daemon entry points too, so a caller cannot silently
+        // bypass the common admission function in a later refactor.
+        let create = serde_json::from_value(serde_json::json!({
+            "remember_launch_choices": false, "remember_container_size": false,
+            "create_managed_worktree": false, "subagents": mj_core::subagent::SubagentPolicy::None,
+            "no_project_memory": false, "no_github_events": false,
+            "workspace_id": workspace.id, "profile_id": "codex", "bundle_id": "",
+            "target_template_id": "apple", "title": "capacity refusal",
+            "additional_mounts": [], "resource_allocation": allocation(16)
+        }))
+        .unwrap();
+        let error = state
+            .start_create_session(create)
+            .await
+            .expect_err("create must refuse Apple RAM overcommit");
+        assert_eq!(
+            Refusal::of(&error).unwrap().code(),
+            Some("container-capacity-exceeded")
+        );
+        let mut stopped = busy.clone();
+        stopped.id = "resumable".into();
+        stopped.state = SessionState::Stopped;
+        stopped.target_template_id = "podman".into();
+        stopped.last_profile = "codex".into();
+        stopped.resource_allocation = Some(allocation(16));
+        crate::database::save_session(&stopped).unwrap();
+        state.owner().edit_sessions(|sessions| {
+            sessions.insert(stopped.id.clone(), stopped.clone());
+        });
+        let error = state
+            .resume_session(ResumeSessionRequest {
+                session_id: stopped.id.clone(),
+                workspace_id: workspace.id.clone(),
+                profile_id: "codex".into(),
+                target_template_id: "apple".into(),
+                additional_mounts: None,
+                resource_allocation: None,
+                discard_queue: false,
+                repository_preflight: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            Refusal::of(&error).unwrap().code(),
+            Some("container-capacity-exceeded")
+        );
+        let move_request = serde_json::from_value(serde_json::json!({
+            "preparation": {
+                "selection": {"session_id": stopped.id, "target_template_id": "apple"},
+                "source_profile_id": "codex", "source_target_template_id": "podman",
+                "cross_harness": false, "active": false, "queued_commands": [],
+                "fingerprint": "prepared", "operation_id": "capacity-move"
+            },
+            "queue": null, "acknowledge_interruption": true
+        }))
+        .unwrap();
+        let error = state
+            .move_session(move_request)
+            .await
+            .expect_err("move must refuse Apple RAM overcommit");
+        assert_eq!(
+            Refusal::of(&error).unwrap().code(),
+            Some("container-capacity-exceeded")
+        );
+
+        let admitted = state
+            .admit_container_launch(
+                "podman",
+                Some(allocation(16)),
+                Some("podman-launch"),
+                BTreeSet::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        let warning = admitted.warning.as_deref().unwrap();
+        assert!(warning.contains("more CPUs"));
+        assert!(warning.contains("more RAM"));
+        assert_eq!(state.notices.lock().unwrap().back().unwrap().text, warning);
+        let notice_count = state.notices.lock().unwrap().len();
+        let joined = state
+            .admit_container_launch(
+                "podman",
+                Some(allocation(16)),
+                Some("podman-launch"),
+                BTreeSet::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.notices.lock().unwrap().len(),
+            notice_count,
+            "joining must not duplicate launch warnings"
+        );
+        // A soft-budget launch must never lend its admission to an Apple
+        // request, even if both templates share the physical host.
+        assert!(
+            state
+                .admit_container_launch(
+                    "apple",
+                    Some(allocation(16)),
+                    Some("podman-launch"),
+                    BTreeSet::new(),
+                    None
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            state
+                .admit_container_launch(
+                    "podman",
+                    Some(allocation(4)),
+                    Some("podman-launch"),
+                    BTreeSet::new(),
+                    None
+                )
+                .await
+                .is_err()
+        );
+        drop(admitted);
+        assert!(
+            state
+                .container_capacity_reservations()
+                .contains_key("podman-launch")
+        );
+        drop(joined);
+        let admitted = state
+            .admit_container_launch(
+                "apple",
+                Some(allocation(4)),
+                Some("apple-cpu"),
+                BTreeSet::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        let warning = admitted.warning.as_deref().unwrap();
+        assert!(warning.contains("more CPUs"));
+        assert!(!warning.contains("more RAM"));
+        drop(admitted);
+
+        // Missing owner sizing refuses Apple only; the cgroup warning describes
+        // uncertainty instead of treating sentinel zeroes as measured capacity.
+        busy.resource_allocation = None;
+        crate::database::save_session(&busy).unwrap();
+        assert!(
+            state
+                .admit_container_launch("apple", Some(allocation(4)), None, BTreeSet::new(), None)
+                .await
+                .is_err()
+        );
+        let admitted = state
+            .admit_container_launch("podman", Some(allocation(4)), None, BTreeSet::new(), None)
+            .await
+            .unwrap();
+        assert!(
+            admitted
+                .warning
+                .as_deref()
+                .unwrap()
+                .contains("no recorded size")
+        );
+        drop(admitted);
+        // No successful reading exists on this separate runtime.
+        let unavailable = crate::daemon::tests::test_runtime_state();
+        assert!(
+            unavailable
+                .admit_container_launch("apple", Some(allocation(4)), None, BTreeSet::new(), None)
+                .await
+                .is_err()
+        );
+        assert!(
+            unavailable
+                .admit_container_launch("podman", Some(allocation(4)), None, BTreeSet::new(), None)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn reservation_replaces_the_same_sessions_active_commitment() {
         let mut active =
             crate::controller::test_support::checkpoint_test_session("reserved-session");
@@ -662,6 +1070,8 @@ mod tests {
         let reservations = BTreeMap::from([(
             active.id.clone(),
             ContainerCapacityReservation {
+                leases: 1,
+                hard_memory: false,
                 target_ids: vec!["podman".into()],
                 allocation: mj_core::state::SessionResourceAllocation::Container {
                     cpus: 4,
@@ -687,7 +1097,7 @@ mod tests {
                 memory_bytes: 8 << 30,
             }
         );
-        assert!(!capacity.fits(&reservations[&active.id].allocation));
+        assert!(capacity.refuses(&reservations[&active.id].allocation, true));
     }
 
     // Hard-won: d27eb9f56: a same-host Move released its running source too early.
@@ -716,6 +1126,8 @@ mod tests {
         let reservations = BTreeMap::from([(
             source.id.clone(),
             ContainerCapacityReservation {
+                leases: 1,
+                hard_memory: false,
                 target_ids: vec!["podman".into()],
                 allocation: mj_core::state::SessionResourceAllocation::Container {
                     cpus: 2,
@@ -733,10 +1145,12 @@ mod tests {
         assert_eq!(capacity.committed.cpus, 8);
         assert_eq!(capacity.remaining.cpus, 2);
         assert!(
-            !capacity.fits(&mj_core::state::SessionResourceAllocation::Container {
-                cpus: 8,
-                memory_bytes: 16 << 30,
-            })
+            capacity
+                .overcommit(&mj_core::state::SessionResourceAllocation::Container {
+                    cpus: 8,
+                    memory_bytes: 16 << 30,
+                })
+                .cpus
         );
 
         let mut stopped = source.clone();
@@ -776,6 +1190,8 @@ mod tests {
         let reservations = BTreeMap::from([(
             source.id.clone(),
             ContainerCapacityReservation {
+                leases: 1,
+                hard_memory: false,
                 target_ids: vec!["docker".into()],
                 allocation: mj_core::state::SessionResourceAllocation::Container {
                     cpus: 4,
@@ -837,15 +1253,17 @@ mod tests {
         let capacity =
             capacity_with_reservations_after(&input, [&source], &BTreeMap::new(), &replaced);
 
-        assert!(
-            capacity.fits(&mj_core::state::SessionResourceAllocation::Container {
+        assert!(!capacity.refuses(
+            &mj_core::state::SessionResourceAllocation::Container {
                 cpus: 9,
                 memory_bytes: 18 << 30,
-            })
-        );
+            },
+            true
+        ));
     }
 
     // Hard-won: d27eb9f56: a joined web Move lease deleted the owner's reservation.
+    // Hard-won: #1375: the first holder could finish while a join still needed its reservation.
     #[tokio::test]
     async fn joined_lease_cannot_remove_the_owning_reservation() {
         let state = crate::daemon::tests::test_runtime_state();
@@ -861,20 +1279,27 @@ mod tests {
             memory_bytes: 4 << 30,
         };
 
-        let owner = state.reserve_container_capacity("session", &input, allocation.clone());
-        let joined = state.reserve_container_capacity("session", &input, allocation);
-        drop(joined);
-        assert!(
-            state
-                .container_capacity_reservations()
-                .contains_key("session")
-        );
-        drop(owner);
-        assert!(
-            !state
-                .container_capacity_reservations()
-                .contains_key("session")
-        );
+        for owner_finishes_first in [false, true] {
+            let owner = state.reserve_container_capacity("session", &input, allocation.clone());
+            let joined = state.reserve_container_capacity("session", &input, allocation.clone());
+            let (first, last) = if owner_finishes_first {
+                (owner, joined)
+            } else {
+                (joined, owner)
+            };
+            drop(first);
+            assert!(
+                state
+                    .container_capacity_reservations()
+                    .contains_key("session")
+            );
+            drop(last);
+            assert!(
+                !state
+                    .container_capacity_reservations()
+                    .contains_key("session")
+            );
+        }
     }
 
     // Hard-won: d27eb9f56: the terminal feed omitted daemon-only reservations.

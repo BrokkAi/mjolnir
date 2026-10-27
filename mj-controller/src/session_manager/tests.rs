@@ -1515,6 +1515,21 @@ fn leased_relay_child_serves_stdio() {
                             payload: mj_core::relay::RelayResponsePayload::ReviewBaselineAdvanced,
                         },
                     }
+                } else if let RelayRequest::SetOperatorAway { away, revision } = &request.request {
+                    use std::io::Write as _;
+                    let mut log = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(PathBuf::from(&root).join("operator-presence.log"))
+                        .unwrap();
+                    writeln!(log, "{revision} {away}").unwrap();
+                    mj_core::relay::RelayResponseEnvelope {
+                        request_id: request.request_id,
+                        protocol_version: request.protocol_version,
+                        body: RelayResponseBody::Ok {
+                            payload: RelayResponsePayload::Status(relay.operational_state()),
+                        },
+                    }
                 } else {
                     relay.handle(request)
                 };
@@ -2630,6 +2645,7 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
 }
 
 #[cfg(unix)]
+// Hard-won: AFK review #1/#2: equal availability hid missed transitions on reconnect.
 #[tokio::test]
 async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
     if std::env::var_os("MJ_TEST_SUBAGENT_ADMISSION_RECONNECT_CHILD").is_none() {
@@ -2657,6 +2673,7 @@ async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
 
     let relay_root = tempfile::tempdir().unwrap();
     let target = leased_relay_target(relay_root.path());
+    crate::database::set_operator_away(true).unwrap();
     let mut connection = None;
     let first = sync_actor_connection(&target, &mut connection).await;
     assert!(first.is_err(), "the first worker lost the open reply");
@@ -2671,9 +2688,23 @@ async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
             .exists()
     );
 
+    // The worker misses off/on. Reconnect must deliver revision3 although
+    // the last availability value it received was already true.
+    crate::database::set_operator_away(false).unwrap();
+    crate::database::set_operator_away(true).unwrap();
     sync_actor_connection(&target, &mut connection)
         .await
         .expect("the next relay connection repairs the gate");
+    // A still-connected actor must also send a new revision with the same bool.
+    crate::database::set_operator_away(false).unwrap();
+    crate::database::set_operator_away(true).unwrap();
+    sync_actor_connection(&target, &mut connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(relay_root.path().join("operator-presence.log")).unwrap(),
+        "1 true\n3 true\n5 true\n"
+    );
     assert!(connection.is_some());
     let state: serde_json::Value = serde_json::from_slice(
         &std::fs::read(relay_root.path().join("subagent-admission.json")).unwrap(),

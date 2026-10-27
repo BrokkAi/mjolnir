@@ -587,11 +587,19 @@ pub(super) fn viewer_snapshot_selected(
             continue;
         };
         let quota = crate::quota::surface_quota_report(quota);
+        let master_weekly = quota.weekly_window();
+        let fable_remaining = master_weekly.and_then(|master| {
+            master.remaining_percent?;
+            quota
+                .fable_weekly_window()
+                .and_then(|window| window.remaining_percent)
+        });
         profile.quota = Some(ViewerQuota {
             summary: quota.compact(),
             windows: quota
                 .windows
                 .iter()
+                .filter(|window| window.model_scope.is_none())
                 .map(|window| crate::server::ViewerQuotaWindow {
                     label: window.label.clone(),
                     resets_at_epoch_seconds: window.resets_at_epoch_seconds,
@@ -602,6 +610,9 @@ pub(super) fn viewer_snapshot_selected(
                     percent_used: window
                         .remaining_percent
                         .map(|left| 100_u8.saturating_sub(left)),
+                    fable_remaining_percent: master_weekly
+                        .filter(|weekly| std::ptr::eq(*weekly, window))
+                        .and(fable_remaining),
                     resets_at: window.resets.clone(),
                     projects_exhaustion_before_reset: crate::quota::projects_exhaustion(
                         window,

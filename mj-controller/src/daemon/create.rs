@@ -8,9 +8,13 @@ impl RuntimeState {
         self: &Arc<Self>,
         request: CreateSessionRequest,
     ) -> Result<RegisteredSession> {
-        self.start_create_session_inner(request, LifecycleControl::default(), None)
-            .await
-            .map(|(registered, _)| registered)
+        let (registered, _, warning) = self
+            .start_create_session_inner(request, LifecycleControl::default(), None)
+            .await?;
+        if let Some(warning) = warning {
+            self.push_notice(&registered.session.id, warning);
+        }
+        Ok(registered)
     }
 
     /// Register and start a child worker on its parent's existing target.
@@ -227,7 +231,7 @@ impl RuntimeState {
         request: CreateSessionRequest,
         control: LifecycleControl,
         publication: tokio::sync::oneshot::Receiver<std::result::Result<(), String>>,
-    ) -> Result<(RegisteredSession, bool)> {
+    ) -> Result<(RegisteredSession, bool, Option<String>)> {
         self.start_create_session_inner(request, control, Some(publication))
             .await
     }
@@ -237,7 +241,7 @@ impl RuntimeState {
         request: CreateSessionRequest,
         control: LifecycleControl,
         publication: Option<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>>,
-    ) -> Result<(RegisteredSession, bool)> {
+    ) -> Result<(RegisteredSession, bool, Option<String>)> {
         let mut request = request;
         let parent = request.profile_id.clone();
         let supplied = request.subagents.clone();
@@ -258,39 +262,8 @@ impl RuntimeState {
             &policy,
         )
         .await?;
-        let container_target = config
-            .targets
-            .get(&request.target_template_id)
-            .is_some_and(mj_core::config::is_container_target);
         if let Some(allocation) = request.resource_allocation.as_ref() {
             validate_minimum_container_allocation(allocation)?;
-        }
-        let container_capacity = if container_target {
-            let input = self
-                .container_capacity_input(&request.target_template_id)
-                .await
-                .context(mj_core::refusal::Refusal::precondition(
-                    "Mjolnir could not read this host's CPU and RAM capacity; check the target and retry",
-                ))?;
-            if input.is_none() && self.capacity_feed().is_some() {
-                return Err(anyhow::Error::new(
-                    mj_core::refusal::Refusal::precondition(
-                        "this target's host capacity is not ready yet; refresh the target and retry",
-                    )
-                    .with_code("container-capacity-unavailable"),
-                ));
-            }
-            input
-        } else {
-            None
-        };
-        if container_capacity.is_some() && request.resource_allocation.is_none() {
-            return Err(anyhow::Error::new(
-                mj_core::refusal::Refusal::unusable(
-                    "container sessions require an explicit CPU and RAM allocation; retry from a current client or pass `cpus` and `memory_bytes`",
-                )
-                .with_code("container-size-required"),
-            ));
         }
         if !request.bundle_id.is_empty() {
             crate::controller::config_only_controller(config.clone())
@@ -298,34 +271,23 @@ impl RuntimeState {
                 .await
                 .map_err(crate::controller::GithubBundleSelectionError::into_anyhow)?;
         }
-        // The reservation and the durable session record must be one
-        // serialized decision. If the lock covered only the check, two
-        // concurrent creates could observe the same committed total.
-        let _container_admission = if container_capacity.is_some() {
-            Some(self.container_admission.lock().await)
-        } else {
-            None
-        };
+        let _container_admission = self
+            .admit_container_launch(
+                &request.target_template_id,
+                request.resource_allocation.clone(),
+                None,
+                BTreeSet::new(),
+                None,
+            )
+            .await?;
         // Discovery is restartable preparation, not admitted lifecycle work.
         let _upgrade_work = crate::upgrade::activity("session admission")?;
         request.subagents = Some(policy);
         let path_cancelled = control.cancelled.clone();
         let remember_launch_choices = request.remember_launch_choices;
         let preferences_owner = self.clone();
-        let admission_state = self.clone();
         let (registered, review_turned_off) = blocking(move || {
             let mut controller = Controller::load()?;
-            if let (Some(input), Some(allocation)) =
-                (container_capacity, request.resource_allocation.as_ref())
-            {
-                validate_minimum_container_allocation(allocation)?;
-                let capacity = admission_state
-                    .capacity_with_reservations(&input, controller.state.sessions.values());
-                ensure!(
-                    capacity.fits(allocation),
-                    capacity_refusal(capacity, allocation)
-                );
-            }
             let path_executor = crate::targets::CancellableProcessExecutor::new(path_cancelled)
                 .with_deadline(Duration::from_secs(30));
             let project_directory = request
@@ -426,6 +388,7 @@ impl RuntimeState {
             ))
         })
         .await?;
+        let capacity_warning = _container_admission.warning.clone();
         drop(_container_admission);
         let session_id = registered.session.id.clone();
         self.start_or_join_lifecycle_controlled(
@@ -487,7 +450,7 @@ impl RuntimeState {
             },
         )?;
         self.reload_controller().await?;
-        Ok((registered, review_turned_off))
+        Ok((registered, review_turned_off, capacity_warning))
     }
 
     pub async fn wait_create_session(&self, session_id: &str) -> Result<()> {
@@ -531,84 +494,9 @@ fn validate_minimum_container_allocation(
         })
 }
 
-pub(super) fn capacity_refusal(
-    capacity: mj_core::state::HostContainerCapacity,
-    allocation: &mj_core::state::SessionResourceAllocation,
-) -> anyhow::Error {
-    use anyhow::Error;
-    use mj_core::refusal::Refusal;
-    use mj_core::state::SessionResourceAllocation;
-
-    let SessionResourceAllocation::Container {
-        cpus: requested_cpus,
-        memory_bytes: requested_memory,
-    } = allocation
-    else {
-        return Error::new(Refusal::unusable(
-            "container capacity admission received a non-container allocation",
-        ));
-    };
-    if !capacity.complete {
-        return Error::new(
-            Refusal::unusable(
-                "a live container on this host has no recorded CPU and RAM sizing, so Mjolnir cannot safely calculate the RAM left; stop that session or restart it with an explicit size",
-            )
-            .with_code("container-capacity-unknown"),
-        );
-    }
-    let gib = mj_core::state::floor_gib_tenths;
-    Error::new(
-        Refusal::unusable(format!(
-            "this launch requests {requested_cpus} CPUs and {} GiB of RAM, but the host has {} CPUs and {} GiB of RAM left after its system reserve and live container commitments. Suspend or stop a session, or choose a smaller allocation. Mjolnir does not stop sessions automatically.",
-            gib(*requested_memory),
-            capacity.remaining.cpus,
-            gib(capacity.remaining.memory_bytes),
-        ))
-        .with_code("container-capacity-exceeded"),
-    )
-}
-
 #[cfg(test)]
 mod capacity_admission_tests {
     use super::*;
-
-    #[test]
-    fn capacity_refusal_names_remaining_ram_and_never_promises_automatic_stop() {
-        let capacity = mj_core::state::HostContainerCapacity {
-            total: mj_core::state::HostContainerSize {
-                cpus: 24,
-                memory_bytes: 64 << 30,
-            },
-            reserved: mj_core::state::HostContainerSize {
-                cpus: 0,
-                memory_bytes: 12 << 30,
-            },
-            committed: mj_core::state::HostContainerSize {
-                cpus: 20,
-                memory_bytes: 44 << 30,
-            },
-            remaining: mj_core::state::HostContainerSize {
-                cpus: 4,
-                memory_bytes: (8 << 30) - 1,
-            },
-            complete: true,
-        };
-        let allocation = mj_core::state::SessionResourceAllocation::Container {
-            cpus: 4,
-            memory_bytes: 16 << 30,
-        };
-
-        let error = capacity_refusal(capacity, &allocation);
-        let refusal = mj_core::refusal::Refusal::of(&error).expect("user-facing refusal");
-
-        assert_eq!(refusal.code(), Some("container-capacity-exceeded"));
-        assert!(refusal.message().contains("4 CPUs and 7.9 GiB of RAM left"));
-        assert!(
-            refusal
-                .message()
-                .contains("does not stop sessions automatically")
-        );
-    }
 
     #[test]
     fn undersized_container_is_a_user_facing_refusal() {
@@ -712,7 +600,7 @@ mod delegation_replay_tests {
             };
             let (publish, publication) = tokio::sync::oneshot::channel();
             let control = super::LifecycleControl::default();
-            let (registered, _) = runtime
+            let (registered, _, _) = runtime
                 .start_create_session_controlled(request, control.clone(), publication)
                 .await
                 .unwrap();

@@ -204,6 +204,11 @@ pub enum RelayRequest {
     PollSubagentQueue {
         acknowledged: Option<u64>,
     },
+    /// Connection-only operator-away control; never journaled as a command.
+    SetOperatorAway {
+        away: bool,
+        revision: u64,
+    },
     /// Open or close worker-owned admission for requests that change child
     /// state. Closing is serialized with the private MCP queue's enqueue lock.
     SetSubagentAdmission {
@@ -372,6 +377,7 @@ impl RelayRequest {
             Self::SubagentRequests => "subagent_requests",
             Self::PollSubagentQueue { .. } => "poll_subagent_queue",
             Self::SetSubagentAdmission { .. } => "set_subagent_admission",
+            Self::SetOperatorAway { .. } => "set_operator_away",
             Self::HistoryQuery { .. } => "history_query",
             Self::HistoryRequests => "history_requests",
             Self::CompleteHistoryRequest { .. } => "complete_history_request",
@@ -400,6 +406,7 @@ impl RelayRequest {
             Self::SubagentRequests | Self::CompleteSubagentRequest { .. } => 12,
             Self::PollSubagentQueue { .. } => super::RELAY_SUBAGENT_FEED_PROTOCOL,
             Self::SetSubagentAdmission { .. } => 32,
+            Self::SetOperatorAway { .. } => super::RELAY_OPERATOR_AWAY_PROTOCOL,
             Self::RespondElicitation { .. } => 2,
             Self::InstallPromptContext { .. } => 3,
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,

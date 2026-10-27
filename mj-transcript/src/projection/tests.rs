@@ -779,6 +779,61 @@ fn golden_mailbox_delivery_transcript() {
         untagged_agent_chunk("Responding after delivery."),
     );
 
+    let question = mj_core::elicitation::ElicitationRequest::from_acp_params(
+        "away-question",
+        json!({
+            "mode":"form", "sessionId":"session", "message":"Claude Code requests permission:\ntouch afk-created.txt",
+            "requestedSchema":{"type":"object","properties":{"answer":{"type":"string"}}}
+        }),
+    )
+    .unwrap();
+    apply_observation(
+        &mut session,
+        RelayObservation::ElicitationRequested {
+            request: question.clone(),
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::ElicitationResolved {
+            elicitation_id: question.id,
+            action: mj_core::elicitation::OPERATOR_AWAY_ACTION.into(),
+            reply: None,
+        },
+    );
+    let notices = vec![
+        mailbox_event(
+            "operator-away",
+            "operator_away",
+            true,
+            1000,
+            MailboxEventBody::OperatorAway {
+                request: "Claude Code requests permission:\ntouch afk-created.txt".into(),
+            },
+        ),
+        mailbox_event(
+            "operator-back",
+            "operator_away",
+            true,
+            1001,
+            MailboxEventBody::OperatorBack {
+                requests: vec!["Claude Code requests permission:\ntouch afk-created.txt".into()],
+            },
+        ),
+    ];
+    apply_observation(
+        &mut session,
+        RelayObservation::MailboxEventsDelivered {
+            event_keys: notices.iter().map(|event| event.key.clone()).collect(),
+            path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
+            prompt_command_id: None,
+            hook_event: Some("PostToolUse".into()),
+            events: notices,
+            lease_id: Some("operator-notices".into()),
+            steering: None,
+        },
+    );
+
     mj_core::golden::assert_golden(
         env!("CARGO_MANIFEST_DIR"),
         "mailbox-delivery-transcript",

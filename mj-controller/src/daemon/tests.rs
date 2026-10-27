@@ -647,6 +647,145 @@ fn attachment_liveness_probe_does_not_reap_children() {
     assert!(status.success());
 }
 
+// Hard-won: live AFK test: AFK off reported success without persisting.
+#[tokio::test]
+async fn operator_away_off_action_persists_and_notifies_only_unblocked_sessions() {
+    use mj_client::runtime_feed::RuntimeReplica;
+    use mj_core::elicitation::ElicitationRequest;
+    use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
+    use mj_core::relay::{RelayEvent, RelayObservation, relay_event_digest};
+    const CHILD: &str = "MJ_OPERATOR_AWAY_ACTION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "operator_away_off_action_persists_and_notifies_only_unblocked_sessions",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    for id in ["blocked", "unblocked"] {
+        crate::database::save_session(&runtime_test_session(id, "default", SessionState::Running))
+            .unwrap();
+    }
+    let mut state = test_runtime_state();
+    Arc::get_mut(&mut state).unwrap().committed =
+        Some(crate::database::subscribe_committed_state().unwrap());
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    assert!(matches!(
+        handle_action(
+            DaemonAction::SetOperatorAway { away: true },
+            &metadata,
+            &state,
+            &cancellation
+        )
+        .await
+        .unwrap(),
+        DaemonReply::Done
+    ));
+    let mut replica = RuntimeReplica::default();
+    replica
+        .apply(state.runtime_changes(None, false).await.unwrap())
+        .unwrap();
+    assert!(replica.projection.metadata.operator_presence.away);
+    // Worker-target projections deliberately omit global preferences. Prime
+    // their cache just as ordinary worker polling does before AFK-off.
+    let _worker_inputs = state.worker_controller_projection();
+    let request = ElicitationRequest::from_acp_params(
+        "permission-1",
+        serde_json::json!({
+            "mode":"form", "sessionId":"afk-test", "message":"Claude Code requests permission:\ntouch afk-created.txt",
+            "requestedSchema":{"type":"object","properties":{"answer":{"type":"string"}}}
+        }),
+    )
+    .unwrap();
+    for id in ["blocked", "unblocked"] {
+        let mut current = crate::database::load_materialized_session(id)
+            .unwrap()
+            .unwrap();
+        let mut observations = vec![
+            RelayObservation::ElicitationRequested {
+                request: request.clone(),
+            },
+            RelayObservation::ElicitationResolved {
+                elicitation_id: request.id.clone(),
+                action: mj_core::elicitation::OPERATOR_AWAY_ACTION.into(),
+                reply: None,
+            },
+        ];
+        if id == "blocked" {
+            observations.push(RelayObservation::ElicitationRequested {
+                request: request.clone(),
+            });
+        }
+        crate::database::apply_projection_page(id, move |page| {
+            for observation in observations {
+                let mut event = RelayEvent {
+                    format: mj_core::relay::RELAY_EVENT_FORMAT_V1,
+                    ordinal: current.applied_event_ordinal + 1,
+                    previous_digest: current.applied_event_digest.clone(),
+                    digest: String::new(),
+                    recorded_at_ms: 100,
+                    command_id: None,
+                    observation,
+                };
+                event.digest = relay_event_digest(&event)?;
+                let mutation =
+                    mj_transcript::projection::project_relay_event(&current, &event)?.mutation;
+                page.apply(
+                    event.ordinal,
+                    &event.previous_digest,
+                    &event.digest,
+                    &mutation,
+                )?;
+                mj_transcript::projection::apply_committed_projection_event(
+                    &mut current,
+                    &event,
+                    mutation,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+    assert!(matches!(
+        handle_action(
+            DaemonAction::SetOperatorAway { away: false },
+            &metadata,
+            &state,
+            &cancellation
+        )
+        .await
+        .unwrap(),
+        DaemonReply::Done
+    ));
+    let reloaded = crate::database::load_state_from(&crate::database::database_path()).unwrap();
+    assert!(!reloaded.operator_presence.away);
+    replica
+        .apply(state.runtime_changes(None, false).await.unwrap())
+        .unwrap();
+    assert_eq!(
+        replica.projection.metadata.operator_presence,
+        reloaded.operator_presence
+    );
+    let returned = crate::database::pending_mailbox_events(100)
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| {
+            let event: MailboxEvent = serde_json::from_str(&entry.event_json).unwrap();
+            matches!(event.body, MailboxEventBody::OperatorBack { .. })
+                .then_some((entry.target_session_id, event.wake))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(returned, vec![("unblocked".into(), true)]);
+}
+
 #[tokio::test]
 async fn client_presence_is_global_and_detach_and_prune_remove_it() {
     let state = test_runtime_state();
@@ -1812,6 +1951,15 @@ fn released_protocol_transcripts() -> Vec<ProtocolTranscript> {
             responses: [
                 r#"{"protocol_version":63,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-10-27T00:00:00Z","build_version":"2.58.0","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
                 r#"{"protocol_version":63,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
+            ],
+        },
+        ProtocolTranscript {
+            protocol_version: 64,
+            daemon_build: "2.59.1",
+            expected_requests: requests(64),
+            responses: [
+                r#"{"protocol_version":64,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-10-27T00:00:00Z","build_version":"2.59.1","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
+                r#"{"protocol_version":64,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
             ],
         },
     ]
@@ -5678,13 +5826,19 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
         let id = workspace.id.clone();
         async move { state.close_workspace(id).await }
     });
+    // Cancel only once the close has joined both stops. A cancel before that
+    // ends the close without submitting them, which is not this case.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while state.cancel_workspace_close(&workspace.id).is_err() {
+        while !["past-commit", "before-commit"]
+            .into_iter()
+            .all(|id| state.close_is_requested(id))
+        {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("the workspace close never started");
+    .expect("the workspace close never joined both stops");
+    state.cancel_workspace_close(&workspace.id).unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while state
             .owner()

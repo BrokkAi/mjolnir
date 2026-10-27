@@ -200,6 +200,7 @@ for line in sys.stdin:
 
 fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig) -> LaunchSpec {
     LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,

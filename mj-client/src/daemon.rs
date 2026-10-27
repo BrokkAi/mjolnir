@@ -102,9 +102,10 @@ pub enum WikiIndexState {
     /// sessions that exist. This is the state a fresh index starts in.
     #[default]
     Indexing,
-    /// The index file on disk was written by a different SessionWiki schema
-    /// version. Mjolnir will not open it, because opening it would drop and
-    /// rebuild the user's whole cache.
+    /// The index file on disk was written by a newer SessionWiki schema
+    /// version. Mjolnir will not open it, because rebuilding it down would only
+    /// make the newer program rebuild it back. An older index is not this
+    /// state: the daemon rebuilds it, and it reads as `Indexing` meanwhile.
     VersionMismatch,
 }
 
@@ -426,6 +427,9 @@ pub struct DraftPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
+    SetOperatorAway {
+        away: bool,
+    },
     NativeAgentHistory {
         owner: String,
         child: String,
@@ -2400,8 +2404,9 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Creation and runtime metadata carry interactive launch-choice provenance.
 // New-session creation independently controls whether its container size
 // becomes the host's saved default.
+// Operator-away action and runtime metadata.
 // Terminals no longer save harness titles; the daemon alone projects them.
-pub const PROTOCOL_VERSION: u32 = 63;
+pub const PROTOCOL_VERSION: u32 = 64;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

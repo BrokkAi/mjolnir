@@ -1119,13 +1119,15 @@ fn simple_mode_detaches_on_direct_ctrl_q_and_never_claims_ctrl_b() {
 fn dashboard_detach_restores_terminal_then_exits_promptly_with_final_message() {
     const REATTACH_MESSAGE: &str = "The Mjolnir daemon is still running with no active sessions. \
          `mj --instance terminal-regression daemon stop` stops it.";
+    // This assertion is about leaving the daemon behind, so it must not race an
+    // idle-exit daemon disappearing while the dashboard counts its sessions.
     let DashboardPty {
         _storage,
         mut master,
         slave: _slave,
         original_termios: before,
         mut child,
-    } = spawn_dashboard_pty();
+    } = spawn_dashboard_pty_with_idle_exit(false);
     let mut output = PtyOutput::new();
     wait_for_ready(child.child_mut(), &mut master, &mut output, READY_MARKER);
 

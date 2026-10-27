@@ -530,9 +530,12 @@ the viewer's create form selects: the size last chosen for that host, else
 ```
 
 A size above the host's reported totals answers `400`, and so does either
-field on a target that is not a container target. The daemon also refuses a
-launch that would exceed the host's aggregate committed CPU or hard RAM
-budget. `remember_container_size` (boolean, default `false`) saves the selected
+field on a target that is not a container target. CPU overcommit is admitted
+with a warning. RAM overcommit is also admitted for Docker and Podman,
+including on macOS. Only Apple `container` targets refuse aggregate RAM
+overcommit or an unavailable or incomplete RAM budget: their VMs do not
+return freed memory to macOS. Create, resume, and move share this policy.
+A creation warning is returned in the optional `notice` field. `remember_container_size` (boolean, default `false`) saves the selected
 size as the default for that physical host without changing the saved profile,
 target, recent-launch, or sub-agent defaults.
 

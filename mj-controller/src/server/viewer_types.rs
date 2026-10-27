@@ -14,6 +14,8 @@ pub(crate) fn take_viewer_row_visits() -> usize {
 #[serde(deny_unknown_fields)]
 pub struct ViewerSnapshot {
     #[serde(default)]
+    pub operator_away: bool,
+    #[serde(default)]
     pub profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
     #[serde(
         default,
@@ -345,6 +347,9 @@ impl ViewerSnapshot {
                     .copied(),
                 container_host_limits: None,
                 container_capacity: None,
+                container_memory_hard_limit: mj_core::config::container_memory_is_hard_limit(
+                    target,
+                ),
                 default_resource_allocation: if mj_core::config::is_container_target(target) {
                     let size = mj_core::state::default_container_size(
                         mj_core::config::container_size_host(target)
@@ -394,6 +399,7 @@ impl ViewerSnapshot {
         Self {
             profile_capabilities: Default::default(),
             last_subagent_policy: state.last_subagent_policy.clone(),
+            operator_away: state.operator_presence.away,
             subagents_configured: config.subagents.is_configured(),
             revision,
             generated_at: now_unix().to_string(),
@@ -957,6 +963,10 @@ pub struct ViewerQuotaWindow {
     pub banked_resets: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percent_used: Option<u8>,
+    /// Claude's remaining Fable allowance, attached only to the master weekly
+    /// window so surfaces can show both readings without another meter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fable_remaining_percent: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<String>,
     /// Whether this window is on course to run out before it resets. The
@@ -1091,6 +1101,10 @@ pub struct ViewerTarget {
     /// showing the RAM left. `container_host_limits` remains for older clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_capacity: Option<mj_core::state::HostContainerCapacity>,
+    /// Whether RAM beyond `container_capacity.remaining` is refused rather
+    /// than warned about; see `mj_core::config::container_memory_is_hard_limit`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub container_memory_hard_limit: bool,
     /// Shared default selected for this container target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_resource_allocation: Option<SessionResourceAllocation>,

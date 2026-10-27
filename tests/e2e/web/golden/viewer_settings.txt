@@ -1,0 +1,160 @@
+=== the first page lists every section and what it is set to (390x844) ===
+Settings
+
+Changes stay in this draft until you save.
+
+SETUP
+Agent Profiles
+claude
+Projects
+None yet
+Runtimes
+apple-container, docker, +3 more
+Machines
+local
+SESSIONS
+Code Review
+Off
+Continuation
+On · 3 continuations plus quota recovery
+Sub-agents
+Up to 6 at once
+SessionWiki
+Keeps every session
+Web Access
+On · 127.0.0.1:3765
+DISPLAY
+Interface
+Midnight · sidebar left
+Notifications
+Terminal
+Advanced
+All off
+PRIVACY
+Jev (hosted service)
+On · sends turn text for classification
+OTHER
+GitHub events
+On · GitHub activity
+layout: {"overflowsSideways":false,"savebar":false,"saveEnabled":false,"menu":"Settings","hash":"#settings"}
+=== a profile page names the terminal step for signing in (390x844) ===
+Settings
+Agent Profiles
+claude
+
+Changes stay in this draft until you save.
+
+To sign this profile in, save it, then run `mj login --profile claude` in a terminal.
+
+Enabled
+Type
+Codex
+Claude Code
+Kimi Code
+Grok Build
+Muse Code
+opencode
+MiMo Code
+DSH
+Account directory
+
+The agent's account directory, such as ~/.codex. Save, then choose Sign in.
+
+Environment variables
+2 settings
+Context budget (bytes)
+
+Optional positive byte limit for transcript compaction. Leave blank for the default.
+
+Remove
+control Enabled: checked
+control Type: Claude Code
+control Account directory: "<home>" (text, placeholder "Not set")
+control Context budget (bytes): "" (text, placeholder "262144 (256 KiB)")
+layout: {"overflowsSideways":false,"savebar":false,"saveEnabled":false,"menu":"Settings","hash":"#settings/profiles/claude"}
+=== an accepted edit leaves the draft unsaved (390x844) ===
+Settings
+Continuation
+
+Continue an unfinished request up to three times per message, and resume a session after its quota resets.
+
+Enabled
+
+Unsaved changes. Save writes them to the configuration file.
+
+Discard
+Save
+control Enabled: unchecked
+layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/continuation"}
+=== a refused edit keeps what was typed beside the reason (390x844) ===
+Settings
+Sub-agents
+
+Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.
+
+Maximum concurrent children
+
+Enter a whole number from 1 to 64.
+
+Straightforward
+2 settings
+
+Work with a clear method. Choose a model and its effort.
+
+Subtle
+2 settings
+
+Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward.
+
+Unsaved changes. Save writes them to the configuration file.
+
+Discard
+Save
+control Maximum concurrent children: "99" (text, placeholder "6 (default)")
+layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/subagents"}
+=== a discovered model offers its own efforts (390x844) ===
+Settings
+Sub-agents
+Straightforward
+
+Work with a clear method. Choose a model and its effort.
+
+Model
+Default (Not set)
+opus
+sonnet
+Effort
+Default (Harness default)
+high
+max
+
+Unsaved changes. Save writes them to the configuration file.
+
+Discard
+Save
+control Model: opus
+control Effort: Default (Harness default)
+layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/subagents/straightforward"}
+=== saving returns the saved draft (390x844) ===
+Settings
+Sub-agents
+Straightforward
+
+Work with a clear method. Choose a model and its effort.
+
+Model
+Default (Not set)
+opus
+sonnet
+Effort
+Default (Harness default)
+high
+max
+
+Saved.
+
+Discard
+Save
+control Model: opus
+control Effort: Default (Harness default)
+layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":false,"menu":"Settings","hash":"#settings/subagents/straightforward"}

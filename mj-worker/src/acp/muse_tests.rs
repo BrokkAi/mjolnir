@@ -22,6 +22,7 @@ pub(crate) async fn native_muse_turn(
     HarnessKind::Muse.configure_home_environment(home, &mut environment);
     let resuming = resume.is_some();
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -183,6 +184,7 @@ for line in sys.stdin:
     )
     .unwrap();
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -305,7 +307,7 @@ async fn a_muse_host_that_could_not_start_reports_its_own_diagnostic() {
 }
 
 #[tokio::test]
-#[ignore = "requires MJ_MUSE_ACP_TEST_BINARY pointing to verified muse-acp 0.16.0"]
+#[ignore = "requires MJ_MUSE_ACP_TEST_BINARY pointing to verified muse-acp 0.17.0"]
 async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resume() {
     let adapter =
         PathBuf::from(std::env::var_os("MJ_MUSE_ACP_TEST_BINARY").expect("set adapter path"));
@@ -340,6 +342,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             ),
         ]);
         let spec = LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,

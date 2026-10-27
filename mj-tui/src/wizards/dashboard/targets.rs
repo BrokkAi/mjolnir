@@ -396,23 +396,30 @@ impl DashboardState {
         let target_id = nth_key(&self.config.targets, wizard.target());
         let uses_remaining = wizard.remember_container_size().is_some();
         let capacity = self.host_container_capacity(&target_id);
-        if uses_remaining && capacity.is_some_and(|capacity| !capacity.complete) {
-            let (_, allocation, error) = wizard.sizing_mut();
-            *allocation = None;
-            *error = Some(
-                "A live container has no recorded sizing, so RAM left cannot be calculated safely."
-                    .into(),
-            );
-            return;
-        }
-        let limits = if uses_remaining {
-            capacity.map(|capacity| (capacity.remaining.cpus, capacity.remaining.memory_bytes))
-        } else {
-            self.host_limits(&target_id)
-        };
+        // Remaining capacity is advisory except for Apple container RAM.
+        // Editors still cap values at the physical host totals. Only a new
+        // session is refused here: a resumed or moved session may already be
+        // counted in the projection, and the daemon excludes it when deciding.
+        let limits = capacity
+            .map(|capacity| (capacity.total.cpus, capacity.total.memory_bytes))
+            .or_else(|| self.host_limits(&target_id));
         let result = wizard.resource_editor().allocation(limits, uses_remaining);
         let (_, allocation, error) = wizard.sizing_mut();
         match result {
+            Ok(value)
+                if uses_remaining
+                    && capacity.is_some_and(|capacity| {
+                        capacity.refuses(
+                            &value,
+                            mj_core::config::container_memory_is_hard_limit(
+                                &self.config.targets[&target_id],
+                            ),
+                        )
+                    }) =>
+            {
+                *error = capacity.map(|capacity| capacity.refusal_message(&value));
+                *allocation = None;
+            }
             Ok(value) => {
                 *allocation = Some(value);
                 *error = None;

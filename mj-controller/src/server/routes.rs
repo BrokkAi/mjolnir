@@ -171,6 +171,21 @@ pub(super) fn router(options: ServerOptions) -> Router {
             "/api/actions",
             post(action).layer(DefaultBodyLimit::max(MAX_PROMPT_BODY_BYTES)),
         )
+        // Configuration is edited here, on the cookie-only surface, and never
+        // through `/api/actions` or `/api/v1`; see `settings.rs`.
+        .route("/api/settings", get(read_settings))
+        .route(
+            "/api/settings/page",
+            post(render_settings_page).layer(DefaultBodyLimit::max(MAX_SETTINGS_BODY_BYTES)),
+        )
+        .route(
+            "/api/settings/edit",
+            post(edit_settings).layer(DefaultBodyLimit::max(MAX_SETTINGS_BODY_BYTES)),
+        )
+        .route(
+            "/api/settings/save",
+            post(save_settings).layer(DefaultBodyLimit::max(MAX_SETTINGS_BODY_BYTES)),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_session,

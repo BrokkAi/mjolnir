@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 98;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 99;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1802,6 +1802,31 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older daemons cannot decode OperatorAway/OperatorBack mailbox bodies.
+    if version < 99 {
+        let add_frontier = if legacy_schema::table_has_column(
+            connection,
+            "materialized_sessions",
+            "operator_away_event_frontier",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE materialized_sessions ADD COLUMN operator_away_event_frontier INTEGER NOT NULL DEFAULT 0 CHECK(operator_away_event_frontier >= 0);"
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS operator_away (singleton INTEGER PRIMARY KEY CHECK(singleton=1), away INTEGER NOT NULL CHECK(away IN (0,1)), revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0));
+             INSERT OR IGNORE INTO operator_away VALUES(1,0,0);
+             CREATE TABLE IF NOT EXISTS operator_away_workers (session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE, protocol INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS operator_away_requests (session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE, requested_seq INTEGER NOT NULL, elicitation_id TEXT NOT NULL, request TEXT NOT NULL, period INTEGER NOT NULL, resolved_seq INTEGER, action TEXT, PRIMARY KEY(session_id, requested_seq));
+             {add_frontier}
+             UPDATE schema_compatibility SET minimum_compatible_version = 99 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at) VALUES(99, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 99;
+             COMMIT;",
+        ))?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2297,7 +2322,7 @@ mod reader_tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        assert_eq!(revisions, [93, 94, 95, 96, 97, 98]);
+        assert_eq!(revisions, [93, 94, 95, 96, 97, 98, 99]);
         let fresh = Connection::open_in_memory().unwrap();
         migrate_schema(&fresh).unwrap();
         let schema = |database: &Connection| {
@@ -3047,6 +3072,18 @@ mod reader_tests {
         if version < 85 {
             restore_github_v84_schema(&connection);
         }
+        if version < 99 {
+            connection.execute_batch("DROP TABLE IF EXISTS operator_away_requests; DROP TABLE IF EXISTS operator_away_workers; DROP TABLE IF EXISTS operator_away;").unwrap();
+            if legacy_schema::table_has_column(
+                &connection,
+                "materialized_sessions",
+                "operator_away_event_frontier",
+            )
+            .unwrap()
+            {
+                connection.execute_batch("ALTER TABLE materialized_sessions DROP COLUMN operator_away_event_frontier;").unwrap();
+            }
+        }
         // Historical fixtures must remove columns introduced by later revisions.
         if version < 94
             && legacy_schema::table_has_column(
@@ -3523,6 +3560,70 @@ mod reader_tests {
     /// A store ahead of this build cannot be fixed by starting a daemon of
     /// this build, so the reader must not say so. This is the message the
     /// incident in #24 printed twice a second for an hour.
+    #[test]
+    fn operator_away_migration_refuses_previous_readers_and_writers() {
+        const CHILD: &str = "MJ_OPERATOR_AWAY_MIGRATION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(
+                    module_path!(),
+                    "operator_away_migration_refuses_previous_readers_and_writers",
+                ),
+            )
+            .env(CHILD, "1")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("away-migration.sqlite");
+        save_session_to(&path, &super::super::tests::session("session", "project")).unwrap();
+        stamp_schema_version(&path, 98);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_away_migration BEFORE INSERT ON schema_migrations WHEN NEW.version=99 BEGIN SELECT RAISE(ABORT,'away migration'); END;").unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        connection
+            .execute_batch("ROLLBACK; DROP TRIGGER fail_away_migration;")
+            .unwrap();
+        let before = read_schema_state(&connection).unwrap();
+        assert_eq!(before.revision, 98);
+        assert_eq!(before.minimum_compatible, Some(98));
+        assert!(
+            !legacy_schema::table_has_column(
+                &connection,
+                "materialized_sessions",
+                "operator_away_event_frontier"
+            )
+            .unwrap()
+        );
+        migrate_schema(&connection).unwrap();
+        let schema = read_schema_state(&connection).unwrap();
+        let error = schema.ensure_supported_by(98).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<StoreSchemaMismatch>().unwrap().reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: 99
+            }
+        ));
+        assert_eq!(schema.minimum_compatible, Some(99));
+        connection
+            .execute("UPDATE operator_away SET away=1,revision=7", [])
+            .unwrap();
+        connection.execute("UPDATE materialized_sessions SET operator_away_event_frontier=20 WHERE session_id='session'",[]).unwrap();
+        // New writers preserve the durable flag and replay frontier across ordinary session updates.
+        connection.execute("UPDATE materialized_sessions SET applied_event_ordinal=2,pending_elicitations_json='[]' WHERE session_id='session'",[]).unwrap();
+        assert_eq!(connection.query_row("SELECT operator_away_event_frontier FROM materialized_sessions WHERE session_id='session'",[],|r|r.get::<_,u64>(0)).unwrap(),20);
+        assert!(load_state_from(&path).unwrap().operator_presence.away);
+        assert_eq!(
+            connection
+                .query_row("SELECT revision FROM operator_away", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            7
+        );
+    }
+
     #[test]
     fn question_frontier_migration_is_atomic_and_preserved_by_previous_writers() {
         let root = tempfile::tempdir().unwrap();

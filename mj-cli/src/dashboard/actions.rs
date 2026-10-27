@@ -83,6 +83,30 @@ pub(crate) async fn apply_dashboard_action(
 ) -> Result<()> {
     context.cancel_stale_path_input();
     match action {
+        DashboardAction::SetOperatorAway { away } => {
+            let revision = context.dashboard.operator_presence_revision();
+            crate::dashboard::io::spawn_critical_async(
+                context.critical_operations.clone(),
+                "changing operator presence",
+                context.dashboard_io_tx.clone(),
+                std::time::Duration::from_secs(30),
+                async move {
+                    let mut client = daemon::connect_or_start().await?;
+                    match client
+                        .request(daemon::DaemonAction::SetOperatorAway { away })
+                        .await?
+                    {
+                        daemon::DaemonReply::Done => Ok(()),
+                        reply => bail!("unexpected operator-presence reply {reply:?}"),
+                    }
+                },
+                move |result| DashboardIoUpdate::OperatorAway {
+                    away,
+                    revision,
+                    result,
+                },
+            );
+        }
         DashboardAction::None => {}
         DashboardAction::CopyNativeSessionId { native_session_id } => {
             context.copy_text(&native_session_id, "Copied session ID")?;

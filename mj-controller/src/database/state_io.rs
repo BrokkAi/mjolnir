@@ -16,7 +16,19 @@ pub fn load_state_from(path: &Path) -> Result<State> {
 }
 
 pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
-    let mut state = State::default();
+    let mut state = State {
+        operator_presence: connection.query_row(
+            "SELECT away,revision FROM operator_away WHERE singleton=1",
+            [],
+            |row| {
+                Ok(OperatorPresence {
+                    away: row.get(0)?,
+                    revision: row.get(1)?,
+                })
+            },
+        )?,
+        ..Default::default()
+    };
     let remembered: Option<String> = connection
         .query_row(
             "SELECT policy FROM subagent_preference WHERE singleton = 1",
@@ -1359,6 +1371,45 @@ pub(super) fn load_session_with(
     load_checkpoints_selected(connection, &mut state, Some(id))?;
     state.validate()?;
     Ok(state.sessions.remove(id))
+}
+
+/// Read the daemon-owned setting without loading all session records.
+pub fn load_operator_presence() -> Result<OperatorPresence> {
+    if let Some(committed) = committed_state()? {
+        return Ok(committed.state.operator_presence);
+    }
+    open_reader(&database_path())?
+        .query_row(
+            "SELECT away,revision FROM operator_away WHERE singleton=1",
+            [],
+            |row| {
+                Ok(OperatorPresence {
+                    away: row.get(0)?,
+                    revision: row.get(1)?,
+                })
+            },
+        )
+        .map_err(Into::into)
+}
+
+/// The shared database writer owns transition and no-op decisions.
+pub fn set_operator_away(away: bool) -> Result<bool> {
+    let changed = submit_database_write("operator away setting", move |connection| {
+        super::operator_away::set_with(connection, away)
+    })?;
+    if changed {
+        crate::mailbox_outbox::notify_mailbox_outbox_changed();
+    }
+    Ok(changed)
+}
+
+/// Persist the last negotiated worker protocol so AFK-off remains correct
+/// before the daemon has reattached every worker after a restart.
+pub fn record_operator_away_worker_protocol(session: String, protocol: u32) -> Result<()> {
+    submit_database_write("operator away worker protocol", move |connection| {
+        connection.execute("INSERT INTO operator_away_workers(session_id,protocol) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET protocol=excluded.protocol WHERE protocol != excluded.protocol", params![session,protocol])?;
+        Ok(())
+    })
 }
 
 #[cfg(test)]

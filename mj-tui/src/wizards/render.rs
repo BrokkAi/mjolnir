@@ -63,13 +63,19 @@ fn target_step_choices<W: WizardDraft>(
                         };
                         help.push(Line::styled(
                             format!(
-                                "Host: {} CPUs · {} GiB RAM · hard commitment; {}",
+                                "Host: {} CPUs · {} GiB RAM · committed; {}",
                                 capacity.total.cpus,
                                 capacity_gib_text(capacity.total.memory_bytes),
                                 remaining
                             ),
                             theme::muted(),
                         ));
+                        if let Some(allocation) = wizard.resource_allocation()
+                            && let Some(message) =
+                                capacity.overcommit(allocation).warning(&capacity)
+                        {
+                            help.push(Line::styled(message, warning));
+                        }
                     } else if dashboard.host_limits(id).is_none() {
                         help.push(Line::styled(
                             "Host totals unavailable; resource limits cannot be checked.",

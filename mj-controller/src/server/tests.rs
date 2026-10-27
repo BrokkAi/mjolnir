@@ -134,6 +134,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         ]),
     };
     let state = AppState {
+        operator_presence: Default::default(),
         last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
@@ -1474,6 +1475,25 @@ async fn actions_are_refused_when_their_capability_is_false() {
     }
 }
 
+#[tokio::test]
+async fn operator_away_action_is_sessionless_and_reaches_controller() {
+    let (app, mut actions, _, _, _) =
+        app_with_snapshot(|snapshot| snapshot.sessions = Default::default());
+    let cookie = login_cookie(&app).await;
+    let posted = tokio::spawn(post_action(
+        app,
+        cookie,
+        r#"{"action":"set-operator-away","away":true}"#.into(),
+    ));
+    let request = actions.recv().await.unwrap();
+    assert_eq!(
+        request.action,
+        ControllerAction::SetOperatorAway { away: true }
+    );
+    request.reply.send(ActionOutcome::accepted()).unwrap();
+    assert_eq!(posted.await.unwrap().status(), StatusCode::ACCEPTED);
+}
+
 /// A setting the harness never advertised is not a setting. Forwarding one
 /// asks the agent to refuse something the viewer should never have offered.
 #[tokio::test]
@@ -2738,6 +2758,7 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     assert!(validate_action(&action("raw", Some("/work/project".into())), &snapshot).is_ok());
 }
 
+// Hard-won: #1375: the HTTP pre-check refused cgroup ceilings and CPU overcommit.
 #[test]
 fn new_action_validates_allocation_kind_and_reported_container_limits() {
     let (config, state) = sample_config_state();
@@ -2841,8 +2862,29 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
             ),
             &snapshot,
         )
-        .is_err()
+        .is_ok()
     );
+    // The same projected policy applies on the API boundary: only the Apple
+    // RAM flag changes aggregate admission; per-session physical limits stay.
+    let ram_overcommit = mj_core::state::SessionResourceAllocation::Container {
+        cpus: 4,
+        memory_bytes: 24 << 30,
+    };
+    assert!(validate_action(&action("podman", Some(ram_overcommit.clone())), &snapshot).is_ok());
+    snapshot
+        .targets
+        .iter_mut()
+        .find(|target| target.id == "podman")
+        .unwrap()
+        .container_memory_hard_limit = true;
+    let refusal = validate_action(&action("podman", Some(ram_overcommit)), &snapshot).unwrap_err();
+    assert_eq!(refusal.status, StatusCode::BAD_REQUEST);
+    assert!(refusal.message.contains("20 GiB left"));
+    let cpu_overcommit = mj_core::state::SessionResourceAllocation::Container {
+        cpus: 5,
+        memory_bytes: 8 << 30,
+    };
+    assert!(validate_action(&action("podman", Some(cpu_overcommit)), &snapshot).is_ok());
 }
 
 #[tokio::test]
@@ -3243,6 +3285,7 @@ async fn snapshot_wire_cursor_and_detail_route_share_revision_and_resolve_intern
             .to_bytes(),
     )
     .unwrap();
+    assert_eq!(snapshot["operator_away"], false);
     assert_eq!(snapshot["cursor"]["sequence"], 1);
     assert!(snapshot["cursor"]["incarnation"].as_str().is_some());
     let snapshot_row = &snapshot["sessions"][0];
@@ -4654,4 +4697,275 @@ checkEqual(moveSubagentChange(dshDraft), null, 'the untouched DSH policy is reta
 "#
         ),
     );
+}
+
+/// One request to a settings route, as the viewer sends it.
+async fn settings_request(
+    app: &Router,
+    cookie: &str,
+    uri: &str,
+    body: Option<&serde_json::Value>,
+) -> (StatusCode, String) {
+    let builder = match body {
+        Some(_) => Request::post(uri),
+        None => Request::get(uri),
+    }
+    .header(COOKIE, cookie)
+    .header(CONTENT_TYPE, "application/json");
+    let response = app
+        .clone()
+        .oneshot(
+            builder
+                .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+/// The settings routes over a configuration file in an isolated store: what
+/// the viewer is sent for a draft holding literal secrets, a page, an
+/// accepted and a refused edit, and the save. The recorded exchange is also
+/// the fixture the browser test replays, so both sides agree on its shape.
+#[tokio::test]
+async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model() {
+    if !in_isolated_store("settings_routes_hide_literal_secrets_and_save_through_the_shared_model")
+    {
+        return;
+    }
+    const SECRET: &str = "sk-literal-secret-6c1f2a";
+    const RUNTIME_SECRET: &str = "runtime-literal-secret-91d0";
+    let path = mj_core::config::config_path();
+    let directory = path.parent().unwrap().to_path_buf();
+    let home = directory.join("claude-home");
+    let home_toml = toml::Value::String(home.display().to_string()).to_string();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "version = {version}\n\n\
+             [profiles.claude]\nkind = \"claude\"\nhome = {home_toml}\n\n\
+             [profiles.claude.environment]\nANTHROPIC_API_KEY = \"{SECRET}\"\n\
+             PROXY_TOKEN = {{ from_secret = \"PROXY_TOKEN\" }}\n\n\
+             [targets.lab]\nkind = \"podman\"\nimage = \"example.test/lab:1\"\n\n\
+             [targets.lab.environment]\nLAB_TOKEN = \"{RUNTIME_SECRET}\"\n\n\
+             [targets.apple-container]\nkind = \"apple-container\"\nimage = \"example.test/apple:1\"\n\n\
+             [targets.localhost]\nkind = \"bare\"\n",
+            version = mj_core::config::CONFIG_VERSION,
+        ),
+    )
+    .unwrap();
+    // The daemon has discovered what the profile offers, keyed by its
+    // configured installation, which includes the environment the browser
+    // never sees.
+    let identity = Config::load_from(&path).unwrap().profiles["claude"].capabilities_key("claude");
+    let capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot =
+        serde_json::from_value(serde_json::json!({"profiles": {identity: {
+            "choices": {"status": "ready", "value": {"model": null, "observed_at": 0, "efforts": [],
+                "models": [
+                    {"value": "opus", "name": "Opus", "description": null},
+                    {"value": "sonnet", "name": "Sonnet", "description": null},
+                ]}},
+            "efforts": {"opus": {"status": "ready", "value": [
+                {"value": "high", "name": "High", "description": null},
+                {"value": "max", "name": "Max", "description": null},
+            ]}},
+        }}}))
+        .unwrap();
+    let (app, ..) = app_with_snapshot(move |snapshot| snapshot.profile_capabilities = capabilities);
+    let cookie = login_cookie(&app).await;
+
+    // The agents' bearer token reaches `/api/v1`, never Settings.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/api/settings")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-api-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let environments = |value: &serde_json::Value| {
+        serde_json::json!({
+            "profiles.claude": value["profiles"]["claude"]["environment"],
+            "targets.lab": value["targets"]["lab"]["environment"],
+        })
+    };
+    let mut exchange = Vec::new();
+    let mut bodies = Vec::new();
+    let mut record = |uri: &str, request: serde_json::Value, status: StatusCode, body: &str| {
+        bodies.push(body.to_owned());
+        let response: serde_json::Value = serde_json::from_str(body).unwrap();
+        let mut summary = serde_json::Map::new();
+        for field in ["original", "draft"] {
+            if let Some(value) = response.get(field) {
+                summary.insert(format!("{field}_environments"), environments(value));
+            }
+        }
+        for field in ["page", "notice", "error"] {
+            if let Some(value) = response.get(field) {
+                summary.insert(field.to_owned(), value.clone());
+            }
+        }
+        exchange.push(serde_json::json!({
+            "uri": uri,
+            "request": request,
+            "status": status.as_u16(),
+            "response": summary,
+        }));
+        response
+    };
+
+    let (status, body) = settings_request(&app, &cookie, "/api/settings", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let opened = record("/api/settings", serde_json::Value::Null, status, &body);
+    let original = opened["original"].clone();
+    let mut draft = opened["draft"].clone();
+
+    // The requests a browser makes, in its order: open a page, then edit on
+    // it, and save from the page it is on. Each sends the draft the
+    // previous answer returned.
+    let root = || ("/api/settings/page", serde_json::json!({"path": []}));
+    let steps = [
+        (
+            "/api/settings/page",
+            serde_json::json!({"path": ["profiles", "claude"]}),
+        ),
+        root(),
+        (
+            "/api/settings/page",
+            serde_json::json!({"path": ["continuation"]}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["continuation"], "edit": {"kind": "toggle", "path": ["continuation", "enabled"]}}),
+        ),
+        root(),
+        (
+            "/api/settings/page",
+            serde_json::json!({"path": ["subagents"]}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "max_concurrent"], "text": "99"}}),
+        ),
+        (
+            "/api/settings/page",
+            serde_json::json!({"path": ["subagents", "straightforward"]}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents", "straightforward"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "model"], "choice": "opus"}}),
+        ),
+        (
+            "/api/settings/save",
+            serde_json::json!({"page": ["subagents", "straightforward"]}),
+        ),
+    ];
+    for (uri, sent) in steps {
+        let mut request = sent.clone();
+        request["draft"] = draft.clone();
+        if uri == "/api/settings/save" {
+            request["original"] = original.clone();
+        }
+        let (status, body) = settings_request(&app, &cookie, uri, Some(&request)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer = record(uri, sent, status, &body);
+        if let Some(next) = answer.get("draft") {
+            draft = next.clone();
+        }
+    }
+
+    for body in &bodies {
+        assert!(
+            !body.contains(SECRET),
+            "a literal secret reached the browser: {body}"
+        );
+        assert!(
+            !body.contains(RUNTIME_SECRET),
+            "a literal secret reached the browser: {body}"
+        );
+    }
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains(SECRET), "{saved}");
+    assert!(saved.contains(RUNTIME_SECRET), "{saved}");
+    let saved = Config::load_from(&path).unwrap();
+    assert!(!saved.continuation.enabled);
+    assert_eq!(
+        serde_json::to_value(&saved.subagents).unwrap()["straightforward"]["model"],
+        "opus"
+    );
+
+    let rendered_home = serde_json::to_string(&home.display().to_string()).unwrap();
+    let rendered_home = rendered_home.trim_matches('"');
+    let text = serde_json::to_string_pretty(&exchange)
+        .unwrap()
+        .replace(rendered_home, "<home>");
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "viewer-settings-exchange",
+        &text,
+    );
+}
+
+/// A viewer's draft goes stale when another client saves first. A field both
+/// changed is a conflict, and a hidden value the file no longer holds cannot
+/// be put back; either way the save is refused and the file is untouched.
+#[tokio::test]
+async fn settings_save_refuses_a_stale_draft_without_writing() {
+    if !in_isolated_store("settings_save_refuses_a_stale_draft_without_writing") {
+        return;
+    }
+    let path = mj_core::config::config_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "version = {}\n\n[targets.lab]\nkind = \"podman\"\nimage = \"example.test/lab:1\"\n\n\
+             [targets.lab.environment]\nLAB_TOKEN = \"first-literal\"\n",
+            mj_core::config::CONFIG_VERSION,
+        ),
+    )
+    .unwrap();
+    let (app, ..) = app();
+    let cookie = login_cookie(&app).await;
+    let (_, body) = settings_request(&app, &cookie, "/api/settings", None).await;
+    let opened: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let edit = serde_json::json!({
+        "draft": opened["draft"],
+        "page": ["phone"],
+        "edit": {"kind": "set", "path": ["phone", "bind"], "text": "127.0.0.1:4000"},
+    });
+    let (_, body) = settings_request(&app, &cookie, "/api/settings/edit", Some(&edit)).await;
+    let edited: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let save = serde_json::json!({"original": opened["original"], "draft": edited["draft"]});
+
+    Config::update_to(&path, |config| {
+        config.phone.bind = "127.0.0.1:5000".parse().unwrap();
+        Ok(())
+    })
+    .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let (status, body) = settings_request(&app, &cookie, "/api/settings/save", Some(&save)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.contains("changed in another client"), "{body}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("LAB_TOKEN = \"first-literal\"\n", "");
+    std::fs::write(&path, text).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let unrelated = serde_json::json!({"original": opened["original"], "draft": opened["draft"]});
+    let (status, body) =
+        settings_request(&app, &cookie, "/api/settings/save", Some(&unrelated)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("hidden value of LAB_TOKEN"), "{body}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }

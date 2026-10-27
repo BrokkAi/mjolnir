@@ -8,7 +8,7 @@
 mod spawn;
 pub(crate) use spawn::*;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -46,6 +46,11 @@ use crate::short_id;
 /// Everything the dashboard learns from a background job.
 pub(crate) enum DashboardIoUpdate {
     RuntimeConfirmationMissing(String),
+    OperatorAway {
+        away: bool,
+        revision: u64,
+        result: Result<(), String>,
+    },
     ProfileHydration {
         key: String,
         result: std::result::Result<(), String>,
@@ -627,6 +632,9 @@ impl DashboardContext {
             return;
         }
         match update {
+            DashboardIoUpdate::OperatorAway { away, revision, result } => {
+                self.dashboard.operator_away_request_finished(away, revision, result);
+            }
             DashboardIoUpdate::RuntimeConfirmationMissing(error) => {
                 self.dashboard.set_failure_notice(error)
             }

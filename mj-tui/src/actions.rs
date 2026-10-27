@@ -22,6 +22,7 @@ use crate::{DashboardAction, DashboardState, Focus};
 /// One thing the surface can be asked to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandId {
+    GoAfk,
     OpenSession,
     PinSession,
     ChangeWorkspace,
@@ -231,6 +232,17 @@ macro_rules! footer_word {
 
 fn always_ready(_: &DashboardState) -> Availability {
     Availability::Ready
+}
+
+fn operator_away_available(dashboard: &DashboardState) -> Availability {
+    if matches!(
+        dashboard.operator_presence,
+        crate::operator_away::OperatorPresence::Returning { .. }
+    ) {
+        Availability::Blocked("Waiting for the daemon to confirm your return")
+    } else {
+        Availability::Ready
+    }
 }
 
 fn spinner_available(dashboard: &DashboardState) -> Availability {
@@ -737,6 +749,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Chord,
         footer_rank: 0,
         available: suspend_session_available,
+    },
+    CommandSpec {
+        id: CommandId::GoAfk,
+        label: "Go AFK",
+        description: "Tell agents the operator is away until this window is closed.",
+        scope: Scope::Global,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: operator_away_available,
     },
     CommandSpec {
         id: CommandId::RenameWorkspace,
@@ -1657,7 +1681,10 @@ impl DashboardState {
         if spec(id).pane_keys.is_empty() && !matches!(id, CommandId::Palette | CommandId::Help) {
             self.remember_command(id);
         }
-        if matches!(id, CommandId::SuspendSession | CommandId::RestartSession) {
+        if matches!(
+            id,
+            CommandId::SuspendSession | CommandId::RestartSession | CommandId::GoAfk
+        ) {
             match (spec(id).available)(self) {
                 Availability::Hidden => return DashboardAction::None,
                 Availability::Blocked(reason) => {
@@ -1889,6 +1916,7 @@ impl DashboardState {
                 );
                 DashboardAction::None
             }
+            CommandId::GoAfk => DashboardAction::SetOperatorAway { away: true },
             CommandId::MarkAllRead => self.mark_all_read(),
             CommandId::FilterSessions => {
                 self.begin_sessions_filter();

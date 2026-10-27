@@ -195,6 +195,12 @@ pub struct SubagentFinishedReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MailboxEventBody {
+    OperatorAway {
+        request: String,
+    },
+    OperatorBack {
+        requests: Vec<String>,
+    },
     ReviewVerdict {
         review_id: String,
         repository: std::path::PathBuf,
@@ -268,6 +274,9 @@ impl MailboxEventBody {
     /// legacy text, but it cannot preserve peer sender identity.
     pub const fn minimum_relay_protocol(&self) -> u32 {
         match self {
+            Self::OperatorAway { .. } | Self::OperatorBack { .. } => {
+                crate::relay::RELAY_OPERATOR_AWAY_PROTOCOL
+            }
             Self::ReviewVerdict { .. } => crate::relay::RELAY_PUSH_REVIEW_PROTOCOL,
             Self::SubagentFinished { .. } => crate::relay::RELAY_SUBAGENT_FINISHED_PROTOCOL,
             Self::SessionMessage { .. } => crate::relay::RELAY_SESSION_MESSAGE_PROTOCOL,
@@ -309,6 +318,16 @@ pub struct MailboxEventDescription {
 /// event body. The caller still serializes this as the old `text` field.
 pub fn render_mailbox_event(event: &MailboxEvent) -> String {
     let description = describe_mailbox_event(event);
+    if matches!(
+        event.body,
+        MailboxEventBody::OperatorAway { .. } | MailboxEventBody::OperatorBack { .. }
+    ) {
+        return format!(
+            "{}\n{}",
+            description.header,
+            description.body.unwrap_or_default()
+        );
+    }
     if let MailboxEventBody::ParentMessage { text } = &event.body {
         return format!("{}\n{text}", description.header);
     }
@@ -350,12 +369,24 @@ pub fn render_mailbox_events(events: &[MailboxEvent]) -> String {
     }
     let mut blocks: Vec<_> = events
         .iter()
-        .filter(|event| is_session_message(&event.body))
+        .filter(|event| {
+            is_session_message(&event.body)
+                || matches!(
+                    event.body,
+                    MailboxEventBody::OperatorAway { .. } | MailboxEventBody::OperatorBack { .. }
+                )
+        })
         .map(render_mailbox_event)
         .collect();
     let untrusted = events
         .iter()
-        .filter(|event| !is_session_message(&event.body))
+        .filter(|event| {
+            !is_session_message(&event.body)
+                && !matches!(
+                    event.body,
+                    MailboxEventBody::OperatorAway { .. } | MailboxEventBody::OperatorBack { .. }
+                )
+        })
         .map(render_mailbox_event)
         .collect::<Vec<_>>();
     if !untrusted.is_empty() {
@@ -371,6 +402,31 @@ pub fn render_mailbox_events(events: &[MailboxEvent]) -> String {
 /// the same event type, title, actor, and item reference.
 pub fn describe_mailbox_event(event: &MailboxEvent) -> MailboxEventDescription {
     let (header, body, context, transcript_line) = match &event.body {
+        MailboxEventBody::OperatorBack { requests } => (
+            "Mjolnir: the operator is back".to_owned(),
+            Some(format!(
+                "The operator is back. While they were away, Mjolnir answered these requests for them:\n\n{}\n\nIf you still need an answer, ask again now. It will be shown to the operator.",
+                requests
+                    .iter()
+                    .map(|request| quoted_body(request).join("\n"))
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            )),
+            None,
+            "Told the agent you are back".to_owned(),
+        ),
+        MailboxEventBody::OperatorAway { request } => (
+            "Mjolnir: the operator is away".to_owned(),
+            Some(format!(
+                "The operator is away, so Mjolnir answered this request for them. They have not seen it and have not refused it:\n\n{}\n\nIf you have other useful work that does not depend on this answer, do that work now. If you cannot continue without an answer, make the same request again. Mjolnir will then show it to the operator and wait for them, which may take a long time.",
+                quoted_body(request).join("\n")
+            )),
+            None,
+            format!(
+                "Not shown because you were away: {}",
+                request.lines().next().unwrap_or_default()
+            ),
+        ),
         MailboxEventBody::ReviewVerdict {
             repository,
             base_commit,

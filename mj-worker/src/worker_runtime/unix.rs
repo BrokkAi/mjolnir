@@ -317,6 +317,11 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
     );
     let managed_subagent = config.is_managed_subagent();
     let acp_spec = LaunchSpec {
+        operator_away: relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .operator_away
+            .clone(),
         imported_logins: None,
         clear_context_request: None,
         context_restore: None,
@@ -1397,6 +1402,21 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+fn reuse_review_baselines(
+    relay_state_exists: bool,
+    recorded: &std::collections::BTreeMap<PathBuf, Vec<crate::review::capture::UntrackedEntry>>,
+    git: &dyn mj_checkpoint::archive::GitCommandRunner,
+    session: &str,
+) -> bool {
+    relay_state_exists
+        || (!recorded.is_empty()
+            && crate::review::capture::session_holds_review_baselines(
+                git,
+                &recorded.keys().cloned().collect::<Vec<_>>(),
+                session,
+            ))
+}
+
 async fn prepare_and_start_harness(
     setup: HarnessPreparationSetup,
     dispatch_wake_rx: &mut Option<mpsc::Receiver<()>>,
@@ -1422,8 +1442,8 @@ async fn prepare_and_start_harness(
     let subagent_role = config.subagent_mcp_role();
     let root = root_path.as_path();
     // The first capture must precede the primary harness, so pre-existing
-    // edits are not reported as this session's turn. A restart retains its
-    // original baseline and untracked list.
+    // edits are not reported as this session's turn. Restarts and in-place moves
+    // retain their original baseline and untracked list.
     if config.review_capture {
         let budget = preparation_step(
             root,
@@ -1437,7 +1457,7 @@ async fn prepare_and_start_harness(
         let recorded: std::collections::BTreeMap<
             PathBuf,
             Vec<crate::review::capture::UntrackedEntry>,
-        > = if relay_state_exists {
+        > = {
             let read_record = record.clone();
             bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                 if step_cancel.is_cancelled() {
@@ -1449,7 +1469,8 @@ async fn prepare_and_start_harness(
                     .unwrap_or_default())
             })
             .await?
-        } else {
+        };
+        let recorded = {
             let mut workspace_roots = vec![config.cwd.clone()];
             workspace_roots.extend(reviewer_workspace_directories(&config));
             let session_id = config.session_id.clone();
@@ -1459,6 +1480,9 @@ async fn prepare_and_start_harness(
                 );
                 let _cancel_git = git.cancellation_guard();
                 tokio::task::spawn_blocking(move || {
+                    if reuse_review_baselines(relay_state_exists, &recorded, &git, &session_id) {
+                        return Ok(recorded);
+                    }
                     let repositories =
                         crate::review::capture::discover_repositories(&git, &workspace_roots);
                     crate::review::capture::initialize_review_baselines(
@@ -2045,6 +2069,20 @@ pub(super) async fn serve_client_with_memory(
                 .as_ref()
                 .and_then(|services| services.subagents.clone())
                 .or_else(|| subagents.clone());
+            if let RelayRequest::SetOperatorAway { away, revision } = &envelope.request {
+                let state = {
+                    let relay = relay.lock().expect("relay state lock poisoned");
+                    relay.operator_away.set(mj_core::state::OperatorPresence { away: *away, revision: *revision });
+                    relay.operational_state()
+                };
+                let response = RelayResponseEnvelope {
+                    protocol_version: envelope.protocol_version,
+                    request_id: envelope.request_id,
+                    body: RelayResponseBody::Ok { payload: RelayResponsePayload::Status(state) },
+                };
+                write_logged_response(&mut writer, &response, &session_id, "set_operator_away").await?;
+                continue;
+            }
             if matches!(
                 &envelope.request,
                 RelayRequest::AttachmentPresent { .. }
@@ -2439,6 +2477,43 @@ mod preparation_tests {
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+
+    // Hard-won: c29b1379c: an in-place Move's relay reset made review rescan the checkout and refuse it.
+    #[test]
+    fn review_baseline_reuse_survives_relay_reset_only_with_a_record_and_owned_pins() {
+        use crate::test_support::git;
+        use mj_checkpoint::archive::SystemGit;
+
+        let repository = tempfile::tempdir().unwrap();
+        let root = repository.path();
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.name", "Review Test"]);
+        git(root, &["config", "user.email", "review@example.test"]);
+        git(root, &["commit", "--allow-empty", "-qm", "base"]);
+        let empty = std::collections::BTreeMap::new();
+        assert!(reuse_review_baselines(true, &empty, &SystemGit, "session"));
+        assert!(!reuse_review_baselines(
+            false, &empty, &SystemGit, "session"
+        ));
+        let recorded = crate::review::capture::initialize_review_baselines(
+            &SystemGit,
+            &[root.to_path_buf()],
+            "session",
+        )
+        .unwrap();
+        assert!(reuse_review_baselines(
+            false, &recorded, &SystemGit, "session"
+        ));
+        assert!(!reuse_review_baselines(
+            false, &recorded, &SystemGit, "other"
+        ));
+        assert!(reuse_review_baselines(true, &recorded, &SystemGit, "other"));
+        let reference = mj_checkpoint::archive::review_baseline_ref(&SystemGit, root).unwrap();
+        git(root, &["update-ref", "-d", &reference]);
+        assert!(!reuse_review_baselines(
+            false, &recorded, &SystemGit, "session"
+        ));
+    }
 
     type TestReader = BufReader<OwnedReadHalf>;
 

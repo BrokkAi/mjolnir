@@ -51,6 +51,8 @@ pub struct RuntimeContainerCapacity {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeMetadata {
     #[serde(default)]
+    pub operator_presence: mj_core::state::OperatorPresence,
+    #[serde(default)]
     pub profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
     pub config: Config,
     /// The ids in `config.targets` that the daemon supplied as default
@@ -614,11 +616,18 @@ mod tests {
         }
     }
 
+    // Hard-won: AFK review #3: a coalesced feed hid transitions with equal availability.
     #[test]
     fn replica_applies_add_update_delete_atomically_and_ignores_duplicates() {
         let mut first = RuntimeProjection::default();
+        first.metadata.operator_presence = mj_core::state::OperatorPresence {
+            away: true,
+            revision: 1,
+        };
         first.sessions.insert("old".into(), session("old"));
         let mut next = first.clone();
+        // The intermediate here revision2 was coalesced away by the watch feed.
+        next.metadata.operator_presence.revision = 3;
         next.sessions.remove("old");
         next.sessions.insert("new".into(), session("new"));
         let initial = RuntimeFrame::Snapshot {
@@ -630,6 +639,8 @@ mod tests {
             cursor: cursor("a", 2),
             changes: Box::new(RuntimeDelta::between(&first, &next)),
         };
+        let delta: RuntimeFrame =
+            serde_json::from_value(serde_json::to_value(delta).unwrap()).unwrap();
         let mut replica = RuntimeReplica::default();
         replica.apply(initial).unwrap();
         let retained = replica.projection.clone();

@@ -128,6 +128,9 @@ pub(super) async fn apply_phone_action(
     control: &PhoneActionControl,
 ) -> Result<()> {
     match action {
+        ControllerAction::SetOperatorAway { away } => {
+            services.daemon_runtime.set_operator_away(away).await
+        }
         ControllerAction::New {
             remember_launch_choices,
             remember_container_size,
@@ -182,7 +185,7 @@ pub(super) async fn apply_phone_action(
             });
             let session_title_override = Some(title.clone());
             let (published, publication) = tokio::sync::oneshot::channel();
-            let (registered, review_turned_off) = services
+            let (registered, review_turned_off, capacity_warning) = services
                 .daemon_runtime
                 .start_create_session_controlled(
                     CreateSessionRequest {
@@ -209,7 +212,7 @@ pub(super) async fn apply_phone_action(
                         session_title_override,
                     },
                     control
-                        .create
+                        .lifecycle
                         .clone()
                         .expect("New action has a daemon create control"),
                     publication,
@@ -221,6 +224,7 @@ pub(super) async fn apply_phone_action(
                     action_id,
                     session: registered.session,
                     review_turned_off,
+                    capacity_warning,
                     published,
                 })
                 .map_err(|_| anyhow::anyhow!("phone server stopped before publishing session"))?;
@@ -562,7 +566,7 @@ pub(super) async fn apply_phone_action(
                 .restart_session_controlled(
                     session_id,
                     acknowledge_container_recreation,
-                    control.create.clone(),
+                    control.lifecycle.clone(),
                 )
                 .await
                 .map(|_| ())
