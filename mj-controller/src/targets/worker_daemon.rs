@@ -336,6 +336,34 @@ mod tests {
         )
     }
 
+    // Hard-won: c29b1379c: an in-place Move's relay reset made review rescan the checkout and refuse it.
+    #[test]
+    #[cfg(unix)]
+    fn in_place_reset_preserves_the_review_untracked_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("0123456789abcdef");
+        std::fs::create_dir_all(root.join("profile")).unwrap();
+        let record = root.join(mj_core::relay::REVIEW_UNTRACKED_FILE);
+        std::fs::write(&record, "original review record").unwrap();
+        std::fs::write(root.join(mj_core::relay::RELAY_STATE_FILE), "{}").unwrap();
+        let plan = in_place_worker_reset_plan(
+            &TargetLocator::LocalBare {
+                worker_root: root.to_string_lossy().into_owned(),
+            },
+            "0123456789abcdef",
+            &root.join("profile").to_string_lossy(),
+        )
+        .unwrap();
+        let (status, stdout) = run_script(&plan.args[1]);
+        assert_eq!(status, 0, "{stdout}");
+        assert_eq!(
+            std::fs::read_to_string(record).unwrap(),
+            "original review record"
+        );
+        assert!(!root.join(mj_core::relay::RELAY_STATE_FILE).exists());
+        assert!(!root.join("profile").exists());
+    }
+
     /// A worker records its own pid in its startup file before it writes a
     /// pidfile and before its socket exists. The probe has to believe that
     /// record: a worker is not always recognisable by its command line, and
