@@ -666,6 +666,17 @@ impl KeysConfig {
                         match claimed.get(&(trigger, combo)) {
                             // A default yields to whatever the user bound.
                             Some((_, true)) if !is_user => continue,
+                            // Help is a saved compatibility name for Palette;
+                            // the same chord on both fields is one binding.
+                            Some((other, _))
+                                if matches!(
+                                    (*other, action),
+                                    (KeyAction::Help, KeyAction::Palette)
+                                        | (KeyAction::Palette, KeyAction::Help)
+                                ) =>
+                            {
+                                continue;
+                            }
                             Some((other, _)) => {
                                 return Err(key_error(
                                     field,

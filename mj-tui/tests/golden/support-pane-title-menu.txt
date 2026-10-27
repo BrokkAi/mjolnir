@@ -41,7 +41,7 @@ menu anchor: (47, 31, 47, 31)
 │                                            ││╰─────────────────╯      refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 title click action: None
 focus after title click: Prompt
 menu anchor: (47, 34, 47, 34)
@@ -85,7 +85,7 @@ menu anchor: (47, 34, 47, 34)
 │                                            │││Settings…          │    refreshing…                                                        │
 │                                            │││Usage by session…  │    refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰╰───────────────────╯───────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 Targets Refresh action: RefreshAll
 === Targets after Refresh (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -127,7 +127,7 @@ Targets Refresh action: RefreshAll
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 Targets Runtimes… action: None
 === Targets targets setup page (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -169,7 +169,7 @@ Targets Runtimes… action: None
 │                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 Targets Machines… action: None
 === Targets machines setup page (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -211,7 +211,7 @@ Targets Machines… action: None
 │                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 Profiles Refresh action: RefreshAll
 === Profiles after Refresh (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -253,7 +253,7 @@ Profiles Refresh action: RefreshAll
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 Profiles Settings… action: None
 === Profiles profiles setup page (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -295,7 +295,7 @@ Profiles Settings… action: None
 │                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 Targets dot action: None
 === Targets opened by dot (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -337,7 +337,7 @@ Targets dot action: None
 │                                            ││╰─────────────────╯      refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 Targets number 2 action: None
 === Targets number 2: Runtimes…, targets (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -379,7 +379,7 @@ Targets number 2 action: None
 │                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 Targets number 3 action: None
 === Targets number 3: Machines…, machines (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -421,7 +421,7 @@ Targets number 3 action: None
 │                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 === Targets keyboard menu (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
@@ -462,7 +462,7 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 │                                            ││╰─────────────────╯      refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 Targets Escape action: None
 Targets focus after Escape: Targets
 Targets menu after Escape: false
@@ -506,7 +506,7 @@ Targets menu after Escape: false
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 Targets Enter Refresh action: RefreshAll
 === Targets after Enter Refresh (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -548,7 +548,7 @@ Targets Enter Refresh action: RefreshAll
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 Targets Enter setup action: None
 === Targets setup from keyboard (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -590,7 +590,7 @@ Targets Enter setup action: None
 │                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 Profiles dot action: None
 === Profiles opened by dot (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -632,7 +632,7 @@ Profiles dot action: None
 │                                            │││Settings…          │    refreshing…                                                        │
 │                                            │││Usage by session…  │    refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰╰───────────────────╯───────────────────────────────────────────────────────────────────────╯
-Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : / ? palette
 Profiles number 2 action: None
 === Profiles number 2: Settings…, profiles (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -674,7 +674,7 @@ Profiles number 2 action: None
 │                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : / ? palette
 === Profiles keyboard menu (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
@@ -715,7 +715,7 @@ Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes
 │                                            │││Settings…          │    refreshing…                                                        │
 │                                            │││Usage by session…  │    refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰╰───────────────────╯───────────────────────────────────────────────────────────────────────╯
-Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : / ? palette
 Profiles Escape action: None
 Profiles focus after Escape: Quota
 Profiles menu after Escape: false
@@ -759,7 +759,7 @@ Profiles menu after Escape: false
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : / ? palette
 Profiles Enter Refresh action: RefreshAll
 === Profiles after Enter Refresh (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -801,7 +801,7 @@ Profiles Enter Refresh action: RefreshAll
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : / ? palette
 Profiles Enter setup action: None
 === Profiles setup from keyboard (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -843,7 +843,7 @@ Profiles Enter setup action: None
 │                                                                                                                                          │
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : / ? palette
 Targets Minimized size action: None
 Targets menu after size click: false
 === Targets Minimized pane (140x40) ===
@@ -886,7 +886,7 @@ Targets menu after size click: false
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 Targets Standard size action: None
 Targets menu after size click: false
 === Targets Standard pane (140x40) ===
@@ -929,7 +929,7 @@ Targets menu after size click: false
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 Profiles Minimized size action: None
 Profiles menu after size click: false
 === Profiles Minimized pane (140x40) ===
@@ -972,7 +972,7 @@ Profiles menu after size click: false
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 ╰────────────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ───────── ▁   ▄ ─
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 Profiles Standard size action: None
 Profiles menu after size click: false
 === Profiles Standard pane (140x40) ===
@@ -1015,4 +1015,4 @@ Profiles menu after size click: false
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette

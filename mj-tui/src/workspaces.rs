@@ -379,7 +379,6 @@ impl WorkspaceManager {
 fn workspace_manager_generation(mode: &Mode) -> Option<u64> {
     match mode {
         Mode::WorkspaceManager(manager) => Some(manager.generation),
-        Mode::Help(overlay) => workspace_manager_generation(&overlay.return_to),
         _ => None,
     }
 }
@@ -387,7 +386,6 @@ fn workspace_manager_generation(mode: &Mode) -> Option<u64> {
 fn workspace_manager_ref(mode: &Mode) -> Option<&WorkspaceManager> {
     match mode {
         Mode::WorkspaceManager(manager) => Some(manager),
-        Mode::Help(overlay) => workspace_manager_ref(&overlay.return_to),
         _ => None,
     }
 }
@@ -395,7 +393,6 @@ fn workspace_manager_ref(mode: &Mode) -> Option<&WorkspaceManager> {
 fn workspace_manager_in_mode(mode: &mut Mode) -> Option<&mut WorkspaceManager> {
     match mode {
         Mode::WorkspaceManager(manager) => Some(manager),
-        Mode::Help(overlay) => workspace_manager_in_mode(overlay.return_to.as_mut()),
         _ => None,
     }
 }
@@ -706,12 +703,8 @@ impl DashboardState {
                 } else {
                     DashboardAction::None
                 };
-                if return_to_dashboard {
-                    match &mut self.mode {
-                        Mode::WorkspaceManager(_) => self.cancel_modal(),
-                        Mode::Help(overlay) => *overlay.return_to = Mode::Dashboard,
-                        _ => {}
-                    }
+                if return_to_dashboard && let Mode::WorkspaceManager(_) = &mut self.mode {
+                    self.cancel_modal();
                 }
                 return WorkspaceManagementOutcome { foreground, action };
             }

@@ -132,7 +132,7 @@ impl DashboardState {
         if !availability.wanted
             || availability.held
             || availability.in_flight.is_some()
-            || setup_open(&self.mode)
+            || matches!(self.mode, Mode::Setup(_))
         {
             return None;
         }
@@ -355,9 +355,9 @@ impl DashboardState {
     }
 
     /// The ids an open wizard has chosen, so an answer that removes one can
-    /// move the wizard off it. A wizard under the help overlay counts.
+    /// move the wizard off it.
     fn wizard_selection(&self) -> Option<(Option<String>, String)> {
-        match wizard_mode(&self.mode) {
+        match &self.mode {
             Mode::New(wizard) => Some((
                 self.offered_profiles()
                     .nth(wizard.profile)
@@ -385,7 +385,7 @@ impl DashboardState {
         let Some((profile_id, target_id)) = selected else {
             return;
         };
-        let (profiles, launching): (Vec<String>, bool) = match wizard_mode(&self.mode) {
+        let (profiles, launching): (Vec<String>, bool) = match &self.mode {
             Mode::New(wizard) => (
                 self.offered_profiles()
                     .map(|(id, _)| id.to_owned())
@@ -440,7 +440,7 @@ impl DashboardState {
                 *wizard_target = target.or(first_target).unwrap_or(0);
                 gone = return_to_changed_step(step, profile.is_none(), target.is_none());
             };
-        match wizard_mode_mut(&mut self.mode) {
+        match &mut self.mode {
             Mode::New(wizard) => place(&mut wizard.step, &mut wizard.profile, &mut wizard.target),
             Mode::Resume(wizard) => {
                 place(&mut wizard.step, &mut wizard.profile, &mut wizard.target)
@@ -500,29 +500,6 @@ fn return_to_changed_step(
         return Some(WizardStep::Target);
     }
     None
-}
-
-/// The mode under any help overlay, which keeps the wizard it was opened over.
-fn wizard_mode(mode: &Mode) -> &Mode {
-    match mode {
-        Mode::Help(overlay) => wizard_mode(&overlay.return_to),
-        mode => mode,
-    }
-}
-
-fn wizard_mode_mut(mode: &mut Mode) -> &mut Mode {
-    match mode {
-        Mode::Help(overlay) => wizard_mode_mut(&mut overlay.return_to),
-        mode => mode,
-    }
-}
-
-fn setup_open(mode: &Mode) -> bool {
-    match mode {
-        Mode::Setup(_) => true,
-        Mode::Help(overlay) => setup_open(&overlay.return_to),
-        _ => false,
-    }
 }
 
 /// Why a machine has no runtime, from what probing it found: the reason it

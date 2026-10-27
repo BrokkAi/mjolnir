@@ -38,7 +38,7 @@
 │                                                   │╭ Profiles ▾ (not refreshed)─────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                   ││           Harness  Weekly Resets  5H Resets                                                             │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 === grouped host load without sample clock (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
@@ -79,7 +79,7 @@
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === quota error with refresh age (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
@@ -108,7 +108,7 @@
 │                                      ││  codex-1   Codex        unavailable                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === expired login quota (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
@@ -137,7 +137,7 @@
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === usage-priced API quota (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
@@ -166,7 +166,7 @@
 │                                      ││  codex-1         Codex        ▕   API    ▏                                   │
 │                                      ││  codex-2         Codex        refreshing…                                    │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === quota a harness never shares (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
@@ -195,7 +195,7 @@
 │                                      ││  codex-2   Codex        refreshing…                                          │
 │                                      ││  mimo-1    MiMo Code    ▕   n/a    ▏                                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === Claude Fable weekly quota (140x28) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
@@ -224,7 +224,7 @@
 │                                            ││  codex-1   Codex                                                                           │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 === weekly and five-hour quota columns (140x28) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
@@ -253,7 +253,7 @@
 │                                            ││  codex-1   Codex        ▕███████▎  ▏73% 2d 0h   ▕███████   ▏70% 1h 5m                      │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 === weekly and five-hour quota at 80 columns (80x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
 │ default                            ≡ ││                                      │
@@ -282,4 +282,4 @@
 │  codex-1   Codex        ▕███████▎  ▏73% 2d 0h [1]  ▕███████   ▏70% 1h 5m     │
 │  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette

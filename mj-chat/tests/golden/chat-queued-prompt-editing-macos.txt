@@ -22,7 +22,7 @@ Editing the most recently queued prompt
 │                                                                                                  │
 │> second                                                                                          │
 ╰ 1 queued────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
+Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: RemoveQueuedPrompt { id: "queued-2", text: "second", kind: Prompt }
 draft: "second"
 remaining queue: ["first"]
@@ -51,7 +51,7 @@ Editing the most recently queued prompt
 │                                                                                                  │
 │> third                                                                                           │
 ╰ 2 queued────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
+Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: RemoveQueuedPrompt { id: "queued-3", text: "third", kind: Prompt }
 draft: "third"
 remaining queue: ["first", "second"]
@@ -80,7 +80,7 @@ Editing the most recently queued prompt
 │                                                                                                  │
 │> second                                                                                          │
 ╰ 1 queued────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
+Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: RemoveQueuedPrompt { id: "queued-2", text: "second", kind: Prompt }
 draft: "second"
 remaining queue: ["first"]
@@ -109,7 +109,7 @@ Editing the most recently queued prompt
 │> first                                                                                           │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: RemoveQueuedPrompt { id: "queued-1", text: "first", kind: Prompt }
 draft: "first"
 remaining queue: []
@@ -138,7 +138,7 @@ remaining queue: []
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: None
 draft: ""
 remaining queue: []
@@ -167,7 +167,7 @@ remaining queue: []
 │                                                                                                  │
 │> What would you like to build?                                                                   │
 ╰ 1 queued────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
+Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 queue label: queued config
 
 === Ctrl-P peels queued config into composer (100x24) ===
@@ -194,7 +194,7 @@ Editing the most recently queued configuration change
 │> /model sonnet                                                                                   │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: RemoveQueuedPrompt { id: "queued-config", text: "/model sonnet", kind: SetConfig { key: "model", value: "sonnet" } }
 draft: "/model sonnet"
 queue empty: true
@@ -223,5 +223,5 @@ queue empty: true
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: SetConfig { key: "model", value: "sonnet" }

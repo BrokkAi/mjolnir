@@ -686,7 +686,6 @@ impl DashboardState {
                     .review_editor
                     .as_ref()
                     .is_some_and(|dialog| dialog.probing),
-                Mode::Help(overlay) => active(&overlay.return_to),
                 _ => false,
             }
         }
@@ -771,7 +770,6 @@ impl DashboardState {
 fn review_settings_dialog_mut(mode: &mut Mode) -> Option<&mut ReviewSettingsDialog> {
     match mode {
         Mode::Setup(setup) => setup.review_editor.as_deref_mut(),
-        Mode::Help(overlay) => review_settings_dialog_mut(&mut overlay.return_to),
         _ => None,
     }
 }

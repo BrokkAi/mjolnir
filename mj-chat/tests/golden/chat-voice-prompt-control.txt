@@ -22,7 +22,7 @@
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: None
 Alt-V action: None
 draft empty: true
@@ -51,7 +51,7 @@ draft empty: true
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: ToggleVoice
 Alt-V action: None
 
@@ -79,7 +79,7 @@ Alt-V action: None
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 button area: Some(Rect { x: 2, y: 18, width: 5, height: 1 })
 
 === mouse activates microphone on release (100x24) ===
@@ -106,7 +106,7 @@ button area: Some(Rect { x: 2, y: 18, width: 5, height: 1 })
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: ToggleVoice
 press action: None
 
@@ -134,7 +134,7 @@ press action: None
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: None
 button area: Some(Rect { x: 2, y: 18, width: 5, height: 1 })
 
@@ -162,7 +162,7 @@ button area: Some(Rect { x: 2, y: 18, width: 5, height: 1 })
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Listening… click the microphone to stop · PgUp/PgDn transcript │ ctrl+b then : palette · ? keys
+Listening… click the microphone to stop │ ctrl+b then q detach · : / ? palette
 action: None
 draft: "dictated draft"
 
@@ -196,5 +196,5 @@ button area: None
 ╰────────────────────────────╯
 ╭  mic ──────────────────────╮
 ╰────────────────────────────╯
-ctrl+b then : palette · ? keys
+q detach · : / ? palette
 button area: Some(Rect { x: 6, y: 2, width: 5, height: 1 })

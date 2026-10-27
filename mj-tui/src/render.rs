@@ -108,9 +108,6 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
             render_import_bundle_confirmation(frame, area, confirmation, &mut surfaces)
         }
         Mode::Confirm(dialog) => render_confirmation(frame, area, dialog, &mut surfaces),
-        Mode::Help(overlay) => {
-            crate::help::render_help(frame, area, dashboard, overlay, &mut surfaces)
-        }
         Mode::Palette(palette) => {
             crate::palette::render_palette(frame, area, dashboard, palette, &mut surfaces)
         }

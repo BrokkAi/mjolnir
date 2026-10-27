@@ -25,9 +25,8 @@ pub(crate) fn footer_commands(
     hints.into_iter().map(|(_, id, text)| (id, text)).collect()
 }
 
-/// The words that lead the chord group: `ctrl+b then `. No colon follows
-/// "then", because the palette's own chord key is `:` and `then: : palette`
-/// reads as a doubled colon.
+/// The words that lead the chord group: `ctrl+b then `.
+/// `then : / ? palette` names both prefix aliases without a doubled colon.
 pub(crate) fn chord_prefix(dashboard: &DashboardState) -> String {
     if dashboard.simple_mode() {
         String::new()
@@ -36,10 +35,10 @@ pub(crate) fn chord_prefix(dashboard: &DashboardState) -> String {
     }
 }
 
-/// The footer hints that survive longest when the row runs out of width: a
-/// narrow terminal must still say how to reach everything it left out.
+/// The palette hint survives longest when the row runs out of width: a narrow
+/// terminal must still say how to reach command search.
 pub(crate) fn protected_hint(id: &crate::CommandId) -> bool {
-    matches!(id, crate::CommandId::Palette | crate::CommandId::Help)
+    *id == crate::CommandId::Palette
 }
 
 /// The two groups the dashboard footer draws. The third slot exists because
@@ -49,8 +48,24 @@ fn footer_groups(dashboard: &DashboardState) -> [Vec<(crate::CommandId, String)>
     [
         footer_commands(dashboard, crate::actions::FooterGroup::Pane),
         footer_commands(dashboard, crate::actions::FooterGroup::Chord),
-        Vec::new(),
+        direct_palette_commands(dashboard),
     ]
+}
+
+pub(crate) fn direct_palette_commands(
+    dashboard: &DashboardState,
+) -> Vec<(crate::CommandId, String)> {
+    if !crate::actions::available(dashboard, None).contains(&crate::CommandId::Palette) {
+        return Vec::new();
+    }
+    let Some(key) = dashboard.direct_palette_footer_key() else {
+        return Vec::new();
+    };
+    let spec = crate::actions::spec(crate::CommandId::Palette);
+    let Some(word) = (spec.footer)(dashboard) else {
+        return Vec::new();
+    };
+    vec![(crate::CommandId::Palette, format!("{key} {word}"))]
 }
 
 /// The groups that fit in `width`, with the prefix still named on the first
@@ -73,21 +88,17 @@ fn fitted_footer_groups(
 /// as a string per pane, so a hint can never name a key the surface does not
 /// answer, and a command can never be added without the footer knowing.
 ///
-/// The row is two groups separated by a vertical bar, always in this order:
-/// what the focused pane answers, then the prefix chords that answer from
-/// anywhere. The reader therefore always looks in the same place for a given
-/// kind of key, and the row does not reshuffle itself as the pane changes.
+/// The row groups pane keys, prefix chords, then direct keys. The reader
+/// therefore always looks in the same place for a given kind of key, and the
+/// row does not reshuffle itself as the pane changes.
 /// Each group's order comes from `footer_group` and `footer_rank` on the spec,
 /// not from where the command sits in the table.
 ///
 /// `width` is the row's width in cells. When the hints do not fit, whole
 /// segments are dropped from the right — never truncated mid-word, because
 /// half a hint names a key that does not exist — first from the chords, then
-/// from the pane group, with palette and help retained longest so the user can
-/// find everything the narrow row leaves out. The pane group is what works
-/// right here and holds three entries; the chord group holds twelve, and the
-/// palette lists all of them, so a narrow row keeps the three and gives up the
-/// twelve.
+/// from the pane group. The palette hint stays protected so command search
+/// remains discoverable on narrow terminals.
 ///
 /// The composer's own hints come from the chat itself, because they depend on
 /// what it is doing (a queued prompt, dictation, a history search); this text
@@ -169,13 +180,13 @@ pub(crate) fn resize_banner_line() -> Line<'static> {
     Line::raw("Resize panes: h/j/k/l or arrows · Esc done")
 }
 
-/// The `PREFIX` banner with this dashboard's live prefix and help key.
+/// The `PREFIX` banner with this dashboard's live prefix and palette keys.
 pub(crate) fn prefix_banner_line(dashboard: &DashboardState) -> Line<'static> {
+    let palette_keys = dashboard.palette_binding_labels(mj_core::config::Trigger::Prefix, true);
+    let palette_keys = (!palette_keys.is_empty()).then(|| palette_keys.join(" / "));
     theme::prefix_banner(
         &dashboard.keybinds().prefix_label(),
-        &dashboard
-            .footer_key(crate::CommandId::Help)
-            .unwrap_or_else(|| "?".to_owned()),
+        palette_keys.as_deref(),
     )
 }
 

@@ -3,8 +3,8 @@
 //! Every pane command has exactly one [`CommandSpec`] here, carrying its keys,
 //! the word the footer uses for it, and a closure that says whether it applies
 //! right now. Key handling ([`DashboardState::handle_dashboard_key`]), the
-//! footer ([`crate::render::combined_footer_text`]), and the help overlay
-//! ([`crate::help`]) all read this table, so a binding and its advertisement
+//! footer ([`crate::render::combined_footer_text`]), and the command palette
+//! ([`crate::palette`]) all read this table, so a binding and its advertisement
 //! cannot drift apart.
 //!
 //! The registry lives in `mj-tui` rather than a crate of its own because
@@ -98,7 +98,6 @@ pub enum CommandId {
     SessionActions,
     InterruptTurn,
     InterruptAll,
-    Help,
 }
 
 /// Where a command belongs: which pane has to own the keyboard for it to
@@ -514,7 +513,7 @@ fn operation_in_flight(dashboard: &DashboardState) -> Availability {
 }
 
 /// Every command the surface has. The order here is the order the footer
-/// prints its hints and the order the help overlay prints each group.
+/// prints its hints and the command palette groups its entries.
 pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::ChangeGoSetup,
@@ -1118,8 +1117,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Targets,
         pane_keys: &[KeyHint::plain(KeyCode::Char('d'), "d")],
         action: None,
-        // The Disks cell shows it can be clicked; the key is listed in help
-        // and the palette rather than taking footer room from global keys.
+        // The Disks cell shows it can be clicked; the key is listed in the
+        // palette rather than taking footer room from global keys.
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -1445,7 +1444,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Command palette",
         description: "Search every command that applies right now and run one.",
         scope: Scope::Global,
-        pane_keys: &[],
+        pane_keys: &[KeyHint::plain(KeyCode::Char('?'), "?")],
         action: Some(KeyAction::Palette),
         footer: footer_word!("palette"),
         footer_group: FooterGroup::Chord,
@@ -1463,18 +1462,6 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: spinner_available,
-    },
-    CommandSpec {
-        id: CommandId::Help,
-        label: "Help",
-        description: "List every key this surface answers.",
-        scope: Scope::Global,
-        pane_keys: &[KeyHint::plain(KeyCode::Char('?'), "?")],
-        action: Some(KeyAction::Help),
-        footer: footer_word!("keys"),
-        footer_group: FooterGroup::Chord,
-        footer_rank: 12,
-        available: always_ready,
     },
 ];
 
@@ -1589,20 +1576,14 @@ pub(crate) fn available(dashboard: &DashboardState, scope_filter: Option<Scope>)
 impl DashboardState {
     /// Whether a bound command still answers with the current dialog open.
     ///
-    /// Help and detach have always answered from every surface, and the pane
-    /// preset only changes the layout underneath, so all three survive a modal.
-    /// The rest would act on a surface the user cannot see, so they wait for
-    /// the dialog to close — except over the help overlay, which is a
-    /// reference rather than a decision.
+    /// Detach always answers from every surface, and the pane preset only
+    /// changes the layout underneath, so both survive a modal.
     pub fn command_allowed_now(&self, id: CommandId) -> bool {
         match id {
             // Refreshing is harmless over a modal: it asks the daemon for
             // fresh capacity and quota figures and changes nothing on screen
             // the dialog owns.
-            CommandId::Help
-            | CommandId::QuitDetach
-            | CommandId::TogglePanePreset
-            | CommandId::Refresh => true,
+            CommandId::QuitDetach | CommandId::TogglePanePreset | CommandId::Refresh => true,
             // Cancel is allowed through exactly one modal: the target-actions
             // dialog, where it cancels the test that dialog is running.
             CommandId::CancelOperation => self.target_test_running() || !self.modal_open(),
@@ -1615,13 +1596,13 @@ impl DashboardState {
             | CommandId::SelectWorkspacePrevious
             | CommandId::SelectWorkspaceNext
             | CommandId::SwitchWorkspace => !self.modal_open(),
-            _ => !self.modal_open() || matches!(self.mode, crate::Mode::Help(_)),
+            _ => !self.modal_open(),
         }
     }
 
     /// Runs one registry command. Every arm calls the same entry point the
-    /// key handler used to call directly, so the footer, the help overlay, and
-    /// the keyboard cannot disagree about what a command does.
+    /// key handler used to call directly, so the footer, the palette, and the
+    /// keyboard cannot disagree about what a command does.
     pub fn dispatch_command(&mut self, id: CommandId) -> DashboardAction {
         let saved = self.command_session_override.clone();
         // From the composer a session command acts on the conversation it
@@ -1678,7 +1659,7 @@ impl DashboardState {
         // Commands a person reaches for by name are worth remembering; the
         // pane keys and the palette itself are not. The palette records
         // whatever it runs itself, pane keys included.
-        if spec(id).pane_keys.is_empty() && !matches!(id, CommandId::Palette | CommandId::Help) {
+        if spec(id).pane_keys.is_empty() && id != CommandId::Palette {
             self.remember_command(id);
         }
         if matches!(
@@ -1836,7 +1817,7 @@ impl DashboardState {
                         DashboardAction::InterruptTurn { session_id }
                     }),
                 Availability::Blocked(reason) => {
-                    self.set_notice(crate::help::sentence(reason));
+                    self.set_notice(sentence(reason));
                     DashboardAction::None
                 }
                 Availability::Hidden => DashboardAction::None,
@@ -1860,7 +1841,7 @@ impl DashboardState {
                     DashboardAction::None
                 }
                 Availability::Blocked(reason) => {
-                    self.set_notice(crate::help::sentence(reason));
+                    self.set_notice(sentence(reason));
                     DashboardAction::None
                 }
                 Availability::Hidden => DashboardAction::None,
@@ -1879,7 +1860,7 @@ impl DashboardState {
                         DashboardAction::OpenSubagents { parent_id }
                     }),
                 Availability::Blocked(reason) => {
-                    self.set_notice(crate::help::sentence(reason));
+                    self.set_notice(sentence(reason));
                     DashboardAction::None
                 }
                 Availability::Hidden => DashboardAction::None,
@@ -2049,17 +2030,6 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::QuitDetach => DashboardAction::QuitDetach,
-            // Help toggles: the same key that opens the reference closes it
-            // again, which is what the overlay's own Esc/F1/? arm does when
-            // the key reaches it rather than the chord pre-filter.
-            CommandId::Help => {
-                if matches!(self.mode, crate::Mode::Help(_)) {
-                    self.close_help();
-                } else {
-                    self.begin_help();
-                }
-                DashboardAction::None
-            }
         }
     }
 
@@ -2072,6 +2042,20 @@ impl DashboardState {
             action: (!matches!(&action, DashboardAction::None)).then_some(action),
         }
     }
+}
+
+/// Availability reasons are fragments for notices and menu descriptions;
+/// present them as complete sentences in those command surfaces.
+pub(crate) fn sentence(reason: &str) -> String {
+    let mut chars = reason.chars();
+    let mut text: String = chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default();
+    if !text.is_empty() && !text.ends_with(['.', '!', '?']) {
+        text.push('.');
+    }
+    text
 }
 
 fn upgrade_container_available(dashboard: &DashboardState) -> Availability {
@@ -2146,11 +2130,11 @@ mod tests {
     }
 
     /// A-17: the Sub-agents pane opened only by a mouse click on the prompt's
-    /// lower border. It is a registry command now, so the help overlay, the
-    /// palette, a default chord, and the footer all reach it.
+    /// lower border. It is a registry command now, so the palette, a default
+    /// chord, and the footer all reach it.
     // Hard-won: 85c59fc968: the existing Sub-agents pane had no keyboard route.
     #[test]
-    fn sub_agents_open_from_a_chord_and_are_listed_for_help_and_the_palette() {
+    fn sub_agents_open_from_a_chord_and_are_listed_in_the_palette() {
         let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
         dashboard.focus_sessions();
         assert_eq!(

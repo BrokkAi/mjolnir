@@ -128,9 +128,6 @@ impl DashboardState {
         if self.component_modal_open() {
             return self.handle_component_event(crossterm::event::Event::Key(key));
         }
-        if matches!(self.mode, Mode::Help(_)) {
-            return self.handle_help_key(key);
-        }
         self.handle_dashboard_key(key)
     }
 
@@ -160,10 +157,6 @@ impl DashboardState {
         self.paste_revision = self.paste_revision.wrapping_add(1);
         if self.away_dialog().is_some() {
             self.handle_away_event(Event::Paste(pasted.to_owned()));
-            return;
-        }
-        if matches!(self.mode, Mode::Help(_)) {
-            self.paste_help(pasted);
             return;
         }
         if self.component_modal_open() {
@@ -241,9 +234,6 @@ impl DashboardState {
             self.begin_pane_menu(pane);
             self.record_event_handled();
             return DashboardAction::None;
-        }
-        if matches!(self.mode, Mode::Help(_)) {
-            return self.handle_help_mouse(mouse);
         }
         if self.component_modal_open() {
             return self.handle_component_event(crossterm::event::Event::Mouse(mouse));
@@ -414,7 +404,7 @@ impl DashboardState {
     ///
     /// Everything that runs a named command is looked up in the action
     /// registry ([`crate::actions`]) rather than matched here, so the keys, the
-    /// footer, and the help overlay are all reading one table. What stays as
+    /// footer, and the command palette all read one table. What stays as
     /// hand-written arms is the input that is not a command: list
     /// navigation, and the two keys whose meaning depends on state.
     pub(crate) fn handle_dashboard_key(&mut self, key: KeyEvent) -> DashboardAction {

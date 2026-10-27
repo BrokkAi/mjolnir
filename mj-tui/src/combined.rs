@@ -1118,9 +1118,14 @@ fn render_combined_themed(
                         dashboard,
                         crate::actions::FooterGroup::Chord,
                     );
+                    let functions = crate::render::direct_palette_commands(dashboard);
                     let chord_prefix = crate::render::chord_prefix(dashboard);
-                    let commands = chords.clone();
+                    let commands = chords.iter().chain(&functions).cloned().collect::<Vec<_>>();
                     let chords = chords
+                        .iter()
+                        .map(|(_, text)| text.as_str())
+                        .collect::<Vec<_>>();
+                    let functions = functions
                         .iter()
                         .map(|(_, text)| text.as_str())
                         .collect::<Vec<_>>();
@@ -1141,7 +1146,7 @@ fn render_combined_themed(
                                 area: footer_area,
                                 chords: &chords,
                                 chord_prefix: &chord_prefix,
-                                functions: &[],
+                                functions: &functions,
                                 banner: banner.as_ref(),
                             }),
                             overlay: pane_rect,
@@ -1944,6 +1949,54 @@ mod tests {
                 "{width}: {first:?} is not a whole chord in {footer:?}"
             );
         }
+
+        let mut dashboard = dashboard_with_session(session.clone());
+        dashboard.focus = Focus::Prompt;
+        let mut config = dashboard.config.clone();
+        config.keys.prefix = "ctrl+a".into();
+        config.keys.help = ["prefix+?", "ctrl+alt+p"].into();
+        dashboard.set_config(config);
+        let fixture = mj_client::session::replacement_session_test_fixture(&session_id, 1);
+        let chat = ActiveChat::open(
+            fixture.stopped,
+            "hel",
+            None,
+            fixture.control,
+            mj_chat::chat::SessionHeaderIdentity::default(),
+            String::new(),
+            mj_chat::chat::Notices::default(),
+        );
+        let mut chats = BTreeMap::from([(session_id.clone(), chat)]);
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_combined_for_test(
+                    frame,
+                    &mut dashboard,
+                    &mut chats,
+                    &BTreeMap::new(),
+                    false,
+                );
+            })
+            .unwrap();
+        let footer = buffer_lines(terminal.backend().buffer())
+            .last()
+            .expect("footer row")
+            .clone();
+        assert!(footer.contains("ctrl+a then"), "{footer}");
+        assert!(footer.contains(": / ? palette"), "{footer}");
+        assert!(footer.contains("ctrl+alt+p palette"), "{footer}");
+
+        let chords = crate::render::footer_commands(&dashboard, crate::actions::FooterGroup::Chord);
+        let direct = crate::render::direct_palette_commands(&dashboard);
+        let direct_command_index = chords.len();
+        assert_eq!(direct[0].0, crate::CommandId::Palette);
+        let direct_area = chats[&session_id]
+            .footer_command_areas()
+            .into_iter()
+            .find(|(index, _, text)| *index == direct_command_index && text == "ctrl+alt+p palette")
+            .expect("direct palette footer is connected to the host command list");
+        assert_eq!(direct_area.0, direct_command_index);
     }
 
     /// Launch campaign finding A-13: in an empty pane the "Pin selected

@@ -176,7 +176,7 @@ The default bindings:
 | Field | Default | Action |
 | --- | --- | --- |
 | `prefix` | `ctrl+b` | The prefix key itself |
-| `help` | `prefix+?` | Open help |
+| `help` | `prefix+?` | Open the command palette (legacy alias) |
 | `settings` | `prefix+s` | Open Settings |
 | `detach` | `prefix+q` | Detach this terminal |
 | `new_session` | `prefix+c` | Open the session creation wizard |

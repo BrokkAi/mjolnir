@@ -28,7 +28,7 @@
 │       ╰──────────────────────────────────────────────────────────────────────────────────╯  s    │
 │                                                                                                  │
 ╰─────                                                                                        ─────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 action: ValidateProjectDirectory { target_template_id: "local", directory: "/work/project" }
 === single_profile_and_raw_target_create_from_project_without_confirm (100x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
@@ -60,7 +60,7 @@ action: ValidateProjectDirectory { target_template_id: "local", directory: "/wor
 │       ╰──────────────────────────────────────────────────────────────────────────────────╯  s    │
 │                                                                                                  │
 ╰─────                                                                                        ─────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 action: CreateSession with managed worktree enabled
 === single_profile_keeps_container_sizing_and_confirm (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
@@ -92,7 +92,7 @@ action: CreateSession with managed worktree enabled
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 action: None
 === single_profile_keeps_container_sizing_and_confirm (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
@@ -124,7 +124,7 @@ action: None
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === single_profile_keeps_container_sizing_and_confirm (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                                                                              │
@@ -155,7 +155,7 @@ action: None
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 action: PreflightResumeRepositories
 === single_profile_raw_resume_starts_checks_without_confirm (100x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
@@ -187,4 +187,4 @@ action: PreflightResumeRepositories
 │       ╰──────────────────────────────────────────────────────────────────────────────────╯  s    │
 │                                                                                                  │
 ╰─────                                                                                        ─────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette

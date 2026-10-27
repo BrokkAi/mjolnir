@@ -14,7 +14,6 @@ pub(crate) mod actions;
 mod attachment;
 mod auto_afk;
 mod composer_drafts;
-mod help_search;
 pub(crate) mod io;
 mod read_receipts;
 mod startup_prompts;
@@ -416,7 +415,6 @@ pub(crate) struct DashboardContext {
     /// The newest conversation search the Sessions filter asked for, read by
     /// its debounced task the same way.
     sessions_text_request: Arc<std::sync::atomic::AtomicU64>,
-    help_search: help_search::HelpSearch,
     usage_report: usage_report::UsageReportLoader,
 
     pub(crate) dashboard_io_tx: UnboundedSender<DashboardIoUpdate>,
@@ -1003,9 +1001,6 @@ pub(crate) async fn run_dashboard_for_workspace(
             context.reconcile_conversation_attachments();
             context.refresh_go_context();
             context.refresh_git_status();
-            context
-                .help_search
-                .sync(&context.dashboard, &context.dashboard_io_tx);
             context
                 .usage_report
                 .sync(&context.dashboard, &context.dashboard_io_tx);
@@ -1805,7 +1800,6 @@ impl DashboardContext {
             resolving_aws_resource_options: BTreeSet::new(),
             wiki_search_task: None,
             sessions_text_request: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            help_search: help_search::HelpSearch::default(),
             usage_report: usage_report::UsageReportLoader::default(),
             import_updates_tx,
             import_profiles: Feed::new(import_updates_rx),

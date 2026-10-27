@@ -369,7 +369,6 @@ impl WikiSearchState {
 fn resume_dialog(mode: &Mode) -> Option<&ResumeDialog> {
     match mode {
         Mode::ResumeDialog(dialog) => Some(dialog),
-        Mode::Help(overlay) => resume_dialog(&overlay.return_to),
         Mode::Confirm(ConfirmDialog {
             confirmation: Confirmation::DestroyStopped { reopen, .. },
             ..
@@ -381,7 +380,6 @@ fn resume_dialog(mode: &Mode) -> Option<&ResumeDialog> {
 fn resume_dialog_mut(mode: &mut Mode) -> Option<&mut ResumeDialog> {
     match mode {
         Mode::ResumeDialog(dialog) => Some(dialog),
-        Mode::Help(overlay) => resume_dialog_mut(&mut overlay.return_to),
         Mode::Confirm(ConfirmDialog {
             confirmation: Confirmation::DestroyStopped { reopen, .. },
             ..
@@ -1211,7 +1209,7 @@ impl DashboardState {
                         && dialog.live_search == LiveSearchState::Pending)
                     || dialog.history == HistoryLoad::Loading
             }
-            Mode::Setup(_) | Mode::Help(_) => self.review_settings_discovery_active(),
+            Mode::Setup(_) => self.review_settings_discovery_active(),
             _ => false,
         };
         dialog_animates

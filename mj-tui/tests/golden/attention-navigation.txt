@@ -38,7 +38,7 @@
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · : / ? palette
 attention levels: asks=Waiting, remote=Waiting, done=Unread, quiet=Idle, missing=Inactive; queue: [asks:Waiting, remote:Waiting, done:Unread]
 
 === failure, unreachable worker, and question (140x40) ===
@@ -81,7 +81,7 @@ attention levels: asks=Waiting, remote=Waiting, done=Unread, quiet=Idle, missing
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (×1) · b panes · q detach · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (×1) · b panes · q detach · : / ? palette
 attention levels: asks=Failed, remote=Unreachable, done=Unread, quiet=Idle, missing=Inactive; queue: [asks:Failed, remote:Unreachable, done:Unread]
 rank relation: Failed>Unreachable=true, Unreachable>Waiting=true
 
@@ -125,7 +125,7 @@ rank relation: Failed>Unreachable=true, Unreachable>Waiting=true
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · : / ? palette
 workspace summary: Some((Waiting, 1))
 workspace badge cells: !1; marker fg=Rgb(240, 205, 145); failure color=false
 
@@ -169,7 +169,7 @@ workspace badge cells: !1; marker fg=Rgb(240, 205, 145); failure color=false
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?1) · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?1) · : / ? palette
 workspace summary: Some((Unreachable, 1))
 workspace badge cells: ?1; marker fg=Rgb(244, 154, 165); failure color=true
 
@@ -213,7 +213,7 @@ workspace badge cells: ?1; marker fg=Rgb(244, 154, 165); failure color=true
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (×1) · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (×1) · : / ? palette
 workspace summary: Some((Failed, 1))
 workspace badge cells: ×1; marker fg=Rgb(244, 154, 165); failure color=true
 
@@ -257,7 +257,7 @@ workspace badge cells: ×1; marker fg=Rgb(244, 154, 165); failure color=true
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 workspace summary: None; badge: absent
 
 === next attention opens the first waiting session (140x40) ===
@@ -300,7 +300,7 @@ workspace summary: None; badge: absent
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 action: Open { session_id: "asks" }; selected: Some("asks"); prompt focused: true
 
 === next attention reaches another workspace (140x40) ===
@@ -343,7 +343,7 @@ action: Open { session_id: "asks" }; selected: Some("asks"); prompt focused: tru
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 action: SelectWorkspace { workspace_id: "other" }
 
 === other workspace selection is applied (140x40) ===
@@ -386,7 +386,7 @@ action: SelectWorkspace { workspace_id: "other" }
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 selected: Some("remote")
 
 === previous attention returns to the default workspace (140x40) ===
@@ -429,7 +429,7 @@ selected: Some("remote")
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 action: SelectWorkspace { workspace_id: "default" }
 
 === default workspace selection is restored (140x40) ===
@@ -472,7 +472,7 @@ action: SelectWorkspace { workspace_id: "default" }
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 selected: Some("asks")
 
 === next attention wraps to the first waiting session (140x40) ===
@@ -515,7 +515,7 @@ selected: Some("asks")
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 action: Open { session_id: "asks" }; selected: Some("asks")
 
 === project rows before folding (140x40) ===
@@ -558,7 +558,7 @@ action: Open { session_id: "asks" }; selected: Some("asks")
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · : / ? palette
 
 === waiting project folded (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -600,7 +600,7 @@ action: Open { session_id: "asks" }; selected: Some("asks")
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · : / ? palette
 
 === next attention unfolds and opens the waiting project (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -642,7 +642,7 @@ action: Open { session_id: "asks" }; selected: Some("asks")
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 action: Open { session_id: "asks" }; folded projects: {}
 
 === empty attention queue reports its notice (140x40) ===
@@ -728,8 +728,8 @@ action: None; notice: Some("Nothing is waiting for you.")
 │                                                                ││  codex-1   Codex        refreshing…                                                                                                │
 │                                                                ││  codex-2   Codex        refreshing…                                                                                                │
 ╰────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys
-footer: / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
+footer: / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 
 === footer omits next attention while quiet (200x40) ===
 ╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -771,8 +771,8 @@ footer: / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g se
 │                                                                ││  codex-1   Codex        refreshing…                                                                                                │
 │                                                                ││  codex-2   Codex        refreshing…                                                                                                │
 ╰────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
-footer: Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
+footer: Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 
 === workspace tabs show their urgent badges (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
@@ -814,7 +814,7 @@ footer: Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ c
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · : / ? palette
 workspace tabs: │ Default !1  Other !1               ≡ ││                                                                              │
 
 === folded project heading carries unread badge (120x40) ===
@@ -857,7 +857,7 @@ workspace tabs: │ Default !1  Other !1               ≡ ││               
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · : / ? palette
 folded heading: │[2] done ✓1 ──────────────────────────││                                                                              │
 
 === priority order lists attention before idle (140x40) ===
@@ -900,7 +900,7 @@ folded heading: │[2] done ✓1 ───────────────�
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · : / ? palette
 priority session ids: ["asks", "done", "quiet"]; project headings: false
 
 === priority order reveals all rows (140x40) ===

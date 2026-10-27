@@ -46,22 +46,6 @@ fn first_run_does_not_replace_an_open_settings_draft() {
 }
 
 #[test]
-fn welcome_retains_background_results_under_help() {
-    let mut dashboard = dashboard();
-    dashboard.begin_welcome();
-    dashboard.dispatch_command(CommandId::Help);
-    dashboard.welcome_configured(vec!["Agents: Claude Code.".into()]);
-    dashboard.welcome_checked(vec!["Login required.".into()]);
-    let Mode::Help(help) = &dashboard.mode else {
-        panic!("help closed");
-    };
-    let Mode::Welcome(welcome) = help.return_to.as_ref() else {
-        panic!("welcome lost");
-    };
-    assert!(welcome.lines.iter().any(|line| line == "Login required."));
-}
-
-#[test]
 fn welcome_offers_managed_setup_when_no_agent_was_found() {
     let mut dashboard = dashboard();
     dashboard.begin_welcome();

@@ -38,7 +38,7 @@
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 
 === Unicode click on first label cell leaves filter active (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
@@ -80,7 +80,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 click=(6,3); action=None; filter retained=true
 
 === Unicode click on last label cell leaves filter active (120x40) ===
@@ -123,7 +123,7 @@ click=(6,3); action=None; filter retained=true
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 click=(19,3); action=None; filter retained=true
 
 === Unicode clear chip drops search and state filters (120x40) ===
@@ -166,7 +166,7 @@ click=(19,3); action=None; filter retained=true
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 chip=(21,3) glyph='×'; action=None; filter active=false
 
 === ASCII state filter and title clear chip (120x40) ===
@@ -209,7 +209,7 @@ chip=(21,3) glyph='×'; action=None; filter active=false
 |                                      ||  codex-1   Codex        refreshing..                                         |
 |                                      ||  codex-2   Codex        refreshing..                                         |
 +--------------------------------------++------------------------------------------------------------------------------+
-Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : palette - ? keys
+Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : / ? palette
 
 === ASCII click on first label cell leaves filter active (120x40) ===
 + Workspaces -------- * MJOLNIR vX.Y.Z ++ Browse | Conversation ---------------------------------------------- +   .---+
@@ -251,7 +251,7 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                      ||  codex-1   Codex        refreshing..                                         |
 |                                      ||  codex-2   Codex        refreshing..                                         |
 +--------------------------------------++------------------------------------------------------------------------------+
-Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : palette - ? keys
+Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : / ? palette
 click=(6,3); action=None; filter retained=true
 
 === ASCII click on last label cell leaves filter active (120x40) ===
@@ -294,7 +294,7 @@ click=(6,3); action=None; filter retained=true
 |                                      ||  codex-1   Codex        refreshing..                                         |
 |                                      ||  codex-2   Codex        refreshing..                                         |
 +--------------------------------------++------------------------------------------------------------------------------+
-Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : palette - ? keys
+Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : / ? palette
 click=(19,3); action=None; filter retained=true
 
 === ASCII clear chip drops search and state filters (120x40) ===
@@ -337,7 +337,7 @@ click=(19,3); action=None; filter retained=true
 |                                      ||  codex-1   Codex        refreshing..                                         |
 |                                      ||  codex-2   Codex        refreshing..                                         |
 +--------------------------------------++------------------------------------------------------------------------------+
-Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : palette - ? keys
+Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : / ? palette
 chip=(21,3) glyph='x'; action=None; filter active=false
 
 === inactive filter input follows buttons at 140 columns (140x40) ===
@@ -380,7 +380,7 @@ chip=(21,3) glyph='x'; action=None; filter active=false
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 Sessions action row: "│ Create   Open   Filter: ___________________│"; filter active: false
 
 === inactive filter input follows buttons at 80 columns (80x40) ===
@@ -423,7 +423,7 @@ Sessions action row: "│ Create   Open   Filter: ___________________│"; filte
 │  codex-1   Codex        refreshing…                                          │
 │  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
 Sessions action row: "│ Create   Open   Filter: _____________│"; filter active: false
 
 === minimized pane applies the filter while hiding the input (140x40) ===
@@ -466,7 +466,7 @@ Sessions action row: "│ Create   Open   Filter: _____________│"; filter acti
 │                  ││  codex-1   Codex        refreshing…                                                                                  │
 │                  ││  codex-2   Codex        refreshing…                                                                                  │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 action row: "│ Create   Open    │"; hidden sessions: 0
 click Filter input: None; editing: true
 
@@ -510,7 +510,7 @@ click Filter input: None; editing: true
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 query/cursor: ("nomatch", 7); hidden sessions: 0; row: "│ Create   Open   Filter: nomatch ___________│"
 
 === Esc clears the filter input (140x40) ===
@@ -553,7 +553,7 @@ query/cursor: ("nomatch", 7); hidden sessions: 0; row: "│ Create   Open   Filt
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 filter active: false
 
 === readline Left (140x40) ===
@@ -596,7 +596,7 @@ filter active: false
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@15
 
 === readline Right (140x40) ===
@@ -639,7 +639,7 @@ input/cursor: "alpha beta gamma"@15
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@16
 
 === readline Home (140x40) ===
@@ -682,7 +682,7 @@ input/cursor: "alpha beta gamma"@16
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@0
 
 === readline End (140x40) ===
@@ -725,7 +725,7 @@ input/cursor: "alpha beta gamma"@0
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@16
 
 === readline Ctrl-A (140x40) ===
@@ -768,7 +768,7 @@ input/cursor: "alpha beta gamma"@16
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@0
 
 === readline Ctrl-E (140x40) ===
@@ -811,7 +811,7 @@ input/cursor: "alpha beta gamma"@0
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@16
 
 === readline Ctrl-B (140x40) ===
@@ -854,7 +854,7 @@ input/cursor: "alpha beta gamma"@16
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@15
 
 === readline Ctrl-F (140x40) ===
@@ -897,7 +897,7 @@ input/cursor: "alpha beta gamma"@15
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@16
 
 === readline Alt-B (140x40) ===
@@ -940,7 +940,7 @@ input/cursor: "alpha beta gamma"@16
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@11
 
 === readline Alt-B again (140x40) ===
@@ -983,7 +983,7 @@ input/cursor: "alpha beta gamma"@11
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@6
 
 === readline Alt-F (140x40) ===
@@ -1026,7 +1026,7 @@ input/cursor: "alpha beta gamma"@6
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@10
 
 === readline Delete (140x40) ===
@@ -1069,7 +1069,7 @@ input/cursor: "alpha beta gamma"@10
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha betagamma"@10
 
 === readline Backspace (140x40) ===
@@ -1112,7 +1112,7 @@ input/cursor: "alpha betagamma"@10
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha betgamma"@9
 
 === readline Ctrl-H (140x40) ===
@@ -1155,7 +1155,7 @@ input/cursor: "alpha betgamma"@9
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha begamma"@8
 
 === readline Ctrl-W (140x40) ===
@@ -1198,7 +1198,7 @@ input/cursor: "alpha begamma"@8
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha gamma"@6
 
 === readline Ctrl-K (140x40) ===
@@ -1241,7 +1241,7 @@ input/cursor: "alpha gamma"@6
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha "@6
 
 === readline Ctrl-A before insert (140x40) ===
@@ -1284,7 +1284,7 @@ input/cursor: "alpha "@6
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha "@0
 
 === readline insert x (140x40) ===
@@ -1327,7 +1327,7 @@ input/cursor: "alpha "@0
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "xalpha "@1
 
 === readline Ctrl-U (140x40) ===
@@ -1370,7 +1370,7 @@ input/cursor: "xalpha "@1
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha "@0
 
 === Up leaves text editing for the Sessions pane (140x40) ===
@@ -1413,7 +1413,7 @@ input/cursor: "alpha "@0
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 query/cursor after Up: ("alpha ", 0)
 
 === slash opens filter input (140x40) ===
@@ -1456,7 +1456,7 @@ query/cursor after Up: ("alpha ", 0)
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 editing after slash: true
 
 === Enter keeps text and leaves editing (140x40) ===
@@ -1499,7 +1499,7 @@ editing after slash: true
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 query after Enter: ("q", 1); editing: false
 
 === slash returns focus to the filter input (140x40) ===
@@ -1542,7 +1542,7 @@ query after Enter: ("q", 1); editing: false
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 editing after slash: true
 
 === Esc after slash removes filter (140x40) ===
@@ -1585,7 +1585,7 @@ editing after slash: true
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 filter active: false
 
 === ASCII symbols keep the filter row ASCII (140x40) ===
@@ -1628,7 +1628,7 @@ filter active: false
 |                                            ||  codex-1   Codex        refreshing..                                                       |
 |                                            ||  codex-2   Codex        refreshing..                                                       |
 +--------------------------------------------++--------------------------------------------------------------------------------------------+
-Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - a read - b panes - : palette - ? keys
+Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - a read - b panes - : / ? palette
 filter row: "| Create   Open   Filter: q _________________|"; ASCII: true
 
 === branch name matches without regard to case (140x40) ===
@@ -1671,7 +1671,7 @@ filter row: "| Create   Open   Filter: q _________________|"; ASCII: true
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 hidden sessions: 0
 
 === additional text hides the branch match (140x40) ===
@@ -1714,5 +1714,5 @@ hidden sessions: 0
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 hidden sessions: 1

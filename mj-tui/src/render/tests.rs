@@ -703,7 +703,7 @@ fn a_pending_question_is_the_excerpt_instead_of_the_tool_name() {
     assert_eq!(current_agent_excerpt(&asking), Some("Choose a path"));
 }
 
-/// Help is the one hint that is worth more than any other, so it survives
+/// Command search is the one hint worth more than any other, so it survives
 /// every focus and every width squeeze.
 /// A hint cut in half names a key that does not exist. Narrow terminals
 /// therefore lose whole hints from the right, and never part of one.
@@ -721,19 +721,16 @@ fn footer_hints(footer: &str) -> Vec<String> {
 
 /// The prefix label rides on the first chord hint, which is also the first
 /// chord a narrow row gives up. The label must outlive it: a row reading
-/// `: palette · ? keys` would say `:` alone opens the palette.
+/// `: / ? palette` would say only `:` opens the palette.
 // Hard-won: 22d10cb4: A narrow footer dropped the prefix label with the first chord and made the remaining shortcut look like a plain key.
 #[test]
 fn the_prefix_is_still_named_when_only_protected_chords_survive() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus_sessions();
     let footer = combined_footer_text(&dashboard, 60);
-    assert_eq!(
-        footer, "Enter open │ ctrl+b then : palette · ? keys",
-        "{footer}"
-    );
+    assert_eq!(footer, "Enter open │ ctrl+b then : / ? palette", "{footer}");
     assert!(
-        !combined_footer_text(&dashboard, 200).contains("then : palette"),
+        !combined_footer_text(&dashboard, 200).contains("then : / ? palette"),
         "a wide row keeps the label on the first chord"
     );
 }
@@ -774,7 +771,7 @@ fn every_pane_footer_names_the_prefix_at_140_100_and_80_columns() {
                 "{focus:?} {width}: {footer}"
             );
             assert!(
-                footer.ends_with(": palette · ? keys"),
+                footer.ends_with(": / ? palette"),
                 "{focus:?} {width}: {footer}"
             );
             assert!(!footer.contains("then: :"), "{focus:?} {width}: {footer}");
@@ -782,13 +779,13 @@ fn every_pane_footer_names_the_prefix_at_140_100_and_80_columns() {
     }
 }
 
-/// The prefix chords give way before the pane's own hints, and help and palette
+/// The prefix chords give way before the pane's own hints, and palette aliases
 /// remain visible after every other hint has been dropped. The pane group is
 /// the short list of keys that work right here; the chord group is the long one
 /// the palette holds in full, so the long one is what a narrow row gives up.
 // Hard-won: 36fbf1f1: A 140-column footer kept chord hints while dropping the focused pane hints that teach its active controls.
 #[test]
-fn footer_drops_chord_hints_before_pane_hints_and_keeps_help_longest() {
+fn footer_drops_chord_hints_before_pane_hints_and_keeps_palette_longest() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
     dashboard.focus_sessions();
@@ -804,18 +801,18 @@ fn footer_drops_chord_hints_before_pane_hints_and_keeps_help_longest() {
     let squeezed = combined_footer_text(&dashboard, 90);
     assert_eq!(
         squeezed,
-        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : palette · ? keys"
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette"
     );
 
     // Narrower still, the pane hints give way from the right as well, and the
     // prefix label stays on the first chord left standing.
     assert_eq!(
         combined_footer_text(&dashboard, 52),
-        "Enter open │ ctrl+b then : palette · ? keys"
+        "Enter open │ ctrl+b then : / ? palette"
     );
 
-    assert_eq!(combined_footer_text(&dashboard, 20), ": palette · ? keys");
-    assert_eq!(combined_footer_text(&dashboard, 6), "? keys");
+    assert_eq!(combined_footer_text(&dashboard, 20), ": / ? palette");
+    assert!(combined_footer_text(&dashboard, 6).is_empty());
     assert!(combined_footer_text(&dashboard, 5).is_empty());
     assert!(combined_footer_text(&dashboard, 0).is_empty());
 }

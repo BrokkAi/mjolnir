@@ -579,7 +579,8 @@ pub(crate) fn render_footer_command(
 mod tests {
     use super::*;
     use crate::test_support::{
-        buffer_lines, chord, dashboard_with_session, key, mouse_at, point, running_session,
+        buffer_lines, chord, dashboard_with_session, key, mouse_at, point, prefix_key, route,
+        running_session,
     };
     use crate::{Focus, Mode, PaneSize, SupportPane};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
@@ -696,27 +697,22 @@ mod tests {
     }
 
     #[test]
-    fn footer_help_scrolls_and_closes_without_leaking_to_background_commands() {
+    fn pane_question_mark_opens_palette_and_modal_chord_keeps_its_dialog() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus = Focus::Sessions;
-        let lines = draw(&mut dashboard, (120, 40));
-        // Save the dashboard button location before opening the help overlay;
-        // the overlay may contain its own prose mentioning "Create".
-        let create = point(&lines, "Create");
-        click(&mut dashboard, point(&lines, "? keys"));
-        let lines = draw(&mut dashboard, (120, 40));
-        click(&mut dashboard, create);
-        assert!(matches!(dashboard.mode, Mode::Help(_)));
-        let dismiss = point(&lines, "×");
-        dashboard.handle_mouse(mouse_at(MouseEventKind::ScrollDown, dismiss));
-        assert!(matches!(&dashboard.mode, Mode::Help(overlay) if overlay.scroll > 0));
-        click(&mut dashboard, dismiss);
+        dashboard.handle_key(key(KeyCode::Char('?')));
+        assert!(matches!(dashboard.mode, Mode::Palette(_)));
+        assert!(
+            draw(&mut dashboard, (120, 40))
+                .join("\n")
+                .contains("Search commands")
+        );
+        dashboard.handle_key(key(KeyCode::Esc));
         assert!(matches!(dashboard.mode, Mode::Dashboard));
+
         chord(&mut dashboard, CommandId::OpenConfig);
         let previous = dashboard.mode.clone();
-        dashboard.dispatch_command(CommandId::Help);
-        let lines = draw(&mut dashboard, (120, 40));
-        click(&mut dashboard, point(&lines, "×"));
+        route(&mut dashboard, &[prefix_key(), key(KeyCode::Char('?'))]);
         assert_eq!(dashboard.mode, previous);
     }
 

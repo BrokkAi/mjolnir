@@ -30,7 +30,7 @@
 │                                      ││  codex-1   Codex        refreshing…                      │
 │                                      ││  codex-2   Codex        refreshing…                      │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === AFK waiting requests cleared (100x32) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
@@ -63,7 +63,7 @@
 │                                      ││  codex-1   Codex        refreshing…                      │
 │                                      ││  codex-2   Codex        refreshing…                      │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === AFK ASCII (100x32) ===
 + Workspaces -------- * MJOLNIR vX.Y.Z ++ Browse | Conversation -------------------------- +   .---+
 | default !4                         = ||                                                          |
@@ -96,7 +96,7 @@
 |                                      ||  codex-1   Codex        refreshing..                     |
 |                                      ||  codex-2   Codex        refreshing..                     |
 +--------------------------------------++----------------------------------------------------------+
-/ search (filter a/b/w/i/d) - Tab pane | ctrl+b then c create - g sessions - : palette - ? keys
+/ search (filter a/b/w/i/d) - Tab pane | ctrl+b then c create - g sessions - a read - : / ? palette
 === AFK small (32x12) ===
 
 

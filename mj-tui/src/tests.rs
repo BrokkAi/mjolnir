@@ -3211,7 +3211,7 @@ fn resize_mode_routes_repeated_motions_consumes_text_and_exits() {
         KeyRoute::Forward
     );
     chord(&mut dashboard, CommandId::ResizeMode);
-    chord(&mut dashboard, CommandId::Help);
+    dashboard.dispatch_command(CommandId::Palette);
     assert!(!dashboard.resize_mode_active());
     dashboard.cancel_modal();
     assert!(!dashboard.resize_mode_active());
