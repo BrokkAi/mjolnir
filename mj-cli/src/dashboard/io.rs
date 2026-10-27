@@ -789,9 +789,6 @@ impl DashboardContext {
             }
             DashboardIoUpdate::WorkerRecordPersistence { operation, result } => {
                 match (operation, result) {
-                    (WorkerRecordPersistence::AcpTitle { .. }, Err(error)) => self
-                        .dashboard
-                        .set_notice(format!("Could not save harness title: {error}")),
                     (
                         WorkerRecordPersistence::TargetMissing {
                             session_id,
@@ -817,16 +814,9 @@ impl DashboardContext {
                         ))
                     }
                     (
-                        WorkerRecordPersistence::AcpTitle { .. },
-                        Ok(WorkerRecordPersistenceOutcome::Saved),
-                    )
-                    | (
                         WorkerRecordPersistence::TargetMissing { .. },
                         Ok(WorkerRecordPersistenceOutcome::Unchanged),
                     ) => {}
-                    (operation, Ok(outcome)) => {
-                        unreachable!("persistence operation {operation:?} returned {outcome:?}")
-                    }
                 }
             }
             DashboardIoUpdate::MaterializedSessionProjection { session_id, result } => {

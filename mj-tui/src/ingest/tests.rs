@@ -449,12 +449,33 @@ fn stored_summary_restores_dashboard_messages_without_marking_transcript_ready()
     assert_eq!(detail.current_turn_started_at, Some(4));
     assert_eq!(detail.transcript_hydration, TranscriptHydration::Loading);
     assert!(detail.transcript.is_none());
-    assert_eq!(
-        dashboard.state.sessions["session-1"]
-            .acp_session_title
-            .as_deref(),
-        Some("Persisted title")
-    );
+}
+
+#[test]
+fn dashboard_names_a_session_only_from_the_daemon_record() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let summary = MaterializedSessionSummary {
+        session_id: "session-1".into(),
+        applied_event_ordinal: 1,
+        last_activity_at_ms: None,
+        execution: MaterializedExecutionState::Idle,
+        session_title: Some("Transcript title".into()),
+        last_agent_message: None,
+        last_user_message: None,
+        last_agent_message_follows_last_user: false,
+        agent_message_latest_content_ordinals: vec![],
+        interruption_event_ordinals: vec![],
+    };
+    assert!(dashboard.apply_prepared_materialized_session_summary(
+        PreparedMaterializedSessionSummary::from_materialized(summary, 0),
+    ));
+    let mut materialized = materialized_session_for("session-1", vec![agent_message(2, "done")]);
+    materialized.session_title = Some("Transcript title".into());
+    dashboard.apply_materialized_session(&materialized);
+
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(lines.iter().any(|line| line.contains("ACP pretty name")));
+    assert!(!lines.iter().any(|line| line.contains("Transcript title")));
 }
 
 #[test]
@@ -486,16 +507,14 @@ fn late_startup_summary_does_not_erase_live_tool_preview_at_the_same_frontier() 
 }
 
 #[test]
-fn stored_summary_elides_hidden_context_from_the_name_and_user_preview() {
-    let mut session = stopped_session();
-    session.acp_session_title = None;
-    let mut dashboard = dashboard_with_session(session);
+fn stored_summary_elides_hidden_context_from_the_user_preview() {
+    let mut dashboard = dashboard_with_session(stopped_session());
     let summary = MaterializedSessionSummary {
         session_id: "session-1".into(),
         applied_event_ordinal: 2,
         last_activity_at_ms: Some(2_000),
         execution: MaterializedExecutionState::Idle,
-        session_title: Some("<hel-project-memory>private and truncated".into()),
+        session_title: None,
         last_agent_message: None,
         last_user_message: Some(
             concat!(
@@ -518,10 +537,6 @@ fn stored_summary_elides_hidden_context_from_the_name_and_user_preview() {
             .last_user_message
             .as_deref(),
         Some("Visible question")
-    );
-    assert_eq!(
-        dashboard.state.sessions["session-1"].acp_session_title,
-        None
     );
 }
 

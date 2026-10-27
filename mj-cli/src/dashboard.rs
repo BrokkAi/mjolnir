@@ -1088,7 +1088,7 @@ mod upgrade;
 pub(crate) use upgrade::UpgradeResume;
 mod drafts;
 mod drains;
-pub(crate) use drains::{refresh_open_chats, refresh_subagent_counts};
+pub(crate) use drains::refresh_subagent_counts;
 mod frame_pacer;
 use frame_pacer::{FRAME_INTERVAL, FramePacer, paced};
 mod session_state;
