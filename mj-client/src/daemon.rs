@@ -102,9 +102,10 @@ pub enum WikiIndexState {
     /// sessions that exist. This is the state a fresh index starts in.
     #[default]
     Indexing,
-    /// The index file on disk was written by a different SessionWiki schema
-    /// version. Mjolnir will not open it, because opening it would drop and
-    /// rebuild the user's whole cache.
+    /// The index file on disk was written by a newer SessionWiki schema
+    /// version. Mjolnir will not open it, because rebuilding it down would only
+    /// make the newer program rebuild it back. An older index is not this
+    /// state: the daemon rebuilds it, and it reads as `Indexing` meanwhile.
     VersionMismatch,
 }
 

@@ -475,7 +475,7 @@ impl ResumeDialog {
         }
         self.wiki_search.status().and_then(|status| {
             (status.state == WikiIndexState::VersionMismatch)
-                .then_some("SessionWiki index is at a different version")
+                .then_some("SessionWiki index is from a newer version")
         })
     }
 
@@ -2663,7 +2663,7 @@ fn resume_list_title(
             if status.state == WikiIndexState::Indexing {
                 spans.push(Span::raw(" · index building, more may arrive"));
             } else if status.state == WikiIndexState::VersionMismatch {
-                spans.push(Span::raw(" · incompatible SessionWiki index"));
+                spans.push(Span::raw(" · index from a newer SessionWiki"));
             } else if status.topping_up {
                 spans.push(Span::raw(" · index syncing, more may arrive"));
             }
