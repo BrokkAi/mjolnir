@@ -1494,6 +1494,22 @@ async fn operator_away_action_is_sessionless_and_reaches_controller() {
     assert_eq!(posted.await.unwrap().status(), StatusCode::ACCEPTED);
 }
 
+#[tokio::test]
+async fn operator_activity_action_is_sessionless_and_reaches_controller() {
+    let (app, mut actions, _, _, _) =
+        app_with_snapshot(|snapshot| snapshot.sessions = Default::default());
+    let cookie = login_cookie(&app).await;
+    let posted = tokio::spawn(post_action(
+        app,
+        cookie,
+        r#"{"action":"record-operator-activity"}"#.into(),
+    ));
+    let request = actions.recv().await.unwrap();
+    assert_eq!(request.action, ControllerAction::RecordOperatorActivity);
+    request.reply.send(ActionOutcome::accepted()).unwrap();
+    assert_eq!(posted.await.unwrap().status(), StatusCode::ACCEPTED);
+}
+
 /// A setting the harness never advertised is not a setting. Forwarding one
 /// asks the agent to refuse something the viewer should never have offered.
 #[tokio::test]

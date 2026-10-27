@@ -5852,6 +5852,8 @@ function refreshOpenSubagentContext(id) {
 
 function presentSnapshot(detailChangedIds = []) {
   snapshot = viewerState.metadata;
+  discardQueuedOperatorActivityIfDisabled();
+  activitySignalFailed = false;
   signedOut = false;
   snapshotReceivedAtMs = Date.now();
   reconcileLifecycleActions();
@@ -8355,6 +8357,95 @@ function renderMenuVersion() {
 }
 
 let operatorAwayPending = null;
+
+let activitySignalTimer = null;
+let activitySignalInFlight = false;
+let activitySignalDirty = false;
+let activitySignalFailed = false;
+let lastActivitySignalAt = null;
+
+const OPERATOR_ACTIVITY_SIGNAL_INTERVAL_MS = 1000;
+
+function operatorActivityReportingEnabled() {
+  return Number.isInteger(snapshot?.auto_afk_minutes)
+    && snapshot.auto_afk_minutes > 0
+    && snapshot.operator_away !== true;
+}
+
+function scheduleOperatorActivitySignal() {
+  if (!activitySignalDirty || activitySignalInFlight || activitySignalFailed
+    || !operatorActivityReportingEnabled()) return;
+  const wait = Math.max(
+    0,
+    lastActivitySignalAt === null
+      ? 0
+      : OPERATOR_ACTIVITY_SIGNAL_INTERVAL_MS - (performance.now() - lastActivitySignalAt),
+  );
+  if (wait > 0) {
+    if (activitySignalTimer === null) {
+      activitySignalTimer = setTimeout(() => {
+        activitySignalTimer = null;
+        void sendOperatorActivitySignal();
+      }, wait);
+    }
+    return;
+  }
+  void sendOperatorActivitySignal();
+}
+
+function discardQueuedOperatorActivityIfDisabled() {
+  if (operatorActivityReportingEnabled()) return;
+  activitySignalDirty = false;
+  if (activitySignalTimer !== null) {
+    clearTimeout(activitySignalTimer);
+    activitySignalTimer = null;
+  }
+}
+
+async function sendOperatorActivitySignal() {
+  if (!activitySignalDirty || activitySignalInFlight || activitySignalFailed
+    || !operatorActivityReportingEnabled()) return;
+  activitySignalDirty = false;
+  activitySignalInFlight = true;
+  lastActivitySignalAt = performance.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+  try {
+    await request('/api/actions', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'record-operator-activity' }),
+      signal: controller.signal,
+    });
+    if (operatorAwayError.textContent.startsWith('Could not record activity:')) {
+      operatorAwayError.textContent = '';
+      operatorAwayError.classList.add('hidden');
+    }
+  } catch (err) {
+    // Stop reporting until a fresh snapshot arrives. This keeps a failed
+    // background action from producing an error for every later input.
+    activitySignalFailed = true;
+    operatorAwayError.textContent = `Could not record activity: ${err.message}`;
+    operatorAwayError.classList.remove('hidden');
+    activitySignalDirty = false;
+  } finally {
+    clearTimeout(timeout);
+    activitySignalInFlight = false;
+    scheduleOperatorActivitySignal();
+  }
+}
+
+function observeTrustedOperatorActivity(event) {
+  if (!event.isTrusted || !operatorActivityReportingEnabled() || activitySignalFailed) return;
+  activitySignalDirty = true;
+  scheduleOperatorActivitySignal();
+}
+
+for (const type of [
+  'keydown', 'paste', 'input',
+  'pointermove', 'pointerdown', 'pointerup', 'pointercancel', 'wheel',
+]) {
+  document.addEventListener(type, observeTrustedOperatorActivity, { capture: true, passive: true });
+}
 
 function renderOperatorAway() {
   const away = operatorAwayPending ?? snapshot?.operator_away === true;

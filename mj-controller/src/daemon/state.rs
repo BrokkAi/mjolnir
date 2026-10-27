@@ -79,6 +79,7 @@ impl RuntimeState {
             Some(profile_catalog.clone()),
             reviewer_runtime.clone(),
         );
+        let inactivity = auto_afk::Inactivity::new(controller.config.advanced.auto_afk_minutes);
         Self {
             attachments: Mutex::new(BTreeMap::new()),
             phone_status: Mutex::new(WebViewerStatus::Starting),
@@ -101,7 +102,8 @@ impl RuntimeState {
             startup_prompts: Mutex::new(BTreeMap::new()),
             startup_enqueue: tokio::sync::Mutex::new(()),
             controller_loader,
-            config_mutation: tokio::sync::Mutex::new(()),
+            config_mutation: tokio::sync::Mutex::new(inactivity),
+            inactivity_changed: tokio::sync::Notify::new(),
             projects: Arc::new(crate::project_catalog::Catalog::default()),
             profile_catalog,
             recovery_observer,
