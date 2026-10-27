@@ -462,8 +462,14 @@ fn inline_output(entry: &ChatEntry, limit: usize) -> Vec<String> {
     let failed = entry.tool_status == Some(ToolStatus::Failed);
     let mut lines = entry.tool_diffstats.clone();
     if failed || !explored {
-        let output = entry.tool_content.join("\n");
+        let output = tool_content_without_error(entry)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
         lines.extend(output.trim_matches('\n').lines().map(str::to_owned));
+    }
+    if failed && let Some(error) = entry.tool_error.as_deref() {
+        lines.extend(format!("Error: {error}").lines().map(str::to_owned));
     }
     if lines.len() <= limit {
         return lines;
@@ -877,7 +883,8 @@ pub(super) fn entry_logical_lines(
 
     if expanded_tool
         && mode == TranscriptRenderMode::Rich
-        && let Some(input) = &entry.tool_input
+        && entry.role == ChatRole::Tool
+        && (entry.tool_input.is_some() || entry.tool_error.is_some())
     {
         let title = if entry.leading_omitted {
             format!("[… earlier content omitted …]\n{}", entry.text)
@@ -885,17 +892,29 @@ pub(super) fn entry_logical_lines(
             entry.text.clone()
         };
         let mut lines = markdown_lines(&title, visual.body_style, visual.header_style, width);
-        let input = format!(
-            "Input arguments\n{}",
-            mj_transcript::transcript::tool_input_text(input)
-        );
-        lines.extend(raw_lines(&input, visual.body_style));
-        lines.extend(markdown_lines(
-            &tool_details(entry).join("\n"),
-            visual.body_style,
-            visual.header_style,
-            width,
-        ));
+        if let Some(input) = &entry.tool_input {
+            let input = format!(
+                "Input arguments\n{}",
+                mj_transcript::transcript::tool_input_text(input)
+            );
+            lines.extend(raw_lines(&input, visual.body_style));
+        }
+        let details = tool_details(entry).join("\n");
+        if !details.is_empty() {
+            lines.extend(markdown_lines(
+                &details,
+                visual.body_style,
+                visual.header_style,
+                width,
+            ));
+        }
+        if let Some(error) = entry.tool_error.as_deref() {
+            let error = format!(
+                "Error\n{}",
+                mj_core::transcript::sanitize_terminal_text(error)
+            );
+            lines.extend(raw_lines(&error, visual.body_style));
+        }
         return lines;
     }
     let source = entry_body_source(entry, mode, expanded_tool);
@@ -909,13 +928,20 @@ pub(super) fn entry_logical_lines(
 
 /// The tool output, diff stats, and locations an entry's details show.
 fn tool_details(entry: &ChatEntry) -> Vec<String> {
-    entry
-        .tool_content
-        .iter()
+    tool_content_without_error(entry)
         .chain(&entry.tool_diffstats)
         .chain(&entry.tool_locations)
         .cloned()
         .collect()
+}
+
+/// Ordinary content must not duplicate the separately rendered raw-output
+/// diagnostic, whose literal rendering is authoritative for the error.
+fn tool_content_without_error<'a>(entry: &'a ChatEntry) -> impl Iterator<Item = &'a String> + 'a {
+    entry
+        .tool_content
+        .iter()
+        .filter(|content| entry.tool_error.as_deref() != Some(content.as_str()))
 }
 
 /// The text an entry's body is drawn from. Plans and an opened tool call
@@ -929,6 +955,14 @@ fn entry_body_source(entry: &ChatEntry, mode: TranscriptRenderMode, expanded_too
             .expect("tool arguments are serializable JSON values");
         let input = mj_core::transcript::sanitize_terminal_text(&input);
         details.insert(0, format!("Input arguments\n{input}"));
+    }
+    if mode == TranscriptRenderMode::Raw
+        && let Some(error) = entry.tool_error.as_deref()
+    {
+        details.push(format!(
+            "Error\n{}",
+            mj_core::transcript::sanitize_terminal_text(error)
+        ));
     }
     let mut source = match mode {
         TranscriptRenderMode::Rich if expanded_tool && entry.role == ChatRole::Tool => {
