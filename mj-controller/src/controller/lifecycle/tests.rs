@@ -850,6 +850,49 @@ fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
     assert!(reports.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_dir());
 }
 
+/// A close of a running child goes through the checkpoint route; reports
+/// survive there too, not only on the no-checkpoint path.
+// Hard-won: #1333: close deleted the child's report_dir that parents were told to cite.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
+fn checkpointed_close_keeps_a_child_report_directory() {
+    if !in_isolated_store("checkpointed_close_keeps_a_child_report_directory") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let worker_root = directory.path().join(session_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let mut controller = failed_subagent_controller(&worker_root, session_id);
+    let reports = seed_child_reports(&mut controller, session_id, directory.path());
+    let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);
+    let session = controller.state.sessions.get_mut(session_id).unwrap();
+    session.state = SessionState::Closing;
+    session.checkpoint = Some(checkpoint.clone());
+
+    controller
+        .destroy_after_verified_checkpoint_with(
+            session_id,
+            &checkpoint,
+            &ProcessExecutor,
+            |_| Ok(()),
+        )
+        .unwrap();
+
+    let closed = &controller.state.sessions[session_id];
+    assert_eq!(closed.state, SessionState::Stopped);
+    assert!(closed.target.is_none());
+    assert!(
+        reports.join(session_id).is_dir(),
+        "checkpointed close keeps the child's report directory"
+    );
+    assert!(reports.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_dir());
+}
+
 /// An in-flight state with nobody to finish it becomes a failure the user can
 /// read, and a state that still has an owner is left alone (#1070).
 // Hard-won: 7aea6c5c: interrupted lifecycle recovery left no readable failure cause
