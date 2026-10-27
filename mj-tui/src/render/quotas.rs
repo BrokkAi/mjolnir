@@ -433,7 +433,17 @@ pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<Quot
                         ),
                         Some(quota) if quota.error.is_none() => {
                             let (weekly_reset, five_hour_reset) = quota_reset_cells(quota, now);
-                            let weekly = quota_bar(quota.summary_window());
+                            let mut weekly = quota_bar(quota.summary_window());
+                            if quota
+                                .weekly_window()
+                                .and_then(quota_remaining_percent)
+                                .is_some()
+                                && let Some(fable) = quota
+                                    .fable_weekly_window()
+                                    .and_then(quota_remaining_percent)
+                            {
+                                weekly.spans.push(Span::raw(format!(" ({fable}%)")));
+                            }
                             let five_hour = five_hour_quota_bar(quota);
                             let weekly_chart = !weekly.spans.is_empty();
                             let five_hour_chart = !five_hour.spans.is_empty();

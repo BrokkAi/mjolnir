@@ -1945,12 +1945,30 @@ fn released_protocol_transcripts() -> Vec<ProtocolTranscript> {
             ],
         },
         ProtocolTranscript {
+            protocol_version: 63,
+            daemon_build: "2.58.0",
+            expected_requests: requests(63),
+            responses: [
+                r#"{"protocol_version":63,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-10-27T00:00:00Z","build_version":"2.58.0","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
+                r#"{"protocol_version":63,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
+            ],
+        },
+        ProtocolTranscript {
             protocol_version: 64,
             daemon_build: "2.59.1",
             expected_requests: requests(64),
             responses: [
                 r#"{"protocol_version":64,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-10-27T00:00:00Z","build_version":"2.59.1","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
                 r#"{"protocol_version":64,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
+            ],
+        },
+        ProtocolTranscript {
+            protocol_version: 65,
+            daemon_build: "2.59.1",
+            expected_requests: requests(65),
+            responses: [
+                r#"{"protocol_version":65,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-10-27T00:00:00Z","build_version":"2.59.1","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
+                r#"{"protocol_version":65,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
             ],
         },
     ]

@@ -524,10 +524,6 @@ pub enum DaemonAction {
         mounts: Vec<AdditionalMount>,
         mount_history: Vec<PathBuf>,
     },
-    SetSessionAcpTitle {
-        session_id: String,
-        title: Option<String>,
-    },
     MarkSessionTargetMissing {
         session_id: String,
         detail: String,
@@ -1726,20 +1722,6 @@ impl DaemonClient {
         }
     }
 
-    pub async fn set_session_acp_title(
-        &mut self,
-        session_id: String,
-        title: Option<String>,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::SetSessionAcpTitle { session_id, title })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected ACP-title reply {reply:?}"),
-        }
-    }
-
     pub async fn mark_session_target_missing(
         &mut self,
         session_id: String,
@@ -2435,8 +2417,10 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Creation and runtime metadata carry interactive launch-choice provenance.
 // New-session creation independently controls whether its container size
 // becomes the host's saved default.
-// Operator-away action and runtime metadata; daemon-owned project removal.
-pub const PROTOCOL_VERSION: u32 = 64;
+// Operator-away action and runtime metadata.
+// Terminals no longer save harness titles; the daemon alone projects them.
+// Project removal runs through the daemon-owned database writer.
+pub const PROTOCOL_VERSION: u32 = 65;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

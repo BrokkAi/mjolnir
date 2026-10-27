@@ -1,6 +1,5 @@
 //! Terminal-specific adapters for controller background feeds.
 use crate::dashboard::io::{DashboardIoUpdate, report};
-use anyhow::Result;
 use mj_controller::controller::Controller;
 pub(crate) use mj_controller::pollers::*;
 use mj_controller::session_manager::ViewError;
@@ -18,29 +17,21 @@ pub(crate) struct DashboardLifecycleUpdate {
 }
 
 const WORKER_DIAGNOSIS_TIMEOUT: Duration = Duration::from_secs(15);
-/// Applies one worker poll to the controller's records, the dashboard, and
-/// the open conversations. `persistence` is where the records it changes are
-/// saved; `None` saves nothing. Returns the poll's projection, moved out of
-/// the update rather than copied, when it carried one.
+/// Applies one worker poll's reachability to the dashboard. `persistence` is
+/// where a missing target is recorded; `None` records nothing. Returns the
+/// poll's projection, moved out of the update rather than copied, when it
+/// carried one. The session's name is not taken from the poll: the daemon
+/// projects it into the record, and the record reaches the dashboard with
+/// the daemon's other record changes.
 pub(crate) fn apply_worker_poll_update(
-    controller: &mut Controller,
+    controller: &Controller,
     dashboard: &mut DashboardState,
-    chats: &mut std::collections::BTreeMap<String, mj_chat::chat::ActiveChat>,
     update: WorkerPollUpdate,
     persistence: Option<(
         &tokio::sync::mpsc::UnboundedSender<DashboardIoUpdate>,
         &crate::dashboard::CriticalOperationTracker,
     )>,
-) -> Result<Option<mj_core::state::MaterializedSession>> {
-    if apply_worker_record_update(controller, &update, persistence)? {
-        dashboard.set_state(controller.state.clone());
-        // The Sessions row now reads the new title from the record. The open
-        // conversation's header must read it too, now: the daemon's later
-        // copy of the record is identical, so it refreshes nothing, and the
-        // header used to wait for the turn's end to change the record again
-        // (launch finding R5-7).
-        crate::dashboard::refresh_open_chats(chats, controller, dashboard);
-    }
+) -> Option<mj_core::state::MaterializedSession> {
     match update.view.error {
         Some(ViewError::Unreachable(detail)) => {
             dashboard.mark_transcript_unavailable(&update.session_id);
@@ -93,36 +84,11 @@ pub(crate) fn apply_worker_poll_update(
         }
         None => dashboard.report_session_reachable(&update.session_id),
     }
-    Ok(update.view.snapshot.map(|snapshot| snapshot.materialized))
-}
-
-fn apply_worker_record_update(
-    controller: &mut Controller,
-    update: &WorkerPollUpdate,
-    dashboard_io: Option<(
-        &tokio::sync::mpsc::UnboundedSender<DashboardIoUpdate>,
-        &crate::dashboard::CriticalOperationTracker,
-    )>,
-) -> Result<bool> {
-    let Some(title) = project_worker_title(controller, update) else {
-        return Ok(false);
-    };
-    if let Some((updates, tracker)) = dashboard_io {
-        spawn_worker_record_persistence(
-            update.session_id.clone(),
-            WorkerRecordPersistence::AcpTitle { title },
-            updates.clone(),
-            tracker.clone(),
-        );
-    }
-    Ok(true)
+    update.view.snapshot.map(|snapshot| snapshot.materialized)
 }
 
 #[derive(Debug)]
 pub(crate) enum WorkerRecordPersistence {
-    AcpTitle {
-        title: Option<String>,
-    },
     TargetMissing {
         session_id: String,
         detail: String,
@@ -132,7 +98,6 @@ pub(crate) enum WorkerRecordPersistence {
 
 #[derive(Debug)]
 pub(crate) enum WorkerRecordPersistenceOutcome {
-    Saved,
     TargetMissing(SessionState),
     Unchanged,
 }
@@ -143,19 +108,14 @@ fn spawn_worker_record_persistence(
     updates: tokio::sync::mpsc::UnboundedSender<DashboardIoUpdate>,
     tracker: crate::dashboard::CriticalOperationTracker,
 ) {
-    let label = match &operation {
-        WorkerRecordPersistence::AcpTitle { .. } => "saving agent title for",
-        WorkerRecordPersistence::TargetMissing { .. } => "saving missing target for",
-    };
-    let guard = tracker.begin(format!("{label} {}", crate::short_id(&session_id)));
+    let guard = tracker.begin(format!(
+        "saving missing target for {}",
+        crate::short_id(&session_id)
+    ));
     tokio::spawn(async move {
         let result = async {
             let mut daemon = daemon::connect_or_start().await?;
             match &operation {
-                WorkerRecordPersistence::AcpTitle { title } => daemon
-                    .set_session_acp_title(session_id, title.clone())
-                    .await
-                    .map(|()| WorkerRecordPersistenceOutcome::Saved),
                 WorkerRecordPersistence::TargetMissing {
                     session_id,
                     detail,
