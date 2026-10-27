@@ -176,7 +176,6 @@ pub(super) fn session_request_meta(
     let mut claude_code = serde_json::Map::from_iter([(
         "emitRawSDKMessages".to_owned(),
         serde_json::json!([
-            {"type": "system", "subtype": CLAUDE_BACKGROUND_TASKS_CHANGED_SUBTYPE},
             {"type": "result"},
         ]),
     )]);

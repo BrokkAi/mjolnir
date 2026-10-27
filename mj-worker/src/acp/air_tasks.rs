@@ -1,17 +1,5 @@
 use super::*;
 
-pub(super) const CLAUDE_BACKGROUND_TASKS_CHANGED_SUBTYPE: &str = "background_tasks_changed";
-
-#[derive(Debug, Clone, Deserialize)]
-pub(super) struct ClaudeBackgroundTaskPayload {
-    task_id: String,
-    description: String,
-    #[serde(default)]
-    task_type: Option<String>,
-    #[serde(default)]
-    ambient: bool,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcNotification)]
 #[notification(method = "_claude/sdkMessage")]
 pub(super) struct ClaudeSdkMessageNotification {
@@ -36,21 +24,10 @@ pub(super) struct RawSessionNotification {
     pub(super) update: serde_json::Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ClaudeAsyncTaskControlUpdate {
-    Set {
-        task_id: String,
-        can_stop: bool,
-        /// `completed` or `failed`: Claude Code answers either with a
-        /// task-notification turn. `stopped` is answered with a plain notice.
-        settled: bool,
-    },
-    Ignore,
-}
-
-pub(super) fn claude_async_task_control_update(
+/// Decode AIR tasks independently of the harness and owning session.
+pub(super) fn air_task_update(
     update: &serde_json::Value,
-) -> std::result::Result<Option<ClaudeAsyncTaskControlUpdate>, String> {
+) -> std::result::Result<Option<Option<AirTaskUpdate>>, String> {
     let Some(kind) = update
         .get("sessionUpdate")
         .and_then(serde_json::Value::as_str)
@@ -60,51 +37,55 @@ pub(super) fn claude_async_task_control_update(
     if !kind.starts_with("async_task_") {
         return Ok(None);
     }
-    let task_id = || {
-        update
-            .get("asyncTaskId")
-            .and_then(serde_json::Value::as_str)
-            .filter(|id| !id.trim().is_empty())
-            .map(str::to_owned)
-            .ok_or_else(|| format!("{kind} requires a non-empty asyncTaskId"))
-    };
-    match kind {
-        "async_task_spawned" => Ok(Some(ClaudeAsyncTaskControlUpdate::Set {
-            task_id: task_id()?,
-            can_stop: update
-                .get("canStop")
-                .and_then(serde_json::Value::as_bool)
-                .ok_or_else(|| "async_task_spawned requires canStop".to_owned())?,
-            settled: false,
-        })),
+    if update.get("taskType").and_then(serde_json::Value::as_str) == Some("turn") {
+        return Ok(Some(None));
+    }
+    let task_id = update
+        .get("asyncTaskId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| format!("{kind} requires a non-empty asyncTaskId"))?
+        .to_owned();
+    let description = update
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .or_else(|| update.get("name").and_then(serde_json::Value::as_str))
+        .map(str::to_owned);
+    let can_stop = update.get("canStop").and_then(serde_json::Value::as_bool);
+    let change = match kind {
+        "async_task_spawned" => AirTaskUpdate::Spawned {
+            task_id,
+            description: description.ok_or("async_task_spawned requires name or description")?,
+            can_stop: can_stop.ok_or("async_task_spawned requires canStop")?,
+        },
+        "async_task_progress" => AirTaskUpdate::Changed {
+            task_id,
+            description,
+            can_stop,
+        },
         "async_task_state_update" => {
-            let state = update
-                .get("state")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "async_task_state_update requires state".to_owned())?;
-            if matches!(state, "completed" | "failed" | "stopped") {
-                Ok(Some(ClaudeAsyncTaskControlUpdate::Set {
-                    task_id: task_id()?,
-                    can_stop: false,
+            match update.get("state").and_then(serde_json::Value::as_str) {
+                Some("running" | "paused") => AirTaskUpdate::Changed {
+                    task_id,
+                    description,
+                    can_stop,
+                },
+                Some(state @ ("completed" | "failed" | "stopped")) => AirTaskUpdate::Finished {
+                    task_id,
                     settled: state != "stopped",
-                }))
-            } else if matches!(state, "running" | "paused") {
-                Ok(Some(ClaudeAsyncTaskControlUpdate::Ignore))
-            } else {
-                Err(format!("unknown Claude async task state {state:?}"))
+                },
+                state => return Err(format!("unknown AIR async task state {state:?}")),
             }
         }
-        "async_task_progress" => {
-            task_id()?;
-            Ok(Some(ClaudeAsyncTaskControlUpdate::Ignore))
-        }
-        _ => Err(format!("unknown Claude async task update {kind:?}")),
-    }
+        _ => return Err(format!("unknown AIR async task update {kind:?}")),
+    };
+    Ok(Some(Some(change)))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcRequest)]
-#[request(method = "_session/async_task/stop", response = ClaudeAsyncTaskStopResponse)]
-pub(super) struct ClaudeAsyncTaskStopRequest {
+#[request(method = "_session/async_task/stop", response = AirAsyncTaskStopResponse)]
+pub(super) struct AirAsyncTaskStopRequest {
     #[serde(rename = "sessionId")]
     pub(super) session_id: SessionId,
     #[serde(rename = "asyncTaskId")]
@@ -112,38 +93,8 @@ pub(super) struct ClaudeAsyncTaskStopRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcResponse)]
-pub(super) struct ClaudeAsyncTaskStopResponse {
+pub(super) struct AirAsyncTaskStopResponse {
     stopped: bool,
-}
-
-/// Extract the one Claude SDK level signal Hel subscribes to. Edge lifecycle
-/// messages and foreground activity are deliberately ignored: their ordering
-/// is unspecified and task starts include foreground work.
-pub(super) fn claude_background_tasks(
-    message: &serde_json::Value,
-) -> std::result::Result<Option<Vec<ClaudeBackgroundTask>>, serde_json::Error> {
-    if message.get("type").and_then(serde_json::Value::as_str) != Some("system")
-        || message.get("subtype").and_then(serde_json::Value::as_str)
-            != Some(CLAUDE_BACKGROUND_TASKS_CHANGED_SUBTYPE)
-    {
-        return Ok(None);
-    }
-    let payload = serde_json::from_value::<Vec<ClaudeBackgroundTaskPayload>>(
-        message
-            .get("tasks")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
-    )?;
-    Ok(Some(
-        payload
-            .into_iter()
-            .filter(|task| !task.ambient && task.task_type.as_deref() != Some("local_agent"))
-            .map(|task| ClaudeBackgroundTask {
-                task_id: task.task_id,
-                description: task.description,
-            })
-            .collect(),
-    ))
 }
 
 pub(super) const BACKGROUND_TASK_STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -181,9 +132,12 @@ pub(super) async fn stop_background_task(
                 Err("background task is no longer running".into())
             }
         }
-        mj_core::relay::BackgroundTaskStopTarget::ClaudeAsyncTask { task_id } => {
-            let request = ClaudeAsyncTaskStopRequest {
-                session_id: session_id.clone(),
+        mj_core::relay::BackgroundTaskStopTarget::AirAsyncTask {
+            session_id: owner,
+            task_id,
+        } => {
+            let request = AirAsyncTaskStopRequest {
+                session_id: owner.into(),
                 async_task_id: task_id,
             };
             match tokio::time::timeout(
@@ -194,8 +148,8 @@ pub(super) async fn stop_background_task(
             {
                 Ok(Ok(response)) if response.stopped => Ok(()),
                 Ok(Ok(_)) => Err("background task is no longer stoppable".into()),
-                Ok(Err(error)) => Err(format!("stop Claude background task: {error}")),
-                Err(_) => Err("timed out stopping Claude background task".into()),
+                Ok(Err(error)) => Err(format!("stop AIR background task: {error}")),
+                Err(_) => Err("timed out stopping AIR background task".into()),
             }
         }
     }

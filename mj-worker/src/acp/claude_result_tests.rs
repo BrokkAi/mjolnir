@@ -95,8 +95,8 @@ impl ClaudeProbe {
         let new = probe.message().await;
         assert_eq!(new["method"], "session/new");
         assert_eq!(
-            new["params"]["_meta"]["claudeCode"]["emitRawSDKMessages"][1],
-            json!({"type": "result"}),
+            new["params"]["_meta"]["claudeCode"]["emitRawSDKMessages"],
+            json!([{"type": "result"}]),
             "the session must ask the adapter for SDK results"
         );
         probe

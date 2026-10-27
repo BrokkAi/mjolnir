@@ -535,15 +535,11 @@ pub(crate) fn record_runtime_event(
                 }
             }
         }
-        RuntimeEvent::ClaudeBackgroundTasksChanged { tasks } => {
-            relay.claude_background_tasks_changed(tasks)?;
-        }
-        RuntimeEvent::ClaudeAsyncTaskControlChanged {
-            task_id,
-            can_stop,
-            settled,
-        } => {
-            relay.claude_async_task_control_changed(task_id, can_stop, settled)?;
+        // Historical runtime payloads can still appear in old transcripts.
+        RuntimeEvent::ClaudeBackgroundTasksChanged { .. }
+        | RuntimeEvent::ClaudeAsyncTaskControlChanged { .. } => {}
+        RuntimeEvent::AirTaskChanged { session_id, update } => {
+            relay.air_task_changed(session_id, update)?;
         }
         RuntimeEvent::ClaudeTurnResult(result) => {
             if !nominate_claude_prompt_result(in_flight, commands, &result) {

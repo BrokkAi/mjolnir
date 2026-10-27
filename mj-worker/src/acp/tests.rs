@@ -1021,110 +1021,86 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
     );
 }
 
+// Hard-won: a02d1c6: child task updates must not become warning rows in the parent transcript.
 #[tokio::test]
-async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_step() {
+async fn air_tasks_from_root_and_child_sessions_stop_through_the_owning_adapter() {
+    use mj_core::acp::AirTaskUpdate;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    for (resume_session, advertised_resume) in [
-        (None, false),
-        (None, true),
-        (Some("native"), false),
-        (Some("native"), true),
-    ] {
-        let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    for harness in [HarnessKind::Codex, HarnessKind::Claude] {
         let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
         let bridge = tokio::spawn(async move {
             let (read, mut write) = tokio::io::split(bridge_stream);
             let mut lines = BufReader::new(read).lines();
-            while let Some(line) = lines.next_line().await.expect("read fake adapter input") {
-                let request: serde_json::Value =
-                    serde_json::from_str(&line).expect("fake adapter input is JSON-RPC");
-                let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let Some(method) = request["method"].as_str() else {
                     continue;
                 };
-                let _ = observed_tx.send(request.clone());
-                let id = request
-                    .get("id")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                let response = match method {
-                    "initialize" => {
-                        let mut result = serde_json::json!({"protocolVersion": 1});
-                        if advertised_resume {
-                            result["agentCapabilities"] = serde_json::json!({
-                                "sessionCapabilities": {"resume": {}}
-                            });
+                let mut updates = Vec::new();
+                let result = match method {
+                    "initialize" => serde_json::json!({"protocolVersion":1}),
+                    "session/new" => {
+                        updates.push(("scripted", serde_json::json!({"sessionUpdate":"subagent_spawned", "subagentSessionId":"child", "name":"review", "task":"review source", "capabilities":{}})));
+                        for owner in ["scripted", "child"] {
+                            let id = if owner == "child" && harness == HarnessKind::Codex {
+                                "child:task"
+                            } else {
+                                "task"
+                            };
+                            let mut spawn = serde_json::json!({"sessionUpdate":"async_task_spawned", "asyncTaskId":id, "name":"sleep 600", "taskType":"shell", "showInTranscript":false, "canStop":true});
+                            if harness == HarnessKind::Claude {
+                                spawn["description"] = serde_json::json!("Background sleeper");
+                            }
+                            updates.push((owner, spawn));
+                            updates.push((owner, serde_json::json!({"sessionUpdate":"async_task_progress", "asyncTaskId":id, "description":format!("{owner} sleeper")})));
+                            updates.push((owner, serde_json::json!({"sessionUpdate":"async_task_state_update", "asyncTaskId":id, "state":"paused"})));
                         }
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": result,
-                        })
+                        updates.push(("scripted", serde_json::json!({"sessionUpdate":"async_task_spawned", "asyncTaskId":"turn", "name":"autonomous turn", "taskType":"turn", "canStop":true})));
+                        updates.push(("scripted", serde_json::json!({"sessionUpdate":"async_task_state_update", "asyncTaskId":"turn", "state":"completed"})));
+                        serde_json::json!({"sessionId":"scripted", "modes":{"currentModeId":"default", "availableModes":[{"id":"default", "name":"Default"},{"id":"auto", "name":"Auto"},{"id":"agent", "name":"Agent"}]}})
                     }
-                    "session/new" | "session/load" | "session/resume" => serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {"sessionId": "scripted", "modes": {
-                            "currentModeId": "default",
-                            "availableModes": [
-                                {"id": "default", "name": "Default"},
-                                {"id": "auto", "name": "Auto"}
-                            ]
-                        }},
-                    }),
-                    "session/set_mode" => {
-                        serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}})
+                    "session/set_mode" => serde_json::json!({}),
+                    "_session/async_task/stop" => {
+                        let owner = request["params"]["sessionId"].as_str().unwrap();
+                        let task = request["params"]["asyncTaskId"].as_str().unwrap();
+                        assert!(matches!(owner, "scripted" | "child"));
+                        assert_eq!(
+                            task,
+                            if owner == "child" && harness == HarnessKind::Codex {
+                                "child:task"
+                            } else {
+                                "task"
+                            }
+                        );
+                        let update = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":owner, "update":{"sessionUpdate":"async_task_state_update", "asyncTaskId":task, "state":"stopped"}}});
+                        write
+                            .write_all(format!("{update}\n").as_bytes())
+                            .await
+                            .unwrap();
+                        serde_json::json!({"stopped":true})
                     }
                     _ => continue,
                 };
-                if matches!(method, "session/new" | "session/load" | "session/resume") {
-                    for message in [
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "method": "_claude/sdkMessage",
-                            "params": {
-                                "sessionId": "scripted",
-                                "message": {
-                                    "type": "system",
-                                    "subtype": "task_started",
-                                    "task_id": "foreground",
-                                },
-                            },
-                        }),
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "method": "_claude/sdkMessage",
-                            "params": {
-                                "sessionId": "scripted",
-                                "message": {
-                                    "type": "system",
-                                    "subtype": CLAUDE_BACKGROUND_TASKS_CHANGED_SUBTYPE,
-                                    "tasks": [{
-                                        "task_id": "server",
-                                        "task_type": "shell",
-                                        "description": "npm run dev",
-                                    }],
-                                },
-                            },
-                        }),
-                    ] {
-                        write
-                            .write_all(format!("{message}\n").as_bytes())
-                            .await
-                            .expect("write fake adapter extension notification");
-                    }
+                for (owner, update) in updates {
+                    let notification = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":owner,"update":update}});
+                    write
+                        .write_all(format!("{notification}\n").as_bytes())
+                        .await
+                        .unwrap();
                 }
+                let response =
+                    serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result":result});
                 write
                     .write_all(format!("{response}\n").as_bytes())
                     .await
-                    .expect("write fake adapter response");
+                    .unwrap();
             }
         });
         let (client_read, client_write) = tokio::io::split(client_stream);
         let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
-        let (request_tx, mut request_rx) = mpsc::channel(1);
+        let (request_tx, mut request_rx) = mpsc::channel(4);
         let (event_tx, mut event_rx) = mpsc::channel(32);
-        let step_clock = crate::acp::StepClock::default();
+        let step_clock = StepClock::default();
         let observed_step_clock = step_clock.clone();
         let spec = LaunchSpec {
             operator_away: Default::default(),
@@ -1150,11 +1126,11 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
             additional_directories: Vec::new(),
             extra_mcp_servers: Vec::new(),
             project_memory: None,
-            resume_session: resume_session.map(str::to_owned),
+            resume_session: None,
             native_session_may_have_history: false,
             accepted_config: Default::default(),
             initial_model: None,
-            harness: HarnessKind::Claude,
+            harness,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             acp_activity: AcpActivityClock::default(),
             step_clock,
@@ -1170,57 +1146,103 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
             )
             .await
         });
-
-        let event = wait_for_runtime_event(&mut event_rx, |event| {
-            matches!(event, RuntimeEvent::ClaudeBackgroundTasksChanged { .. })
-        })
-        .await;
-        let RuntimeEvent::ClaudeBackgroundTasksChanged { tasks } = event else {
-            unreachable!("wait_for_runtime_event matched the Claude level event");
-        };
-        assert_eq!(
-            tasks,
-            vec![ClaudeBackgroundTask {
-                task_id: "server".into(),
-                description: "npm run dev".into(),
-            }]
-        );
-        assert_eq!(
-            observed_step_clock.started_at_ms(),
-            None,
-            "a provider background level must not advance the step clock"
-        );
-
+        let root = tempfile::tempdir().unwrap();
+        let mut relay = crate::relay::DurableRelay::open(root.path(), "air-test", "test").unwrap();
+        relay.set_background_work_policy(crate::relay::BackgroundWorkPolicy::AirTasks);
+        relay.set_harness_turn_policy(if harness == HarnessKind::Claude {
+            crate::relay::HarnessTurnPolicy::ClaudeAdapter
+        } else {
+            crate::relay::HarnessTurnPolicy::CodexAdapter
+        });
+        let mut paused = 0;
+        while paused < 2 {
+            let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            match event {
+                RuntimeEvent::AirTaskChanged { session_id, update } => {
+                    if matches!(&update, AirTaskUpdate::Spawned { .. }) {
+                        let AirTaskUpdate::Spawned { description, .. } = &update else {
+                            unreachable!()
+                        };
+                        assert_eq!(
+                            description,
+                            if harness == HarnessKind::Claude {
+                                "Background sleeper"
+                            } else {
+                                "sleep 600"
+                            }
+                        );
+                    }
+                    if matches!(
+                        &update,
+                        AirTaskUpdate::Changed {
+                            description: None,
+                            ..
+                        }
+                    ) {
+                        paused += 1;
+                    }
+                    relay.air_task_changed(session_id, update).unwrap();
+                }
+                RuntimeEvent::Warning { message } => {
+                    assert!(!message.contains("async_task"), "{message}")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(observed_step_clock.started_at_ms(), None);
+        let commands = relay.operational_state().background_commands;
+        assert_eq!(commands.len(), 2);
+        for command in commands {
+            assert!(command.can_stop);
+            assert!(command.command.ends_with(" sleeper"));
+            let target = relay.background_task_stop_target(&command.id).unwrap();
+            let (resolved, resolution) = oneshot::channel();
+            request_tx
+                .send(CommandRequest::StopBackgroundTask { target, resolved })
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), resolution)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            loop {
+                let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                match event {
+                    RuntimeEvent::AirTaskChanged { session_id, update } => {
+                        let finished = matches!(update, AirTaskUpdate::Finished { .. });
+                        relay.air_task_changed(session_id, update).unwrap();
+                        if finished
+                            && relay
+                                .operational_state()
+                                .background_commands
+                                .iter()
+                                .all(|entry| entry.id != command.id)
+                        {
+                            break;
+                        }
+                    }
+                    RuntimeEvent::Warning { message } => {
+                        assert!(!message.contains("async_task"), "{message}")
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(relay.operational_state().background_commands.is_empty());
+        assert!(relay.activity_facts().task_settled_at_ms.is_none());
         drop(request_tx);
         tokio::time::timeout(Duration::from_secs(5), driver)
             .await
-            .expect("closing the command channel ends the runtime")
-            .expect("the runtime task does not panic")
-            .expect("the fake adapter session ends cleanly");
-        let mut session_requests = Vec::new();
-        while let Ok(request) = observed_rx.try_recv() {
-            if matches!(
-                request["method"].as_str(),
-                Some("session/new" | "session/load" | "session/resume")
-            ) {
-                session_requests.push(request);
-            }
-        }
-        assert_eq!(session_requests.len(), 1, "open exactly one native session");
-        assert_eq!(
-            session_requests[0]["method"],
-            if resume_session.is_none() {
-                "session/new"
-            } else if advertised_resume {
-                "session/resume"
-            } else {
-                "session/load"
-            },
-            "session setup must select the advertised lifecycle method"
-        );
-        if resume_session.is_some() {
-            assert_eq!(session_requests[0]["params"]["sessionId"], "native");
-        }
+            .unwrap()
+            .unwrap()
+            .unwrap();
         bridge.abort();
     }
 }

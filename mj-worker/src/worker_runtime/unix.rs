@@ -822,11 +822,9 @@ pub async fn run_daemon_owned(
         HarnessKind::Codex => crate::relay::HarnessTurnPolicy::CodexAdapter,
         _ => crate::relay::HarnessTurnPolicy::Disabled,
     });
-    // Codex runs its own shells instead of asking Hel for a terminal, so the
-    // only evidence of a command it left running is a card with no exit code.
+    // Both adapters publish their background command lifecycle through AIR.
     durable_relay.set_background_work_policy(match config.harness {
-        HarnessKind::Codex => crate::relay::BackgroundWorkPolicy::CodexExecCards,
-        HarnessKind::Claude => crate::relay::BackgroundWorkPolicy::ClaudeTasks,
+        HarnessKind::Claude | HarnessKind::Codex => crate::relay::BackgroundWorkPolicy::AirTasks,
         HarnessKind::Kimi => crate::relay::BackgroundWorkPolicy::KimiTasks,
         _ => crate::relay::BackgroundWorkPolicy::HostedTerminals,
     });

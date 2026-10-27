@@ -477,24 +477,24 @@ mod tests {
     fn completed(root: &Path) -> DurableRelay {
         let mut relay = DurableRelay::open(root, "jev-test", "test").unwrap();
         relay.set_turn_verdict_harness(HarnessKind::Claude);
-        relay.background_work = BackgroundWorkPolicy::ClaudeTasks;
+        relay.background_work = BackgroundWorkPolicy::AirTasks;
         relay
             .turn_context
             .reset("How many tickets fell out of s21?");
         relay.record_session_update(serde_json::from_value(serde_json::json!({
             "sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"One ticket so far: #3486."}
         })).unwrap()).unwrap();
-        relay.claude_background_tasks_changed(tasks()).unwrap();
-        for task in relay.claude_background_tasks.values_mut() {
-            task.started_at_ms = 100;
+        relay.set_air_tasks(tasks()).unwrap();
+        for task in relay.air_tasks.values_mut() {
+            task.command.started_at_ms = 100;
         }
         relay.activity_facts();
         relay
     }
 
-    fn tasks() -> Vec<crate::acp::ClaudeBackgroundTask> {
+    fn tasks() -> Vec<crate::relay::AirTaskFixture> {
         (0..4)
-            .map(|id| crate::acp::ClaudeBackgroundTask {
+            .map(|id| crate::relay::AirTaskFixture {
                 task_id: id.to_string(),
                 description: format!("Old provisioning wait {id}"),
             })
@@ -506,13 +506,20 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = completed(temp.path());
         relay
-            .claude_async_task_control_changed("0".into(), true, false)
+            .air_task_changed(
+                "root".into(),
+                crate::acp::AirTaskUpdate::Changed {
+                    task_id: "0".into(),
+                    description: None,
+                    can_stop: Some(true),
+                },
+            )
             .unwrap();
         let before = relay.operational_state().background_commands;
         assert!(
             before
                 .iter()
-                .any(|task| task.id == "claude:0" && task.can_stop)
+                .any(|task| task.id == "air:4:root:0" && task.can_stop)
         );
         let generation = relay.turn_context.generation();
         let evidence = relay.turn_context.evidence(
@@ -538,8 +545,9 @@ mod tests {
         );
         assert_eq!(state.background_commands, before);
         assert_eq!(
-            relay.background_task_stop_target("claude:0").unwrap(),
-            BackgroundTaskStopTarget::ClaudeAsyncTask {
+            relay.background_task_stop_target("air:4:root:0").unwrap(),
+            BackgroundTaskStopTarget::AirAsyncTask {
+                session_id: "root".into(),
                 task_id: "0".into()
             }
         );
@@ -562,7 +570,7 @@ mod tests {
             .unwrap();
         let mut unchanged = tasks();
         unchanged.reverse();
-        relay.claude_background_tasks_changed(unchanged).unwrap();
+        relay.set_air_tasks(unchanged).unwrap();
         assert_eq!(relay.turn_context.generation(), generation);
         assert!(relay.operational_state().activity_state().is_idle());
         assert!(relay.pending_replied_verdict().is_none());
@@ -578,7 +586,7 @@ mod tests {
         assert!(relay.operational_state().activity_state().is_idle());
         let mut replaced = tasks();
         replaced[0].task_id = "replacement".into();
-        relay.claude_background_tasks_changed(replaced).unwrap();
+        relay.set_air_tasks(replaced).unwrap();
         assert!(matches!(
             relay.operational_state().activity_state(),
             ActivityState::Background { .. }
@@ -631,12 +639,13 @@ mod settled_task_tests {
     fn claude_relay(root: &Path) -> DurableRelay {
         let mut relay = DurableRelay::open(root, "settle-test", "test").unwrap();
         relay.set_turn_verdict_harness(HarnessKind::Claude);
-        relay.background_work = BackgroundWorkPolicy::ClaudeTasks;
+        relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
+        relay.background_work = BackgroundWorkPolicy::AirTasks;
         relay
     }
 
-    fn task(id: &str) -> crate::acp::ClaudeBackgroundTask {
-        crate::acp::ClaudeBackgroundTask {
+    fn task(id: &str) -> crate::relay::AirTaskFixture {
+        crate::relay::AirTaskFixture {
             task_id: id.into(),
             description: format!("cargo test ({id})"),
         }
@@ -647,14 +656,18 @@ mod settled_task_tests {
     fn a_completed_task_keeps_the_session_busy_until_its_turn_opens() {
         let dir = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(dir.path());
-        relay
-            .claude_background_tasks_changed(vec![task("a"), task("b")])
-            .unwrap();
+        relay.set_air_tasks(vec![task("a"), task("b")]).unwrap();
         assert!(relay.activity_facts().task_settled_at_ms.is_none());
 
         // The adapter's edge update for a completed task.
         relay
-            .claude_async_task_control_changed("a".into(), false, true)
+            .air_task_changed(
+                "root".into(),
+                crate::acp::AirTaskUpdate::Finished {
+                    task_id: "a".into(),
+                    settled: true,
+                },
+            )
             .unwrap();
         let facts = relay.activity_facts();
         let settled = facts.task_settled_at_ms.expect("settle recorded");
@@ -683,9 +696,7 @@ mod settled_task_tests {
         let mut relay = claude_relay(dir.path());
         // A configured harness session; otherwise nothing is ever quiet.
         relay.acp_ready = true;
-        relay
-            .claude_background_tasks_changed(vec![task("srv")])
-            .unwrap();
+        relay.set_air_tasks(vec![task("srv")]).unwrap();
         relay
             .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
             .unwrap();
@@ -801,9 +812,7 @@ mod settled_task_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(dir.path());
         relay.acp_ready = true;
-        relay
-            .claude_background_tasks_changed(vec![task("srv")])
-            .unwrap();
+        relay.set_air_tasks(vec![task("srv")]).unwrap();
         relay
             .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
             .unwrap();
@@ -829,9 +838,7 @@ mod settled_task_tests {
         drop(relay);
 
         let mut relay = restart(dir.path());
-        relay
-            .claude_background_tasks_changed(vec![task("srv")])
-            .unwrap();
+        relay.set_air_tasks(vec![task("srv")]).unwrap();
         assert!(relay.activity_facts().background_needed.is_none());
         relay.prepare_pending_assessment().unwrap();
         let (revision, evidence, _) = relay
@@ -852,9 +859,7 @@ mod settled_task_tests {
 
         // The next restart asks once more, and a confident answer applies.
         let mut relay = restart(dir.path());
-        relay
-            .claude_background_tasks_changed(vec![task("srv")])
-            .unwrap();
+        relay.set_air_tasks(vec![task("srv")]).unwrap();
         relay.prepare_pending_assessment().unwrap();
         let (revision, _, _) = relay.pending_replied_verdict().unwrap();
         relay
@@ -918,9 +923,7 @@ mod settled_task_tests {
             .unwrap();
         submit_relay(&mut relay, "api-turn-20", prompt("Build it and report."));
         relay.claim_pending_commands(true).unwrap();
-        relay
-            .claude_background_tasks_changed(vec![task("build")])
-            .unwrap();
+        relay.set_air_tasks(vec![task("build")]).unwrap();
         say(&mut relay, "The build is running in the background.");
         let completed = relay
             .record_command_completed(
@@ -943,9 +946,15 @@ mod settled_task_tests {
 
         // The build finishes and Claude Code answers it with its own turn.
         relay
-            .claude_async_task_control_changed("build".into(), false, true)
+            .air_task_changed(
+                "root".into(),
+                crate::acp::AirTaskUpdate::Finished {
+                    task_id: "build".into(),
+                    settled: true,
+                },
+            )
             .unwrap();
-        relay.claude_background_tasks_changed(Vec::new()).unwrap();
+        relay.set_air_tasks(Vec::new()).unwrap();
         relay
             .record_observation(RelayObservation::HarnessTurnStarted {
                 started_at_ms: epoch_millis(),
@@ -1061,26 +1070,30 @@ mod settled_task_tests {
     }
 
     #[test]
-    fn only_the_edge_update_settles_and_a_stopped_task_does_not() {
+    fn stopped_tasks_do_not_anticipate_a_notification_turn() {
         let dir = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(dir.path());
-        relay
-            .claude_background_tasks_changed(vec![task("a"), task("b")])
-            .unwrap();
+        relay.set_air_tasks(vec![task("a"), task("b")]).unwrap();
         // A stop the user asked for is answered with a notice, not a turn.
         relay
-            .claude_async_task_control_changed("b".into(), false, false)
-            .unwrap();
-        assert!(relay.activity_facts().task_settled_at_ms.is_none());
-        // The level shrinking cannot tell a completed task from a stopped
-        // one, so it does not count as a settle on its own.
-        relay
-            .claude_background_tasks_changed(vec![task("a")])
+            .air_task_changed(
+                "root".into(),
+                crate::acp::AirTaskUpdate::Finished {
+                    task_id: "b".into(),
+                    settled: false,
+                },
+            )
             .unwrap();
         assert!(relay.activity_facts().task_settled_at_ms.is_none());
         assert_eq!(relay.operational_state().background_commands.len(), 1);
         relay
-            .claude_async_task_control_changed("a".into(), false, true)
+            .air_task_changed(
+                "root".into(),
+                crate::acp::AirTaskUpdate::Finished {
+                    task_id: "a".into(),
+                    settled: true,
+                },
+            )
             .unwrap();
         assert!(relay.activity_facts().task_settled_at_ms.is_some());
         // A restart forgets it with the rest of the harness's processes.

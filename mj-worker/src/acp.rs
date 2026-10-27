@@ -4,7 +4,7 @@
 //! deliberately does not know about orchestration, turn reviews, or subagents;
 //! [`surface`] projects protocol capabilities for the chat control surface.
 
-mod claude_tasks;
+mod air_tasks;
 mod drive;
 mod launch;
 mod native_agents;
@@ -16,7 +16,7 @@ use operator_away::*;
 mod session;
 mod session_config;
 pub(crate) mod verdict_client;
-use claude_tasks::*;
+use air_tasks::*;
 use drive::*;
 use launch::*;
 pub use launch::{ContextReset, LaunchSpec, ReviewerMcpServer, SubagentMcpSocket};

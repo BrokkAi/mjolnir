@@ -1022,12 +1022,16 @@ mod tests {
             "1.0.0",
         )
         .unwrap();
-        relay.set_background_work_policy(mj_worker::relay::BackgroundWorkPolicy::ClaudeTasks);
+        relay.set_background_work_policy(mj_worker::relay::BackgroundWorkPolicy::AirTasks);
         relay
-            .claude_background_tasks_changed(vec![mj_core::acp::ClaudeBackgroundTask {
-                task_id: "design-review".into(),
-                description: "Design simplification and cleanup review".into(),
-            }])
+            .air_task_changed(
+                "root".into(),
+                mj_core::acp::AirTaskUpdate::Spawned {
+                    task_id: "design-review".into(),
+                    description: "Design simplification and cleanup review".into(),
+                    can_stop: true,
+                },
+            )
             .unwrap();
         let state = relay.operational_state();
         let now = (state.background_commands[0].started_at_ms / 1_000) as u64 + 60;
@@ -1041,7 +1045,15 @@ mod tests {
             &activity,
         );
         writeln!(out, "idle: {}", activity.is_idle(None)).unwrap();
-        relay.claude_background_tasks_changed(Vec::new()).unwrap();
+        relay
+            .air_task_changed(
+                "root".into(),
+                mj_core::acp::AirTaskUpdate::Finished {
+                    task_id: "design-review".into(),
+                    settled: false,
+                },
+            )
+            .unwrap();
         let activity = SessionActivity::of(&relay.operational_state());
         row(
             &mut out,

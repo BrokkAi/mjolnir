@@ -4,7 +4,7 @@ use mj_core::config::HarnessKind;
 
 fn open(root: &std::path::Path) -> DurableRelay {
     let mut relay = DurableRelay::open(root, SESSION, "test").unwrap();
-    relay.set_background_work_policy(BackgroundWorkPolicy::CodexExecCards);
+    relay.set_background_work_policy(BackgroundWorkPolicy::AirTasks);
     relay.set_turn_verdict_harness(HarnessKind::Codex);
     relay
         .record_observation(RelayObservation::SessionConfigured {
@@ -106,8 +106,8 @@ fn server_retry_requires_a_jev_verdict_and_retries_with_backoff() {
 #[test]
 fn retry_dispatches_for_each_harness_after_jev_approval() {
     let configurations = [
-        (HarnessKind::Codex, BackgroundWorkPolicy::CodexExecCards),
-        (HarnessKind::Claude, BackgroundWorkPolicy::ClaudeTasks),
+        (HarnessKind::Codex, BackgroundWorkPolicy::AirTasks),
+        (HarnessKind::Claude, BackgroundWorkPolicy::AirTasks),
         (HarnessKind::Kimi, BackgroundWorkPolicy::KimiTasks),
         (HarnessKind::Grok, BackgroundWorkPolicy::HostedTerminals),
         (HarnessKind::Muse, BackgroundWorkPolicy::HostedTerminals),

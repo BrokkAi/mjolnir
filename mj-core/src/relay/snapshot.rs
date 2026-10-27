@@ -470,7 +470,7 @@ pub struct BackgroundCommand {
 pub enum BackgroundTaskStopTarget {
     NativeAgent { session_id: String },
     HostedTerminal { terminal_id: String },
-    ClaudeAsyncTask { task_id: String },
+    AirAsyncTask { session_id: String, task_id: String },
 }
 
 /// A turn the harness started on its own, with no prompt in flight.

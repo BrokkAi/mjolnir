@@ -4,6 +4,18 @@ fn background_task_id(kind: &str, provider_id: &str) -> String {
     format!("{kind}:{provider_id}")
 }
 
+/// One adapter task and the ACP session that owns its stop operation.
+#[derive(Debug, Clone)]
+pub(super) struct AirTaskEntry {
+    pub(super) session_id: String,
+    pub(super) task_id: String,
+    pub(super) command: BackgroundCommand,
+}
+
+fn air_task_key(session_id: &str, task_id: &str) -> String {
+    format!("{}:{session_id}:{task_id}", session_id.len())
+}
+
 /// A Kimi native task together with the ACP launcher call it came from, so a
 /// hosted terminal bound to that call is not listed as a second job.
 #[derive(Debug, Clone)]
@@ -36,7 +48,7 @@ pub(super) fn is_agent_output(update: &SessionUpdate) -> bool {
 /// when a user-requested stop ends a background task. The SDK injects nothing
 /// into the model for that stop, so no model cycle and no result follow it.
 /// Only the prefix is stable: the name that follows is whatever the adapter
-/// currently calls the task, which later level and start messages rename.
+/// currently calls the task, which later AIR progress messages can rename.
 /// Checked against claude-agent-acp 0.81.0 `dist/async-tasks.js`
 /// (`taskStopped`, via `noticeTranscriptText`) on 2026-09-22.
 pub(super) const CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX: &str = "**Task stopped by user:** ";
@@ -50,18 +62,6 @@ pub(super) fn agent_chunk_text(update: &SessionUpdate) -> Option<&str> {
         },
         _ => None,
     }
-}
-
-/// The command an exec card ran, from its raw input. Codex sends either a
-/// string or the argv it executed.
-fn exec_card_command(raw_input: Option<&serde_json::Value>) -> Option<String> {
-    let command = raw_input?.get("command")?;
-    if let Some(text) = command.as_str() {
-        return Some(text.to_owned());
-    }
-    let argv = command.as_array()?;
-    let words: Vec<&str> = argv.iter().filter_map(serde_json::Value::as_str).collect();
-    (!words.is_empty()).then(|| words.join(" "))
 }
 
 fn kimi_native_tool_call_id(tool_call_id: &str) -> &str {
@@ -114,9 +114,8 @@ impl DurableRelay {
     /// first.
     ///
     /// A hosted terminal only counts while nothing of ours is in flight: until
-    /// then it is the turn's own work, not something left behind. A Codex exec
-    /// card counts from the moment its result arrives with a null exit code,
-    /// because Codex starts these during a turn and never mentions them again.
+    /// then it is the turn's own work, not something left behind. AIR tasks
+    /// count as soon as their adapter announces them.
     ///
     /// Kimi is the exception to the in-flight rule: it detaches a shell into
     /// one of our terminals and keeps working, so a terminal its native journal
@@ -133,36 +132,21 @@ impl DurableRelay {
     pub(super) fn background_commands(&self) -> Vec<BackgroundCommand> {
         let turn_in_flight = self.turn_in_progress();
         let detached_terminals = self.detached_agent_terminals();
-        let mut commands: Vec<BackgroundCommand> = match self.background_work {
-            BackgroundWorkPolicy::HostedTerminals
-            | BackgroundWorkPolicy::ClaudeTasks
-            | BackgroundWorkPolicy::KimiTasks => self
-                .active_agent_terminals
-                .values()
-                .filter(|terminal| {
-                    !turn_in_flight || detached_terminals.contains(terminal.terminal_id.as_str())
-                })
-                .map(|terminal| BackgroundCommand {
-                    id: background_task_id("terminal", &terminal.terminal_id),
-                    started_at_ms: terminal.started_at_ms,
-                    command: terminal.command.clone(),
-                    can_stop: true,
-                })
-                .collect(),
-            BackgroundWorkPolicy::CodexExecCards => {
-                self.background_exec_cards.values().cloned().collect()
-            }
-        };
-        if self.background_work == BackgroundWorkPolicy::ClaudeTasks {
-            commands.extend(
-                self.claude_background_tasks
-                    .iter()
-                    .map(|(task_id, command)| {
-                        let mut command = command.clone();
-                        command.can_stop = self.claude_stoppable_tasks.contains(task_id);
-                        command
-                    }),
-            );
+        let mut commands: Vec<BackgroundCommand> = self
+            .active_agent_terminals
+            .values()
+            .filter(|terminal| {
+                !turn_in_flight || detached_terminals.contains(terminal.terminal_id.as_str())
+            })
+            .map(|terminal| BackgroundCommand {
+                id: background_task_id("terminal", &terminal.terminal_id),
+                started_at_ms: terminal.started_at_ms,
+                command: terminal.command.clone(),
+                can_stop: true,
+            })
+            .collect();
+        if self.background_work == BackgroundWorkPolicy::AirTasks {
+            commands.extend(self.air_tasks.values().map(|entry| entry.command.clone()));
         }
         if self.background_work == BackgroundWorkPolicy::KimiTasks {
             commands.extend(
@@ -216,14 +200,14 @@ impl DurableRelay {
             .collect()
     }
 
-    /// Replace Claude's background-task level without opening a foreground
-    /// turn. Edge bookends cannot be paired safely with this signal: their
-    /// ordering is unspecified, and task starts also include foreground work.
-    pub fn claude_background_tasks_changed(
+    /// Apply AIR lifecycle changes at the single owner of live background work.
+    pub fn air_task_changed(
         &mut self,
-        tasks: Vec<crate::acp::ClaudeBackgroundTask>,
+        session_id: String,
+        update: crate::acp::AirTaskUpdate,
     ) -> Result<()> {
-        if self.background_work != BackgroundWorkPolicy::ClaudeTasks
+        use crate::acp::AirTaskUpdate;
+        if self.background_work != BackgroundWorkPolicy::AirTasks
             || matches!(
                 self.snapshot.execution,
                 RelayExecutionState::Closing | RelayExecutionState::Closed
@@ -231,29 +215,56 @@ impl DurableRelay {
         {
             return Ok(());
         }
-        let now = epoch_millis();
-        // A task leaving the level says nothing about a coming turn: a task
-        // the user stopped leaves it too, and no turn follows a stop. Only
-        // the edge update (`claude_async_task_control_changed`) knows which.
-        self.claude_background_tasks = tasks
-            .into_iter()
-            .map(|task| {
-                let task_id = task.task_id;
+        match update {
+            AirTaskUpdate::Spawned {
+                task_id,
+                description,
+                can_stop,
+            } => {
+                let key = air_task_key(&session_id, &task_id);
                 let started_at_ms = self
-                    .claude_background_tasks
-                    .get(&task_id)
-                    .map_or(now, |previous| previous.started_at_ms);
-                (
-                    task_id.clone(),
-                    BackgroundCommand {
-                        id: background_task_id("claude", &task_id),
-                        started_at_ms,
-                        command: task.description,
-                        can_stop: false,
+                    .air_tasks
+                    .get(&key)
+                    .map_or_else(epoch_millis, |entry| entry.command.started_at_ms);
+                self.air_tasks.insert(
+                    key.clone(),
+                    AirTaskEntry {
+                        session_id,
+                        task_id,
+                        command: BackgroundCommand {
+                            id: background_task_id("air", &key),
+                            started_at_ms,
+                            command: description,
+                            can_stop,
+                        },
                     },
-                )
-            })
-            .collect();
+                );
+            }
+            AirTaskUpdate::Changed {
+                task_id,
+                description,
+                can_stop,
+            } => {
+                if let Some(entry) = self.air_tasks.get_mut(&air_task_key(&session_id, &task_id)) {
+                    if let Some(description) = description {
+                        entry.command.command = description;
+                    }
+                    if let Some(can_stop) = can_stop {
+                        entry.command.can_stop = can_stop;
+                    }
+                }
+            }
+            AirTaskUpdate::Finished { task_id, settled } => {
+                let removed = self.air_tasks.remove(&air_task_key(&session_id, &task_id));
+                if removed.is_some()
+                    && settled
+                    && self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
+                    && self.snapshot.native_agent_replay.is_none()
+                {
+                    self.note_task_settled();
+                }
+            }
+        }
         self.persist_activity_transition()
     }
 
@@ -373,28 +384,6 @@ impl DurableRelay {
         Ok(())
     }
 
-    /// Add or remove the stop affordance announced by Claude's AIR extension.
-    /// Task existence remains owned by `claude_background_tasks_changed`.
-    pub fn claude_async_task_control_changed(
-        &mut self,
-        task_id: String,
-        can_stop: bool,
-        settled: bool,
-    ) -> Result<()> {
-        if self.background_work != BackgroundWorkPolicy::ClaudeTasks {
-            return Ok(());
-        }
-        if can_stop {
-            self.claude_stoppable_tasks.insert(task_id);
-        } else {
-            self.claude_stoppable_tasks.remove(&task_id);
-        }
-        if settled {
-            self.note_task_settled();
-        }
-        self.persist_activity_transition()
-    }
-
     /// A background task the harness will answer with a turn of its own just
     /// settled. Until that turn opens, the session is not quiet.
     pub(super) fn note_task_settled(&mut self) {
@@ -440,16 +429,20 @@ impl DurableRelay {
                 terminal_id: terminal_id.clone(),
             });
         }
-        if let Some((task_id, _)) = self
-            .claude_background_tasks
+        if let Some((key, entry)) = self
+            .air_tasks
             .iter()
-            .find(|(id, _)| background_task_id("claude", id) == requested_id)
+            .find(|(_, entry)| entry.command.id == requested_id)
         {
-            // The adapter acknowledges the stop with a plain chunk; remember
-            // the request so `record_session_update` can pair it.
-            self.claude_pending_stops.insert(task_id.clone());
-            return Ok(BackgroundTaskStopTarget::ClaudeAsyncTask {
-                task_id: task_id.clone(),
+            if self.harness_turns == HarnessTurnPolicy::ClaudeAdapter {
+                self.claude_pending_stops
+                    .entry(entry.session_id.clone())
+                    .or_default()
+                    .insert(key.clone());
+            }
+            return Ok(BackgroundTaskStopTarget::AirAsyncTask {
+                session_id: entry.session_id.clone(),
+                task_id: entry.task_id.clone(),
             });
         }
         bail!("background task is no longer running")
@@ -457,19 +450,58 @@ impl DurableRelay {
 
     /// Forget a Claude stop that never reached the adapter, so a later chunk
     /// with the acknowledgement prefix is not mistaken for an answer to it.
-    pub fn claude_stop_not_sent(&mut self, task_id: &str) {
-        self.claude_pending_stops.remove(task_id);
+    pub fn claude_stop_not_sent(&mut self, session_id: &str, task_id: &str) {
+        if let Some(pending) = self.claude_pending_stops.get_mut(session_id) {
+            pending.remove(&air_task_key(session_id, task_id));
+            if pending.is_empty() {
+                self.claude_pending_stops.remove(session_id);
+            }
+        }
     }
 
     /// Whether this update is the adapter acknowledging a stop this process
     /// requested: a single text block with the acknowledgement prefix while a
     /// stop is pending. The adapter names no task id in the chunk and may
-    /// have renamed the task since the level reported it, so the pairing is
+    /// have renamed the task since its spawn, so the pairing is
     /// by count, not by name.
-    pub(super) fn is_claude_stop_acknowledgement(&self, update: &SessionUpdate) -> bool {
-        !self.claude_pending_stops.is_empty()
+    fn is_claude_stop_acknowledgement_for(
+        &self,
+        session_id: Option<&str>,
+        update: &SessionUpdate,
+    ) -> bool {
+        self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
+            && session_id.is_some_and(|id| {
+                self.claude_pending_stops
+                    .get(id)
+                    .is_some_and(|pending| !pending.is_empty())
+            })
             && agent_chunk_text(update)
                 .is_some_and(|text| text.starts_with(CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX))
+    }
+
+    pub(super) fn is_claude_stop_acknowledgement(&self, update: &SessionUpdate) -> bool {
+        self.is_claude_stop_acknowledgement_for(self.snapshot.native_session_id.as_deref(), update)
+    }
+
+    pub(super) fn consume_claude_stop_acknowledgement(
+        &mut self,
+        session_id: Option<&str>,
+        update: &SessionUpdate,
+    ) -> bool {
+        if !self.is_claude_stop_acknowledgement_for(session_id, update) {
+            return false;
+        }
+        let Some(session_id) = session_id else {
+            return false;
+        };
+        let Some(pending) = self.claude_pending_stops.get_mut(session_id) else {
+            return false;
+        };
+        let consumed = pending.pop_first().is_some();
+        if pending.is_empty() {
+            self.claude_pending_stops.remove(session_id);
+        }
+        consumed
     }
 
     pub fn agent_terminal_started(&mut self, terminal: ActiveAgentTerminal) -> Result<()> {
@@ -501,11 +533,8 @@ impl DurableRelay {
     /// piece of in-memory process state a harness reports is cleared here, so
     /// a restart and a closed terminal set cannot disagree about it.
     pub(super) fn forget_harness_processes(&mut self) {
-        self.codex_execute_tools.clear();
-        self.background_exec_cards.clear();
-        self.claude_background_tasks.clear();
+        self.air_tasks.clear();
         self.claude_pending_stops.clear();
-        self.claude_stoppable_tasks.clear();
         self.task_settled_at_ms = None;
         self.kimi_background_tasks.clear();
         self.kimi_provisional_tasks.clear();
@@ -516,84 +545,6 @@ impl DurableRelay {
         if self.background_work == BackgroundWorkPolicy::KimiTasks {
             self.background_work_known = Some(false);
         }
-    }
-
-    /// Follow a Codex `exec_command` card: a result with a null exit code is a
-    /// process Codex left running, and the next card for the same call reports
-    /// the exit that ends it.
-    ///
-    /// Codex runs its own shells and never asks Hel for a terminal, so a card
-    /// is the only evidence there is. The card shape is the one described in
-    /// `.agents/docs/claude-autonomous-turns.md`: an execute card whose
-    /// `rawOutput` object carries `exit_code`, null while the process runs.
-    pub(super) fn track_codex_exec_card(&mut self, update: &SessionUpdate) {
-        let (tool_call_id, kind, status, raw_input, raw_output) = match update {
-            SessionUpdate::ToolCall(call) => (
-                call.tool_call_id.0.as_ref(),
-                Some(call.kind),
-                Some(call.status),
-                call.raw_input.as_ref(),
-                call.raw_output.as_ref(),
-            ),
-            SessionUpdate::ToolCallUpdate(call) => (
-                call.tool_call_id.0.as_ref(),
-                call.fields.kind,
-                call.fields.status,
-                call.fields.raw_input.as_ref(),
-                call.fields.raw_output.as_ref(),
-            ),
-            _ => return,
-        };
-        match kind {
-            Some(agent_client_protocol::schema::v1::ToolKind::Execute) => {
-                let command =
-                    exec_card_command(raw_input).unwrap_or_else(|| tool_call_id.to_owned());
-                self.codex_execute_tools
-                    .insert(tool_call_id.to_owned(), command);
-            }
-            Some(_) => {
-                self.codex_execute_tools.remove(tool_call_id);
-                self.background_exec_cards.remove(tool_call_id);
-                return;
-            }
-            None => {}
-        }
-        let Some(command) = self.codex_execute_tools.get(tool_call_id).cloned() else {
-            // Tool-call updates are partial. A result with no kind belongs to
-            // the card that introduced it; it is not evidence of execution by
-            // itself (guardian reviews and searches also carry raw output).
-            return;
-        };
-        if status.is_some_and(|status| {
-            status == agent_client_protocol::schema::v1::ToolCallStatus::Failed
-        }) {
-            self.codex_execute_tools.remove(tool_call_id);
-            self.background_exec_cards.remove(tool_call_id);
-            return;
-        }
-        // A card with no result says nothing about a process: an execute card
-        // is in flight until Codex reports its output.
-        let Some(raw_output) = raw_output else {
-            return;
-        };
-        // MCP calls also have kind Execute, but their result/error envelope
-        // has no process exit field. Absence is not evidence of detachment.
-        let Some(exit_code) = raw_output.get("exit_code") else {
-            return;
-        };
-        if !exit_code.is_null() {
-            self.codex_execute_tools.remove(tool_call_id);
-            self.background_exec_cards.remove(tool_call_id);
-            return;
-        }
-        self.background_exec_cards
-            .entry(tool_call_id.to_owned())
-            .or_insert(BackgroundCommand {
-                id: background_task_id("codex", tool_call_id),
-                started_at_ms: epoch_millis(),
-                command,
-                can_stop: false,
-            });
     }
 
     /// Remember which hosted terminal a tool call embedded. Kimi launches a
@@ -697,5 +648,52 @@ impl DurableRelay {
                 },
                 native_task_id: task_id.map(str::to_owned),
             });
+    }
+}
+
+/// Fixtures are applied as AIR spawn/terminal edges, never as a provider level.
+#[cfg(test)]
+pub(crate) struct AirTaskFixture {
+    pub task_id: String,
+    pub description: String,
+}
+
+#[cfg(test)]
+impl DurableRelay {
+    pub(crate) fn set_air_tasks(&mut self, tasks: Vec<AirTaskFixture>) -> Result<()> {
+        use crate::acp::AirTaskUpdate;
+        let ended: Vec<_> = self
+            .air_tasks
+            .values()
+            .filter(|entry| {
+                entry.session_id == "root"
+                    && !tasks.iter().any(|task| task.task_id == entry.task_id)
+            })
+            .map(|entry| entry.task_id.clone())
+            .collect();
+        for task_id in ended {
+            self.air_task_changed(
+                "root".into(),
+                AirTaskUpdate::Finished {
+                    task_id,
+                    settled: false,
+                },
+            )?;
+        }
+        for task in tasks {
+            let can_stop = self
+                .air_tasks
+                .get(&air_task_key("root", &task.task_id))
+                .is_some_and(|entry| entry.command.can_stop);
+            self.air_task_changed(
+                "root".into(),
+                AirTaskUpdate::Spawned {
+                    task_id: task.task_id,
+                    description: task.description,
+                    can_stop,
+                },
+            )?;
+        }
+        Ok(())
     }
 }

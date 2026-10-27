@@ -475,15 +475,30 @@ pub struct AcceptedSessionConfig {
     pub effort: Option<String>,
 }
 
-/// A task in Claude Code's process-local background-task level signal.
-///
-/// The adapter also sends `task_type` and an optional `ambient` marker. Hel
-/// only needs the stable id and user-facing description, and filters ambient
-/// housekeeping tasks before publishing the replacement level to the relay.
+/// Historical raw SDK task record, retained for old RuntimeEvent payloads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaudeBackgroundTask {
     pub task_id: String,
     pub description: String,
+}
+
+/// A change in the adapter-owned AIR background task inventory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AirTaskUpdate {
+    Spawned {
+        task_id: String,
+        description: String,
+        can_stop: bool,
+    },
+    Changed {
+        task_id: String,
+        description: Option<String>,
+        can_stop: Option<bool>,
+    },
+    Finished {
+        task_id: String,
+        settled: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -541,17 +556,21 @@ pub enum RuntimeEvent {
     SessionUpdate {
         update: serde_json::Value,
     },
-    /// Replacement level for Claude Code's live non-ambient background tasks.
-    /// This provider signal does not represent transcript or foreground work.
+    /// Historical runtime payload; retained only for transcript decoding.
     ClaudeBackgroundTasksChanged {
         tasks: Vec<ClaudeBackgroundTask>,
     },
+    /// Historical runtime payload; retained only for transcript decoding.
     ClaudeAsyncTaskControlChanged {
         task_id: String,
         can_stop: bool,
         /// The task completed or failed, so Claude Code will follow it with a
         /// task-notification turn. A task the user stopped gets no turn.
         settled: bool,
+    },
+    AirTaskChanged {
+        session_id: String,
+        update: AirTaskUpdate,
     },
     /// Claude Code reported the end of one model cycle. It travels on the
     /// same ordered stream as `SessionUpdate`, so everything the adapter sent

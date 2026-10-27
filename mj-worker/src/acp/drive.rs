@@ -159,6 +159,25 @@ where
             async move |notification: RawSessionNotification, _cx| {
                 notification_activity.mark();
                 if matches!(notification_harness, HarnessKind::Claude | HarnessKind::Codex) {
+                    match air_task_update(&notification.update) {
+                        Ok(Some(update)) => {
+                            if let Some(update) = update {
+                                notification_events.send(RuntimeEvent::AirTaskChanged {
+                                    session_id: notification.session_id.to_string(), update,
+                                }).await.map_err(|_| relay_event_channel_error())?;
+                            }
+                            return Ok(());
+                        }
+                        Ok(None) => {}
+                        Err(message) => {
+                            notification_events.send(RuntimeEvent::Warning {
+                                message: format!("ignored malformed AIR async task update: {message}"),
+                            }).await.map_err(|_| relay_event_channel_error())?;
+                            return Ok(());
+                        }
+                    }
+                }
+                if matches!(notification_harness, HarnessKind::Claude | HarnessKind::Codex) {
                     let routed = native_agents.lock().expect("native agent router poisoned")
                         .route(&notification.session_id.to_string(), &notification.update);
                     match routed {
@@ -167,44 +186,11 @@ where
                                 .map_err(|_| relay_event_channel_error())?;
                             return Ok(());
                         }
-                        Ok(native_agents::Routed::Ignored) => return Ok(()),
                         Ok(native_agents::Routed::Parent) => {}
                         Err(error) => {
                             notification_events.send(RuntimeEvent::Warning {
                                 message: format!("native agent update: {error:#}"),
                             }).await.map_err(|_| relay_event_channel_error())?;
-                            return Ok(());
-                        }
-                    }
-                }
-                if notification_harness == HarnessKind::Claude {
-                    match claude_async_task_control_update(&notification.update) {
-                        Ok(Some(ClaudeAsyncTaskControlUpdate::Set {
-                            task_id,
-                            can_stop,
-                            settled,
-                        })) => {
-                            notification_events
-                                .send(RuntimeEvent::ClaudeAsyncTaskControlChanged {
-                                    task_id,
-                                    can_stop,
-                                    settled,
-                                })
-                                .await
-                                .map_err(|_| relay_event_channel_error())?;
-                            return Ok(());
-                        }
-                        Ok(Some(ClaudeAsyncTaskControlUpdate::Ignore)) => return Ok(()),
-                        Ok(None) => {}
-                        Err(message) => {
-                            notification_events
-                                .send(RuntimeEvent::Warning {
-                                    message: format!(
-                                        "ignored malformed Claude async task update: {message}"
-                                    ),
-                                })
-                                .await
-                                .map_err(|_| relay_event_channel_error())?;
                             return Ok(());
                         }
                     }
@@ -318,28 +304,6 @@ where
                         return Ok(());
                     }
                 }
-                let tasks = match claude_background_tasks(&notification.message) {
-                    Ok(Some(tasks)) => tasks,
-                    Ok(None) => return Ok(()),
-                    Err(error) => {
-                        claude_sdk_events
-                            .send(RuntimeEvent::Warning {
-                                message: format!(
-                                    "ignored malformed Claude background task level: {error}"
-                                ),
-                            })
-                            .await
-                            .map_err(|_| relay_event_channel_error())?;
-                        // A malformed level cannot establish which provider
-                        // tasks are still live, so keep the last known level
-                        // until a valid replacement arrives.
-                        return Ok(());
-                    }
-                };
-                claude_sdk_events
-                    .send(RuntimeEvent::ClaudeBackgroundTasksChanged { tasks })
-                    .await
-                    .map_err(|_| relay_event_channel_error())?;
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),

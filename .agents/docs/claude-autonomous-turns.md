@@ -31,7 +31,7 @@ per-harness contract.
   queued user prompt there before the cycle ends.
 - Claude Code ends every model cycle with one SDK `result` message. New and
   resumed sessions ask for it through `_meta.claudeCode.emitRawSDKMessages`
-  (`{"type":"result"}`, beside the background-task level), and the adapter
+  (`{"type":"result"}`), and the adapter
   forwards it as `_claude/sdkMessage` before it does anything else with it.
   The result names its origin: `human` (or no origin, on older Claude Code)
   for a cycle that answered the user, and `task-notification`, `peer`,
@@ -218,91 +218,38 @@ evidence differently, and `BackgroundWorkPolicy` picks which one a relay reads
   list the moment the child exits. A terminal only counts as background work
   while no prompt and no harness turn is open; until then it is the turn's own
   work.
-- `ClaudeTasks` (Claude). Includes hosted terminals plus the SDK's full live
-  background-task list. New and resumed Claude sessions opt into the
-  `system/background_tasks_changed` raw SDK message (and the `result` message
-  described above) through `_meta.claudeCode.emitRawSDKMessages`. The adapter forwards it as
-  `_claude/sdkMessage`; Hel excludes tasks marked `ambient` (SDK housekeeping),
-  replaces its task map on each notification, and
-  preserves the first observation time of IDs still present. An empty list
-  clears the tasks. These updates do not open a foreground turn, advance the
-  step clock, or enter the transcript. Prompt completion leaves the list
-  intact; bridge teardown, restart, and close clear it. The SDK level is
-  process-local and emits nothing at startup, so it must not be restored from
-  transcript history. Task starts and completion bookends are deliberately
-  not correlated with this level: their ordering is unspecified, and starts
-  include foreground tasks. This fixes idle being displayed while Claude's
-  own background agents are still running.
+- `AirTasks` (Claude and Codex). Includes hosted terminals plus the AIR
+  adapter's visible background tasks. Both clients declare `asyncTasks` under
+  initialize `_meta.jetbrains.air.capabilities`. `async_task_spawned` adds a
+  session-owned task, progress can rename it, and completed, failed or stopped
+  state updates remove it. Running and paused states retain it. `taskType: turn`
+  represents an autonomous turn rather than a background command and is excluded.
+  Adapter-hidden Monitor and ambient work does not enter this inventory.
 
-  A stop Hel requests for one of these tasks is acknowledged by the
-  adapter with a plain `agent_message_chunk` whose text is
-  `**Task stopped by user:** <name>.` and no origin marker: the SDK injects
-  nothing into the model for a user-stopped shell task, so no turn runs.
-  Only the prefix is stable. `<name>` is whatever the adapter calls the task
-  at that moment, and a later `task_started` or level replaces it (a live
-  check saw the level say `Sleep for the live check` and the acknowledgement
-  quote the command `sleep 900`). The relay therefore records the task id as
-  a pending stop when `background_task_stop_target` resolves a
-  `ClaudeAsyncTask`, treats the next prefixed single-text chunk as its
-  acknowledgement while any stop is pending, and does not open a harness turn
-  for it; the chunk still enters the transcript. A stop that never reaches
-  the adapter drops its pending entry (`claude_stop_not_sent`), and restart or
-  close clears them all. Checked against claude-agent-acp 0.73.0
-  `dist/async-tasks.js` (`taskStopped`, `mergeLevel`, `mergeStarted`) and
-  live on 2026-09-14. Tasks that end on their own still re-invoke the model
-  and open a turn as before.
+  Tasks are keyed by owning ACP session and task id, so native child sessions
+  share the inventory without colliding with root task ids. A task advertised
+  with `canStop` resolves to `AirAsyncTask { session_id, task_id }`; stopping
+  sends `_session/async_task/stop` to that exact session. Codex shell tasks are
+  consequently stoppable. Tool cards remain transcript/output events and never
+  establish background process existence.
 
-  A task list that stays populated for hours is not by itself a relay bug.
-  On 2026-09-14 a session reported six tasks alive for over five hours; each
-  was a `until ! pgrep -f "<pattern>"; do sleep 10; done` loop whose pattern
-  matched the loop's own command line, so it could never exit. The relay
-  reported the SDK level accurately. The remedy is agent guidance, not a relay
-  change.
-- `CodexExecCards` (Codex). codex-acp runs its own shells and never calls
-  `terminal/create`, so the only evidence is the tool card. An `exec_command`
-  card carries its result under `rawOutput`, with `exit_code` parsed from
-  Codex's structured result. A card whose `rawOutput` has an explicitly null
-  `exit_code` is a process Codex's unified exec left running; the relay tracks it by
-  tool call id and clears it when a later card for the same call reports an exit
-  code, when the harness restarts, and when the session closes. ACP tool-call
-  updates are partial, so the relay first remembers that the card was explicitly
-  introduced with `kind: execute`. A later `rawOutput` without `kind` inherits
-  that remembered identity. Raw output by itself is not execution evidence:
-  Codex Guardian reviews and searches also return it. MCP calls can themselves
-  have `kind: execute`; their `result`/`error` envelopes omit `exit_code` and
-  must not be classified as background processes.
+  Prompt completion preserves this live inventory; harness teardown, restart,
+  and close clear it. During session/load, Claude can replay historical spawn
+  and terminal pairs, while Codex reannounces live commands. The relay processes
+  those inventory updates inside the native-agent replay bracket without
+  anticipating notification turns from historical completions.
 
-The Claude level contract was checked on 2026-09-06 against the installed
-claude-agent-acp 0.73.0 `dist/acp-agent.js` (raw SDK forwarding and
-`shouldEmitRawMessage`) and its SDK's `SDKBackgroundTasksChangedMessage` in
-`sdk.d.ts`. The latter specifies replacement semantics, process-local reset,
-unspecified ordering relative to edge events, and exclusion of `ambient`
-tasks from activity indicators.
-
-The completed-command shape and partial-update behavior were validated against
-codex-acp 1.8.0 on 2026-09-04. Ordinary commands ended with
-`rawOutput.exit_code: 0`. Guardian cards began as `kind: think`, then ended in a
-partial update with raw output and no repeated kind; treating that final update
-as an execute result produced dozens of false `BG` entries. The relay regression
-tests cover both the correlated execute update and the non-execute negative
-control. A live detached-process check is still needed to confirm Codex's null
-exit-code and five-minute reap behavior; if the reap is confirmed, entries
-should also age out at that bound.
-
-On 2026-09-05, source review of the installed codex-acp 1.8.0
-`dist/index.js` (`createCommandExecutionUpdate` and
-`createCommandExecutionCompleteUpdate`) confirmed that command starts carry
-their kind and command, while completion updates reuse `item.id`, omit kind,
-and carry `exit_code: item.exitCode`. In-progress items produce no completion
-update. This confirms partial-update correlation, but does not establish that
-a null exit code proves detachment or that polling reuses the original item ID.
-Those remain assumptions of the existing background-process tracking; no
-timeout-based cleanup is justified by this source review.
+  Only Claude's harness turn policy anticipates a task-notification turn after
+  a live task completes or fails. Stopped tasks get no such turn. Claude still
+  opts into raw SDK `result` notifications and `perTaskStopAffordance`; neither
+  is replaced by AIR task inventory. Claude acknowledges requested stops with
+  a plain `agent_message_chunk` starting `**Task stopped by user:** `, with no
+  model cycle or result. The relay pairs those chunks with pending Claude
+  stops so they cannot open a foreground turn. Codex uses no such pairing.
 
 Turn-boundary regression coverage also checks successful, rejected, and
 interrupted prompts: stale foreground tool statuses clear, while a previously
-tracked detached command survives and can still be cleared by its correlated
-exit update.
+tracked AIR task survives until its terminal lifecycle update.
 
 Validation on 2026-09-05 passed: `cargo fmt --all -- --check`, the full
 `cargo test --quiet` suite, and `cargo clippy --all-targets -- -D warnings`.
@@ -318,7 +265,7 @@ Running clocks read `43m36s`, not `00:43:36` (`format_clock`).
   model cycle ends with a result, so this now needs output that belongs to no
   cycle. The one such chunk Hel itself provokes, the `**Task stopped by user:**
   <name>.` acknowledgement of a stop it requested, is paired with the pending
-  stop and handled (see `ClaudeTasks` above).
+  stop and handled (see `AirTasks` above).
 - **A steer that lands just as a cycle ends can run as a harness turn.** If
   Claude Code finishes the cycle before it reads the steered message, the
   result reports no queued user message and ends the prompt, and the steered
