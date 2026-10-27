@@ -15,7 +15,8 @@ Users should search for a command and run it from the same place they discover i
 - [x] (2026-10-27) Preserve saved key configurations as aliases; focused decoded-config, punctuation, simple-mode, modal-state, and palette-golden tests pass.
 - [x] (2026-10-27) Review focused routing/render coverage and resolve custom/disabled alias findings, including composer hint/click routing.
 - [x] (2026-10-27) Full four-crate validation passes: 1,806 passed, 12 ignored; workspace Clippy, formatting, and diff checks pass.
-- [ ] Commit on the current branch and push to origin/master.
+- [x] (2026-10-27) Commit the implementation as 9836a9c79 on the current branch.
+- [x] (2026-10-27) Verify the merged AFK golden passes and deliver the current branch to origin/master; this plan update accompanies the delivery merge.
 
 ## Surprises & Discoveries
 
@@ -73,6 +74,10 @@ The implementation child reports under the session's `.mj-agents/602c26d5b00fb0c
 
 The final four-crate test command passed with 1,806 passing tests and 12 ignored, with no failures. Workspace Clippy with warnings denied, formatting, and the diff check also passed. Intermediate full runs exposed stale footer snapshots; all affected Linux/macOS goldens were updated and the final suites passed. Focused coverage includes decoded legacy configurations, punctuation encoding, simple-mode aliases, modal draft preservation, dashboard and composer footer grouping, and direct command click indices.
 
+After implementation commit 9836a9c79, merge upstream d5311066c before delivery. Its independent AFK dialog styling and GitHub-watch changes merged cleanly; only the affected AFK render golden needs a targeted check against the combined styling and footer, with no broad suite repetition.
+
+The integrated-tree `golden_operator_away_dialog` test passed with no edits. This confirms the automatically merged snapshot includes both the concurrent AFK styling and unified palette footer.
+
 ## Interfaces and Dependencies
 
 Use existing key configuration, `CommandId::Palette`, command registry metadata, and palette rendering. The legacy Help key action may remain as compatibility input but must map to the same visible palette command. Do not introduce dependencies, database migrations, or protocol changes.
@@ -86,3 +91,7 @@ Updated after implementation: recorded the full removal, focused passes, and all
 Updated after final review: recorded required corrections for disabled bindings and custom direct aliases before the final validation round.
 
 Updated after validation: recorded resolved review findings, passing full suites, updated snapshots, Clippy, and formatting.
+
+Updated after committing: recorded the implementation commit and the targeted validation of concurrent AFK styling before the final push.
+
+Final update: recorded the passing integrated golden and delivery of the reviewed, validated implementation.

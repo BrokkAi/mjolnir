@@ -6,11 +6,11 @@
 │ Create                                                                                           │
 │hel ───  ╭ ×  AFK  ─────────────────────────────────────────────────────────────────────╮         │
 │  ! Wai  │                                                                              │         │
-│  Quest  │                               A     FFFFF   K   K                            │         │
-│  │ Cho  │                              A A    F       K  K                             │         │
-│  │      │                             AAAAA   FFFF    KKK                              │         │
-│         │                             A   A   F       K  K                             │         │
-│  ! Wai  │                             A   A   F       K   K                            │         │
+│  Quest  │                    ▟█████▙  ▄████▄  ██████  ██   ██     ╱╱                   │         │
+│  │ Cho  │                    ▜█████▛  ██  ██  ██      ██  ██     ╱╱                    │         │
+│  │      │                       ║     ██████  █████   █████     ╱━━                    │         │
+│         │                       ║     ██  ██  ██      ██  ██     ╱╱                    │         │
+│  ! Wai  │                       ▀     ██  ██  ██      ██   ██   ╱╱                     │         │
 │  Quest  │                                                                              │         │
 │  │ Cho  │   While you are away, an agent that asks a question or needs permission is   │         │
 │  │      │  told that you are away and asked to do other useful work first. If it asks  │         │
@@ -39,11 +39,11 @@
 │ Create                                                                                           │
 │hel ───  ╭ ×  AFK  ─────────────────────────────────────────────────────────────────────╮         │
 │  · Wai  │                                                                              │         │
-│  Idle   │                               A     FFFFF   K   K                            │         │
-│  │ No   │                              A A    F       K  K                             │         │
-│  │      │                             AAAAA   FFFF    KKK                              │         │
-│         │                             A   A   F       K  K                             │         │
-│  · Wai  │                             A   A   F       K   K                            │         │
+│  Idle   │                    ▟█████▙  ▄████▄  ██████  ██   ██     ╱╱                   │         │
+│  │ No   │                    ▜█████▛  ██  ██  ██      ██  ██     ╱╱                    │         │
+│  │      │                       ║     ██████  █████   █████     ╱━━                    │         │
+│         │                       ║     ██  ██  ██      ██  ██     ╱╱                    │         │
+│  · Wai  │                       ▀     ██  ██  ██      ██   ██   ╱╱                     │         │
 │  Idle   │                                                                              │         │
 │  │ No   │   While you are away, an agent that asks a question or needs permission is   │         │
 │  │      │  told that you are away and asked to do other useful work first. If it asks  │         │
@@ -72,11 +72,11 @@
 | Create                                                                                           |
 |hel ---  + x  AFK  ---------------------------------------------------------------------+         |
 |  ! Wai  |                                                                              |         |
-|  Quest  |                               A     FFFFF   K   K                            |         |
-|  | Cho  |                              A A    F       K  K                             |         |
-|  |      |                             AAAAA   FFFF    KKK                              |         |
-|         |                             A   A   F       K  K                             |         |
-|  ! Wai  |                             A   A   F       K   K                            |         |
+|  Quest  |                    .=====.  /####\  ######  ##   ##     //                   |         |
+|  | Cho  |                    '==+=='  ##  ##  ##      ##  ##     //                    |         |
+|  |      |                       |     ######  #####   #####     /==                    |         |
+|         |                       |     ##  ##  ##      ##  ##     //                    |         |
+|  ! Wai  |                      [_]    ##  ##  ##      ##   ##   //                     |         |
 |  Quest  |                                                                              |         |
 |  | Cho  |   While you are away, an agent that asks a question or needs permission is   |         |
 |  |      |  told that you are away and asked to do other useful work first. If it asks  |         |
@@ -121,6 +121,39 @@
    │ Close this window to  │
    │      come back.       │
    ╰───────────────────────╯
+
+
+=== AFK tall narrow (56x32) ===
+                   Terminal too small
+                Need at least 60 columns.
+                   Current width: 56.
+
+
+      ╭ ×  AFK  ─────────────────────────────────╮
+      │                                          │
+      │                    AFK                   │
+      │                                          │
+      │ While you are away, an agent that asks a │
+      │   question or needs permission is told   │
+      │  that you are away and asked to do other │
+      │  useful work first. If it asks the same  │
+      │  thing again, the request waits for you. │
+      │                                          │
+      │             Waiting for you:             │
+      │     Waiting session 0 (default / hel)    │
+      │     Waiting session 1 (default / hel)    │
+      │     Waiting session 2 (default / hel)    │
+      │     Waiting session 3 (default / hel)    │
+      │                                          │
+      │      Close this window to come back.     │
+      │                                          │
+      │                                          │
+      │                                          │
+      ╰──────────────────────────────────────────╯
+
+
+
+
 
 
 === AFK tiny (10x5) ===

@@ -9,7 +9,8 @@ use mj_chat::theme;
 use mj_core::state::OperatorPresence as DaemonOperatorPresence;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Margin, Rect};
-use ratatui::text::Line;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 
 use crate::modal_surface::DialogModal;
@@ -19,12 +20,22 @@ use crate::widgets::{
 use crate::{DashboardAction, DashboardState};
 
 const EXPLANATION: &str = "While you are away, an agent that asks a question or needs permission is told that you are away and asked to do other useful work first. If it asks the same thing again, the request waits for you.";
-const ART: [&str; 5] = [
-    "   A     FFFFF   K   K",
-    "  A A    F       K  K ",
-    " AAAAA   FFFF    KKK  ",
-    " A   A   F       K  K ",
-    " A   A   F       K   K",
+type AwayArtRow = (&'static str, &'static str, &'static str);
+
+const UNICODE_ART: [AwayArtRow; 5] = [
+    (" ▟█████▙ ", "▄████▄  ██████  ██   ██", "    ╱╱ "),
+    (" ▜█████▛ ", "██  ██  ██      ██  ██ ", "   ╱╱  "),
+    ("    ║    ", "██████  █████   █████  ", "  ╱━━  "),
+    ("    ║    ", "██  ██  ██      ██  ██ ", "   ╱╱  "),
+    ("    ▀    ", "██  ██  ██      ██   ██", "  ╱╱   "),
+];
+
+const ASCII_ART: [AwayArtRow; 5] = [
+    (r" .=====. ", r"/####\  ######  ##   ##", "    // "),
+    (r" '==+==' ", "##  ##  ##      ##  ## ", "   //  "),
+    ("    |    ", "######  #####   #####  ", "  /==  "),
+    ("    |    ", "##  ##  ##      ##  ## ", "   //  "),
+    ("   [_]   ", "##  ##  ##      ##   ##", "  //   "),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,12 +231,43 @@ pub(crate) fn render(
     form.begin_frame();
     let title = dismissible_modal_title(&mut form, popup, " AFK ", theme::title(true), true);
     frame.render_widget(theme::modal().title(title), popup);
+    let symbols = theme::symbols_for(dashboard.config.advanced.symbols);
+    let art = if symbols == theme::SymbolSet::Ascii {
+        &ASCII_ART
+    } else {
+        &UNICODE_ART
+    };
+    let art_lines = art
+        .iter()
+        .map(|(hammer, wordmark, bolt)| {
+            Line::from(vec![
+                Span::styled(
+                    *hammer,
+                    Style::default()
+                        .fg(theme::palette().secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    *wordmark,
+                    Style::default()
+                        .fg(theme::palette().warning)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    *bolt,
+                    Style::default()
+                        .fg(theme::palette().text)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let art_width = art_lines.iter().map(Line::width).max().unwrap_or(0);
     let mut lines = vec![Line::raw("")];
-    if inner.width >= 23 && inner.height >= 15 {
-        lines.extend(
-            ART.into_iter()
-                .map(|line| Line::styled(line, theme::title(true))),
-        );
+    if usize::from(inner.width) >= art_width && inner.height >= 15 {
+        lines.extend(art_lines);
     } else {
         lines.push(Line::styled("AFK", theme::title(true)));
     }
