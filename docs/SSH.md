@@ -52,7 +52,12 @@ hash covers the destination and your `extra_args`, and the shard number counts
 the masters for that host from 0. A `<hash>-<shard>.lock` file beside each
 socket makes processes of the same instance (for example the old and new
 daemon during a restart) take turns checking and opening that master, so
-they never open two. Mjolnir creates the directory with mode
+they never open two. The socket path is the value of an `ssh` option, which
+`ssh` splits on whitespace, so a path containing a space or `%` is quoted and
+escaped for `ssh`'s own parser: macOS keeps its data in
+`~/Library/Application Support/mjolnir`, and that space would otherwise end
+the option early and make `ssh` refuse the whole command line. Mjolnir creates
+the directory with mode
 `0700`. If it cannot, or if the socket path would be too long for a unix socket
 address, every command opens its own connection instead. Commands that share
 a master also share its fate: if the underlying connection drops, every
