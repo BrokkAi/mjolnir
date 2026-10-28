@@ -1785,6 +1785,7 @@ async fn relay_attach_does_not_probe_or_install_project_memory() {
 /// the cheap one can answer first.
 #[cfg(unix)]
 // Hard-won: 0db1a867: Relay acceptance must not wait on catch-up and invite retrying an accepted command.
+// Hard-won: 1d746fab4: every empty catch-up deeply copied unchanged operational JSON.
 #[tokio::test]
 async fn submitting_does_not_catch_the_projection_up_until_asked() {
     if std::env::var_os(SUBMIT_WITHOUT_SYNC_TEST_CHILD).is_none() {
@@ -1823,6 +1824,14 @@ async fn submitting_does_not_catch_the_projection_up_until_asked() {
         connection.materialized.applied_event_ordinal > before,
         "the catch-up is what advances the projection"
     );
+    let held = connection.operational.clone();
+    for _ in 0..3 {
+        connection.sync_in_place().await.unwrap();
+        assert!(
+            held.ptr_eq(&connection.operational),
+            "an empty catch-up must retain its operational publication"
+        );
+    }
 }
 
 #[cfg(unix)]

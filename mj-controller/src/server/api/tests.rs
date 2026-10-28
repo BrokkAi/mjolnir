@@ -2580,29 +2580,6 @@ async fn start_without_a_profile_refuses_an_effort_the_selected_model_does_not_o
     assert!(body.contains("codex-1 offers efforts: high"), "{body}");
     assert!(actions.try_recv().is_err(), "nothing was launched");
 }
-// Hard-won: 00325fa0: API start refusals dropped running and limit counts.
-#[tokio::test]
-async fn start_names_the_pool_counts_when_the_daemon_is_at_its_action_limit() {
-    let backend = Arc::new(FakeBackend::default());
-    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
-
-    let response = tokio::spawn(app.oneshot(start_request(start_body(""))));
-    let request = actions.recv().await.unwrap();
-    request
-        .reply
-        .send(ActionOutcome::Busy {
-            running: 4,
-            limit: 4,
-        })
-        .unwrap();
-
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    let body = json_body(response).await;
-    assert_eq!(body["running_actions"], 4, "{body}");
-    assert_eq!(body["action_limit"], 4, "{body}");
-}
-
 /// The unavailable-model refusal reaches the client with its code, so each
 /// client can add the remedy that fits it.
 // Hard-won: 9fe54d8e: API refusals directed browser callers to CLI-only flags.

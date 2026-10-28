@@ -36,6 +36,11 @@ use mj_core::relay::{
 
 pub use mj_client::session::RelayAttachment;
 
+pub(crate) type SubagentQueueSnapshot = (
+    mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentToolRequest>>,
+    mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentCompletion>>,
+);
+
 const RELAY_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const RELAY_SLOW_OPERATION_WARNING: Duration = Duration::from_secs(5);
 /// Starting a target-side proxy may page the full worker executable in and
@@ -161,6 +166,9 @@ pub struct RelayClient {
     latest_digest: String,
     subagent_acknowledged: Option<u64>,
     subagent_queue: BTreeMap<String, mj_core::subagent::SubagentQueueChange>,
+    /// Invalidated under this connection's exclusive borrow before applying
+    /// queue changes; partial-page failures cannot leave a valid stale view.
+    subagent_publication: Option<SubagentQueueSnapshot>,
     /// The shared-connection session the proxy runs on. Unlike the admission
     /// permit, which is released once hello completes, the session is in use
     /// for as long as the proxy runs, so the lease lives as long as `child`.

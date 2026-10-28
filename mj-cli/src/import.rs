@@ -484,6 +484,7 @@ pub(crate) fn discover_import_profile(
     };
     // A harness whose sessions cannot be listed yet is not an error to report.
     if !native_sessions_enumerable(harness_kind) {
+        profile.scan_progress = Some((0, 0));
         publish(&profile);
         return profile;
     }
@@ -848,6 +849,93 @@ fn import_session_from_profile(
 mod tests {
     use super::*;
     use clap::Parser;
+
+    // Hard-won: 9ca25dbd2: Sessions Open kept scanning forever after skipping DSH's native store.
+    #[test]
+    fn native_discovery_settles_the_dialog_without_local_history() {
+        use std::collections::BTreeMap;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use mj_client::daemon::{WikiIndexState, WikiSearchPage, WikiStatus};
+        use mj_tui::DashboardState;
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("profile");
+        std::fs::create_dir(&home).unwrap();
+        let profiles = [
+            ("bedrock-claude".to_owned(), HarnessKind::Claude),
+            ("dsh".to_owned(), HarnessKind::Dsh),
+        ];
+        let mut dashboard =
+            DashboardState::new(Config::default(), State::default(), BTreeMap::new());
+        dashboard.show_resume_dialog(1, mj_tui::resume_profile_placeholders(profiles.clone()));
+        dashboard.apply_resume_candidates(1, Ok(Default::default()));
+        let request = dashboard.resume_search_request_id().unwrap();
+        dashboard.apply_wiki_search(
+            request,
+            WikiSearchPage {
+                rows: Vec::new(),
+                status: WikiStatus {
+                    state: WikiIndexState::Ready,
+                    topping_up: false,
+                },
+            },
+        );
+        for _ in 0..2 {
+            dashboard.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        }
+        let render = |dashboard: &mut DashboardState| {
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            terminal
+                .draw(|frame| {
+                    mj_tui::render_combined(
+                        frame,
+                        dashboard,
+                        &mut BTreeMap::new(),
+                        &BTreeMap::new(),
+                        false,
+                    );
+                })
+                .unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        assert!(render(&mut dashboard).contains("scanning"));
+        let cache = NativeScanCache::new();
+        for (profile_id, kind) in profiles {
+            let completed = discover_import_profile(profile_id, kind, home.clone(), &cache, |_| {});
+            assert!(completed.error.is_none(), "{completed:?}");
+            dashboard.apply_resume_profile(1, completed);
+        }
+        let rendered = render(&mut dashboard);
+        assert!(rendered.contains("No importable sessions"), "{rendered}");
+        assert!(!rendered.to_lowercase().contains("scanning"), "{rendered}");
+        assert!(!rendered.contains("Scan failed"), "{rendered}");
+
+        // An absent store is empty; an existing, unreadable store still fails visibly.
+        std::fs::write(home.join("projects"), "not a directory").unwrap();
+        let failed = discover_import_profile(
+            "bedrock-claude".into(),
+            HarnessKind::Claude,
+            home,
+            &cache,
+            |_| {},
+        );
+        assert!(failed.error.is_some());
+        dashboard.apply_resume_profile(1, failed);
+        let rendered = render(&mut dashboard);
+        assert!(
+            rendered.contains("Scan failed for bedrock-claude"),
+            "{rendered}"
+        );
+        assert!(!rendered.to_lowercase().contains("scanning"), "{rendered}");
+    }
 
     // Hard-won: 1fe0c7aa4f: Launch finding I2-16 saw one native Grok session twice in import discovery; this checks the deduplicated session listing.
     #[test]
