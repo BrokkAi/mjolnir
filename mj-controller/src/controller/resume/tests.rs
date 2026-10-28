@@ -77,15 +77,15 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
     };
     crate::database::save_subagent_session(&child, &relation).unwrap();
 
-    let (context, notice) = super::load_in_place_subagent_prompt_data(parent_id).unwrap();
+    // The human notice shows only a count; the current child state belongs
+    // to the model's hidden prompt context.
+    let (context, _) = super::load_in_place_subagent_prompt_data(parent_id).unwrap();
     assert!(context.unwrap().contains("fresh-child; running"));
-    assert!(notice.unwrap().contains("fresh-child; running"));
 
     child.state = SessionState::Parked;
     crate::database::save_session(&child).unwrap();
-    let (context, notice) = super::load_in_place_subagent_prompt_data(parent_id).unwrap();
+    let (context, _) = super::load_in_place_subagent_prompt_data(parent_id).unwrap();
     assert!(context.unwrap().contains("fresh-child; parked"));
-    assert!(notice.unwrap().contains("fresh-child; parked"));
 }
 
 #[tokio::test]
