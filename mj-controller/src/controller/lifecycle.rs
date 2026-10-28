@@ -23,6 +23,8 @@ use super::worktree::{
 };
 use super::{Controller, now, persist_session_record_transition_or_restore};
 
+mod subagent;
+
 /// What destroying a session does with its managed worktree's git branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchDisposition {
@@ -86,6 +88,12 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
+        if self.state.subagents.contains_key(session_id) {
+            return self
+                .suspend_subagent_controlled(session_id, executor, None, None)
+                .await
+                .map(|_| ());
+        }
         if self
             .suspend_session_controlled_with_manager(
                 session_id,
@@ -1395,7 +1403,8 @@ impl Controller {
 
 /// Whether a close of this session has no workspace to archive.
 ///
-/// Only a session that cannot be holding live work qualifies. A record still
+/// A sub-agent borrows its parent's workspace and never archives it. Other
+/// sessions qualify only when they cannot be holding live work. A record still
 /// `Provisioning` has never had a worker connected, so there is no relay to
 /// latch and no harness state to capture. A record mid-close or already
 /// failed, with no target locator left, has no target to read a workspace
@@ -1408,9 +1417,11 @@ impl Controller {
 /// and so is that of a failed one: its first prompt was refused for good and
 /// its worker was stopped when it was recorded as failed (I1-2).
 pub fn has_nothing_to_checkpoint(session: &SessionRecord, subagent: bool) -> bool {
+    if subagent {
+        return true;
+    }
     match session.state {
         SessionState::Provisioning | SessionState::Parked | SessionState::StartupCleanup => true,
-        SessionState::Error if subagent => true,
         SessionState::Closing
         | SessionState::Destroying
         | SessionState::Error

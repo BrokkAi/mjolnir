@@ -393,7 +393,7 @@ async fn a_cancel_after_the_close_commits_is_refused_and_the_teardown_finishes()
     }
     let refusal = cancel.expect_err("a cancel after the commit is refused");
     assert!(
-        format!("{refusal:#}").contains("has passed its verified checkpoint"),
+        format!("{refusal:#}").contains("has begun closing and cannot be cancelled"),
         "{refusal:#}"
     );
     let stored = crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
@@ -574,14 +574,25 @@ fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
         close_route(Some(&failed_with_target), false),
         CloseRoute::Graceful
     );
-    // A failed sub-agent's worker is stopped and a child keeps no archive,
-    // so its close settles without a checkpoint even with its target (I1-2).
+    // Every child takes the ownership-aware close, including recovery of an
+    // interrupted teardown; none needs its parent's workspace checkpoint.
     assert_eq!(
         close_route(Some(&failed_with_target), true),
-        CloseRoute::SettleWithoutCheckpoint
+        CloseRoute::Subagent
     );
-    // A running child still takes the graceful close.
-    assert_eq!(close_route(Some(&running), true), CloseRoute::Graceful);
+    for state in [
+        SessionState::Running,
+        SessionState::Disconnected,
+        SessionState::Checkpointing,
+        SessionState::Closing,
+        SessionState::Destroying,
+        SessionState::Parked,
+        SessionState::Stopped,
+    ] {
+        let mut child = running.clone();
+        child.state = state;
+        assert_eq!(close_route(Some(&child), true), CloseRoute::Subagent);
+    }
 
     let mut stopped = runtime_test_session("session", "workspace", SessionState::Stopped);
     assert_eq!(close_route(Some(&stopped), false), CloseRoute::Done);
@@ -2614,6 +2625,74 @@ async fn lifecycle_identity_survives_join_but_changes_for_next_operation() {
     RuntimeState::wait_lifecycle_result(second).await.unwrap();
 }
 
+// Hard-won: #1384: an abandoned failed close blocked a fresh request with a different key.
+#[cfg(unix)]
+#[tokio::test]
+async fn completed_close_allows_a_fresh_request_after_its_caller_disconnects() {
+    if !in_isolated_parked_test(
+        "completed_close_allows_a_fresh_request_after_its_caller_disconnects",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let state = test_runtime_state();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let first = state
+        .start_or_join_lifecycle_with_key(
+            "child-close".into(),
+            LifecycleKind::Suspend,
+            None,
+            Some("first-request".into()),
+            {
+                let release = release.clone();
+                move |_, _, _| async move {
+                    release.notified().await;
+                    bail!("injected close failure")
+                }
+            },
+        )
+        .unwrap();
+    let first_result = first.clone();
+    drop(first);
+    let fresh_request = || {
+        state.start_or_join_lifecycle_with_key(
+            "child-close".into(),
+            LifecycleKind::Suspend,
+            None,
+            Some("fresh-request".into()),
+            |_, _, _| async { Ok(DaemonLifecycleResult::Done) },
+        )
+    };
+    assert!(
+        fresh_request().is_err(),
+        "a running close still owns the child"
+    );
+    release.notify_one();
+    let error = RuntimeState::wait_lifecycle_result(first_result.clone())
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("injected close failure"));
+    // Replay after completion, while the result is retained independently
+    // of the original caller, must still return that same result.
+    let replay = state
+        .start_or_join_lifecycle_with_key(
+            "child-close".into(),
+            LifecycleKind::Suspend,
+            None,
+            Some("first-request".into()),
+            |_, _, _| async { panic!("replaying a request must not run it twice") },
+        )
+        .unwrap();
+    let error = RuntimeState::wait_lifecycle_result(replay)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("injected close failure"));
+    // No caller removes the first operation's retained result.
+    let second = fresh_request().expect("a completed close must not reserve the child");
+    state.remove_completed_lifecycle(&first_result);
+    RuntimeState::wait_lifecycle_result(second).await.unwrap();
+}
+
 #[tokio::test]
 async fn close_waits_for_cancelled_or_committed_provisioning_to_release_ownership() {
     for committed in [false, true] {
@@ -2926,7 +3005,7 @@ async fn a_close_removing_the_target_stops_offering_cancellation() {
     assert!(
         error
             .to_string()
-            .contains("has passed its verified checkpoint and is removing the target"),
+            .contains("has begun closing and cannot be cancelled"),
         "unexpected error: {error:#}"
     );
     assert!(
@@ -6614,7 +6693,7 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
     .unwrap();
     crate::database::record_subagent_report_dir(WORKING_CHILD, reports.to_str().unwrap()).unwrap();
 
-    let (channels, state) = serve_live_session(&relay_root).await;
+    let (channels, state) = serve_live_session(&relay_root, false).await;
     LiveParent {
         _directory: directory,
         relay_root,
@@ -6671,6 +6750,7 @@ fn seed_live_session(directory: &Path, relay_root: &Path) {
 #[cfg(unix)]
 async fn serve_live_session(
     relay_root: &Path,
+    running: bool,
 ) -> (
     crate::session_manager::SessionManagerChannels,
     Arc<RuntimeState>,
@@ -6686,7 +6766,7 @@ async fn serve_live_session(
             relay_root,
             None,
             ReleaseSupport::Supported,
-            false,
+            running,
         )])
         .unwrap();
     channels
@@ -6841,7 +6921,7 @@ async fn live_clone_with_an_unpushed_commit() -> LiveClone {
     ))
     .unwrap();
 
-    let (channels, state) = serve_live_session(&relay_root).await;
+    let (channels, state) = serve_live_session(&relay_root, false).await;
     LiveClone {
         _source: source,
         _directory: directory,
@@ -7470,6 +7550,199 @@ async fn closing_a_parked_sub_agent_stops_it_without_starting_its_worker() {
         "the parked child's worker was not started"
     );
     assert_eq!(stored.sessions[parent_id].state, SessionState::Running);
+}
+
+// Hard-won: #1384: closing a live child exported unrelated nested worktrees in its parent's workspace.
+#[cfg(unix)]
+#[tokio::test]
+async fn child_close_preserves_history_and_reports_without_exporting_the_workspace() {
+    const NAME: &str = "child_close_preserves_history_and_reports_without_exporting_the_workspace";
+    if !in_held_close_child(NAME, "unused") {
+        return;
+    }
+    exercise_child_close_with_a_nested_workspace(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn child_close_cancel_before_commit_leaves_it_running_and_allows_a_fresh_close() {
+    const NAME: &str =
+        "child_close_cancel_before_commit_leaves_it_running_and_allows_a_fresh_close";
+    if !in_held_close_child(NAME, "begin_checkpoint") {
+        return;
+    }
+    exercise_child_close_with_a_nested_workspace(true).await;
+}
+
+#[cfg(unix)]
+async fn exercise_child_close_with_a_nested_workspace(cancel_before_commit: bool) {
+    use crate::controller::checkpoint::tests::{LATCH_RELAY_HOLD_PATH, LATCH_RELAY_SESSION};
+    use crate::controller::test_support::{committed_repository, test_git};
+    let _writer = crate::database::install_isolated_test_writer();
+    let repository = committed_repository();
+    let nested = ".mj/csharp-parity/bin-src";
+    test_git(
+        repository.path(),
+        &["worktree", "add", "--detach", nested, "HEAD"],
+    );
+    let scratch_file = repository.path().join(nested).join("unfinished.txt");
+    std::fs::write(&scratch_file, "scratch work must survive child close").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let relay_root = root.path().join("relay");
+    seed_live_session(root.path(), &relay_root);
+    let conversation = "child conversation ".repeat(8192);
+    {
+        let mut relay =
+            mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0")
+                .unwrap();
+        relay
+            .record_observation(mj_core::relay::RelayObservation::Warning {
+                message: conversation.clone(),
+            })
+            .unwrap();
+    }
+    let workspace = crate::database::create_workspace("Child close ownership").unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    parent.project_directory = Some(repository.path().to_owned());
+    let parent_root = root.path().join(parent_id);
+    std::fs::create_dir_all(&parent_root).unwrap();
+    std::fs::write(parent_root.join("private"), "parent worker").unwrap();
+    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: parent_root.clone(),
+    });
+    crate::database::save_session(&parent).unwrap();
+    let worker_root = root.path().join(LATCH_RELAY_SESSION);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    std::fs::write(worker_root.join("private"), "child worker").unwrap();
+    let mut child = runtime_test_session(LATCH_RELAY_SESSION, &workspace.id, SessionState::Running);
+    child.project_directory = parent.project_directory.clone();
+    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    });
+    crate::database::save_subagent_session(
+        &child,
+        &runtime_test_subagent(LATCH_RELAY_SESSION, parent_id),
+    )
+    .unwrap();
+    let reports = repository
+        .path()
+        .join(".mj/agents")
+        .join(LATCH_RELAY_SESSION);
+    std::fs::create_dir_all(&reports).unwrap();
+    std::fs::write(reports.join("result.txt"), "child report").unwrap();
+    crate::database::record_subagent_report_dir(LATCH_RELAY_SESSION, reports.to_str().unwrap())
+        .unwrap();
+    let (channels, state) = serve_live_session(&relay_root, !cancel_before_commit).await;
+    if cancel_before_commit {
+        let closing = tokio::spawn({
+            let state = state.clone();
+            async move { state.suspend_session(LATCH_RELAY_SESSION.into()).await }
+        });
+        let hold = PathBuf::from(std::env::var_os(LATCH_RELAY_HOLD_PATH).unwrap());
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !hold.with_extension("reached").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the child close did not reach its barrier");
+        state
+            .cancel_lifecycle_with_intent(LATCH_RELAY_SESSION)
+            .await
+            .unwrap();
+        std::fs::write(hold.with_extension("release"), b"go").unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(30), closing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+        let stored = crate::database::load_state().unwrap();
+        assert_eq!(
+            stored.sessions[LATCH_RELAY_SESSION].state,
+            SessionState::Running
+        );
+        assert!(worker_root.join("private").exists());
+    }
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.close_subagent_request(
+            LATCH_RELAY_SESSION.into(),
+            parent_id.into(),
+            "close-child".into(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    channels.shutdown.shutdown().await.unwrap();
+    let stored = crate::database::load_state().unwrap();
+    let closed = &stored.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(closed.state, SessionState::Stopped);
+    assert!(closed.target.is_none() && closed.checkpoint.is_none());
+    assert!(!worker_root.exists());
+    assert_eq!(stored.sessions[parent_id], parent);
+    assert_eq!(
+        std::fs::read_to_string(parent_root.join("private")).unwrap(),
+        "parent worker"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&scratch_file).unwrap(),
+        "scratch work must survive child close"
+    );
+    assert_eq!(
+        std::fs::read_to_string(reports.join("result.txt")).unwrap(),
+        "child report"
+    );
+    let history = crate::database::load_materialized_session(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    assert!(
+        serde_json::to_string(&history)
+            .unwrap()
+            .contains(&conversation)
+    );
+    assert_eq!(
+        history.execution,
+        mj_core::state::MaterializedExecutionState::Closed
+    );
+    assert!(stored.subagents.contains_key(LATCH_RELAY_SESSION));
+}
+
+// Hard-won: #1384: interrupted child cleanup wrongly required a workspace checkpoint and a live worker.
+#[cfg(unix)]
+#[tokio::test]
+async fn child_close_finishes_interrupted_cleanup_without_a_worker_or_checkpoint() {
+    const NAME: &str = "child_close_finishes_interrupted_cleanup_without_a_worker_or_checkpoint";
+    if !in_isolated_parked_test(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Interrupted child close").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let child_id = "55555555555555555555555555555555";
+    let parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    crate::database::save_session(&parent).unwrap();
+    let mut child = parked_child(root.path(), child_id, parent_id, &workspace.id);
+    child.state = SessionState::Destroying;
+    crate::database::save_session(&child).unwrap();
+    let state = test_runtime_state_loading_the_store();
+    state
+        .close_subagent_request(
+            child_id.into(),
+            parent_id.into(),
+            "retry-child-close".into(),
+        )
+        .await
+        .unwrap();
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(stored.sessions[child_id].state, SessionState::Stopped);
+    assert!(stored.sessions[child_id].checkpoint.is_none());
+    assert!(stored.sessions[child_id].target.is_none());
+    assert_eq!(stored.sessions[parent_id], parent);
+    assert!(!root.path().join("started").exists());
 }
 
 #[tokio::test]

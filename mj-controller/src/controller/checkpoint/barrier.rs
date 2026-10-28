@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn connect_checkpoint_relay(
+pub(in crate::controller) async fn connect_checkpoint_relay(
     session_id: &str,
     manager: Option<&SessionManagerControl>,
     reconnect: &targets::CommandSpec,
@@ -62,7 +62,7 @@ pub(super) async fn adopt_restarted_checkpoint_relay(
 
 /// What waiting for a barrier does while the session is working.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BarrierBusyPolicy {
+pub(in crate::controller) enum BarrierBusyPolicy {
     /// Give up as soon as the session is seen working. A checkpoint that can
     /// run again later has nothing to gain from holding a barrier behind a
     /// prompt or a turn the harness started on its own: the wait would only
@@ -86,7 +86,7 @@ impl BarrierBusyPolicy {
     }
 }
 
-pub(super) async fn wait_for_checkpoint_barrier(
+pub(in crate::controller) async fn wait_for_checkpoint_barrier(
     relay: &mut StandaloneSession,
     session_id: &str,
     command_id: &str,

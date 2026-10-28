@@ -424,8 +424,8 @@ fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>
 ///
 /// A failed startup's teardown must finish. A close or a Restart admitted on a
 /// record that already says `Destroying` was past its point of no return
-/// before this daemon started: the verified checkpoint is sealed and the
-/// target is being removed, so stopping now only strands the target.
+/// before this daemon started: its checkpoint is sealed, or a child's final
+/// conversation is durable, and stopping cleanup now only strands the target.
 fn lifecycle_starts_committed(kind: LifecycleKind, state: Option<SessionState>) -> bool {
     kind == LifecycleKind::StartupCleanup
         || matches!(
@@ -437,6 +437,8 @@ fn lifecycle_starts_committed(kind: LifecycleKind, state: Option<SessionState>) 
 /// How a stop request has to be carried out, given the durable record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CloseRoute {
+    /// Stop only the borrowed worker, keeping its conversation in the store.
+    Subagent,
     /// Run the graceful close from the start.
     Graceful,
     /// A previous close stopped partway; finish it from its checkpoint.
@@ -449,7 +451,7 @@ enum CloseRoute {
     Done,
 }
 
-/// A record mid-close with a live target cannot be closed again from the start:
+/// An owning session mid-close with a live target cannot be closed again from the start:
 /// its worker socket is gone, so a fresh checkpoint attempt only fails on
 /// connect. Recovery finishes it from the checkpoint the first close verified.
 /// `subagent` says the session is a Mjolnir sub-agent; see
@@ -458,7 +460,9 @@ fn close_route(session: Option<&SessionRecord>, subagent: bool) -> CloseRoute {
     let Some(session) = session else {
         return CloseRoute::Graceful;
     };
-    if crate::pollers::is_interrupted_close(session) {
+    if subagent {
+        CloseRoute::Subagent
+    } else if crate::pollers::is_interrupted_close(session) {
         CloseRoute::RecoverInterrupted
     } else if session.state == SessionState::Stopped {
         if session.target.is_some() {

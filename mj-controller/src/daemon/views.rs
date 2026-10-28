@@ -29,8 +29,8 @@ impl RuntimeState {
             ensure!(
                 !(active.control.is_committed()
                     && matches!(active.kind, LifecycleKind::Suspend | LifecycleKind::Restart)),
-                "stop of {session_id} has passed its verified checkpoint and is removing the target; \
-                 it cannot be cancelled"
+                "stop of {session_id} has begun closing and cannot be cancelled; \
+                 wait for it to finish"
             );
             bail!("lifecycle operation is no longer cancellable");
         }
