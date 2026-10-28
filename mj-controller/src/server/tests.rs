@@ -4793,7 +4793,8 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
             ]}},
         }}}))
         .unwrap();
-    let (app, ..) = app_with_snapshot(move |snapshot| snapshot.profile_capabilities = capabilities);
+    let (app, ..) =
+        app_with_snapshot(move |snapshot| snapshot.profile_capabilities = capabilities.into());
     let cookie = login_cookie(&app).await;
 
     // The agents' bearer token reaches `/api/v1`, never Settings.

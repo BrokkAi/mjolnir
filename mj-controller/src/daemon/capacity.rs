@@ -9,19 +9,19 @@
 
 use super::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContainerCapacityInput {
     pub(crate) target_ids: Vec<String>,
     pub(crate) total: mj_core::state::HostContainerSize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContainerCapacityCommitment {
     pub(crate) target_ids: Vec<String>,
     pub(crate) allocation: Option<mj_core::state::SessionResourceAllocation>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContainerCapacityReservation {
     leases: usize,
     hard_memory: bool,
@@ -67,6 +67,8 @@ impl Drop for ContainerCapacityLease {
         reservation.leases -= 1;
         if reservation.leases == 0 {
             reservations.remove(&self.session_id);
+            drop(reservations);
+            self.state.publish_revision();
         }
     }
 }
@@ -267,6 +269,8 @@ impl RuntimeState {
                 unreachable!("serialized launch admission already joined any existing reservation");
             }
         }
+        drop(reservations);
+        self.publish_revision();
         ContainerCapacityLease {
             state: self.clone(),
             session_id: session_id.to_owned(),
@@ -546,49 +550,95 @@ fn same_target_group(left: &[String], right: &[String]) -> bool {
     left.len() == right.len() && left.iter().all(|target_id| right.contains(target_id))
 }
 
-fn container_capacity_projection_for(
-    state: &RuntimeState,
-    sessions: &mj_core::state::State,
-) -> BTreeMap<String, mj_client::runtime_feed::RuntimeContainerCapacity> {
-    let Some(feed) = state.capacity_feed() else {
-        return BTreeMap::new();
-    };
-    let reservations = state.container_capacity_reservations();
-    let latest = feed.latest.borrow();
-    feed.targets
-        .borrow()
-        .iter()
-        .filter(|target| target.kind == crate::targets::DeploymentCapacityKind::Host)
-        .filter_map(|target| {
-            let usage = latest.get(&target.id)?;
-            let capacity = capacity_with_reservations(
-                &ContainerCapacityInput {
-                    target_ids: target.target_ids.clone(),
-                    total: mj_core::state::HostContainerSize {
-                        cpus: usage.logical_cores,
-                        memory_bytes: usage.memory_total_bytes,
-                    },
-                },
-                sessions.sessions.values(),
-                &reservations,
-            );
-            Some((
-                target.id.clone(),
-                mj_client::runtime_feed::RuntimeContainerCapacity {
-                    target_ids: target.target_ids.clone(),
-                    capacity,
-                },
-            ))
-        })
-        .collect()
+/// Runtime history is the single publisher of capacity. Record differences
+/// update only live owning containers; unrelated history edits and transcript
+/// updates keep the same publication. Admission still checks its serialized
+/// durable inputs before accepting a launch.
+#[derive(Default)]
+pub(super) struct ContainerCapacityProjection {
+    records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+    owners: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+    hosts: Vec<(String, ContainerCapacityInput)>,
+    reservations: BTreeMap<String, ContainerCapacityReservation>,
+    publication: mj_core::snapshot_map::SharedSnapshot<
+        BTreeMap<String, mj_client::runtime_feed::RuntimeContainerCapacity>,
+    >,
 }
 
-impl RuntimeState {
-    pub(crate) fn container_capacity_projection(
-        &self,
-        sessions: &mj_core::state::State,
-    ) -> BTreeMap<String, mj_client::runtime_feed::RuntimeContainerCapacity> {
-        container_capacity_projection_for(self, sessions)
+impl ContainerCapacityProjection {
+    pub(super) fn project(
+        &mut self,
+        state: &RuntimeState,
+        records: &mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+    ) -> mj_core::snapshot_map::SharedSnapshot<
+        BTreeMap<String, mj_client::runtime_feed::RuntimeContainerCapacity>,
+    > {
+        let mut changed = false;
+        for (id, record) in self.records.changes(records) {
+            let owner = record.filter(|record| mj_core::state::session_owns_container(record));
+            match (self.owners.get(id), owner) {
+                (Some(before), Some(after))
+                    if before.target_template_id == after.target_template_id
+                        && before.resource_allocation == after.resource_allocation => {}
+                (_, Some(record)) => {
+                    self.owners.insert(id.clone(), record.clone());
+                    changed = true;
+                }
+                (Some(_), None) => {
+                    self.owners.remove(id);
+                    changed = true;
+                }
+                (None, None) => {}
+            }
+        }
+        self.records = records.clone();
+        let hosts = state
+            .capacity_feed()
+            .map(|feed| {
+                let latest = feed.latest.borrow();
+                feed.targets
+                    .borrow()
+                    .iter()
+                    .filter(|target| target.kind == crate::targets::DeploymentCapacityKind::Host)
+                    .filter_map(|target| {
+                        let usage = latest.get(&target.id)?;
+                        Some((
+                            target.id.clone(),
+                            ContainerCapacityInput {
+                                target_ids: target.target_ids.clone(),
+                                total: mj_core::state::HostContainerSize {
+                                    cpus: usage.logical_cores,
+                                    memory_bytes: usage.memory_total_bytes,
+                                },
+                            },
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let reservations = state.container_capacity_reservations();
+        if changed || self.hosts != hosts || self.reservations != reservations {
+            self.publication = hosts
+                .iter()
+                .map(|(id, input)| {
+                    (
+                        id.clone(),
+                        mj_client::runtime_feed::RuntimeContainerCapacity {
+                            target_ids: input.target_ids.clone(),
+                            capacity: capacity_with_reservations(
+                                input,
+                                self.owners.values(),
+                                &reservations,
+                            ),
+                        },
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+                .into();
+            self.hosts = hosts;
+            self.reservations = reservations;
+        }
+        self.publication.clone()
     }
 }
 
@@ -1304,6 +1354,7 @@ mod tests {
     }
 
     // Hard-won: d27eb9f56: the terminal feed omitted daemon-only reservations.
+    // Hard-won: 8c88175f7: every update scanned historical sessions for each host.
     #[tokio::test]
     async fn runtime_capacity_projection_includes_the_move_reservation() {
         let state = crate::daemon::tests::test_runtime_state();
@@ -1327,7 +1378,7 @@ mod tests {
         };
         let (targets, _targets_rx) = tokio::sync::watch::channel(vec![target]);
         let (updates, _) = tokio::sync::broadcast::channel(1);
-        let (_latest, latest_rx) =
+        let (latest, latest_rx) =
             tokio::sync::watch::channel(BTreeMap::from([("local".to_owned(), usage)]));
         let (refresh, _) = tokio::sync::mpsc::channel(1);
         assert!(
@@ -1362,7 +1413,7 @@ mod tests {
         });
         let mut sessions = mj_core::state::State::default();
         sessions.sessions.insert(source.id.clone(), source.clone());
-        let _lease = state.reserve_move_capacity_lease(
+        let lease = state.reserve_move_capacity_lease(
             &source.id,
             &input,
             mj_core::state::SessionResourceAllocation::Container {
@@ -1371,11 +1422,18 @@ mod tests {
             },
             Some(ContainerCapacityCommitment {
                 target_ids: vec!["podman".into()],
-                allocation: source.resource_allocation,
+                allocation: source.resource_allocation.clone(),
             }),
         );
 
-        let projection = state.container_capacity_projection(&sessions);
+        for index in 0..6_000 {
+            let mut stopped = source.clone();
+            stopped.id = format!("history-{index:06}");
+            stopped.state = mj_core::state::SessionState::Stopped;
+            sessions.sessions.insert(stopped.id.clone(), stopped);
+        }
+        let mut publisher = ContainerCapacityProjection::default();
+        let projection = publisher.project(&state, &sessions.sessions);
 
         assert_eq!(
             projection["local"].capacity.committed,
@@ -1385,5 +1443,27 @@ mod tests {
             }
         );
         assert_eq!(projection["local"].capacity.remaining.cpus, 1);
+        assert_eq!(publisher.owners.len(), 1);
+        for index in 0..20 {
+            sessions.sessions.get_mut("history-000001").unwrap().title = format!("history {index}");
+            sessions.sessions.get_mut(&source.id).unwrap().title = format!("live {index}");
+            assert!(projection.ptr_eq(&publisher.project(&state, &sessions.sessions)));
+        }
+        drop(lease);
+        let released = publisher.project(&state, &sessions.sessions);
+        assert_eq!(released["local"].capacity.committed.cpus, 8);
+        assert_eq!(
+            projection["local"].capacity.committed.cpus, 9,
+            "held publication stays immutable"
+        );
+        sessions.sessions.get_mut(&source.id).unwrap().state =
+            mj_core::state::SessionState::Stopped;
+        let stopped = publisher.project(&state, &sessions.sessions);
+        assert_eq!(stopped["local"].capacity.committed.cpus, 0);
+        latest.send_modify(|readings| readings.get_mut("local").unwrap().logical_cores = 12);
+        let resized = publisher.project(&state, &sessions.sessions);
+        assert_eq!(resized["local"].capacity.remaining.cpus, 12);
+        targets.send_modify(|targets| targets.clear());
+        assert!(publisher.project(&state, &sessions.sessions).is_empty());
     }
 }

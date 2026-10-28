@@ -614,10 +614,10 @@ impl RuntimeState {
     pub(crate) fn publish_quotas(&self, snapshot: mj_client::quota::QuotaSnapshot) {
         {
             let mut quota = self.quota.lock().unwrap_or_else(PoisonError::into_inner);
-            if quota.snapshot == snapshot {
+            if *quota.snapshot == snapshot {
                 return;
             }
-            quota.snapshot = snapshot;
+            quota.snapshot = snapshot.into();
         }
         self.publish_revision();
     }

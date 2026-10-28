@@ -123,7 +123,9 @@ impl PhoneProjectSources {
         }
         self.records = state.sessions.clone();
         self.relations = state.subagents.clone();
-        self.config = Some(controller.config.clone());
+        if self.config.as_ref() != Some(&controller.config) {
+            self.config = Some(controller.config.clone());
+        }
         let now = Instant::now();
         while self
             .retries

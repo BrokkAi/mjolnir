@@ -148,7 +148,12 @@ fn render(
 }
 
 fn capabilities(state: &ServerState) -> ProfileCapabilitiesSnapshot {
-    state.snapshot_rx.borrow().profile_capabilities.clone()
+    state
+        .snapshot_rx
+        .borrow()
+        .profile_capabilities
+        .clone()
+        .into_inner()
 }
 
 pub(super) async fn render_settings_page(

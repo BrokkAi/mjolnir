@@ -71,6 +71,7 @@ pub(crate) async fn run_server(
     controller.state.sessions = initial.records;
     controller.state.subagents = initial.subagents;
     controller.config = initial.metadata.installed_config();
+    let mut installed_runtime_config = initial.metadata.config.clone();
     controller.state.last_subagent_policies = initial.metadata.last_subagent_policies;
     controller.state.operator_presence = initial.metadata.operator_presence;
     let mut operations = initial
@@ -96,7 +97,7 @@ pub(crate) async fn run_server(
         &capacity_targets_rx.borrow_and_update(),
         &mut capacity_state,
     );
-    let container_capacities = daemon_runtime.container_capacity_projection(&controller.state);
+    let container_capacities = initial.metadata.container_capacities.clone();
     let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(publication.snapshot(
         &controller,
         &workspace_updates.borrow().clone(),
@@ -328,7 +329,10 @@ pub(crate) async fn run_server(
                 publication.observe_runtime(&runtime, &mut native_agents, &mut move_recoveries);
                 controller.state.sessions = runtime.records;
                 controller.state.subagents = runtime.subagents;
-                controller.config = runtime.metadata.installed_config();
+                if installed_runtime_config != runtime.metadata.config {
+                    controller.config = runtime.metadata.installed_config();
+                    installed_runtime_config = runtime.metadata.config.clone();
+                }
                 controller.state.last_subagent_policies = runtime.metadata.last_subagent_policies;
                 controller.state.operator_presence = runtime.metadata.operator_presence;
                 for (session_id, error) in &pending_action_errors {
@@ -341,8 +345,7 @@ pub(crate) async fn run_server(
                 operations = runtime.metadata.lifecycles.iter()
                     .map(|view| (view.session_id.clone(), viewer_operation(view)))
                     .collect();
-                let container_capacities =
-                    daemon_runtime.container_capacity_projection(&controller.state);
+                let container_capacities = runtime.metadata.container_capacities;
                 let snapshot = publication.snapshot(
                     &controller,
                     &workspace_updates.borrow().clone(),
