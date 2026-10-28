@@ -451,8 +451,16 @@ impl Controller {
             .target
             .as_ref()
             .context("an in-place harness replacement has no target to replace it in")?;
+        let restart_intent = if mode == InPlaceRestoreMode::Restart {
+            crate::database::load_session_restart(session_id)?
+        } else {
+            None
+        };
         let checkpoint = move_operation
             .and_then(|op| op.handoff.as_ref())
+            .or(restart_intent
+                .as_ref()
+                .and_then(|intent| intent.handoff.as_ref()))
             .or(previous.checkpoint.as_ref())
             .context("session has no checkpoint")?;
         let verified_archive = verify_resume_checkpoint(session_id, checkpoint)?;
@@ -485,7 +493,7 @@ impl Controller {
         )?;
         // A failed/older swap may already have removed native files. Explicit
         // recovery reconstructs them; a freshly sealed source still owns them.
-        let retain_native = mode == InPlaceRestoreMode::Move
+        let retain_native = matches!(mode, InPlaceRestoreMode::Move | InPlaceRestoreMode::Restart)
             && native_continuity
             && previous.state == SessionState::Closing
             && super::super::local_profile_homes::session_has_a_staged_home_of_its_own(previous);

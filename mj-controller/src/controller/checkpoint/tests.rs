@@ -216,7 +216,7 @@ fn startup_reconciliation_only_removes_unreferenced_controller_checkpoints() {
     state.sessions.insert(session_id.into(), session);
 
     assert_eq!(
-        reconcile_managed_checkpoint_archives_in(directory.path(), &state, &[]).unwrap(),
+        reconcile_managed_checkpoint_archives_in(directory.path(), &state, &[], &[]).unwrap(),
         1
     );
     assert!(directory.path().join(referenced_name).exists());
@@ -3902,6 +3902,13 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
     record.last_checkpoint_error = Some("worker process is gone".into());
     let target = record.target.clone().expect("retained target");
     let old_checkpoint = record.checkpoint.clone().expect("previous checkpoint");
+    crate::database::begin_session_restart(
+        LATCH_RELAY_SESSION,
+        "restart-recapture",
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        false,
+    )
+    .unwrap();
     let worker_root = match &target {
         TargetLocator::LocalBare { worker_root } => worker_root.clone(),
         other => panic!("expected the retained local target, got {other:?}"),
@@ -3969,7 +3976,15 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
     assert_eq!(sealed.target, Some(target));
     assert_eq!(sealed.last_error, None);
     assert!(sealed.last_checkpoint_error.is_none());
-    assert_ne!(sealed.checkpoint.as_ref(), Some(&old_checkpoint));
+    assert_eq!(sealed.checkpoint.as_ref(), Some(&old_checkpoint));
+    let intent = crate::database::load_session_restart(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    assert!(intent.handoff.is_some());
+    assert_eq!(
+        intent.checkpoint_sha256.as_ref(),
+        intent.handoff.as_ref().map(|handoff| &handoff.sha256)
+    );
     assert_eq!(
         std::fs::read(workspace_marker).unwrap(),
         b"workspace survives"
