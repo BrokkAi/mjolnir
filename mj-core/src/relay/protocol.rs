@@ -187,6 +187,11 @@ pub enum RelayRequest {
     },
     /// Remove the worker's synchronized GitHub CLI token.
     RemoveGithubToken,
+    /// AWS credentials stay on the control connection, outside the journal.
+    AwsCredentialsState,
+    InstallAwsCredentials {
+        data: String,
+    },
     /// Resolve one in-flight form. Only its rendered, masked reply is journaled.
     RespondElicitation {
         elicitation_id: String,
@@ -372,6 +377,8 @@ impl RelayRequest {
             Self::GithubTokenState => "github_token_state",
             Self::InstallGithubToken { .. } => "install_github_token",
             Self::RemoveGithubToken => "remove_github_token",
+            Self::AwsCredentialsState => "aws_credentials_state",
+            Self::InstallAwsCredentials { .. } => "install_aws_credentials",
             Self::RespondElicitation { .. } => "respond_elicitation",
             Self::StopBackgroundTask { .. } => "stop_background_task",
             Self::SubagentRequests => "subagent_requests",
@@ -393,6 +400,9 @@ impl RelayRequest {
     /// protocol 31.
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::AwsCredentialsState | Self::InstallAwsCredentials { .. } => {
+                super::RELAY_AWS_CREDENTIALS_PROTOCOL
+            }
             Self::CpuUsage => super::RELAY_CPU_USAGE_PROTOCOL,
             Self::DrainMailbox { .. } | Self::AckMailbox { .. } => 33,
             Self::ReserveIdle { .. } => 21,

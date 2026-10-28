@@ -152,6 +152,8 @@ impl DurableRelay {
             | RelayRequest::ReadAttachment { .. }
             | RelayRequest::CpuUsage
             | RelayRequest::CredentialState
+            | RelayRequest::AwsCredentialsState
+            | RelayRequest::InstallAwsCredentials { .. }
             | RelayRequest::ReadCredentials
             | RelayRequest::InstallCredentials { .. }
             | RelayRequest::SkillsState

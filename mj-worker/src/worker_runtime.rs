@@ -412,6 +412,14 @@ fn resolve_relative_harness_home(config: &mut WorkerLaunchConfig, base: &Path) {
     if config.harness_home.is_relative() && !config.harness_home.as_os_str().is_empty() {
         config.harness_home = base.join(&config.harness_home);
     }
+    for key in ["AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"] {
+        if let Some(value) = config.environment.get_mut(key) {
+            let path = Path::new(value);
+            if path.is_relative() {
+                *value = base.join(path).to_string_lossy().into_owned();
+            }
+        }
+    }
     if let Some(memory) = config.project_memory.as_mut() {
         if let Some(socket) = memory.history_socket.as_mut()
             && socket.is_relative()

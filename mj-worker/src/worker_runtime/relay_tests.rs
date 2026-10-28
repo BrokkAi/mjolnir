@@ -616,6 +616,7 @@ fn install_skills_rejects_garbage_and_leaves_the_tree_untouched() {
     );
 }
 
+// Hard-won: #1385: isolated Bedrock workers never received the host AWS credentials.
 #[tokio::test]
 async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
     use base64::Engine as _;
@@ -692,6 +693,66 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
         bytes
     );
 
+    // Exercise the connection-only AWS route with enough data to cross a
+    // pipe buffer, then renew it without restarting the running worker.
+    for generation in ["initial", "renewed"] {
+        let credentials = mj_core::aws_credentials::AwsCredentials::from_export(
+            "bedrock",
+            &serde_json::to_vec(&serde_json::json!({
+                "Version": 1,
+                "AccessKeyId": format!("key-{generation}"),
+                "SecretAccessKey": format!("secret-{generation}"),
+                "SessionToken": "s".repeat(70_000),
+                "Expiration": "2099-01-01T00:00:00Z",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let aws_bytes = credentials.encode().unwrap();
+        for request in [
+            RelayRequest::InstallAwsCredentials {
+                data: base64::engine::general_purpose::STANDARD.encode(&aws_bytes),
+            },
+            RelayRequest::AwsCredentialsState,
+        ] {
+            let envelope = RelayRequestEnvelope {
+                request_id: format!("aws-{generation}"),
+                protocol_version: RELAY_PROTOCOL_VERSION,
+                request,
+            };
+            let mut frame = serde_json::to_vec(&envelope).unwrap();
+            frame.push(b'\n');
+            writer.write_all(&frame).await.unwrap();
+            let response: RelayResponseEnvelope =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            let RelayResponseBody::Ok {
+                payload:
+                    RelayResponsePayload::CredentialState {
+                        present,
+                        fingerprint,
+                        ..
+                    },
+            } = response.body
+            else {
+                panic!("AWS credential request failed: {:?}", response.body);
+            };
+            assert!(present);
+            assert_eq!(
+                fingerprint,
+                mj_core::credentials::credential_fingerprint(&aws_bytes)
+            );
+        }
+        let path = temp
+            .path()
+            .join(mj_core::aws_credentials::SHARED_CREDENTIALS_FILE);
+        assert_eq!(std::fs::read(&path).unwrap(), aws_bytes);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
     {
         let relay = relay.lock().unwrap();
         assert_eq!(relay.latest_ordinal(), 0);
@@ -703,6 +764,8 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
         );
         let persisted = std::fs::read_to_string(relay_root.join("relay-state.json")).unwrap();
         assert!(!persisted.contains(&request.request_id));
+        assert!(!persisted.contains("aws-initial"));
+        assert!(!persisted.contains("secret-renewed"));
     }
 
     drop(writer);

@@ -688,6 +688,8 @@ pub struct CredentialSyncTarget {
     /// profile has no credential file to exchange with the session, so only
     /// skills and the GitHub token are reconciled.
     pub skips_login_file_sync: bool,
+    /// Host AWS chain provisioned into this isolated session, when selected.
+    pub aws_credentials: Option<crate::aws_credentials::AwsCredentialSource>,
     /// GitHub CLI credentials are pushed to every target except raw localhost.
     pub sync_github_token: bool,
     /// The controller has GitHub App configuration and should resolve a

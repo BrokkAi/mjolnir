@@ -2157,6 +2157,8 @@ pub(super) async fn serve_client_with_memory(
             if matches!(
                 &envelope.request,
                 RelayRequest::CredentialState
+                    | RelayRequest::AwsCredentialsState
+                    | RelayRequest::InstallAwsCredentials { .. }
                     | RelayRequest::ReadCredentials
                     | RelayRequest::InstallCredentials { .. }
                     | RelayRequest::SkillsState
