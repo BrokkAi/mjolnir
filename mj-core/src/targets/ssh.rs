@@ -328,6 +328,39 @@ fn control_socket_name(ssh: &SshTarget, shard: usize) -> String {
     name
 }
 
+/// The `-o ControlPath=` option naming `socket`.
+///
+/// `ssh` reads an option's value as config text, not as an opaque argument, so
+/// it splits an unquoted value on whitespace: a socket path holding a space
+/// ends the value early and `ssh` refuses the command line ("keyword
+/// controlpath extra arguments at end of line"). Every macOS instance has one,
+/// because its data directory is under `~/Library/Application Support`. Such a
+/// path is quoted, and a percent is doubled, which `ssh` would otherwise
+/// expand as a token. Anything else keeps the plain form.
+#[cfg(unix)]
+fn control_path_option(socket: &Path) -> String {
+    let path = socket.to_string_lossy();
+    let quotes = path
+        .chars()
+        .any(|character| character.is_whitespace() || matches!(character, '"' | '\\'));
+    let mut value = String::with_capacity(path.len() + 2);
+    for character in path.chars() {
+        match character {
+            '%' => value.push_str("%%"),
+            '"' | '\\' if quotes => {
+                value.push('\\');
+                value.push(character);
+            }
+            _ => value.push(character),
+        }
+    }
+    if quotes {
+        format!("ControlPath=\"{value}\"")
+    } else {
+        format!("ControlPath={value}")
+    }
+}
+
 /// Whether the user's own `ssh` arguments already configure connection
 /// sharing. OpenSSH keeps the first value it sees, so Mjolnir cannot add its
 /// own sharing options without either overriding the user or being
@@ -375,7 +408,7 @@ pub fn push_connection_reuse_args(args: &mut Vec<String>, ssh: &SshTarget) {
             "-o".to_owned(),
             "ControlMaster=no".to_owned(),
             "-o".to_owned(),
-            format!("ControlPath={}", socket.display()),
+            control_path_option(&socket),
         ]);
     }
     #[cfg(not(unix))]
@@ -1480,7 +1513,7 @@ fn master_check_command(ssh: &SshTarget, socket: &Path) -> CommandSpec {
     let mut args = ssh.ssh_args.clone();
     args.extend([
         "-o".to_owned(),
-        format!("ControlPath={}", socket.display()),
+        control_path_option(socket),
         "-O".to_owned(),
         "check".to_owned(),
         ssh.destination.clone(),
@@ -1519,7 +1552,7 @@ fn master_open_command(ssh: &SshTarget, socket: &Path) -> CommandSpec {
         "-o".to_owned(),
         "ControlMaster=yes".to_owned(),
         "-o".to_owned(),
-        format!("ControlPath={}", socket.display()),
+        control_path_option(socket),
         "-o".to_owned(),
         format!("ControlPersist={CONTROL_PERSIST}"),
         ssh.destination.clone(),
@@ -1711,7 +1744,7 @@ pub fn push_session_args(args: &mut Vec<String>, lease: &SshSessionLease) {
             "-o".to_owned(),
             "ControlMaster=no".to_owned(),
             "-o".to_owned(),
-            format!("ControlPath={}", socket.display()),
+            control_path_option(socket),
         ]);
         #[cfg(unix)]
         let probe = lease.probe;
@@ -2072,6 +2105,29 @@ mod tests {
                 &fs::metadata(socket_dir.path()).expect("socket directory")
             ) & 0o777,
             0o700
+        );
+    }
+
+    /// `ssh` reads an option's value as config text: a socket under
+    /// `~/Library/Application Support`, where every macOS instance keeps its
+    /// sockets, must be quoted, and a percent doubled, or `ssh` misreads the
+    /// path. A path that needs neither keeps the plain form.
+    #[test]
+    #[cfg(unix)]
+    fn a_socket_path_survives_the_option_grammar() {
+        assert_eq!(
+            control_path_option(Path::new(
+                "/Users/someone/Library/Application Support/mjolnir/ssh/0123456789abcdef-0"
+            )),
+            "ControlPath=\"/Users/someone/Library/Application Support/mjolnir/ssh/0123456789abcdef-0\""
+        );
+        assert_eq!(
+            control_path_option(Path::new("/tmp/100%/0123456789abcdef-0")),
+            "ControlPath=/tmp/100%%/0123456789abcdef-0"
+        );
+        assert_eq!(
+            control_path_option(Path::new("/tmp/mjolnir/0123456789abcdef-0")),
+            "ControlPath=/tmp/mjolnir/0123456789abcdef-0"
         );
     }
 
