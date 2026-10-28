@@ -328,6 +328,30 @@ fn control_socket_name(ssh: &SshTarget, shard: usize) -> String {
     name
 }
 
+/// The `-o` value that points `ssh` at `socket`.
+///
+/// An `ssh` option is one line of config, and `ssh` splits that line on
+/// whitespace unless the value stands inside double quotes. A socket path with
+/// a space in it -- macOS keeps its data in `~/Library/Application
+/// Support/mjolnir` -- therefore ends the option early and `ssh` refuses the
+/// whole command line with "keyword controlpath extra arguments at end of
+/// line". `%` starts a token expansion in `ControlPath` (and in the other
+/// filename options), so it is doubled. A path that needs neither is passed
+/// exactly as it always was.
+#[cfg(unix)]
+fn control_path_option(socket: &Path) -> String {
+    let path = socket.display().to_string().replace('%', "%%");
+    let path = if path.contains(|character: char| {
+        character.is_whitespace() || character == '"' || character == '\\'
+    }) {
+        // Inside the quotes OpenSSH unescapes only these two.
+        format!("\"{}\"", path.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        path
+    };
+    format!("ControlPath={path}")
+}
+
 /// Whether the user's own `ssh` arguments already configure connection
 /// sharing. OpenSSH keeps the first value it sees, so Mjolnir cannot add its
 /// own sharing options without either overriding the user or being
@@ -375,7 +399,7 @@ pub fn push_connection_reuse_args(args: &mut Vec<String>, ssh: &SshTarget) {
             "-o".to_owned(),
             "ControlMaster=no".to_owned(),
             "-o".to_owned(),
-            format!("ControlPath={}", socket.display()),
+            control_path_option(&socket),
         ]);
     }
     #[cfg(not(unix))]
@@ -1480,7 +1504,7 @@ fn master_check_command(ssh: &SshTarget, socket: &Path) -> CommandSpec {
     let mut args = ssh.ssh_args.clone();
     args.extend([
         "-o".to_owned(),
-        format!("ControlPath={}", socket.display()),
+        control_path_option(socket),
         "-O".to_owned(),
         "check".to_owned(),
         ssh.destination.clone(),
@@ -1519,7 +1543,7 @@ fn master_open_command(ssh: &SshTarget, socket: &Path) -> CommandSpec {
         "-o".to_owned(),
         "ControlMaster=yes".to_owned(),
         "-o".to_owned(),
-        format!("ControlPath={}", socket.display()),
+        control_path_option(socket),
         "-o".to_owned(),
         format!("ControlPersist={CONTROL_PERSIST}"),
         ssh.destination.clone(),
@@ -1711,7 +1735,7 @@ pub fn push_session_args(args: &mut Vec<String>, lease: &SshSessionLease) {
             "-o".to_owned(),
             "ControlMaster=no".to_owned(),
             "-o".to_owned(),
-            format!("ControlPath={}", socket.display()),
+            control_path_option(socket),
         ]);
         #[cfg(unix)]
         let probe = lease.probe;
@@ -2075,6 +2099,54 @@ mod tests {
         );
     }
 
+    /// A control socket is the value of an `ssh` option, and `ssh` splits an
+    /// unquoted value on whitespace. On macOS the sockets sit below
+    /// `~/Library/Application Support/mjolnir`, so every option line Mjolnir
+    /// wrote was refused with "keyword controlpath extra arguments at end of
+    /// line" and no Mac target answered at all. `ssh -G` resolves options
+    /// without connecting, so this holds the value we emit against ssh's own
+    /// parser. `%` is expanded even inside the quotes, so it is doubled.
+    #[test]
+    #[cfg(unix)]
+    fn a_control_path_with_a_space_reaches_ssh_intact() {
+        let _guard = SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let socket_dir = sharing_socket_dir();
+        let dir = socket_dir.path().join("Application Support/%h");
+        let ssh = SshTarget {
+            destination: "socket-spaces.invalid".to_owned(),
+            ssh_args: Vec::new(),
+        };
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(dir.clone())));
+        let mut args = Vec::new();
+        push_connection_reuse_args(&mut args, &ssh);
+        set_ssh_connection_sharing_for_test(None);
+
+        let Ok(resolved) = std::process::Command::new("ssh")
+            .args(["-F", "/dev/null", "-G"])
+            .args(&args)
+            .arg(&ssh.destination)
+            .output()
+        else {
+            return; // no ssh client on this machine
+        };
+        let stderr = String::from_utf8_lossy(&resolved.stderr);
+        assert!(
+            resolved.status.success(),
+            "ssh refused the options we built: {stderr}\n{args:?}"
+        );
+        let expected = format!(
+            "controlpath {}",
+            dir.join(control_socket_name(&ssh, 0)).display()
+        );
+        let stdout = String::from_utf8_lossy(&resolved.stdout);
+        assert!(
+            stdout.lines().any(|line| line == expected),
+            "expected {expected:?}:\n{stdout}"
+        );
+    }
+
     /// Each instance keeps its own sockets, because each daemon counts only
     /// its own sessions against a master.
     #[test]
@@ -2325,13 +2397,7 @@ mod tests {
             .execute(&master_check_command(&ssh, &socket))
             .expect("ssh -O check must run");
         let exit = std::process::Command::new("ssh")
-            .args([
-                "-O",
-                "exit",
-                "-o",
-                &format!("ControlPath={}", socket.display()),
-                &host,
-            ])
+            .args(["-O", "exit", "-o", &control_path_option(&socket), &host])
             .output();
         let output = output.expect("ssh must run");
         assert_eq!(
@@ -2382,13 +2448,7 @@ mod tests {
         let exit_all = || {
             for socket in &sockets {
                 let _ = std::process::Command::new("ssh")
-                    .args([
-                        "-O",
-                        "exit",
-                        "-o",
-                        &format!("ControlPath={}", socket.display()),
-                        &host,
-                    ])
+                    .args(["-O", "exit", "-o", &control_path_option(socket), &host])
                     .output();
             }
         };
