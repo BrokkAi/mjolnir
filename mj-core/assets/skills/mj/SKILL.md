@@ -41,7 +41,9 @@ Summarize the edited path and settings and any remaining diagnostics.
 To rerun automatic agent and repository discovery, use `mj setup`. For host prerequisites,
 `mj setup instructions --platform linux` or `--platform macos` prints an
 agent preparation guide. `mj set-config` changes one live session's harness
-settings (model, effort, etc.); it does not edit the user's mj defaults.
+settings (model, effort, etc.); it does not edit the user's mj defaults. In an
+interactive conversation, `/config` lists every setting the harness advertises,
+`/config <key>` opens its values, and `/config <key> <value>` applies one.
 
 ## Check availability first
 

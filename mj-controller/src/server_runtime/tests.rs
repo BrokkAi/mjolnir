@@ -718,6 +718,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         (vec![model_option(), fast_option(&["on", "off"])], true),
         (Vec::new(), false),
     ] {
+        let offers_config = !options.is_empty();
         operational.get_mut("session-1").unwrap().config_options = options;
         let names = project(&operational).sessions[0]
             .available_commands
@@ -725,6 +726,11 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
             .map(|command| command.name.clone())
             .collect::<Vec<_>>();
         assert_eq!(names.contains(&"fast".to_owned()), offers_fast, "{names:?}");
+        assert_eq!(
+            names.contains(&"config".to_owned()),
+            offers_config,
+            "{names:?}"
+        );
     }
 
     assert!(session.is_idle);

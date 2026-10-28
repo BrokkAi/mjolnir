@@ -92,6 +92,7 @@ function claudeTwoQuestionRequest() {
 }
 
 function fixtureSnapshot(configOptions = [], sessionOverrides = {}) {
+  const canSetConfig = configOptions.length > 0;
   return {
     revision: 1,
     generated_at: '2026-09-05T00:00:00Z',
@@ -132,6 +133,9 @@ function fixtureSnapshot(configOptions = [], sessionOverrides = {}) {
           { name: 'help', description: 'Show available commands', source: 'mj' },
           { name: 'plan', description: 'Toggle plan mode', source: 'mj' },
           { name: 'implement', description: 'Leave plan mode and implement', source: 'mj' },
+          ...(canSetConfig
+            ? [{ name: 'config', description: 'Change any advertised session setting', source: 'mj', argument: 'key [value]' }]
+            : []),
         ],
         capabilities: {
           open: true,
@@ -142,7 +146,7 @@ function fixtureSnapshot(configOptions = [], sessionOverrides = {}) {
           suspend: false,
           rename: false,
           resume: false,
-          set_config: false,
+          set_config: canSetConfig,
           set_plan_mode: true,
         },
         ...sessionOverrides,
@@ -1322,4 +1326,52 @@ test('keyboard submission accepts false booleans and an empty form sends only on
   });
   await waitForActionCount(state, 2);
   expect(state.actions[1].response).toEqual({ action: 'accept', content: {} });
+});
+
+test('session settings expose every advertised ACP option', async ({ page }) => {
+  const state = await mockViewerApi(page, [], [
+    { key: 'model', label: 'Model', current: 'gpt-5', choices: [{ value: 'gpt-5', name: 'GPT-5' }] },
+    { key: 'approval_mode', label: 'Approval mode', current: 'prompt', choices: [
+      { value: 'prompt', name: 'Ask first' },
+      { value: 'allow', name: 'Allow without asking' },
+    ] },
+  ]);
+
+  await expect(page.locator('#prompt-settings')).toContainText('Approval mode');
+  await page.getByRole('button', { name: 'Session settings' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Session settings' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('select[data-config-key]')).toHaveCount(2);
+  await expect(dialog.locator('select[data-config-key="approval_mode"]')).toHaveValue('prompt');
+  await page.setViewportSize({ width: 320, height: 568 });
+  await expect(dialog).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+
+  await dialog.locator('select[data-config-key="approval_mode"]').selectOption('allow');
+  await waitForActionCount(state, 1);
+  expect(state.actions[0]).toMatchObject({
+    action: 'set-config',
+    key: 'approval_mode',
+    value: 'allow',
+  });
+
+  await dialog.getByRole('button', { name: 'Close' }).click();
+  await page.locator('#prompt-text').fill('/config');
+  await page.locator('#send-button').click();
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Close' }).click();
+
+  await page.locator('#prompt-text').fill('/config approval_mode allow');
+  await page.locator('#send-button').click();
+  await waitForActionCount(state, 2);
+  expect(state.actions[1]).toMatchObject({
+    action: 'set-config',
+    key: 'approval_mode',
+    value: 'allow',
+  });
+
+  await page.locator('#prompt-text').fill('/config approval_mode bypass');
+  await page.locator('#send-button').click();
+  await expect(page.locator('#conversation-error')).toContainText('choices: prompt, allow');
+  expect(state.actions).toHaveLength(2);
 });

@@ -34,6 +34,9 @@ The viewer can:
   reviewing the resolved launch;
 - open a live conversation, send prompts, and run the slash commands the
   session actually supports;
+- use **Session settings** or `/config` to review and change every selectable
+  setting the active harness advertises, including approval and collaboration
+  options that are not model or effort;
 - queue prompts while an agent is busy, **Interrupt turn** without releasing the environment, and cancel shell work;
 - suspend a session, resume it from its checkpoint, and browse all suspended resume
   candidates, including records previously archived by a provider;

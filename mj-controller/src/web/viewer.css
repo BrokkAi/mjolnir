@@ -1656,6 +1656,16 @@ article > h3 {
   font-weight: 600;
 }
 
+.prompt-settings-open {
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  color: var(--focus);
+  background: transparent;
+  font: inherit;
+  text-decoration: underline;
+}
+
 .entry-time {
   margin-left: auto;
   color: var(--dim);
@@ -1990,6 +2000,23 @@ body[data-connection='reconnecting'] .connection {
 .session-dialog::backdrop { background: #0008; }
 
 .changed-files-dialog { width: min(64rem, 92vw); }
+
+.session-config-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.session-config-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.session-config-field select {
+  width: 100%;
+}
 
 .changed-files-diff {
   background: var(--surface-raised);

@@ -82,6 +82,10 @@ Type in Prompt and press `Enter`. If the harness is already answering, another s
 The prompt surface also understands:
 
 - `!command` to run `bash -lc` independently inside the session workspace.
+- `/config` to list and change every selectable setting the active harness
+  advertises. `/config <key>` opens that setting's values, while
+  `/config <key> <value>` applies one directly. A change submitted during a
+  turn queues with the other work.
 - `/model` and `/effort` to change the harness settings. A change submitted during a turn queues with the other work.
 - `/fast`, `/plan`, and `/implement` when the active harness exposes the corresponding mode.
 - `/review` for an independent review of the completed turn; see [turn review](/turn-review/).

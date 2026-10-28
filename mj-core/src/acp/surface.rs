@@ -88,6 +88,10 @@ impl AcpSessionSurface {
         self.sync_plan_mode();
     }
 
+    pub fn config_options(&self) -> &[SessionConfigOption] {
+        &self.config_options
+    }
+
     pub fn set_session_modes(&mut self, modes: Option<SessionModeState>) {
         self.session_modes = modes;
         self.sync_plan_mode();

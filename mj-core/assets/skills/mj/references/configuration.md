@@ -625,7 +625,8 @@ use their image-provided runtime or the documented installer fallback. The
 `PATH`.
 
 Profiles do not accept `model` or `reasoning_effort`. Use `/model` and `/effort`
-inside a session, or configure the harness's own defaults in its home. For
+or `/config` inside a session, or configure the harness's own defaults in its
+home. For
 credential files, staging allowlists, skills, quotas, and harness limitations,
 see [Profiles and harnesses](/profiles/).
 

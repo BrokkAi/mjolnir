@@ -333,6 +333,13 @@ pub(super) fn phone_commands(
             .iter()
             .any(|option| option.key == key)
     };
+    if session.capabilities.set_config && !session.config_options.is_empty() {
+        commands.push(command(
+            "config",
+            "change any setting advertised by the active agent",
+            Some("key [value]"),
+        ));
+    }
     if option("model") {
         commands.push(command("model", "change the active model", Some("value")));
     }
@@ -382,6 +389,7 @@ pub(super) fn phone_commands(
         "clear",
         "help",
         "detach",
+        "config",
         "model",
         "fast",
         "effort",

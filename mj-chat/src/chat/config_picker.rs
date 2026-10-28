@@ -1,4 +1,4 @@
-//! Compact, anchored `/model` and `/effort` dropdowns with type-to-filter.
+//! Compact, anchored session-setting and value dropdowns with type-to-filter.
 
 use crate::theme;
 use crossterm::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEventKind};
@@ -8,7 +8,9 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
-use mj_core::acp::SessionConfigChoice;
+use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigOptionCategory};
+use mj_core::acp::surface::config_current_value;
+use mj_core::acp::{SessionConfigChoice, session_config_choices};
 use mj_core::relay::WorkerPhase;
 
 use super::autocomplete::{config_choice_name, matching_indices};
@@ -30,37 +32,98 @@ enum ConfigControl {
 /// before applying the choice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ConfigPicker {
-    key: &'static str,
-    choices: Vec<SessionConfigChoice>,
+    title: String,
+    key: Option<String>,
     current: Option<String>,
+    items: Vec<ConfigPickerItem>,
     filter: TextInput,
     form: Form<ConfigControl>,
     filtered: Vec<usize>,
     area: Rect,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConfigPickerItem {
+    Option {
+        key: String,
+        label: String,
+        current: Option<String>,
+    },
+    Value {
+        key: String,
+        choice: SessionConfigChoice,
+    },
+}
+
 impl ConfigPicker {
-    fn new(key: &'static str, choices: Vec<SessionConfigChoice>, current: Option<String>) -> Self {
+    fn new_options(options: &[SessionConfigOption]) -> Option<Self> {
+        let mut items = Vec::new();
+        for option in options {
+            let key = config_option_key(option);
+            if items.iter().any(|item| matches!(item, ConfigPickerItem::Option { key: existing, .. } if existing == &key)) {
+                continue;
+            }
+            let choices = session_config_choices(options, &key);
+            if choices.is_empty() {
+                continue;
+            }
+            let current = config_current_value(options, &key);
+            let label = option.name.trim();
+            items.push(ConfigPickerItem::Option {
+                key,
+                label: if label.is_empty() {
+                    option.id.to_string()
+                } else {
+                    label.to_owned()
+                },
+                current,
+            });
+        }
+        (!items.is_empty()).then(|| Self::new("Session settings".to_owned(), None, None, items))
+    }
+
+    fn new_values(key: String, choices: Vec<SessionConfigChoice>, current: Option<String>) -> Self {
+        let items = choices
+            .into_iter()
+            .map(|choice| ConfigPickerItem::Value {
+                key: key.clone(),
+                choice,
+            })
+            .collect();
+        Self::new(key.clone(), Some(key), current, items)
+    }
+
+    fn new(
+        title: String,
+        key: Option<String>,
+        current: Option<String>,
+        items: Vec<ConfigPickerItem>,
+    ) -> Self {
         let selected = current
             .as_deref()
-            .and_then(|current| choices.iter().position(|choice| choice.value == current))
+            .and_then(|current| {
+                items.iter().position(|item| {
+                    matches!(item, ConfigPickerItem::Value { choice, .. } if choice.value == current)
+                })
+            })
             .unwrap_or(0);
-        let filtered = (0..choices.len()).collect();
+        let filtered = (0..items.len()).collect();
         let mut form = Form::new();
         form.declare(ConfigControl::Filter, ControlKind::TextField);
         form.declare(
             ConfigControl::Values,
             ControlKind::ChoiceList {
-                len: choices.len(),
+                len: items.len(),
                 selected,
             },
         );
         form.set_list_activation(ConfigControl::Values, ListActivation::SingleClick);
         form.end_frame(ConfigControl::Values);
         Self {
+            title,
             key,
-            choices,
             current,
+            items,
             filter: TextInput::new(),
             form,
             filtered,
@@ -72,19 +135,30 @@ impl ConfigPicker {
         self.form.selected(ConfigControl::Values).unwrap_or(0)
     }
 
-    fn selection(&self) -> Option<&SessionConfigChoice> {
+    fn selection(&self) -> Option<&ConfigPickerItem> {
         self.filtered
             .get(self.selected())
-            .and_then(|&index| self.choices.get(index))
+            .and_then(|&index| self.items.get(index))
+    }
+
+    #[cfg(test)]
+    fn selected_value(&self) -> Option<&str> {
+        match self.selection()? {
+            ConfigPickerItem::Option { .. } => None,
+            ConfigPickerItem::Value { choice, .. } => Some(&choice.value),
+        }
     }
 
     fn refilter(&mut self) {
         let kept = self.filtered.get(self.selected()).copied();
         self.filtered = if self.filter.is_empty() {
-            (0..self.choices.len()).collect()
+            (0..self.items.len()).collect()
         } else {
-            matching_indices(&self.choices, self.filter.value(), |choice| {
-                (&choice.value, Some(choice.name.as_str()))
+            matching_indices(&self.items, self.filter.value(), |item| match item {
+                ConfigPickerItem::Option { key, label, .. } => (key, Some(label.as_str())),
+                ConfigPickerItem::Value { choice, .. } => {
+                    (&choice.value, Some(choice.name.as_str()))
+                }
             })
         };
         let selected = kept
@@ -102,6 +176,17 @@ impl ConfigPicker {
     }
 }
 
+pub(super) fn config_option_key(option: &SessionConfigOption) -> String {
+    let id = option.id.to_string();
+    match option.category {
+        Some(SessionConfigOptionCategory::Model) => "model".to_owned(),
+        Some(SessionConfigOptionCategory::ThoughtLevel) => "effort".to_owned(),
+        _ if id == "model" => "model".to_owned(),
+        _ if mj_core::acp::EFFORT_OPTION_IDS.contains(&id.as_str()) => "effort".to_owned(),
+        _ => id,
+    }
+}
+
 impl ChatState {
     pub(super) fn advertised_config_values(&self, key: &str) -> &[SessionConfigChoice] {
         match key {
@@ -111,17 +196,33 @@ impl ChatState {
         }
     }
 
-    pub(super) fn open_config_picker(&mut self, key: &'static str) -> bool {
-        let current = match key {
+    pub(super) fn config_values(&self, key: &str) -> Vec<SessionConfigChoice> {
+        session_config_choices(self.acp_surface.config_options(), key)
+    }
+
+    fn current_config_value(&self, key: &str) -> Option<String> {
+        match key {
             "model" => self.current_model().map(str::to_owned),
             "effort" => self.current_effort().map(str::to_owned),
-            _ => return false,
+            _ => config_current_value(self.acp_surface.config_options(), key),
+        }
+    }
+
+    pub(super) fn open_config_menu(&mut self) -> bool {
+        let Some(picker) = ConfigPicker::new_options(self.acp_surface.config_options()) else {
+            return false;
         };
-        let choices = self.advertised_config_values(key).to_vec();
+        self.config_picker = Some(picker);
+        true
+    }
+
+    pub(super) fn open_config_picker(&mut self, key: &str) -> bool {
+        let choices = self.config_values(key);
         if choices.is_empty() {
             return false;
         }
-        self.config_picker = Some(ConfigPicker::new(key, choices, current));
+        let current = self.current_config_value(key);
+        self.config_picker = Some(ConfigPicker::new_values(key.to_owned(), choices, current));
         true
     }
 
@@ -228,28 +329,34 @@ impl ChatState {
         let Some(picker) = self.config_picker.as_ref() else {
             return ChatAction::None;
         };
-        let Some(choice) = picker.selection() else {
+        let Some(selection) = picker.selection().cloned() else {
             return ChatAction::None;
         };
-        let key = picker.key;
-        let value = choice.value.clone();
+        let (key, value) = match selection {
+            ConfigPickerItem::Option { key, .. } => {
+                if !self.open_config_picker(&key) {
+                    self.set_notice(format!(
+                        "The agent no longer advertises values for {key}; this configuration change was not sent"
+                    ));
+                }
+                return ChatAction::None;
+            }
+            ConfigPickerItem::Value { key, choice } => (key, choice.value),
+        };
         self.config_picker = None;
         if matches!(self.phase, WorkerPhase::Closing | WorkerPhase::Closed) {
             self.set_notice("The worker is closing; this configuration change was not sent");
             return ChatAction::None;
         }
         if !self
-            .advertised_config_values(key)
+            .config_values(&key)
             .iter()
             .any(|choice| choice.value == value)
         {
             self.set_notice(format!("The agent no longer advertises {key} value {value}; this configuration change was not sent"));
             return ChatAction::None;
         }
-        ChatAction::SetConfig {
-            key: key.to_owned(),
-            value,
-        }
+        ChatAction::SetConfig { key, value }
     }
 }
 
@@ -262,27 +369,35 @@ pub(super) fn render_config_picker(
     let anchor = chat
         .config_chip_areas
         .iter()
-        .find(|(key, _)| *key == picker.key)
+        .find(|(key, _)| picker.key.as_deref() == Some(*key))
         .map(|(_, area)| *area)
         .or(chat.voice_button_area)
         .unwrap_or(Rect::new(area.x, area.bottom().saturating_sub(1), 1, 1));
     let rows = picker
         .filtered
         .iter()
-        .map(|&index| {
-            let choice = &picker.choices[index];
-            let marker = if picker.current.as_deref() == Some(choice.value.as_str()) {
-                theme::glyphs().check
-            } else {
-                " "
-            };
-            Line::from(format!("{marker} {}", config_choice_name(choice)))
+        .map(|&index| match &picker.items[index] {
+            ConfigPickerItem::Option { label, current, .. } => {
+                let current = current
+                    .as_deref()
+                    .map(|current| format!(": {current}"))
+                    .unwrap_or_default();
+                Line::from(format!("  {label}{current}"))
+            }
+            ConfigPickerItem::Value { choice, .. } => {
+                let marker = picker.current.as_deref() == Some(choice.value.as_str());
+                Line::from(format!(
+                    "{} {}",
+                    if marker { theme::glyphs().check } else { " " },
+                    config_choice_name(choice)
+                ))
+            }
         })
         .collect::<Vec<_>>();
     let title = if picker.filter.is_empty() {
-        format!(" {} ", picker.key)
+        format!(" {} ", picker.title)
     } else {
-        format!(" {}: {} ", picker.key, picker.filter.value())
+        format!(" {}: {} ", picker.title, picker.filter.value())
     };
     let width = rows
         .iter()
@@ -375,6 +490,22 @@ mod tests {
         .category(SessionConfigOptionCategory::ThoughtLevel)
     }
 
+    fn approval_option(current: &str, values: &[&str]) -> SessionConfigOption {
+        SessionConfigOption::select(
+            "approval_mode",
+            "Approval mode",
+            current.to_owned(),
+            SessionConfigSelectOptions::Ungrouped(
+                values
+                    .iter()
+                    .map(|value| {
+                        SessionConfigSelectOption::new((*value).to_owned(), (*value).to_owned())
+                    })
+                    .collect(),
+            ),
+        )
+    }
+
     fn chat_with_models() -> ChatState {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.set_config_options(&[
@@ -400,8 +531,8 @@ mod tests {
             .config_picker
             .as_ref()
             .unwrap()
-            .selection()
-            .map(|choice| choice.value.clone());
+            .selected_value()
+            .map(str::to_owned);
         // The harness re-advertises a reordered list mid-selection.
         chat.set_config_options(&[model_option(
             "auto",
@@ -411,9 +542,66 @@ mod tests {
             chat.config_picker
                 .as_ref()
                 .unwrap()
-                .selection()
-                .map(|choice| choice.value.clone()),
+                .selected_value()
+                .map(str::to_owned),
             before
+        );
+    }
+
+    #[test]
+    fn config_command_reaches_an_arbitrary_advertised_setting() {
+        let mut chat = chat_with_models();
+        chat.set_config_options(&[
+            model_option("auto", &[("auto", "Auto")]),
+            effort_option("high", &["low", "high"]),
+            approval_option("prompt", &["prompt", "allow"]),
+        ]);
+
+        chat.set_input("/config".into());
+        assert_eq!(chat.submit_input(), ChatAction::None);
+        assert!(chat.config_picker_active());
+        assert!(
+            drawn_transcript(&mut chat, 100, 24)
+                .join("\n")
+                .contains("Approval mode")
+        );
+        type_text(&mut chat, "approval");
+        assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+        assert!(
+            drawn_transcript(&mut chat, 100, 24)
+                .join("\n")
+                .contains("allow")
+        );
+        type_text(&mut chat, "allow");
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter)),
+            ChatAction::SetConfig {
+                key: "approval_mode".into(),
+                value: "allow".into(),
+            }
+        );
+
+        chat.set_input("/config approval_mode prompt".into());
+        assert_eq!(
+            chat.submit_input(),
+            ChatAction::SetConfig {
+                key: "approval_mode".into(),
+                value: "prompt".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn config_command_refuses_values_outside_the_live_catalogue() {
+        let mut chat = chat_with_models();
+        chat.set_config_options(&[approval_option("prompt", &["prompt", "allow"])]);
+        chat.set_input("/config approval_mode bypass".into());
+
+        assert_eq!(chat.submit_input(), ChatAction::None);
+        assert!(chat.input.is_empty());
+        assert!(
+            chat.notice()
+                .is_some_and(|notice| notice.contains("choices: prompt, allow"))
         );
     }
 
@@ -505,7 +693,7 @@ mod tests {
             assert!(picker.area.bottom() <= 24);
             assert!(picker.area.height <= 10);
             assert!(rows.join("\n").contains("model-23"));
-            assert_eq!(picker.selection().unwrap().value, "model-23");
+            assert_eq!(picker.selected_value(), Some("model-23"));
         }
     }
     #[test]
@@ -736,8 +924,8 @@ mod tests {
         let selected_effort = effort
             .config_picker
             .as_ref()
-            .and_then(|picker| picker.selection())
-            .map(|choice| choice.value.clone())
+            .and_then(|picker| picker.selected_value())
+            .map(str::to_owned)
             .expect("selected effort");
         let effort_surface = format!(
             "{}\nselection: {selected_effort}",
