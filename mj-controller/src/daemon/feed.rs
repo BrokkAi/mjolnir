@@ -14,6 +14,7 @@ type Children = SnapshotMap<String, SnapshotMap<String, ()>>;
 /// of every session from the same capture, for the in-process web server.
 #[derive(Default)]
 pub(super) struct RuntimeHistory {
+    capacity: super::capacity::ContainerCapacityProjection,
     incarnation: String,
     sequence: u64,
     snapshots: VecDeque<(u64, RuntimeProjection, usize)>,
@@ -288,11 +289,13 @@ impl RuntimeState {
                     moves,
                     metadata: RuntimeMetadata {
                         operator_presence: controller.state.operator_presence,
-                        config: controller.config.clone(),
+                        config: owner.config_snapshot.clone(),
                         default_targets: controller.config.default_targets.clone(),
                         last_subagent_policies: controller.state.last_subagent_policies.clone(),
                         lifecycles,
-                        container_capacities: self.container_capacity_projection(&controller.state),
+                        container_capacities: history
+                            .capacity
+                            .project(self, &controller.state.sessions),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -348,7 +351,7 @@ impl RuntimeState {
             .unwrap_or_else(PoisonError::into_inner)
             .snapshot
             .clone();
-        full.metadata.storage = crate::target_storage::views();
+        full.metadata.storage = crate::target_storage::views_snapshot();
         full.metadata.profile_capabilities = self
             .profile_catalog
             .get()
@@ -356,7 +359,7 @@ impl RuntimeState {
             .unwrap_or_default();
         full.metadata.recent_launch = self.recent_launch.borrow().clone();
         full.metadata.launch_recency = if launch_inputs_changed(&history.full, &full) {
-            mj_client::runtime_feed::launch_recency(&full.records)
+            mj_client::runtime_feed::launch_recency(&full.records).into()
         } else {
             history.full.metadata.launch_recency.clone()
         };
@@ -577,7 +580,7 @@ mod tests {
             CapabilityState::Ready(_)
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(replica.projection.metadata.config, Config::default());
+        assert_eq!(*replica.projection.metadata.config, Config::default());
     }
 
     #[tokio::test]
@@ -605,6 +608,88 @@ mod tests {
         assert_eq!(changes.records.len(), 1);
         replica.apply(frame).unwrap();
         assert!(replica.projection.records.contains_key("new"));
+    }
+
+    // Hard-won: 8c88175f7: captures copied and compared unchanged metadata on every update.
+    #[tokio::test]
+    async fn unrelated_captures_share_metadata_and_replacements_preserve_held_snapshots() {
+        const CHILD: &str = "MJ_TEST_SHARED_RUNTIME_PUBLICATION";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(
+                    module_path!(),
+                    "unrelated_captures_share_metadata_and_replacements_preserve_held_snapshots",
+                ),
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "cpu-publication-regression")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let state = super::super::tests::test_runtime_state();
+        let catalog = crate::server_runtime::profile_catalog::ProfileCatalog::with_probe(
+            crate::server_runtime::profile_catalog::counting_probe(Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            )),
+        );
+        assert!(state.profile_catalog.set(catalog).is_ok());
+        state.owner().edit_sessions(|sessions| {
+            for index in 0..6_000 {
+                let id = format!("history-{index:06}");
+                sessions.insert(id.clone(), record(&id, SessionState::Stopped));
+            }
+        });
+        let before = state.runtime_publication().unwrap();
+        for _ in 0..20 {
+            state.publish_revision();
+            let after = state.runtime_publication().unwrap();
+            assert!(before.metadata.config.ptr_eq(&after.metadata.config));
+            assert!(before.metadata.quotas.ptr_eq(&after.metadata.quotas));
+            assert!(before.metadata.storage.ptr_eq(&after.metadata.storage));
+            assert!(
+                before
+                    .metadata
+                    .profile_capabilities
+                    .ptr_eq(&after.metadata.profile_capabilities)
+            );
+            assert!(
+                before
+                    .metadata
+                    .container_capacities
+                    .ptr_eq(&after.metadata.container_capacities)
+            );
+        }
+        let mut config = (*before.metadata.config).clone();
+        config.advanced.auto_afk_minutes += 1;
+        state.owner().install_config(config.clone());
+        state.publish_quotas(mj_client::quota::QuotaSnapshot {
+            cycles: 1,
+            ..Default::default()
+        });
+        let after = state.runtime_publication().unwrap();
+        assert_eq!(after.metadata.quotas.cycles, 1);
+        assert_eq!(before.metadata.quotas.cycles, 0);
+        assert_eq!(*after.metadata.config, config);
+        assert_ne!(*before.metadata.config, config);
+        crate::target_storage::record_samples(
+            &[crate::target_storage::tests::sample(
+                "runtime-sharing",
+                20 << 30,
+                30 << 30,
+            )],
+            100,
+        );
+        let measured = state.runtime_publication().unwrap();
+        assert!(!measured.metadata.storage.ptr_eq(&before.metadata.storage));
+        assert!(before.metadata.storage.is_empty());
+        assert!(!measured.metadata.storage.is_empty());
+        let wire = serde_json::to_value(&after.metadata).unwrap();
+        assert!(wire["config"].is_object());
+        assert!(wire["storage"].is_array());
+        let received: RuntimeMetadata = serde_json::from_value(wire).unwrap();
+        assert_eq!(received, after.metadata);
     }
 
     #[test]

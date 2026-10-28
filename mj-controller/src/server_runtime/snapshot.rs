@@ -92,7 +92,7 @@ pub(super) fn viewer_capacity(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let storage = crate::target_storage::views();
+    let storage = crate::target_storage::views_snapshot();
     state
         .values()
         .map(|entry| {

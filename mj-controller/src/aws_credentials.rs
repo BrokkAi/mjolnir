@@ -132,6 +132,7 @@ mod tests {
     }
 
     // Hard-won: #1385: copying profile selection left isolated Bedrock workers without credentials.
+    // Hard-won: #1390: background installation omitted the native process-provider configuration.
     #[cfg(unix)]
     #[test]
     #[ignore = "requires AWS CLI v2; uses isolated fixture credentials without network access"]
@@ -178,12 +179,7 @@ mod tests {
             )
             .unwrap();
             let exported = export(&source, &IsolatedAws).unwrap();
-            exported.install(&home).unwrap();
-            std::fs::write(
-                home.join("aws-config"),
-                exported.configuration(&home).unwrap(),
-            )
-            .unwrap();
+            exported.install(&home, &home).unwrap();
             let mut worker_source = source.clone();
             worker_source.environment.insert(
                 "AWS_CONFIG_FILE".into(),

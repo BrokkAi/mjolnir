@@ -1,5 +1,38 @@
 use super::*;
 
+/// Operation identity and the notice already reported belong to one observation.
+pub(super) struct RemoteLifecycleObservation {
+    operation_id: String,
+    notice: Option<String>,
+}
+
+/// Returns whether this operation supersedes an observed one for the session.
+fn observe_remote_lifecycle(
+    operations: &mut BTreeMap<String, RemoteLifecycleObservation>,
+    dashboard: &mut DashboardState,
+    lifecycle: &crate::daemon::RuntimeLifecycleView,
+) -> bool {
+    let previous = operations.insert(
+        lifecycle.session_id.clone(),
+        RemoteLifecycleObservation {
+            operation_id: lifecycle.operation_id.clone(),
+            notice: lifecycle.notice.clone(),
+        },
+    );
+    let supersedes = previous
+        .as_ref()
+        .is_some_and(|previous| previous.operation_id != lifecycle.operation_id);
+    if let Some(notice) = &lifecycle.notice
+        && (supersedes
+            || previous
+                .as_ref()
+                .is_none_or(|previous| previous.notice.as_ref() != Some(notice)))
+    {
+        dashboard.set_notice(notice);
+    }
+    supersedes
+}
+
 enum LifecycleCompletion {
     Current(Option<Box<ActiveLifecycleOperation>>),
     Superseded,
@@ -404,8 +437,9 @@ impl DashboardContext {
             .map(|lifecycle| lifecycle.session_id.clone())
             .collect::<BTreeSet<_>>();
         for session_id in self
-            .remote_lifecycle_sessions
-            .difference(&active)
+            .remote_lifecycle_operations
+            .keys()
+            .filter(|session_id| !active.contains(*session_id))
             .cloned()
             .collect::<Vec<_>>()
         {
@@ -413,7 +447,6 @@ impl DashboardContext {
             if !self.lifecycle_operations.contains_key(&session_id) && !move_active {
                 self.dashboard.finish_session_operation(&session_id);
             }
-            self.remote_lifecycle_sessions.remove(&session_id);
             self.remote_lifecycle_operations.remove(&session_id);
         }
         for lifecycle in lifecycles {
@@ -430,19 +463,16 @@ impl DashboardContext {
             // Keep the daemon identity even while a local action is waiting
             // for its callback. The callback is keyed only by session id, so
             // this lets it distinguish an authoritative newer operation.
-            let previous_operation_id = self
-                .remote_lifecycle_operations
-                .insert(lifecycle.session_id.clone(), lifecycle.operation_id.clone());
-            self.remote_lifecycle_sessions
-                .insert(lifecycle.session_id.clone());
+            let supersedes = observe_remote_lifecycle(
+                &mut self.remote_lifecycle_operations,
+                &mut self.dashboard,
+                &lifecycle,
+            );
             if !self
                 .lifecycle_operations
                 .contains_key(&lifecycle.session_id)
             {
-                if previous_operation_id
-                    .as_ref()
-                    .is_some_and(|previous| previous != &lifecycle.operation_id)
-                {
+                if supersedes {
                     // A new daemon operation for the same session supersedes
                     // the old overlay even when both snapshots use the same
                     // lifecycle kind.
@@ -467,9 +497,6 @@ impl DashboardContext {
                         target_id,
                     );
                 }
-            }
-            if let Some(notice) = lifecycle.notice {
-                self.dashboard.set_notice(notice);
             }
         }
     }
@@ -813,6 +840,65 @@ fn next_workspace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hard-won: #1388: unrelated runtime updates repeatedly restored retained lifecycle warnings.
+    #[test]
+    fn lifecycle_notices_are_reported_once_per_observed_transition() {
+        let mut dashboard = DashboardState::new(
+            Config::default(),
+            mj_core::state::State::default(),
+            BTreeMap::new(),
+        );
+        let notices = mj_chat::chat::Notices::default();
+        dashboard.share_notices(notices.clone());
+        let mut operations = BTreeMap::new();
+        let mut lifecycle = crate::daemon::RuntimeLifecycleView {
+            operation_id: "first".into(),
+            move_operation_id: None,
+            cancellable: true,
+            session_id: "session".into(),
+            kind: crate::daemon::RuntimeLifecycleKind::Create,
+            started_at_epoch_seconds: 1,
+            active_stages: Vec::new(),
+            resume_destination: None,
+            notice: Some("Clone cache preparation failed".into()),
+        };
+        observe_remote_lifecycle(&mut operations, &mut dashboard, &lifecycle);
+        assert_eq!(dashboard.notice(), lifecycle.notice);
+        dashboard.set_notice("A later background notice");
+        for _ in 0..20 {
+            observe_remote_lifecycle(&mut operations, &mut dashboard, &lifecycle);
+        }
+        assert_eq!(
+            dashboard.notice().as_deref(),
+            Some("A later background notice")
+        );
+        dashboard.clear_notice();
+        observe_remote_lifecycle(&mut operations, &mut dashboard, &lifecycle);
+        assert!(
+            dashboard.notice().is_none(),
+            "dismissed warnings must stay dismissed"
+        );
+        assert_eq!(notices.history().len(), 2);
+
+        lifecycle.notice = Some("Clone-cache cleanup was skipped".into());
+        observe_remote_lifecycle(&mut operations, &mut dashboard, &lifecycle);
+        assert_eq!(dashboard.notice(), lifecycle.notice);
+        dashboard.clear_notice();
+        lifecycle.operation_id = "second".into();
+        assert!(observe_remote_lifecycle(
+            &mut operations,
+            &mut dashboard,
+            &lifecycle
+        ));
+        assert_eq!(dashboard.notice(), lifecycle.notice);
+        dashboard.clear_notice();
+        lifecycle.notice = None;
+        observe_remote_lifecycle(&mut operations, &mut dashboard, &lifecycle);
+        lifecycle.notice = Some("Clone cache preparation failed".into());
+        observe_remote_lifecycle(&mut operations, &mut dashboard, &lifecycle);
+        assert_eq!(dashboard.notice(), lifecycle.notice);
+    }
 
     #[test]
     fn a_created_workspace_opens_with_the_feed_frame_that_adds_it() {

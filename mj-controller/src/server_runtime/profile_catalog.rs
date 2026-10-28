@@ -77,6 +77,7 @@ struct Definition {
 #[derive(Default)]
 struct Inner {
     live: Option<Config>,
+    publication: Option<mj_core::snapshot_map::SharedSnapshot<ProfileCapabilitiesSnapshot>>,
     definitions: BTreeMap<String, Definition>,
     entries: BTreeMap<CacheKey, Entry>,
     /// Probes replacing out-of-date ready entries, which stay served
@@ -124,9 +125,14 @@ impl ProfileCatalog {
         }
     }
 
-    pub(crate) fn snapshot(&self) -> ProfileCapabilitiesSnapshot {
-        let inner = self.lock();
-        ProfileCapabilitiesSnapshot {
+    pub(crate) fn snapshot(
+        &self,
+    ) -> mj_core::snapshot_map::SharedSnapshot<ProfileCapabilitiesSnapshot> {
+        let mut inner = self.lock();
+        if let Some(snapshot) = &inner.publication {
+            return snapshot.clone();
+        }
+        let snapshot = mj_core::snapshot_map::SharedSnapshot::from(ProfileCapabilitiesSnapshot {
             profiles: inner
                 .definitions
                 .keys()
@@ -160,7 +166,9 @@ impl ProfileCatalog {
                     (identity.clone(), ProfileCapabilities { choices, efforts })
                 })
                 .collect(),
-        }
+        });
+        inner.publication = Some(snapshot.clone());
+        snapshot
     }
 
     /// Adoption updates which profiles are enabled without invalidating capability entries.
@@ -220,6 +228,7 @@ impl ProfileCatalog {
                         });
                     }
                 }
+                inner.publication = None;
                 if live {
                     // End the previous owner's supervisors so only the fresh
                     // attempt below can publish for this identity.
@@ -269,7 +278,7 @@ impl ProfileCatalog {
     pub(crate) fn reread_failed(self: &Arc<Self>, profile_id: &str) {
         let mut started = Vec::new();
         {
-            let mut inner = self.lock();
+            let mut inner = self.edit();
             let Some(identity) = inner
                 .live
                 .as_ref()
@@ -409,7 +418,7 @@ impl ProfileCatalog {
             result = attempt.clone() => Some(result),
         };
         let (changed, started) = {
-            let mut inner = self.lock();
+            let mut inner = self.edit();
             if !inner
                 .refreshing
                 .get(&key)
@@ -495,7 +504,7 @@ impl ProfileCatalog {
                 };
                 let mut started = Vec::new();
                 {
-                    let mut inner = self.lock();
+                    let mut inner = self.edit();
                     if !inner
                         .entries
                         .get(&key)
@@ -557,7 +566,7 @@ impl ProfileCatalog {
                     _ = tokio::time::sleep(delay) => {}
                 }
                 {
-                    let mut inner = self.lock();
+                    let mut inner = self.edit();
                     if !inner
                         .entries
                         .get(&key)
@@ -609,6 +618,7 @@ impl ProfileCatalog {
                 } else {
                     let attempt = self.attempt(&inner.definitions[&key.0], key.1.clone());
                     let entry = Entry::Pending(attempt.clone());
+                    inner.publication = None;
                     inner.entries.insert(key.clone(), entry.clone());
                     (entry, Some(attempt))
                 }
@@ -675,6 +685,7 @@ impl ProfileCatalog {
                 }
                 _ => {
                     let attempt = self.attempt(&inner.definitions[&key.0], key.1.clone());
+                    inner.publication = None;
                     inner
                         .entries
                         .insert(key.clone(), Entry::Pending(attempt.clone()));
@@ -776,6 +787,12 @@ impl ProfileCatalog {
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn edit(&self) -> MutexGuard<'_, Inner> {
+        let mut inner = self.lock();
+        inner.publication = None;
+        inner
     }
 
     #[cfg(test)]
@@ -924,6 +941,7 @@ mod tests {
         Arc::new(AtomicUsize::new(0))
     }
 
+    // Hard-won: 8c88175f7: reads rebuilt the entire unchanged model catalog.
     #[tokio::test]
     async fn pending_model_efforts_share_one_attempt_and_unchanged_profiles_stay_warm() {
         let calls = calls();
@@ -1007,6 +1025,12 @@ mod tests {
             2,
             "membership changes retain unchanged efforts"
         );
+        let held = catalog.snapshot();
+        catalog
+            .options_for(&config, "parent", Some("other".into()))
+            .await
+            .unwrap();
+        assert!(held.ptr_eq(&catalog.snapshot()));
     }
 
     /// Muse catalogues change server-side without a managed-pin bump, so a
