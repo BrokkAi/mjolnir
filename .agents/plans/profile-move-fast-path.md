@@ -13,7 +13,8 @@ A Move between compatible profiles on the same environment should keep the insta
 - [x] (2026-10-28) Retain native files and the worker for a compatible in-place Move; refresh profile files and install only the small relay seed.
 - [x] (2026-10-28) Pass all 64 initial Move integration and ordering regressions, including the new retention and ownership cases.
 - [x] (2026-10-28) Finish full controller/checkpoint suites, rerun the sole shell-startup timeout in isolation, and pass workspace Clippy and formatting.
-- [ ] Review, commit on the current branch, and push to origin/master.
+- [x] (2026-10-28) Commit implementation as `06f4f8792`, merge the concurrent macOS golden-only update as `035409e8e`, and push to origin/master.
+- [x] (2026-10-28) Confirm successful agent-dev publication for both architectures and the manifest in run `40627986226`.
 
 ## Surprises & Discoveries
 
@@ -35,7 +36,9 @@ The reported session waited roughly 58 seconds behind a full recovery checkpoint
 
 The initial 64 Move regressions passed. Final validation ran the complete touched-crate suites: checkpoint had 165 passes and 2 ignored tests; controller had 2,173 passes, 17 ignored tests, and one failure in `container_runtime_freezes_relative_path_and_provider_selection`. That failure was the existing Bash login-shell initialization exceeding 10 seconds. The exact test passed on an isolated rerun in 3.11 seconds. Workspace `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` both passed. The timeout is recorded without changing the unrelated login-shell deadline or rerunning the complete suite.
 
-The normal compatible in-place path retains native file and executable inodes and avoids archive restoration. The ownership regression observes the actor while a checkpoint permit is held. Existing queue, failed-swap, cross-harness, and daemon-restart regressions passed. No live instance was upgraded or used for testing. Commit and push are the remaining steps.
+The normal compatible in-place path retains native file and executable inodes and avoids archive restoration. The ownership regression observes the actor while a checkpoint permit is held. Existing queue, failed-swap, cross-harness, and daemon-restart regressions passed. No live instance was upgraded or used for testing. Implementation commit `06f4f8792` and merge `035409e8e` are pushed to master. The merge brought only macOS golden-file regeneration and required no repeat of the Linux checks. Agent-dev image run `40627986226` completed successfully for amd64, arm64, and manifest publication: https://github.com/BrokkAi/mjolnir/actions/runs/40627986226.
+
+The implementation is complete. The user requested that the final completion report also go to session `6a3d03316390200372b0f6e4603c35ee`; that handoff follows the final documentation commit.
 
 Review also identified a worker surviving a daemon upgrade. Profile refresh reads the installed executable's build identity under lifecycle ownership and upgrades an older/different worker only when needed. Native state remains in place in both cases; the existing second-local-target integration case covers executable replacement while preserving that state. The initial full validation run was cancelled before completion when this case was found; the final validation above includes the corrected source.
 
@@ -82,3 +85,7 @@ Updated 2026-10-28 after initial regression success: document the preserved hand
 Updated 2026-10-28 during final review: retain compatibility with a worker that outlived its daemon by conditionally upgrading its executable without restoring native state.
 
 Updated 2026-10-28 after validation: record the complete test counts, successful isolated shell-timeout rerun, and clean Clippy/format checks.
+
+Updated 2026-10-28 after pushing: record the implementation/merge commits, the unrelated macOS golden update, and the pending image publication and requested notification.
+
+Updated 2026-10-28 at closeout: both image architectures and manifest publication succeeded; finish the validation record and hand off the completed work.
