@@ -398,6 +398,15 @@ impl RuntimeState {
             }))
     }
 
+    pub(crate) fn subagent_report_parent_ids(&self) -> Vec<String> {
+        self.owner()
+            .indexes
+            .report_parents
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     /// A record publication is visible before its writer reply. Refreshing at
     /// this boundary ensures every decision observes that publication together
     /// with control ownership, even before the background subscriber wakes up.

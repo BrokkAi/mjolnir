@@ -4,11 +4,13 @@ pub struct StandaloneSession {
     pub(super) client: RelayClient,
     pub(super) materialized: MaterializedSession,
     pub(super) window: mj_core::state::ProjectionWindow,
-    pub(super) operational: RelayOperationalState,
+    pub(super) operational: mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>,
     pub(super) latest_credential_sync_signal: Option<CredentialSyncSignal>,
     pub(super) project_memory: Option<ProjectMemorySyncTarget>,
-    pub(super) subagent_requests: Vec<mj_core::subagent::SubagentToolRequest>,
-    pub(super) subagent_completions: Vec<mj_core::subagent::SubagentCompletion>,
+    pub(super) subagent_requests:
+        mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentToolRequest>>,
+    pub(super) subagent_completions:
+        mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentCompletion>>,
     subagent_queue: super::subagent_queue::SubagentQueueObserver,
     subagent_queue_error: Option<String>,
     history_jobs: tokio::task::JoinSet<mj_core::history::HistoryResult>,
@@ -45,11 +47,11 @@ impl StandaloneSession {
             client,
             materialized,
             window,
-            operational,
+            operational: operational.into(),
             latest_credential_sync_signal: None,
             project_memory: target.project_memory.clone(),
-            subagent_requests: Vec::new(),
-            subagent_completions: Vec::new(),
+            subagent_requests: Default::default(),
+            subagent_completions: Default::default(),
             subagent_queue: super::subagent_queue::SubagentQueueObserver::spawn(target),
             subagent_queue_error: None,
             history_jobs: tokio::task::JoinSet::new(),
@@ -275,7 +277,9 @@ impl StandaloneSession {
         let mut operational = catch_up.state;
         operational.acknowledged_through = cursor.ordinal;
         operational.acknowledged_digest = cursor.digest;
-        self.operational = operational;
+        if *self.operational != operational {
+            self.operational = operational.into();
+        }
         Ok(())
     }
 
@@ -357,11 +361,11 @@ impl StandaloneSession {
         ManagedSessionSnapshot {
             window: self.window.clone(),
             materialized: self.materialized.clone(),
-            operational: self.operational.clone(),
+            operational: self.operational.clone().into_inner(),
             latest_credential_sync_signal: self.latest_credential_sync_signal.clone(),
             worker_build: self.client.worker_build().map(str::to_owned),
-            subagent_requests: self.subagent_requests.clone(),
-            subagent_completions: self.subagent_completions.clone(),
+            subagent_requests: self.subagent_requests.clone().into_inner(),
+            subagent_completions: self.subagent_completions.clone().into_inner(),
             subagent_queue_error: self.subagent_queue_error.clone(),
         }
     }
