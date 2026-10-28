@@ -4789,6 +4789,134 @@ fn in_place_move_with_oversized_file_exports_only_session_handoff() {
     );
 }
 
+/// Restart uses the same bounded handoff as Move, even with a workspace too
+/// large to checkpoint, and keeps both the staged native state and full copy.
+#[cfg(unix)]
+#[test]
+fn restart_with_oversized_workspace_retains_native_state_and_full_checkpoint() {
+    use std::os::unix::fs::MetadataExt;
+
+    let name =
+        test_name("restart_with_oversized_workspace_retains_native_state_and_full_checkpoint");
+    if std::env::var_os("MJ_RESTART_HANDOFF_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_RESTART_HANDOFF_CHILD", "1")
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut fixture = in_place_fixture(HarnessKind::Codex, HarnessKind::Codex);
+    let large_file = fixture.checkout.join("large-build-output");
+    fs::File::create(&large_file)
+        .unwrap()
+        .set_len(9 * 1024 * 1024 * 1024)
+        .unwrap();
+    let checkout_inode = fs::metadata(&fixture.checkout).unwrap().ino();
+    let native_file = fixture.worker_root.join("profile/source-only.txt");
+    let native_inode = fs::metadata(&native_file).unwrap().ino();
+    let source_target = fixture.controller.state.sessions[LATCH_RELAY_SESSION]
+        .target
+        .clone();
+    let intent = crate::database::begin_session_restart(
+        LATCH_RELAY_SESSION,
+        "restart-handoff",
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        false,
+    )
+    .unwrap();
+    crate::database::mark_session_restart_checkpoint_started(
+        LATCH_RELAY_SESSION,
+        &intent.operation_id,
+    )
+    .unwrap();
+    let source_relay = seed_source_relay(&fixture.worker_root);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let executor = RecordingProcessExecutor::default();
+    runtime.block_on(async {
+        let channels = start_source_relay_manager(&source_relay);
+        let result = fixture
+            .controller
+            .suspend_session_for_restart(
+                LATCH_RELAY_SESSION,
+                &executor,
+                &channels.control,
+                None,
+                false,
+            )
+            .await;
+        channels.shutdown.shutdown().await.unwrap();
+        result.unwrap();
+    });
+    let intent = crate::database::load_session_restart(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    let handoff = intent.handoff.as_ref().expect("Restart owns a handoff");
+    assert_eq!(
+        intent.checkpoint_sha256.as_deref(),
+        Some(handoff.sha256.as_str())
+    );
+    assert!(fs::metadata(&handoff.archive_path).unwrap().len() < 1024 * 1024);
+    let verified = mj_checkpoint::archive::verify_archive_streaming(&handoff.archive_path).unwrap();
+    assert!(
+        verified
+            .manifest
+            .payloads
+            .iter()
+            .filter(|payload| payload.path.starts_with("repositories/"))
+            .all(|payload| payload.size < 1024)
+    );
+    assert_eq!(
+        fixture.controller.state.sessions[LATCH_RELAY_SESSION]
+            .checkpoint
+            .as_ref(),
+        Some(&fixture.checkpoint)
+    );
+    // Model startup: reload durable ownership and sweep unreferenced archives.
+    crate::controller::checkpoint::reconcile_managed_checkpoint_archives().unwrap();
+    assert!(handoff.archive_path.exists());
+    crate::database::advance_session_restart(
+        LATCH_RELAY_SESSION,
+        &intent.operation_id,
+        crate::database::SessionRestartPhase::RestoringInPlace,
+    )
+    .unwrap();
+    runtime
+        .block_on(fixture.controller.restore_session_in_place_for_restart(
+            LATCH_RELAY_SESSION,
+            IN_PLACE_SOURCE_PROFILE,
+            "local-bare",
+            &executor,
+        ))
+        .unwrap()
+        .unwrap();
+    let record = &fixture.controller.state.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(record.state, SessionState::Running);
+    assert_eq!(record.target, source_target);
+    assert_eq!(record.checkpoint.as_ref(), Some(&fixture.checkpoint));
+    assert!(fixture.checkpoint.archive_path.exists());
+    assert_eq!(
+        fs::metadata(&fixture.checkout).unwrap().ino(),
+        checkout_inode
+    );
+    assert_eq!(fs::metadata(&native_file).unwrap().ino(), native_inode);
+    assert_eq!(fs::read(native_file).unwrap(), b"old harness state");
+    assert_eq!(
+        fs::metadata(large_file).unwrap().len(),
+        9 * 1024 * 1024 * 1024
+    );
+    crate::database::finish_session_restart(LATCH_RELAY_SESSION, &intent.operation_id).unwrap();
+    crate::controller::checkpoint::reconcile_managed_checkpoint_archives().unwrap();
+    assert!(!handoff.archive_path.exists());
+    assert!(fixture.checkpoint.archive_path.exists());
+}
+
 #[cfg(unix)]
 struct Ec2PreviewExecutor(GitWithPodmanPreflightExecutor);
 
