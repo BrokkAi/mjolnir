@@ -1641,3 +1641,135 @@ for line in sys.stdin:
         }
     }
 }
+
+// Hard-won: ac9d7ce9f: empty delegation deltas rebuilt and copied full queue payloads.
+#[cfg(unix)]
+#[tokio::test]
+async fn delegation_publications_share_empty_polls_and_recover_partial_pages() {
+    use mj_core::subagent::{
+        SubagentCompletion, SubagentQueueChange, SubagentQueuePage, SubagentToolAction,
+        SubagentToolRequest,
+    };
+    let completion = |id: &str| SubagentCompletion {
+        request_id: id.into(),
+        completed_at_ms: 100,
+        is_error: true,
+        input_delivery: Some(serde_json::json!({"error": "failure detail\n".repeat(10_000)})),
+        interrupted_wait: None,
+    };
+    let first = completion("first");
+    let second = completion("second");
+    let request = SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "second".into(),
+        created_at_ms: 100,
+        action: SubagentToolAction::SendMessage {
+            child_session_id: "child".into(),
+            message: "message detail\n".repeat(10_000),
+        },
+    };
+    let page = |sequence, changes, has_more| RelayResponseBody::Ok {
+        payload: RelayResponsePayload::SubagentQueue {
+            page: SubagentQueuePage {
+                sequence,
+                changes,
+                has_more,
+            },
+        },
+    };
+    let replies = vec![
+        page(
+            1,
+            vec![SubagentQueueChange::Completed(first.clone())],
+            false,
+        ),
+        page(2, vec![], false),
+        page(
+            3,
+            vec![
+                SubagentQueueChange::Retired {
+                    request_id: "first".into(),
+                },
+                SubagentQueueChange::Request(request.clone()),
+            ],
+            true,
+        ),
+        RelayResponseBody::Error {
+            error: RelayProtocolError {
+                code: RelayErrorCode::Internal,
+                message: "failure between queue pages".into(),
+                retryable: true,
+                detail: None,
+            },
+        },
+        page(4, vec![], false),
+        page(5, vec![], false),
+        page(
+            6,
+            vec![SubagentQueueChange::Completed(second.clone())],
+            false,
+        ),
+        page(
+            7,
+            vec![SubagentQueueChange::Retired {
+                request_id: "second".into(),
+            }],
+            false,
+        ),
+        page(8, vec![], false),
+    ];
+    let root = tempfile::tempdir().unwrap();
+    let fixture = root.path().join("queue-pages.json");
+    let encoded = serde_json::to_vec(&replies).unwrap();
+    assert!(encoded.len() > 64 * 1024);
+    std::fs::write(&fixture, encoded).unwrap();
+    let script = format!(
+        r#"
+import json, sys
+pages = iter(json.load(open(sys.argv[1])))
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request["request"]["method"]
+    if method == "hello":
+        body = {{"result": "ok", "payload": {{"type": "hello", "data": {{"negotiated": {protocol}, "relay_version": "queue-publication-fixture", "session_id": "{SESSION_ID}"}}}}}}
+    else:
+        assert method == "poll_subagent_queue", method
+        body = next(pages)
+    body.update(request_id=request["request_id"], protocol_version={protocol})
+    print(json.dumps(body), flush=True)
+"#,
+        protocol = RELAY_PROTOCOL_VERSION
+    );
+    let spec = CommandSpec::new("python3", ["-c", &script, &fixture.to_string_lossy()])
+        .purpose("delegation queue publication fixture");
+    let mut client = RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let held = client.subagent_requests().await.unwrap();
+    assert_eq!(&*held.1, std::slice::from_ref(&first));
+    let unchanged = client.subagent_requests().await.unwrap();
+    assert!(held.0.ptr_eq(&unchanged.0) && held.1.ptr_eq(&unchanged.1));
+    let error = client.subagent_requests().await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("failure between queue pages"),
+        "{error:#}"
+    );
+    assert!(client.subagent_publication.is_none());
+    let recovered = client.subagent_requests().await.unwrap();
+    assert_eq!(&*recovered.0, &[request]);
+    assert!(recovered.1.is_empty());
+    assert_eq!(
+        &*held.1,
+        &[first],
+        "held completion stays immutable after retirement"
+    );
+    let unchanged = client.subagent_requests().await.unwrap();
+    assert!(recovered.0.ptr_eq(&unchanged.0) && recovered.1.ptr_eq(&unchanged.1));
+    let completed = client.subagent_requests().await.unwrap();
+    assert!(completed.0.is_empty());
+    assert_eq!(&*completed.1, &[second]);
+    let retired = client.subagent_requests().await.unwrap();
+    assert!(retired.0.is_empty() && retired.1.is_empty());
+    let unchanged = client.subagent_requests().await.unwrap();
+    assert!(retired.0.ptr_eq(&unchanged.0) && retired.1.ptr_eq(&unchanged.1));
+}

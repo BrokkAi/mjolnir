@@ -1741,9 +1741,7 @@ fn subagent_status(
     // message would otherwise replace it, keep the child `error`, and reach
     // the parent as a second failure (#1321). A stopped record that holds an
     // error is a failed resume, which still reports below.
-    if record
-        .is_some_and(|record| record.state == SessionState::Stopped && record.last_error.is_none())
-    {
+    if record.is_some_and(mj_core::state::SessionRecord::is_cleanly_stopped) {
         return ("stopped".into(), None, true);
     }
     // A record that failed to start holds the cause; the follow-up's own

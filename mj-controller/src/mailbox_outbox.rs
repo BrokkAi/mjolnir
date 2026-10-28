@@ -179,9 +179,7 @@ async fn process_pending(
     // Lifecycle recovery can settle a finish after startup reconciliation.
     // Rebuild missing events from durable state on the same bounded sweep
     // that retries their delivery, including after a missed completion update.
-    let parents = tokio::task::spawn_blocking(crate::database::list_subagent_parent_ids)
-        .await
-        .context("parent report reconciliation read task failed")??;
+    let parents = state.subagent_report_parent_ids();
     for parent in parents {
         if stop.is_cancelled() {
             return Ok(());

@@ -111,12 +111,7 @@ impl RelayClient {
         }
     }
 
-    pub async fn subagent_requests(
-        &mut self,
-    ) -> Result<(
-        Vec<mj_core::subagent::SubagentToolRequest>,
-        Vec<mj_core::subagent::SubagentCompletion>,
-    )> {
+    pub async fn subagent_requests(&mut self) -> Result<SubagentQueueSnapshot> {
         if self.protocol_version >= mj_core::relay::RELAY_SUBAGENT_FEED_PROTOCOL {
             use mj_core::subagent::SubagentQueueChange;
             loop {
@@ -133,6 +128,9 @@ impl RelayClient {
                         .is_none_or(|previous| page.sequence > previous),
                     "sub-agent queue page did not advance"
                 );
+                if !page.changes.is_empty() {
+                    self.subagent_publication = None;
+                }
                 for change in page.changes {
                     let id = change.request_id().to_owned();
                     match change {
@@ -150,31 +148,50 @@ impl RelayClient {
                 }
                 tokio::task::yield_now().await;
             }
-            let mut requests = Vec::new();
-            let mut completions = Vec::new();
-            for entry in self.subagent_queue.values() {
-                match entry {
-                    SubagentQueueChange::Request(request) => requests.push(request.clone()),
-                    SubagentQueueChange::Completed(receipt) => completions.push(receipt.clone()),
-                    SubagentQueueChange::Retired { .. } => {
-                        unreachable!("retirement removes the entry")
+            return Ok(self
+                .subagent_publication
+                .get_or_insert_with(|| {
+                    let mut requests = Vec::new();
+                    let mut completions = Vec::new();
+                    for entry in self.subagent_queue.values() {
+                        match entry {
+                            SubagentQueueChange::Request(request) => requests.push(request.clone()),
+                            SubagentQueueChange::Completed(receipt) => {
+                                completions.push(receipt.clone())
+                            }
+                            SubagentQueueChange::Retired { .. } => {
+                                unreachable!("retirement removes the entry")
+                            }
+                        }
                     }
-                }
-            }
-            return Ok((requests, completions));
+                    (requests.into(), completions.into())
+                })
+                .clone());
         }
         let request = RelayRequest::SubagentRequests;
         if !request.supported_at(self.protocol_version) {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok((Default::default(), Default::default()));
         }
         match self.call(request).await {
-            Ok(RelayResponsePayload::SubagentRequests { requests, results }) => Ok((
-                requests,
-                results
+            Ok(RelayResponsePayload::SubagentRequests { requests, results }) => {
+                let completions = results
                     .iter()
                     .map(mj_core::subagent::SubagentCompletion::from)
-                    .collect(),
-            )),
+                    .collect::<Vec<_>>();
+                let changed = self.subagent_publication.as_ref().is_none_or(
+                    |(before_requests, before_completions)| {
+                        **before_requests != requests || **before_completions != completions
+                    },
+                );
+                if changed {
+                    self.subagent_publication = Some((requests.into(), completions.into()));
+                }
+                Ok(self
+                    .subagent_publication
+                    .as_ref()
+                    .expect("legacy queue was published")
+                    .clone())
+            }
             Ok(_) => bail!("relay returned an unexpected sub-agent request response"),
             // The worker refuses this only while its harness preparation is
             // pending or has failed. The harness and its MCP server are not
@@ -186,7 +203,7 @@ impl RelayClient {
                     .downcast_ref::<RelayRejected>()
                     .is_some_and(|rejected| rejected.0.code == RelayErrorCode::InvalidState) =>
             {
-                Ok((Vec::new(), Vec::new()))
+                Ok((Default::default(), Default::default()))
             }
             Err(error) => Err(error),
         }
