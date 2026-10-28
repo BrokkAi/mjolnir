@@ -12,7 +12,8 @@ Every newly launched session should be able to call `mj-agents.fetch` with `sess
 - [x] (2026-10-28) Add shared fetched-file storage and the target-side receive command.
 - [x] (2026-10-28) Add fetch requests, dispatch, and tool registration for every session role.
 - [x] (2026-10-28) Extend MCP and transfer integration coverage; validate touched crates, the full isolated delegation scenario, and workspace clippy. Correct one outdated Claude permission expectation and rerun only the failing test.
-- [ ] Review, commit on the current branch, and push HEAD to origin/master.
+- [x] (2026-10-28) Review, commit on master, merge concurrent upstream changes without rebasing, and push HEAD to origin/master as 9379c006a.
+- [x] (2026-10-28) Final merged-tree clippy and formatting passed; agent-dev image workflow 40688502116 published amd64, arm64, and the combined manifest successfully.
 
 ## Surprises & Discoveries
 
@@ -28,7 +29,7 @@ Top-level sessions already receive the MessageOnly role. Managed children withou
 
 ## Outcomes & Retrospective
 
-Implementation is complete. All 33 focused MCP tests, the 16 MiB worker transfer/truncation regression, the complete isolated delegation scenario, workspace clippy, formatting, and Python syntax checks pass. The full touched-crate suites found only an outdated Claude permission assertion; it now includes fetch and its focused rerun passed. Worker clippy passed again after that test-only correction. The implementation is committed as a7e6f034a; upstream merged cleanly as 9f2686e2b. Publication is pending.
+Implementation is complete. All 33 focused MCP tests, the 16 MiB worker transfer/truncation regression, the complete isolated delegation scenario, workspace clippy, formatting, and Python syntax checks pass. The full touched-crate suites found only an outdated Claude permission assertion; it now includes fetch and its focused rerun passed. Worker clippy passed again after that test-only correction. The implementation is committed as a7e6f034a; upstream merged cleanly as 9f2686e2b. The source is pushed to origin/master as 9379c006a. Final merged-tree workspace clippy and formatting passed. Image publication workflow 40688502116 succeeded for amd64, arm64, and the combined manifest. No implementation work remains.
 
 ## Context and Orientation
 
@@ -68,4 +69,8 @@ Progress update: completed the implementation and extended existing role/approva
 
 Validation update: the CLI package is named brokk-mjolnir. The first full-test command rejected the incorrect package selector before running tests; the corrected command is running.
 
-Validation update: the complete isolated delegation scenario passed. The only full-suite failure was an existing Claude child allow-list expectation omitting fetch; the corrected test passed on its focused rerun. Temporary copies are cleaned up by the scenario. A concurrent upstream Restart refactor arrived after the initial merge and will be merged before publication.
+Validation update: the complete isolated delegation scenario passed. The only full-suite failure was an existing Claude child allow-list expectation omitting fetch; the corrected test passed on its focused rerun. Temporary copies are cleaned up by the scenario. A concurrent upstream Restart refactor and CLI startup fix were merged without conflicts before publication.
+
+Publication update: pushed 9379c006a after merging the independently validated upstream Restart refactor and CLI startup fix. The first push was rejected because master advanced; fetching and merging resolved it without conflicts. The agent-dev image workflow is https://github.com/BrokkAi/mjolnir/actions/runs/40688502116.
+
+Completion update: final merged-tree cargo clippy --all-targets -- -D warnings and cargo fmt --all -- --check passed. The image publication workflow succeeded, as did CI portable-worker compilation and the three-client reliability smoke. Source changes were pushed to master as 9379c006a; this final plan update records the completed result.
