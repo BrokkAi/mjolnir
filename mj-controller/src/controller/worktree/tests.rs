@@ -7,7 +7,7 @@ use anyhow::Result;
 use crate::controller::Controller;
 use crate::controller::resume::apply_failed_resume_rollback;
 use crate::controller::test_support::{
-    FIXTURE_FETCH_URL, FixtureRemoteExecutor, Git225Executor, IsolatedTest,
+    FIXTURE_FETCH_URL, FixtureRemoteExecutor, Git231Executor, IsolatedTest,
     checkout_with_network_remote, checkpoint_test_session, committed_repository, local_bundle,
     managed_raw_session, managed_worktree_session, raw_session_on, resume_compatibility_config,
     ssh_worktree_target, test_git, test_name,
@@ -25,7 +25,6 @@ use crate::targets::{
 use super::*;
 
 // Hard-won: 68ea3d747: cached refs must keep alternate-only objects and copy in one batch.
-// Hard-won: 804e36f6b: Git 2.25 rejected the copy's --no-write-fetch-head and negative refspec.
 #[test]
 #[cfg_attr(
     windows,
@@ -36,7 +35,7 @@ fn managed_clone_copies_large_origin_ref_sets_in_one_command() {
     impl CommandExecutor for RecordingExecutor {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.0.borrow_mut().push(command.purpose.clone());
-            Git225Executor.execute(command)
+            Git231Executor.execute(command)
         }
 
         fn execute_with_stdin(
@@ -45,7 +44,7 @@ fn managed_clone_copies_large_origin_ref_sets_in_one_command() {
             input: &mut (dyn std::io::Read + Send),
         ) -> Result<CommandOutput> {
             self.0.borrow_mut().push(command.purpose.clone());
-            Git225Executor.execute_with_stdin(command, input)
+            Git231Executor.execute_with_stdin(command, input)
         }
     }
 
@@ -139,6 +138,7 @@ fn managed_clone_copies_large_origin_ref_sets_in_one_command() {
         ],
     );
     assert_eq!(copied, refs.trim_end());
+    assert!(!checkout.worktree_root.join(".git/FETCH_HEAD").exists());
     let commands = executor.0.borrow();
     let copies: Vec<_> = commands
         .iter()
@@ -484,7 +484,6 @@ fn a_launch_base_starts_the_worktree_at_that_commit() {
 }
 
 // Hard-won: 90fc17a2b: a new clone started from the host's stale cached origin ref.
-// Hard-won: f050247e7: Git 2.25 rejected the origin fetch's --no-write-fetch-head.
 #[test]
 #[cfg_attr(
     windows,
@@ -516,6 +515,8 @@ fn a_new_clone_starts_at_the_remote_tip_the_host_had_not_fetched() {
     test_git(&root, &["remote", "add", "origin", remote_url]);
     test_git(&root, &["push", "--set-upstream", "origin", "master"]);
     test_git(&root, &["remote", "set-head", "origin", "master"]);
+    test_git(&root, &["fetch", "origin"]);
+    let fetch_head = std::fs::read(root.join(".git/FETCH_HEAD")).unwrap();
     let host_head = test_git(&root, &["rev-parse", "HEAD"]);
     // A teammate pushes after the host's last fetch.
     let teammate = tempfile::tempdir().unwrap();
@@ -544,7 +545,7 @@ fn a_new_clone_starts_at_the_remote_tip_the_host_had_not_fetched() {
     controller.reload().unwrap();
     assert!(
         controller
-            .prepare_managed_raw_worktree(&record.id, &Git225Executor)
+            .prepare_managed_raw_worktree(&record.id, &Git231Executor)
             .unwrap()
     );
     let managed = controller.state.sessions[&record.id]
@@ -552,6 +553,10 @@ fn a_new_clone_starts_at_the_remote_tip_the_host_had_not_fetched() {
         .clone()
         .unwrap();
     assert_eq!(managed.base_commit.as_deref(), Some(pushed.as_str()));
+    assert_eq!(
+        std::fs::read(root.join(".git/FETCH_HEAD")).unwrap(),
+        fetch_head
+    );
     assert_eq!(
         test_git(&managed.worktree_root, &["rev-parse", "HEAD"]),
         pushed
@@ -581,7 +586,7 @@ fn a_new_clone_starts_at_the_remote_tip_the_host_had_not_fetched() {
     workspace.state = SessionState::Stopped;
     workspace.bundle_id = "project".into();
     let conversion = controller
-        .plan_workspace_to_raw(&workspace, "localhost", &Git225Executor)
+        .plan_workspace_to_raw(&workspace, "localhost", &Git231Executor)
         .unwrap();
     assert_eq!(
         conversion.worktree.base_commit.as_deref(),
@@ -792,13 +797,11 @@ fn managed_worktree_origin_uses_source_repository_while_checkout_is_retired() {
 #[test]
 fn raw_no_origin_uses_the_canonical_main_repository_root() {
     struct NoOriginExecutor {
-        commands: RefCell<Vec<CommandSpec>>,
         side: String,
         common: String,
     }
     impl CommandExecutor for NoOriginExecutor {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.commands.borrow_mut().push(command.clone());
             if command.args.iter().any(|argument| argument == "config") {
                 return Ok(CommandOutput {
                     status: 1,
@@ -818,12 +821,6 @@ fn raw_no_origin_uses_the_canonical_main_repository_root() {
                 .any(|argument| argument == "--git-common-dir")
             {
                 format!("{}\n", self.common)
-            } else if command
-                .args
-                .iter()
-                .any(|argument| argument == "--show-prefix")
-            {
-                "\n".to_owned()
             } else {
                 panic!("unexpected command {:?}", command.args);
             };
@@ -856,7 +853,6 @@ fn raw_no_origin_uses_the_canonical_main_repository_root() {
         },
     };
     let executor = NoOriginExecutor {
-        commands: RefCell::new(Vec::new()),
         side: side.to_string_lossy().into_owned(),
         common: main.join(".git").to_string_lossy().into_owned(),
     };
@@ -868,7 +864,6 @@ fn raw_no_origin_uses_the_canonical_main_repository_root() {
     assert_eq!(source.key, format!("path:{}", main.display()));
     assert_eq!(source.short, "project");
     assert_eq!(source.full, main.display().to_string());
-    assert_eq!(executor.commands.borrow().len(), 4);
 }
 
 #[test]
@@ -2023,7 +2018,7 @@ fn a_return_to_local_rejects_a_retained_branch_checked_out_elsewhere() {
     };
 
     let error = controller
-        .plan_workspace_to_raw(&session, "local-bare", &Git225Executor)
+        .plan_workspace_to_raw(&session, "local-bare", &Git231Executor)
         .unwrap_err();
 
     assert!(error.to_string().contains("still checked out"), "{error:#}");

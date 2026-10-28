@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 101;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 102;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1863,6 +1863,28 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older daemons cannot recover a Restart-owned session handoff
+    // and would sweep its archive or restore a stale full checkpoint instead.
+    if version < 102 {
+        let add_column = if super::legacy_schema::table_has_column(
+            connection,
+            "session_restart_intents",
+            "handoff_json",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE session_restart_intents ADD COLUMN handoff_json TEXT CHECK(handoff_json IS NULL OR json_valid(handoff_json));"
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_column}
+             UPDATE schema_compatibility SET minimum_compatible_version = 102 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at) VALUES(102, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 102;
+             COMMIT;",
+        ))?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2376,7 +2398,7 @@ mod reader_tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        assert_eq!(revisions, [93, 94, 95, 96, 97, 98, 99, 100, 101]);
+        assert_eq!(revisions, (93..=SCHEMA_VERSION).collect::<Vec<_>>());
         let fresh = Connection::open_in_memory().unwrap();
         migrate_schema(&fresh).unwrap();
         let schema = |database: &Connection| {
@@ -3166,6 +3188,11 @@ mod reader_tests {
         if version < 101 {
             restore_pre101_subagent_preference(&connection);
         }
+        if version < 102 {
+            connection
+                .execute_batch("ALTER TABLE session_restart_intents DROP COLUMN handoff_json;")
+                .unwrap();
+        }
         // Historical fixtures must remove columns introduced by later revisions.
         if version < 94
             && legacy_schema::table_has_column(
@@ -3311,6 +3338,51 @@ mod reader_tests {
     }
 
     #[test]
+    fn restart_handoff_migration_preserves_legacy_intents_and_refuses_old_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("restart-handoff.sqlite3");
+        drop(open_writer(&path).unwrap());
+        stamp_schema_version(&path, 101);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(
+            "INSERT INTO session_contexts(session_id,bundle_id,created_at) VALUES ('kept','project','now');
+             INSERT INTO sessions(session_id,title,harness_kind,last_profile,target_template_id,state,updated_at)
+                 VALUES ('kept','Keep my work','codex','codex','podman','closing','now');
+             INSERT INTO session_restart_intents(session_id,operation_id,phase,updated_at,checkpoint_sha256,checkpoint_started)
+                 VALUES ('kept','restart-kept','stopping','now','sealed-sha',1);
+             CREATE TRIGGER fail_restart_handoff BEFORE INSERT ON schema_migrations WHEN NEW.version=102
+                 BEGIN SELECT RAISE(ABORT,'restart handoff migration'); END;"
+        ).unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        connection
+            .execute_batch("ROLLBACK; DROP TRIGGER fail_restart_handoff;")
+            .unwrap();
+        let schema = read_schema_state(&connection).unwrap();
+        assert_eq!(schema.revision, 101);
+        assert_eq!(schema.minimum_compatible, Some(101));
+        assert!(
+            !legacy_schema::table_has_column(
+                &connection,
+                "session_restart_intents",
+                "handoff_json"
+            )
+            .unwrap()
+        );
+        migrate_schema(&connection).unwrap();
+        let schema = read_schema_state(&connection).unwrap();
+        assert_eq!(schema.revision, SCHEMA_VERSION);
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        assert!(schema.ensure_supported_by(101).is_err());
+        let intent = super::super::session_restart::load_session_restart_with(&connection, "kept")
+            .unwrap()
+            .unwrap();
+        assert_eq!(intent.operation_id, "restart-kept");
+        assert_eq!(intent.checkpoint_sha256.as_deref(), Some("sealed-sha"));
+        assert!(intent.handoff.is_none());
+        assert!(intent.checkpoint_started);
+    }
+
+    #[test]
     fn profile_subagent_preference_migration_preserves_fallback_and_refuses_old_writers() {
         use mj_core::subagent::SubagentPolicy;
 
@@ -3353,8 +3425,8 @@ mod reader_tests {
             }
             migrate_schema(&legacy).unwrap();
             let schema = read_schema_state(&legacy).unwrap();
-            assert_eq!(schema.revision, 101);
-            assert_eq!(schema.minimum_compatible, Some(101));
+            assert_eq!(schema.revision, SCHEMA_VERSION);
+            assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
             assert!(schema.ensure_supported_by(100).is_err());
             assert!(
                 legacy_schema::table_has_column(&legacy, "subagent_preference", "profile_id")
@@ -3768,7 +3840,7 @@ mod reader_tests {
         assert!(matches!(
             error.downcast_ref::<StoreSchemaMismatch>().unwrap().reason,
             StoreSchemaMismatchReason::Incompatible {
-                minimum_compatible: 101
+                minimum_compatible: MINIMUM_COMPATIBLE_VERSION
             }
         ));
         assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));

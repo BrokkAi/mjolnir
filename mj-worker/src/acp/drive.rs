@@ -78,6 +78,7 @@ where
     let permission_tool_content = tool_content;
     let notification_goal = spec.goal_recovery.clone();
     let notification_harness = spec.harness;
+    let notification_policy = spec.execution_policy;
     let claude_sdk_events = events.clone();
     let claude_sdk_harness = spec.harness;
     let permission_events = events.clone();
@@ -207,7 +208,7 @@ where
                         "coerced an out-of-spec ACP tool status to failed"
                     );
                 }
-                let update = match serde_json::from_value::<SessionUpdate>(raw_update.clone()) {
+                let mut update = match serde_json::from_value::<SessionUpdate>(raw_update.clone()) {
                     Ok(update) => update,
                     Err(error) => match salvage_tool_call_update(&raw_update) {
                         Some(update) => {
@@ -230,6 +231,7 @@ where
                     && !session_update_is_session_state(&update) {
                     return Ok(());
                 }
+                suppress_codex_sandbox_warning(notification_harness, notification_policy, &mut update);
                 notification_goal.lock().expect("goal lock poisoned").state.apply(&update)
                     .map_err(|e| agent_client_protocol::Error::invalid_params().data(serde_json::json!(e.to_string())))?;
                 notification_step_clock.observe(&update);

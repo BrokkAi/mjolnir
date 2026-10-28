@@ -54,7 +54,11 @@ pub fn install_pre_push_hook(runner: &dyn GitCommandRunner, root: &Path) -> Resu
     )?;
     let directory = match configured.status {
         0 => configured.stdout,
-        1 => checked_git(runner, root, &["rev-parse", "--git-path", "hooks"])?,
+        1 => checked_git(
+            runner,
+            root,
+            &["rev-parse", "--path-format=absolute", "--git-path", "hooks"],
+        )?,
         _ => anyhow::bail!(
             "read core.hooksPath: {}",
             String::from_utf8_lossy(&configured.stderr)

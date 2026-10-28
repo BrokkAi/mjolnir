@@ -187,6 +187,57 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     let mut checks = vec![aws_check, docker_check, podman_check, missing_ssh_check];
     checks.extend(subagent_checks);
 
+    // External Git distributions vary their version suffixes. Exercise the
+    // complete report, including failures, rather than just the parser.
+    for response in [
+        Ok(output("git version 2.25.1\n")),
+        Ok(output("git version 2.30.9\n")),
+        Ok(output("git version 2.31.0\n")),
+        Ok(output("git version 2.39.5 (Apple Git-154)\n")),
+        Ok(output("git version 2.47.1.windows.1\n")),
+        Ok(output("unexpected version output\n")),
+        Ok(failed("Git installation is broken")),
+        Err(anyhow!("git executable is unavailable")),
+    ] {
+        let executor = FakeExecutor::new([response]);
+        checks.extend(git_checks(Err(ConfigGap::Missing), &executor));
+        let commands = executor.commands.borrow();
+        assert_eq!(commands[0].program, "git");
+        assert_eq!(commands[0].args, ["--version"]);
+    }
+    let mut git_ssh = ssh_connection();
+    git_ssh.extra_args = vec!["-o".into(), "StrictHostKeyChecking=accept-new".into()];
+    let remote_git = config_with([(
+        "builder",
+        TargetTemplate::SshBare {
+            ssh: git_ssh,
+            permissions: mj_core::config::PermissionMode::Yolo,
+            workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
+        },
+    )]);
+    let executor = FakeExecutor::new([
+        Ok(output("git version 2.43.0\n")),
+        Ok(output("git version 2.25.1\n")),
+    ]);
+    let git_checks = git_checks(Ok(&remote_git), &executor);
+    assert!(!all_ready(&git_checks));
+    assert_eq!(git_checks[1].id, "git.ssh-bare.builder");
+    let json = serde_json::to_value(&git_checks).unwrap();
+    assert_eq!(json[1]["status"], "fixable");
+    assert!(json[1]["remediation"].as_str().unwrap().contains("2.31"));
+    let commands = executor.commands.borrow();
+    assert_eq!(commands[1].program, "ssh");
+    assert_eq!(&commands[1].args[..2], ["-o", "StrictHostKeyChecking=yes"]);
+    assert!(
+        commands[1]
+            .args
+            .last()
+            .unwrap()
+            .ends_with("'git' '--version'")
+    );
+    drop(commands);
+    checks.extend(git_checks);
+
     let home = tempfile::tempdir().unwrap();
     let claude = HarnessProfile {
         enabled: true,

@@ -438,39 +438,24 @@ impl crate::targets::CommandExecutor for FixtureRemoteExecutor {
     }
 }
 
-/// Runs commands for real, but answers as Git 2.25.1 does to the newer
-/// options managed checkouts have used. SSH machines on Ubuntu 20.04 still
-/// run that Git.
-pub(super) struct Git225Executor;
+/// Git 2.31 does not support NUL-delimited worktree lists.
+pub(super) struct Git231Executor;
 
-impl Git225Executor {
+impl Git231Executor {
     fn refusal(command: &crate::targets::CommandSpec) -> Option<crate::targets::CommandOutput> {
         let has = |option: &str| command.args.iter().any(|argument| argument == option);
-        let (status, stderr) = if has("worktree") && has("-z") {
-            (129, "error: unknown switch `z'".to_owned())
-        } else if !has("fetch") {
+        if !has("worktree") || !has("-z") {
             return None;
-        } else if has("--no-write-fetch-head") {
-            (
-                129,
-                "error: unknown option `no-write-fetch-head'".to_owned(),
-            )
-        } else {
-            let negative = command
-                .args
-                .iter()
-                .find(|argument| argument.starts_with('^'))?;
-            (128, format!("fatal: invalid refspec '{negative}'"))
-        };
+        }
         Some(crate::targets::CommandOutput {
-            status,
+            status: 129,
             stdout: Vec::new(),
-            stderr: stderr.into_bytes(),
+            stderr: b"error: unknown switch `z'".to_vec(),
         })
     }
 }
 
-impl crate::targets::CommandExecutor for Git225Executor {
+impl crate::targets::CommandExecutor for Git231Executor {
     fn execute(
         &self,
         command: &crate::targets::CommandSpec,

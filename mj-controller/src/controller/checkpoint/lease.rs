@@ -150,6 +150,9 @@ impl LatchExclusivity {
 pub(in crate::controller) enum CheckpointExportPolicy {
     /// Always export, transfer, and install a new archive.
     Always,
+    /// Export session state and repository metadata; the lifecycle intent owns
+    /// this handoff separately from the full recovery checkpoint.
+    SessionHandoff,
     /// Keep the installed archive when the latched projection holds the same
     /// session content. Relay bookkeeping (the checkpoint commands themselves)
     /// always moves the event frontier, so only content can decide this.

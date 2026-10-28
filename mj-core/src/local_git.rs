@@ -241,7 +241,7 @@ pub fn main_worktree_root(root: &Path) -> Result<PathBuf> {
         .with_context(|| format!("resolve Git working directory {}", root.display()))?;
     let output = crate::subprocess::run_with_input(
         Command::new("git")
-            .args(["rev-parse", "--git-common-dir"])
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
             .current_dir(&directory),
         &[],
     )
@@ -270,8 +270,8 @@ pub fn main_worktree_root(root: &Path) -> Result<PathBuf> {
     Ok(parent)
 }
 
-/// Resolve a single Git path result against its working directory. Older Git
-/// reports common-directory and --git-path results as relative paths.
+/// Validate and normalize a Git path or a relative Git configuration path
+/// against its working directory.
 pub fn resolve_git_path(directory: &Path, output: &str) -> Result<PathBuf> {
     anyhow::ensure!(
         crate::target_path::is_absolute_on_host_or_target(directory),

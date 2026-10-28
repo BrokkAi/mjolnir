@@ -2274,7 +2274,7 @@ fn a_workspace_restore_refuses_a_branch_checked_out_in_another_worktree() {
     );
     let before = git(&destination, &["rev-parse", "HEAD"]);
 
-    let error = restore_repositories(&archive_path, &restore_root, &crate::test_support::Git225)
+    let error = restore_repositories(&archive_path, &restore_root, &crate::test_support::Git231)
         .unwrap_err();
 
     assert!(

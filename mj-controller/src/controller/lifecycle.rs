@@ -137,8 +137,8 @@ impl Controller {
         .await
     }
 
-    /// Seal a restart checkpoint while retaining the existing target. Unlike
-    /// a Move, Restart does not change profile or destination configuration.
+    /// Seal a session handoff while retaining the existing target and full
+    /// recovery checkpoint. Restart keeps the profile and destination.
     ///
     /// An `automatic` Restart, which nobody asked for, never interrupts work:
     /// a session that is working makes it fail with a deferral instead (see
@@ -157,7 +157,11 @@ impl Controller {
             Some(manager),
             None,
             SourceTargetDisposition::RetainForInPlaceSwap,
-            CheckpointExportPolicy::Always,
+            if automatic {
+                CheckpointExportPolicy::Always
+            } else {
+                CheckpointExportPolicy::SessionHandoff
+            },
             true,
             before_close,
             None,
@@ -197,27 +201,20 @@ impl Controller {
                     &mut source_relay,
                 )
                 .await?;
-                if disposition == SourceTargetDisposition::RetainForInPlaceSwap
+                let export_policy = if disposition == SourceTargetDisposition::RetainForInPlaceSwap
                     || operation.workspace_transfer.is_some()
                 {
-                    self.seal_move_handoff(
-                        session_id,
-                        executor,
-                        manager,
-                        operation,
-                        preparation,
-                        source_relay.take(),
-                    )
-                    .await?;
-                    return Ok(false);
-                }
+                    CheckpointExportPolicy::SessionHandoff
+                } else {
+                    CheckpointExportPolicy::ReuseUnchangedArchive
+                };
                 self.suspend_session_controlled_with_manager(
                     session_id,
                     executor,
                     Some(manager),
                     Some((operation, preparation)),
                     disposition,
-                    CheckpointExportPolicy::ReuseUnchangedArchive,
+                    export_policy,
                     true,
                     None,
                     source_relay.take(),
@@ -235,7 +232,7 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
-        move_intent: Option<(
+        mut move_intent: Option<(
             &mut mj_core::state::MoveOperation,
             Option<&mj_core::state::MovePreparation>,
         )>,
@@ -274,7 +271,7 @@ impl Controller {
                 manager,
                 exclusivity,
                 checkpoint_export_policy,
-                None,
+                move_intent.as_ref().map(|(operation, _)| operation.operation_id.as_str()),
                 held_relay,
             )
             .await
@@ -305,7 +302,8 @@ impl Controller {
         let artifact = latched.artifact.clone();
         // Retained environments are not being published or retired. A profile
         // switch must not wait on the repository's network remote.
-        let publication = if disposition == SourceTargetDisposition::RetainForInPlaceSwap {
+        let session_handoff = checkpoint_export_policy == CheckpointExportPolicy::SessionHandoff;
+        let publication = if session_handoff || disposition == SourceTargetDisposition::RetainForInPlaceSwap {
             None
         } else {
             let checkout = self.state.checkout(session_id)?;
@@ -365,17 +363,41 @@ impl Controller {
         let record = self.state.sessions.get_mut(session_id).unwrap();
         record.state = SessionState::Closing;
         record.native_session_id = Some(artifact.native_session_id.clone());
-        record.checkpoint = Some(artifact.metadata.clone());
-        record.publication = publication;
+        if !session_handoff {
+            record.checkpoint = Some(artifact.metadata.clone());
+            record.publication = publication;
+        }
         record.updated_at = now();
         record.last_error = None;
         record.last_checkpoint_error = None;
-        self.persist_checkpoint_transition_or_restore(
-            session_id,
-            &previous,
-            "persist verified checkpoint and closing state before sealing the relay",
-        )?;
-        if let Some((operation, preparation)) = move_intent {
+        if session_handoff {
+            if let Some((operation, _)) = move_intent.as_mut() {
+                operation.handoff = Some(artifact.metadata.clone());
+                operation.checkpoint = previous.checkpoint.clone();
+                operation.updated_at = now();
+                crate::database::save_move_operation(operation)?;
+            } else {
+                let intent = crate::database::load_session_restart(session_id)?
+                    .context("Restart handoff has no lifecycle owner")?;
+                crate::database::record_session_restart_handoff(
+                    session_id,
+                    &intent.operation_id,
+                    &artifact.metadata,
+                )?;
+            }
+            self.persist_session_transition_or_restore(
+                session_id,
+                &previous,
+                "persist closing state before sealing the session handoff",
+            )?;
+        } else {
+            self.persist_checkpoint_transition_or_restore(
+                session_id,
+                &previous,
+                "persist verified checkpoint and closing state before sealing the relay",
+            )?;
+        }
+        if let Some((operation, preparation)) = move_intent.as_mut() {
             // The source is still behind an unsealed barrier. A destination
             // preflight error must release it and leave its processes alive.
             let validation = match self
@@ -384,7 +406,7 @@ impl Controller {
             {
                 Ok(token) => self.validate_move_checkpoint(
                     operation,
-                    preparation,
+                    *preparation,
                     token.as_deref(),
                     executor,
                 ),
@@ -401,15 +423,17 @@ impl Controller {
                 )?;
                 return Err(error);
             }
-            operation.checkpoint = Some(artifact.metadata.clone());
-            operation.updated_at = now();
-            crate::database::save_move_operation(operation)?;
+            if !session_handoff {
+                operation.checkpoint = Some(artifact.metadata.clone());
+                operation.updated_at = now();
+                crate::database::save_move_operation(operation)?;
+            }
         }
         if let Some(before_close) = before_close
             && let Err(error) = before_close.await
         {
-            // The session stays live: dropping the barrier resumes dispatch,
-            // and the record keeps the checkpoint it just verified.
+            // The session stays live: dropping the barrier resumes dispatch.
+            // The record or lifecycle intent keeps the verified archive.
             if let Err(cancel) = latched.relay.cancel_abandoned_barrier().await {
                 tracing::warn!(
                     session_id,
@@ -433,10 +457,12 @@ impl Controller {
             )?;
             return Err(error);
         }
-        prune_replaced_checkpoint(previous.checkpoint.as_ref(), &artifact.metadata);
-        // A stopping session will not checkpoint again, so this is its last
-        // chance to release what its checkpoint now covers.
-        release_projection_behind_checkpoint(session_id, &artifact.metadata);
+        if !session_handoff {
+            prune_replaced_checkpoint(previous.checkpoint.as_ref(), &artifact.metadata);
+            // A stopping session will not checkpoint again, so this is its last
+            // chance to release what its checkpoint now covers.
+            release_projection_behind_checkpoint(session_id, &artifact.metadata);
+        }
 
         let close_command_id = new_command_id("close")?;
         let barrier_command_id = latched.barrier_command_id.clone();
@@ -509,9 +535,17 @@ impl Controller {
         }
         latched.relay.release();
 
-        if disposition == SourceTargetDisposition::RetainForInPlaceSwap {
-            // The record stays `Closing` with its verified checkpoint and its
-            // target. The worker daemon is deliberately left running: a crash
+        if session_handoff
+            && let Some((operation, _)) = move_intent
+        {
+            let mut sealed = previous;
+            sealed.state = SessionState::Closing;
+            operation.recovery_session = Some(sealed);
+            crate::database::save_move_operation(operation)?;
+        }
+        if session_handoff || disposition == SourceTargetDisposition::RetainForInPlaceSwap {
+            // The record stays `Closing` with its target, and the lifecycle
+            // owns the sealed archive. The worker daemon stays running: a crash
             // between here and the in-place restore recovers through
             // `recover_interrupted_close_managed`, which needs the daemon to
             // answer `Closed`.

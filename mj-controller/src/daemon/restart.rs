@@ -462,9 +462,12 @@ impl RuntimeState {
                 .get(session_id)
                 .with_context(|| format!("unknown session {session_id}"))?
                 .clone();
-            let checkpoint_sha256 = record
-                .checkpoint
+            intent = crate::database::load_session_restart(session_id)?
+                .context("Restart intent disappeared after sealing")?;
+            let checkpoint_sha256 = intent
+                .handoff
                 .as_ref()
+                .or(record.checkpoint.as_ref())
                 .context("Restart checkpoint completed without a checkpoint")?
                 .sha256
                 .clone();
@@ -873,9 +876,13 @@ pub(super) fn restart_checkpoint_matches(
     intent: &crate::database::SessionRestartIntent,
 ) -> bool {
     record.target.is_some()
-        && record.checkpoint.as_ref().is_some_and(|checkpoint| {
-            intent.checkpoint_sha256.as_deref() == Some(checkpoint.sha256.as_str())
-        })
+        && intent
+            .handoff
+            .as_ref()
+            .or(record.checkpoint.as_ref())
+            .is_some_and(|checkpoint| {
+                intent.checkpoint_sha256.as_deref() == Some(checkpoint.sha256.as_str())
+            })
         && matches!(
             record.state,
             SessionState::Closing
