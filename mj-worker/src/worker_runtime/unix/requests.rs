@@ -435,7 +435,7 @@ pub(crate) fn apply_credential_request_at(
                 .context("decode AWS credential payload")?;
             let credentials = mj_core::aws_credentials::AwsCredentials::decode(&bytes)?;
             Ok(credential_state_payload(
-                &credentials.install(&endpoint.home)?,
+                &credentials.install(&endpoint.home, &endpoint.home)?,
             ))
         }
         RelayRequest::CredentialState => {
