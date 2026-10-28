@@ -204,6 +204,44 @@ fn session_update_is_relay_visible(
     }
 }
 
+fn suppress_codex_sandbox_warning(
+    harness: HarnessKind,
+    policy: ExecutionPolicy,
+    update: &mut SessionUpdate,
+) {
+    if harness != HarnessKind::Codex || !policy.is_unconstrained() {
+        return;
+    }
+    let SessionUpdate::SessionInfoUpdate(info) = update else {
+        return;
+    };
+    let Some(failure) = mj_core::diagnostic::SessionFailure::from_meta(info.meta.as_ref()) else {
+        return;
+    };
+    if failure.severity != "warning"
+        || failure.details.is_some()
+        || failure.title
+            != "Codex could not find bubblewrap on PATH. \
+            Install bubblewrap with your OS package manager. See the sandbox prerequisites: \
+            https://developers.openai.com/codex/concepts/sandboxing#prerequisites. \
+            Codex will use the bundled bubblewrap in the meantime."
+    {
+        return;
+    }
+    // Codex checks sandbox prerequisites before opening a full-access thread.
+    // Keep any title, goal, or other state carried alongside the notice.
+    if let Some(air) = info
+        .meta
+        .as_mut()
+        .and_then(|meta| meta.get_mut("jetbrains"))
+        .and_then(|jetbrains| jetbrains.get_mut("air"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        air.remove("sessionFailure");
+        tracing::debug!("suppressed Codex bubblewrap prerequisite warning in YOLO mode");
+    }
+}
+
 #[derive(Debug)]
 pub enum CommandRequest {
     ClearContext {
