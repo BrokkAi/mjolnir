@@ -37,7 +37,12 @@ impl Controller {
         requested_operation_id: Option<&str>,
         held_relay: Option<ControllerRelayLease>,
     ) -> Result<LatchedCheckpoint> {
-        let layout = self.session_export_layout(session_id, executor)?;
+        let mut layout = self.session_export_layout(session_id, executor)?;
+        if export_policy == CheckpointExportPolicy::SessionHandoff {
+            for repository in &mut layout.repositories {
+                repository.capture = CheckpointRepositoryCapture::MetadataOnly;
+            }
+        }
         // The layout-level future holds the whole capture protocol and is
         // very large in a debug build. Every wrapper above this one embeds
         // its callee's future, so an unboxed call here made each of the
@@ -50,7 +55,7 @@ impl Controller {
             manager,
             exclusivity,
             export_policy,
-            recovery_copy,
+            recovery_copy && export_policy != CheckpointExportPolicy::SessionHandoff,
             requested_operation_id,
             layout,
             held_relay,

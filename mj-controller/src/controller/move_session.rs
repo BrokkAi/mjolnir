@@ -1,7 +1,6 @@
 //! One recoverable stop/restore operation, independent of its initiating viewer.
 
 mod destination;
-mod handoff;
 #[cfg(test)]
 mod tests;
 mod transfer;
