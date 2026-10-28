@@ -3,11 +3,17 @@ use super::*;
 #[cfg(test)]
 thread_local! {
     static VIEWER_ROW_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static VIEWER_SESSION_SCAN_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 pub(crate) fn take_viewer_row_visits() -> usize {
     VIEWER_ROW_VISITS.with(|visits| visits.replace(0))
+}
+
+#[cfg(test)]
+pub(crate) fn take_viewer_session_scan_visits() -> usize {
+    VIEWER_SESSION_SCAN_VISITS.with(|visits| visits.replace(0))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18,7 +24,9 @@ pub struct ViewerSnapshot {
     #[serde(default)]
     pub auto_afk_minutes: u32,
     #[serde(default)]
-    pub profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    pub profile_capabilities: mj_core::snapshot_map::SharedSnapshot<
+        mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    >,
     #[serde(
         default,
         alias = "last_subagent_policy",
@@ -64,8 +72,19 @@ pub struct ViewerSnapshot {
 pub struct ViewerSessions(pub(crate) mj_core::snapshot_map::SnapshotMap<String, ViewerSession>);
 
 impl ViewerSessions {
+    pub fn get(&self, id: &str) -> Option<&ViewerSession> {
+        self.0.get(id)
+    }
+
+    pub(super) fn get_shared(&self, id: &str) -> Option<Arc<ViewerSession>> {
+        self.0.get_shared(id)
+    }
+
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &ViewerSession> + ExactSizeIterator {
-        self.0.values()
+        self.0.values().inspect(|_| {
+            #[cfg(test)]
+            VIEWER_SESSION_SCAN_VISITS.with(|visits| visits.set(visits.get() + 1));
+        })
     }
 
     pub fn len(&self) -> usize {

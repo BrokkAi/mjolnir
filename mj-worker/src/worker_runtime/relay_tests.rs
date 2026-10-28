@@ -617,6 +617,7 @@ fn install_skills_rejects_garbage_and_leaves_the_tree_untouched() {
 }
 
 // Hard-won: #1385: isolated Bedrock workers never received the host AWS credentials.
+// Hard-won: #1390: worker upgrades synced credential JSON without its process-provider configuration.
 #[tokio::test]
 async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
     use base64::Engine as _;
@@ -751,6 +752,65 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+
+        // An upgraded worker can have the same credentials as the host but
+        // lack the files its new launch environment tells the SDK to read.
+        // Both missing and inconsistent provider files must trigger repair.
+        for (name, replacement) in [
+            ("aws-config", None),
+            ("aws-empty-credentials", None),
+            ("aws-config", Some("[profile wrong]\n")),
+            ("aws-empty-credentials", Some("[default]\n")),
+        ] {
+            let path = temp.path().join(name);
+            if let Some(bytes) = replacement {
+                std::fs::write(&path, bytes).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+            }
+            let state =
+                delegation_exchange(&mut lines, &mut writer, RelayRequest::AwsCredentialsState)
+                    .await;
+            assert!(matches!(
+                state,
+                RelayResponsePayload::CredentialState { present: false, .. }
+            ));
+            let installed = delegation_exchange(
+                &mut lines,
+                &mut writer,
+                RelayRequest::InstallAwsCredentials {
+                    data: base64::engine::general_purpose::STANDARD.encode(&aws_bytes),
+                },
+            )
+            .await;
+            let state =
+                delegation_exchange(&mut lines, &mut writer, RelayRequest::AwsCredentialsState)
+                    .await;
+            assert_eq!(installed, state);
+            assert!(matches!(
+                state,
+                RelayResponsePayload::CredentialState { present: true, .. }
+            ));
+            for name in ["aws-config", "aws-empty-credentials"] {
+                assert_eq!(
+                    std::fs::metadata(temp.path().join(name))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+            assert_eq!(
+                std::fs::read(temp.path().join("aws-config")).unwrap(),
+                credentials.configuration(temp.path()).unwrap()
+            );
+            assert!(
+                std::fs::read(temp.path().join("aws-empty-credentials"))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 
     {

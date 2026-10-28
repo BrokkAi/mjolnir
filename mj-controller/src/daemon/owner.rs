@@ -56,6 +56,7 @@ impl PollableWorkerInputs {
 /// work receives copied inputs and reports its result back to this owner.
 pub(super) struct RuntimeStateOwner {
     controller: Controller,
+    pub(super) config_snapshot: mj_core::snapshot_map::SharedSnapshot<Config>,
     pub(super) lifecycle: BTreeMap<String, ActiveLifecycle>,
     pub(super) close_requested: BTreeSet<String>,
     pub(super) indexes: RecordIndexes,
@@ -180,7 +181,10 @@ impl RuntimeStateOwner {
     }
 
     pub(super) fn install_config(&mut self, config: Config) {
-        self.controller.config = config;
+        if self.controller.config != config {
+            self.config_snapshot = config.clone().into();
+            self.controller.config = config;
+        }
     }
 
     pub(super) fn edit_sessions<R>(
@@ -196,6 +200,7 @@ impl RuntimeStateOwner {
     pub(super) fn new(controller: Controller) -> Self {
         let indexes = RecordIndexes::bootstrap(&controller.state);
         Self {
+            config_snapshot: controller.config.clone().into(),
             controller,
             lifecycle: BTreeMap::new(),
             close_requested: BTreeSet::new(),
@@ -213,10 +218,11 @@ impl RuntimeStateOwner {
 
     pub(super) fn install_controller(&mut self, controller: Controller) {
         if !matches!(self.store, StoreState::Bootstrap) {
-            self.controller.config = controller.config;
+            self.install_config(controller.config);
             return;
         }
         let before = self.controller.state.clone();
+        self.install_config(controller.config.clone());
         self.controller = controller;
         self.records_changed(&before);
     }
@@ -390,6 +396,15 @@ impl RuntimeState {
                     && !closing.contains(&target.session_id)
                     && self.credential_targets.borrow().contains(target)
             }))
+    }
+
+    pub(crate) fn subagent_report_parent_ids(&self) -> Vec<String> {
+        self.owner()
+            .indexes
+            .report_parents
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// A record publication is visible before its writer reply. Refreshing at

@@ -181,7 +181,7 @@ struct Attachment {
 
 #[derive(Default)]
 struct QuotaBoard {
-    snapshot: mj_client::quota::QuotaSnapshot,
+    snapshot: mj_core::snapshot_map::SharedSnapshot<mj_client::quota::QuotaSnapshot>,
     refresh: Option<tokio::sync::mpsc::Sender<()>>,
 }
 

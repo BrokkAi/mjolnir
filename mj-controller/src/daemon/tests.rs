@@ -898,7 +898,10 @@ async fn published_quota_reaches_an_attached_client_through_the_runtime_feed() {
     replica
         .apply(state.runtime_changes(None, false).await.unwrap())
         .unwrap();
-    assert_eq!(replica.projection.metadata.quotas, QuotaSnapshot::default());
+    assert_eq!(
+        *replica.projection.metadata.quotas,
+        QuotaSnapshot::default()
+    );
 
     let snapshot = QuotaSnapshot {
         probing: ["claude".to_owned()].into(),
@@ -911,7 +914,7 @@ async fn published_quota_reaches_an_attached_client_through_the_runtime_feed() {
         .await
         .unwrap();
     replica.apply(frame).unwrap();
-    assert_eq!(replica.projection.metadata.quotas, snapshot);
+    assert_eq!(*replica.projection.metadata.quotas, snapshot);
 
     // Publishing what is already published wakes nobody.
     let before = state.revisions().borrow().to_owned();
@@ -5321,6 +5324,64 @@ fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
         Vec::new(),
         Controller::load,
     ))
+}
+
+// Hard-won: 1d746fab4: each sweep rebuilt reports for every historical parent.
+#[cfg(unix)]
+#[tokio::test]
+async fn report_candidates_follow_committed_child_lifecycle_without_losing_failed_resumes() {
+    const CHILD: &str = "MJ_TEST_REPORT_PARENT_MEMBERSHIP";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "report_candidates_follow_committed_child_lifecycle_without_losing_failed_resumes",
+            ),
+        )
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "report-parent-membership")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut parent = crate::controller::test_support::checkpoint_test_session("report-parent");
+    parent.state = SessionState::Stopped;
+    crate::database::save_session(&parent).unwrap();
+    let mut child = crate::controller::test_support::checkpoint_test_session("report-child");
+    child.state = SessionState::Stopped;
+    child.last_error = None;
+    let relation = runtime_test_subagent(&child.id, &parent.id);
+    crate::database::save_subagent_session(&child, &relation).unwrap();
+    let mut state = test_runtime_state_loading_the_store();
+    Arc::get_mut(&mut state).unwrap().committed =
+        Some(crate::database::subscribe_committed_state().unwrap());
+    assert!(state.subagent_report_parent_ids().is_empty());
+    for lifecycle in [
+        SessionState::Running,
+        SessionState::Parked,
+        SessionState::Lost,
+        SessionState::Error,
+    ] {
+        child.state = lifecycle;
+        crate::database::save_session(&child).unwrap();
+        assert_eq!(
+            state.subagent_report_parent_ids(),
+            [parent.id.clone()],
+            "a stopped parent must still get its child's report"
+        );
+    }
+    child.state = SessionState::Stopped;
+    child.last_error = Some("resume failed".into());
+    crate::database::save_session(&child).unwrap();
+    assert_eq!(state.subagent_report_parent_ids(), [parent.id.clone()]);
+    child.last_error = None;
+    crate::database::save_session(&child).unwrap();
+    assert!(state.subagent_report_parent_ids().is_empty());
+    child.state = SessionState::Provisioning;
+    crate::database::save_session(&child).unwrap();
+    assert_eq!(state.subagent_report_parent_ids(), [parent.id]);
 }
 
 #[cfg(unix)]

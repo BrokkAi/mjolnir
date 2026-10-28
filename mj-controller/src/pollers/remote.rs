@@ -77,16 +77,16 @@ pub fn spawn_remote_dashboard_worker_poller(
                                 lifecycles: metadata.lifecycles,
                                 moves: snapshot.moves,
                                 subagents: snapshot.subagents,
-                                launch_recency: metadata.launch_recency,
+                                launch_recency: metadata.launch_recency.into_inner(),
                                 recent_launch: metadata.recent_launch,
                                 container_upgrade_sessions: metadata.container_upgrade_sessions,
-                                storage: metadata.storage,
-                                container_capacities: metadata.container_capacities,
+                                storage: metadata.storage.into_inner(),
+                                container_capacities: metadata.container_capacities.into_inner(),
                             });
                             send_if_changed(&reviews_tx, metadata.reviews);
-                            send_if_changed(&capabilities_tx, metadata.profile_capabilities);
+                            send_if_changed(&capabilities_tx, metadata.profile_capabilities.into_inner());
                             send_if_changed(&notices_tx, metadata.notices);
-                            send_if_changed(&quotas_tx, metadata.quotas);
+                            send_if_changed(&quotas_tx, metadata.quotas.into_inner());
                         }
                         Some(RuntimeFeedUpdate::Session { session_id, view }) => {
                             if mirror_daemon_view(&targets, &publisher, session_id, *view).await.is_err() { return; }

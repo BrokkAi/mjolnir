@@ -1906,6 +1906,12 @@ pub struct StartSelection {
 }
 
 impl SessionRecord {
+    /// A completed close has no failure left to report. A stopped record
+    /// retaining an error is a failed resume and still needs reconciliation.
+    pub fn is_cleanly_stopped(&self) -> bool {
+        self.state == SessionState::Stopped && self.last_error.is_none()
+    }
+
     /// Why review cannot run for this session, when it cannot: its folder
     /// has no Git commits for review to find changes in.
     #[must_use]

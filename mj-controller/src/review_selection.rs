@@ -209,7 +209,7 @@ pub(crate) async fn resolve(
             &controller.config,
             &providers,
             &settings,
-            offered.as_ref(),
+            offered.as_deref(),
             &mut reasons,
         );
         let quotas = UtilityLlmRuntime::shared()

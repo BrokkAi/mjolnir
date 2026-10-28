@@ -263,6 +263,7 @@ impl RelayClient {
             latest_digest: RELAY_EVENT_GENESIS_DIGEST.to_owned(),
             subagent_acknowledged: None,
             subagent_queue: BTreeMap::new(),
+            subagent_publication: None,
             ssh_session,
         };
         match client

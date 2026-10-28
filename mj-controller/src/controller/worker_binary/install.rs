@@ -1006,8 +1006,8 @@ pub(super) fn clear_profile_configuration(
     paths.push(harness.credential_file_name());
     paths.extend([
         mj_core::aws_credentials::SHARED_CREDENTIALS_FILE,
-        "aws-config",
-        "aws-empty-credentials",
+        mj_core::aws_credentials::CONFIG_FILE,
+        mj_core::aws_credentials::EMPTY_CREDENTIALS_FILE,
     ]);
     match harness {
         HarnessKind::Codex => paths.push(STAGED_CATALOG_FILE),

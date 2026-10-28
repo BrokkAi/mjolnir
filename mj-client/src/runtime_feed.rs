@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 use mj_core::config::Config;
 use mj_core::native_agent::NativeAgentSummary;
-use mj_core::snapshot_map::SnapshotMap;
+use mj_core::snapshot_map::{SharedSnapshot, SnapshotMap};
 use mj_core::state::{MaterializedSession, MoveOperation, ProjectionWindow, SessionRecord};
 use mj_core::subagent::{SubagentPolicy, SubagentRecord};
 use mj_core::transcript::TranscriptItem;
@@ -53,8 +53,9 @@ pub struct RuntimeMetadata {
     #[serde(default)]
     pub operator_presence: mj_core::state::OperatorPresence,
     #[serde(default)]
-    pub profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
-    pub config: Config,
+    pub profile_capabilities:
+        SharedSnapshot<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>,
+    pub config: SharedSnapshot<Config>,
     /// The ids in `config.targets` that the daemon supplied as default
     /// candidates rather than the user's file naming them. `Config` never
     /// serializes this set (it is not file content), so the feed carries it
@@ -76,21 +77,21 @@ pub struct RuntimeMetadata {
     pub notices: Vec<RuntimeNotice>,
     /// The daemon's quota reports. The daemon is the only prober.
     #[serde(default)]
-    pub quotas: crate::quota::QuotaSnapshot,
+    pub quotas: SharedSnapshot<crate::quota::QuotaSnapshot>,
     /// Free space on each target host, and whether it is full. The daemon's
     /// storage board is the only judge; a daemon that predates the field
     /// sends none.
     #[serde(default)]
-    pub storage: Vec<mj_core::targets::storage::TargetStorageView>,
+    pub storage: SharedSnapshot<Vec<mj_core::targets::storage::TargetStorageView>>,
     /// Hard container headroom for each probed deployment host. The daemon
     /// includes in-memory resume and move reservations; terminal surfaces
     /// must not recompute this from records they happen to have loaded.
     #[serde(default)]
-    pub container_capacities: BTreeMap<String, RuntimeContainerCapacity>,
+    pub container_capacities: SharedSnapshot<BTreeMap<String, RuntimeContainerCapacity>>,
     /// What new-session defaults are chosen from. The feed carries only live
     /// sessions, but the defaults follow every session, stopped ones too.
     #[serde(default)]
-    pub launch_recency: Vec<LaunchRecency>,
+    pub launch_recency: SharedSnapshot<Vec<LaunchRecency>>,
     /// Latest interactive launch on the daemon host, independent of session history.
     #[serde(default)]
     pub recent_launch: Option<mj_core::go::RecentLaunch>,
@@ -103,7 +104,7 @@ impl RuntimeMetadata {
     /// The configuration a client installs: the published config with the
     /// daemon's default-candidate set.
     pub fn installed_config(&self) -> Config {
-        let mut config = self.config.clone();
+        let mut config = (*self.config).clone();
         config.default_targets = self.default_targets.clone();
         config
     }
@@ -663,7 +664,7 @@ mod tests {
     #[test]
     fn default_target_origin_survives_the_wire_and_an_older_daemon_sends_none() {
         let mut metadata = RuntimeMetadata {
-            config: Config::default().with_local_targets(),
+            config: Config::default().with_local_targets().into(),
             ..Default::default()
         };
         metadata.default_targets = metadata.config.default_targets.clone();
@@ -676,6 +677,10 @@ mod tests {
         value.as_object_mut().unwrap().remove("default_targets");
         let older: RuntimeMetadata = serde_json::from_value(value).unwrap();
         assert!(!older.installed_config().is_default_target("docker"));
+        let held = metadata.clone();
+        metadata.config.advanced.auto_afk_minutes = 3;
+        assert_eq!(held.config.advanced.auto_afk_minutes, 0);
+        assert_eq!(metadata.config.advanced.auto_afk_minutes, 3);
     }
 
     #[test]
