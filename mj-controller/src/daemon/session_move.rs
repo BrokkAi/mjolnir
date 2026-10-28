@@ -172,6 +172,99 @@ impl RuntimeState {
         Ok(preparation)
     }
 
+    pub(crate) async fn prepare_quota_move(
+        self: &Arc<Self>,
+        session_id: &str,
+        profile_id: &str,
+    ) -> Result<MoveSessionRequest> {
+        let preparation = self
+            .prepare_move_session(MoveSelection {
+                session_id: session_id.to_owned(),
+                profile_id: Some(profile_id.to_owned()),
+                target_template_id: None,
+                workspace: Default::default(),
+                clear_resource_allocation: false,
+                additional_mounts: None,
+                resource_allocation: None,
+                subagents: None,
+            })
+            .await?;
+        ensure!(
+            preparation.in_place
+                && !preparation.cross_harness
+                && !preparation.active
+                && !preparation.stops_subagents
+                && preparation.conversion.is_none(),
+            "Cannot switch profiles automatically: the Move must keep the environment and native conversation, interrupt no active work, stop no sub-agents, and require no conversion"
+        );
+        Ok(MoveSessionRequest {
+            preparation,
+            queue: Some(mj_core::state::ResumeQueueDisposition::Start),
+            acknowledge_interruption: false,
+        })
+    }
+
+    pub(crate) async fn start_quota_move(
+        self: &Arc<Self>,
+        request: MoveSessionRequest,
+        reason: String,
+        continuation: mj_core::state::QuotaMoveContinuation,
+    ) -> Result<()> {
+        let session_id = request.preparation.selection.session_id.clone();
+        let operation_id = request.preparation.operation_id.clone();
+        let source_profile = request.preparation.source_profile_id.clone();
+        let destination_profile = request
+            .preparation
+            .selection
+            .profile_id
+            .clone()
+            .unwrap_or_default();
+        let capacity = self.reserve_container_capacity_for_move(&request).await?;
+        let result =
+            self.admit_move_session(request, capacity, None, Some((reason, continuation)))?;
+        let state = self.clone();
+        tokio::spawn(async move {
+            let channel = result.clone();
+            let failure = match Self::wait_lifecycle_result(result).await {
+                Ok(DaemonLifecycleResult::Move(outcome)) if outcome.outcome == "completed" => None,
+                Ok(DaemonLifecycleResult::Move(outcome)) => {
+                    tracing::warn!(%session_id, %operation_id, outcome = %outcome.outcome,
+                        error = ?outcome.error, "quota profile Move did not complete");
+                    Some(
+                        outcome
+                            .error
+                            .unwrap_or_else(|| format!("Move {}", outcome.outcome)),
+                    )
+                }
+                Ok(_) => {
+                    tracing::error!(%session_id, %operation_id,
+                        "quota profile Move returned an unrelated lifecycle result");
+                    Some("Move returned an unrelated lifecycle result".into())
+                }
+                Err(error) => {
+                    tracing::warn!(%session_id, %operation_id, error = %format!("{error:#}"),
+                    "quota profile Move failed");
+                    Some(format!("{error:#}"))
+                }
+            };
+            if let Some(error) = failure {
+                let current_profile = state
+                    .owner()
+                    .controller()
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .map(|session| session.last_profile.clone())
+                    .unwrap_or(source_profile);
+                state.push_notice(&session_id, format!(
+                    "The automatic switch to profile {destination_profile} after the quota stop failed: {error}. The session is on profile {current_profile}."
+                ));
+            }
+            state.remove_completed_lifecycle(&channel);
+        });
+        Ok(())
+    }
+
     /// Reserve lifecycle ownership before a web request is acknowledged.
     pub(crate) async fn start_move_session(
         self: &Arc<Self>,
@@ -179,7 +272,7 @@ impl RuntimeState {
         control: LifecycleControl,
     ) -> Result<()> {
         let capacity = self.reserve_container_capacity_for_move(&request).await?;
-        self.admit_move_session(request, capacity, Some(control))
+        self.admit_move_session(request, capacity, Some(control), None)
             .map(|_| ())
     }
 
@@ -188,13 +281,18 @@ impl RuntimeState {
         request: MoveSessionRequest,
         capacity_lease: Option<capacity::ContainerCapacityLease>,
         control: Option<LifecycleControl>,
+        quota_move: Option<(String, mj_core::state::QuotaMoveContinuation)>,
     ) -> Result<LifecycleWatch> {
         let selection = request.preparation.selection.clone();
         let operation_id = request.preparation.operation_id.clone();
         // Preparation resolves inherited settings. Compare those settings,
         // never just the verb or a freshly generated preparation identifier.
-        let key =
-            serde_json::to_string(&(&selection, request.queue, request.acknowledge_interruption))?;
+        let key = serde_json::to_string(&(
+            &selection,
+            request.queue,
+            request.acknowledge_interruption,
+            &quota_move,
+        ))?;
         let session_id = selection.session_id.clone();
         let result = self.admit_lifecycle(
             session_id.clone(),
@@ -216,7 +314,9 @@ impl RuntimeState {
                         cancelled,
                         |mut controller, executor, manager| async move {
                             controller
-                                .move_session_managed_controlled(request, &executor, &manager)
+                                .move_session_managed_controlled(
+                                    request, quota_move, &executor, &manager,
+                                )
                                 .await
                         },
                     )
@@ -246,7 +346,7 @@ impl RuntimeState {
         let operation_id = request.preparation.operation_id.clone();
         let session_id = selection.session_id.clone();
         let capacity = self.reserve_container_capacity_for_move(&request).await?;
-        let result = self.admit_move_session(request, capacity, None)?;
+        let result = self.admit_move_session(request, capacity, None, None)?;
         let channel = result.clone();
         let result = Self::wait_lifecycle_result(result).await;
         self.remove_completed_lifecycle(&channel);

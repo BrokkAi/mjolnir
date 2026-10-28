@@ -2,7 +2,7 @@
 [
   {
     "key": "model",
-    "label": "model",
+    "label": "Model",
     "current": "sonnet",
     "choices": [
       {
@@ -17,7 +17,7 @@
   },
   {
     "key": "effort",
-    "label": "effort",
+    "label": "Effort",
     "current": "high",
     "choices": [
       {
@@ -35,7 +35,7 @@
 [
   {
     "key": "model",
-    "label": "model",
+    "label": "Model",
     "current": "opus",
     "choices": [
       {
@@ -50,7 +50,7 @@
   },
   {
     "key": "effort",
-    "label": "effort",
+    "label": "Effort",
     "current": "max",
     "choices": [
       {

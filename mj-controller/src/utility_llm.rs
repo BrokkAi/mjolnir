@@ -33,8 +33,11 @@ const MAX_SUMMARY_BYTES: usize = 8 * 1024;
 /// being a bet, and the pages are already independent and concurrent.
 pub const MAX_PAGE_BYTES: usize = 1024 * 1024;
 
+/// Ordered worst first. A usage-priced (API) profile bills each request, so
+/// it ranks after every subscription that still has, or may have, quota.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum UtilityQuotaClass {
+    UsagePriced,
     Unknown,
     Reserve,
     Healthy,
@@ -507,7 +510,7 @@ fn quota_request(profile_id: &str, profile: &HarnessProfile) -> QuotaRefreshRequ
 
 pub(crate) fn classify_quota(report: &ProfileQuota) -> Option<(UtilityQuotaClass, u8)> {
     if report.is_usage_priced() {
-        return Some((UtilityQuotaClass::Healthy, 100));
+        return Some((UtilityQuotaClass::UsagePriced, 100));
     }
     if report.error.is_some() {
         return Some((UtilityQuotaClass::Unknown, 0));
@@ -888,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn utility_order_keeps_quota_class_then_provider_priority() {
+    fn utility_order_keeps_quota_class_then_provider_priority_and_api_last() {
         let mut candidates = [
             // A Codex profile pointed at DeepSeek ranks with DeepSeek, not with
             // the Codex harness it runs under.
@@ -920,6 +923,13 @@ mod tests {
                 UtilityQuotaClass::Reserve,
                 10,
             ),
+            candidate_for(
+                "codex-api",
+                HarnessKind::Codex,
+                UtilityFamily::Codex,
+                UtilityQuotaClass::UsagePriced,
+                100,
+            ),
         ];
         candidates.sort_by(candidate_order);
         assert_eq!(
@@ -927,7 +937,7 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.profile_id.as_str())
                 .collect::<Vec<_>>(),
-            ["codex", "muse", "deepseek", "grok-reserve"]
+            ["codex", "muse", "deepseek", "grok-reserve", "codex-api"]
         );
     }
 
@@ -1030,7 +1040,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_quota_is_excluded_and_api_is_healthy() {
+    fn zero_quota_is_excluded_and_api_ranks_last() {
         let mut report = ProfileQuota {
             banked_resets: None,
             profile_id: "p".into(),
@@ -1043,7 +1053,7 @@ mod tests {
         };
         assert_eq!(
             classify_quota(&report),
-            Some((UtilityQuotaClass::Healthy, 100))
+            Some((UtilityQuotaClass::UsagePriced, 100))
         );
         report.extra = None;
         report.windows.push(crate::quota::QuotaWindow {

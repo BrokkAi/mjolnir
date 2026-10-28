@@ -1000,7 +1000,7 @@ fn render_combined_themed(
                         transition,
                         failed,
                         pane_id,
-                        pane_focused: false,
+                        highlight_border: false,
                         title_lead: crate::pane_controls::pane_chrome_width(
                             dashboard,
                             pane_id,
@@ -1096,7 +1096,7 @@ fn render_combined_themed(
                     transition,
                     failed,
                     pane_id,
-                    pane_focused: focus_borders,
+                    highlight_border: focus_borders,
                     title_lead: crate::pane_controls::pane_chrome_width(
                         dashboard,
                         pane_id,
@@ -1235,7 +1235,7 @@ fn render_combined_themed(
                                 prompt_area,
                                 dashboard,
                                 session_id,
-                                true,
+                                pane_id,
                                 None,
                             );
                         }
@@ -1552,10 +1552,10 @@ fn draw_standby_prompt(
     prompt_area: Rect,
     dashboard: &mut DashboardState,
     session_id: &str,
-    pane_focused: bool,
+    pane_id: PaneId,
     note: Option<Line<'static>>,
 ) {
-    let focused = pane_focused && dashboard.prompt_has_focus();
+    let focused = pane_id == dashboard.focused_pane() && dashboard.prompt_has_focus();
     let surfaces = {
         let standby = dashboard.standby_prompt_mut(session_id);
         draw_standby_band(frame, prompt_area, standby, focused, note)
@@ -1641,13 +1641,13 @@ fn render_launch_standby_surface(
 /// conversation when the chat opens. Retiring and failed transitions have no
 /// conversation to type toward, so they keep the plain status panel.
 /// What one pane's transition panel reports: the operation under way, whether
-/// it failed, which pane holds it, and whether that pane has the keyboard.
+/// it failed, which pane holds it, and whether to highlight its border.
 #[derive(Clone, Copy)]
 struct TransitionSurface {
     transition: SessionTransitionKind,
     failed: bool,
     pane_id: PaneId,
-    pane_focused: bool,
+    highlight_border: bool,
     /// Columns the pane chrome draws its label into at the left of the
     /// title row; the title starts after them.
     title_lead: u16,
@@ -1677,7 +1677,7 @@ fn render_transition_surface(
         transition,
         failed,
         pane_id,
-        pane_focused,
+        highlight_border,
         title_lead,
     } = surface;
     if failed && transcript_area.height > 3 {
@@ -1722,7 +1722,7 @@ fn render_transition_surface(
         .and_then(|operation| operation.resume_destination.as_ref())
         .map(|(profile, _)| profile.as_str())
         .unwrap_or(&session.last_profile);
-    let mut panel = theme::panel(pane_focused).title(transition_title(transition, title_lead));
+    let mut panel = theme::panel(highlight_border).title(transition_title(transition, title_lead));
     if !failed {
         panel = panel.title(
             Line::from(vec![
@@ -1775,14 +1775,7 @@ fn render_transition_surface(
                 )
                 .left_aligned()
             });
-        draw_standby_prompt(
-            frame,
-            prompt_area,
-            dashboard,
-            session_id,
-            pane_focused,
-            note,
-        );
+        draw_standby_prompt(frame, prompt_area, dashboard, session_id, pane_id, note);
         return;
     }
     let cancel_line = if !failed && operation.is_some_and(|operation| operation.cancellable) {
@@ -2138,6 +2131,54 @@ mod tests {
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::None
         );
+    }
+
+    // Hard-won: c90e988448: single-pane transitions confused border highlighting with caret focus.
+    #[test]
+    fn transition_caret_follows_keyboard_focus_without_a_highlighted_pane_border() {
+        use ratatui::backend::Backend as _;
+
+        for kind in [
+            SessionOperationKind::Launching,
+            SessionOperationKind::Resuming,
+            SessionOperationKind::Moving,
+        ] {
+            let mut dashboard = dashboard_with_session(running_session());
+            dashboard.begin_session_operation("session-1".into(), kind, None);
+            let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+            for (draft, column) in [("", 0), ("a界b", 3)] {
+                for character in draft.chars() {
+                    dashboard.handle_key(key(KeyCode::Char(character)));
+                }
+                if !draft.is_empty() {
+                    dashboard.handle_key(key(KeyCode::Left));
+                }
+                for focused in [true, false] {
+                    if focused {
+                        dashboard.focus_prompt();
+                    } else {
+                        dashboard.focus_sessions();
+                    }
+                    terminal
+                        .draw(|frame| crate::render::render(frame, &mut dashboard))
+                        .unwrap();
+                    // TestBackend has no visibility accessor; changing a clone
+                    // must leave it equal only when visibility already agrees.
+                    let mut expected = terminal.backend().clone();
+                    if focused {
+                        expected.show_cursor().unwrap();
+                        let prompt = dashboard.focused_prompt_area().unwrap();
+                        terminal
+                            .backend_mut()
+                            .assert_cursor_position((prompt.x + 3 + column, prompt.y + 1));
+                    } else {
+                        expected.hide_cursor().unwrap();
+                    }
+                    assert_eq!(terminal.backend(), &expected, "{kind:?}, focus={focused}");
+                }
+                dashboard.focus_prompt();
+            }
+        }
     }
 
     /// A launch that has not registered yet draws the same pair of panels a

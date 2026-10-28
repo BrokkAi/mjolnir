@@ -196,6 +196,8 @@ fn bare_preflight_config() -> Config {
 #[test]
 fn move_recovery_projection_exposes_safe_retry_settings_only() {
     let operation = mj_core::state::MoveOperation {
+        quota_stop_reason: None,
+        quota_continuation: None,
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,
@@ -716,6 +718,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         (vec![model_option(), fast_option(&["on", "off"])], true),
         (Vec::new(), false),
     ] {
+        let offers_config = !options.is_empty();
         operational.get_mut("session-1").unwrap().config_options = options;
         let names = project(&operational).sessions[0]
             .available_commands
@@ -723,6 +726,11 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
             .map(|command| command.name.clone())
             .collect::<Vec<_>>();
         assert_eq!(names.contains(&"fast".to_owned()), offers_fast, "{names:?}");
+        assert_eq!(
+            names.contains(&"config".to_owned()),
+            offers_config,
+            "{names:?}"
+        );
     }
 
     assert!(session.is_idle);

@@ -3270,6 +3270,8 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         resource_allocation: None,
     };
     let mut operation = mj_core::state::MoveOperation {
+        quota_stop_reason: None,
+        quota_continuation: None,
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,

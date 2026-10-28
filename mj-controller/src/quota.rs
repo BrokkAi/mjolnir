@@ -1574,5 +1574,7 @@ fn format_reset_label(reset: DateTime<FixedOffset>) -> String {
 mod tests;
 
 mod recovery;
-pub(crate) use recovery::{exhausted, merge_reset_windows, message_reset, recovery_reset};
+pub(crate) use recovery::{
+    exhausted, long_window_stop, merge_reset_windows, message_reset, recovery_reset,
+};
 pub(crate) use recovery::{quota_score, window_applies};

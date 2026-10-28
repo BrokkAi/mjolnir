@@ -7242,6 +7242,10 @@ function configOption(key) {
   return activeSession()?.config_options?.find(option => option.key === key);
 }
 
+function configValue(option, value) {
+  return option?.choices?.find(choice => String(choice.value) === String(value));
+}
+
 /// The commands offered for what has been typed so far.
 ///
 /// The list is the daemon's: it knows what this session's harness advertised
@@ -7266,19 +7270,33 @@ function paletteState(text) {
     const option = configOption(key);
     if (!option) return null;
     const query = text.slice(prefix.length);
-    if (option.choices.some(choice => choice.value === query)) return null;
-    const matches = option.choices
-      .filter(
-        choice =>
-          choice.value.toLowerCase().startsWith(query.toLowerCase()) ||
-          choice.name.toLowerCase().includes(query.toLowerCase()),
-      )
-      .map(choice => ({
-        insert: `/${key} ${choice.value}`,
-        label: choice.value,
-        hint: choice.name,
-      }));
-    return matches.length ? matches : null;
+    return configValueMatches(prefix, option, query);
+  }
+  if (text.startsWith('/config ')) {
+    const rest = text.slice('/config '.length);
+    const separator = rest.search(/\s/);
+    if (separator < 0) {
+      const query = rest.toLowerCase();
+      const matches = (activeSession()?.config_options || [])
+        .filter(option => {
+          const current = configValue(option, option.current)?.name || String(option.current || '');
+          return (
+            option.key.toLowerCase().startsWith(query) ||
+            String(option.label || '').toLowerCase().includes(query) ||
+            current.toLowerCase().includes(query)
+          );
+        })
+        .map(option => ({
+          insert: `/config ${option.key} `,
+          label: option.key,
+          hint: option.label || '',
+        }));
+      return matches.length ? matches : null;
+    }
+    const key = rest.slice(0, separator);
+    const option = configOption(key);
+    if (!option) return null;
+    return configValueMatches(`/config ${key} `, option, rest.slice(separator + 1));
   }
   if (!text.startsWith('/') || /\s/.test(text)) return null;
   const query = text.slice(1).toLowerCase();
@@ -7291,6 +7309,23 @@ function paletteState(text) {
       insert: `/${command.name} `,
       label: `/${command.name}${command.argument ? ` <${command.argument}>` : ''}`,
       hint: command.description,
+    }));
+  return matches.length ? matches : null;
+}
+
+function configValueMatches(prefix, option, query) {
+  if (configValue(option, query)) return null;
+  const normalized = query.toLowerCase();
+  const matches = option.choices
+    .filter(
+      choice =>
+        String(choice.value).toLowerCase().startsWith(normalized) ||
+        String(choice.name || '').toLowerCase().includes(normalized),
+    )
+    .map(choice => ({
+      insert: `${prefix}${choice.value}`,
+      label: String(choice.name || choice.value),
+      hint: choice.name && choice.name !== choice.value ? choice.value : '',
     }));
   return matches.length ? matches : null;
 }
@@ -7421,6 +7456,43 @@ async function runLocalCommand(text) {
         session_id: currentSession,
         key: name,
         value: argument,
+      });
+      return true;
+    }
+    case 'config': {
+      setComposerText('');
+      if (session?.capabilities?.set_config !== true) {
+        error.textContent = 'This session cannot change configuration right now.';
+        return true;
+      }
+      const args = argument.trim();
+      if (!args) {
+        openSessionSettings(session);
+        return true;
+      }
+      const [key, ...valueParts] = args.split(/\s+/);
+      const option = configOption(key);
+      if (!option) {
+        const keys = (session?.config_options || []).map(item => item.key).join(', ');
+        error.textContent = keys
+          ? `This agent does not offer ${key}; available settings: ${keys}`
+          : 'This agent offers no configurable session settings.';
+        return true;
+      }
+      if (!valueParts.length) {
+        openSessionSettings(session, key);
+        return true;
+      }
+      const value = valueParts.join(' ');
+      if (!configValue(option, value)) {
+        error.textContent = `This agent does not offer ${value} for ${key}; choices: ${option.choices.map(choice => choice.value).join(', ')}`;
+        return true;
+      }
+      await sendAction({
+        action: 'set-config',
+        session_id: currentSession,
+        key,
+        value,
       });
       return true;
     }
@@ -8068,18 +8140,23 @@ function renderSessionTitle(node, session) {
   node.classList.toggle('idle-title', session.is_idle === true);
 }
 
-/// Show only the settings the live session currently has, using the harness's
-/// human-readable choice name when one matches the raw current value. This is
-/// deliberately a readout rather than a control: changing settings remains a
-/// separate, explicit action and a snapshot refresh can remove it entirely.
+/// Show the live session's advertised settings, using the harness's
+/// human-readable choice name when one matches the raw current value. The
+/// Session settings control opens one dialog for the complete catalogue; each
+/// choice is still applied separately so model-dependent options refresh in
+/// the order the harness requires.
 function renderPromptSettings(session) {
-  const settings = ['model', 'effort'].flatMap(key => {
-    const option = session?.config_options?.find(item => item.key === key);
+  const options = (session?.config_options || [])
+    .filter(option => option.choices?.length > 0);
+  const settings = options.flatMap(option => {
     const current = option?.current;
     if (current === null || current === undefined || current === '') return [];
     const rawValue = String(current);
-    const choice = option.choices?.find(item => String(item.value) === rawValue);
-    return [{ label: key === 'model' ? 'Model' : 'Effort', value: choice?.name || rawValue }];
+    const choice = configValue(option, rawValue);
+    return [{
+      label: option.label || option.key,
+      value: choice?.name || rawValue,
+    }];
   });
 
   promptSettings.replaceChildren(
@@ -8092,7 +8169,99 @@ function renderPromptSettings(session) {
       return item;
     }),
   );
-  promptSettings.classList.toggle('hidden', settings.length === 0);
+  const canSettings = session?.capabilities?.set_config === true && options.length > 0;
+  if (canSettings) {
+    const open = button('Session settings', 'prompt-settings-open');
+    open.type = 'button';
+    open.onclick = () => openSessionSettings(sessionById(session.id) || session);
+    promptSettings.append(open);
+  }
+  promptSettings.classList.toggle(
+    'hidden',
+    settings.length === 0 && !canSettings,
+  );
+}
+
+/// One control per advertised ACP selector. A change posts a single setting,
+/// then refreshes from the worker's authoritative catalogue before allowing
+/// another; this keeps model-dependent choices from going stale mid-dialog.
+function openSessionSettings(session, focusKey = null) {
+  if (!session) return;
+  const dialog = openSessionDialog('session-settings-dialog', 'Session settings');
+  const error = el('p', 'error');
+  error.setAttribute('role', 'alert');
+  const list = el('div', 'session-config-list');
+  const controls = el('div', 'row');
+  const close = button('Close', 'secondary');
+  close.type = 'button';
+  close.onclick = () => dialog.close();
+  controls.append(close);
+  dialog.append(
+    el('h2', '', 'Session settings'),
+    el('p', 'dim', session.title || session.id),
+    el('p', 'dim', 'Changes apply immediately to this live session.'),
+    list,
+    error,
+    controls,
+  );
+
+  const render = (latest, focus = null) => {
+    const options = latest?.capabilities?.set_config === true
+      ? latest.config_options || []
+      : [];
+    list.replaceChildren(...options.map(option => {
+      const field = el('label', 'field session-config-field');
+      field.append(el('span', '', option.label || option.key));
+      const select = el('select');
+      select.dataset.configKey = option.key;
+      select.setAttribute('aria-label', option.label || option.key);
+      const current = String(option.current ?? '');
+      const choices = current && !configValue(option, current)
+        ? [{ value: current, name: current }, ...(option.choices || [])]
+        : option.choices || [];
+      for (const choice of choices) {
+        const item = el('option', '', String(choice.name || choice.value));
+        item.value = String(choice.value);
+        select.append(item);
+      }
+      select.value = current;
+      select.onchange = async () => {
+        const value = select.value;
+        if (value === current) return;
+        const selects = [...list.querySelectorAll('select[data-config-key]')];
+        for (const item of selects) item.disabled = true;
+        error.textContent = '';
+        try {
+          await request('/api/actions', {
+            method: 'POST',
+            body: JSON.stringify({
+              action: 'set-config',
+              session_id: latest.id,
+              key: option.key,
+              value,
+            }),
+          });
+          await refresh();
+          const updated = sessionById(latest.id);
+          if (dialog.open) render(updated || latest, option.key);
+        } catch (failure) {
+          if (!dialog.open) return;
+          error.textContent = failure.message;
+          for (const item of selects) item.disabled = false;
+          select.value = current;
+        }
+      };
+      field.append(select);
+      return field;
+    }));
+    if (!options.length) {
+      list.replaceChildren(el('p', 'dim', 'This session offers no configurable settings right now.'));
+    }
+    const target = focus && [...list.querySelectorAll('select')]
+      .find(select => select.dataset.configKey === focus);
+    target?.focus();
+  };
+  render(session, focusKey);
 }
 
 /// The header's one writable setting. Like the prompt settings it re-reads

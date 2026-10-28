@@ -682,6 +682,61 @@ impl ChatState {
                         value: args.to_owned(),
                     }
                 }
+                LocalCommand::Config => {
+                    if matches!(self.phase, WorkerPhase::Closing | WorkerPhase::Closed) {
+                        self.set_notice(
+                            "The worker is closing; this configuration change was not sent",
+                        );
+                        return ChatAction::None;
+                    }
+                    let args = args.trim();
+                    if args.is_empty() {
+                        if self.open_config_menu() {
+                            self.clear_input();
+                        } else {
+                            self.set_notice("The agent offers no configurable session settings");
+                        }
+                        return ChatAction::None;
+                    }
+                    let (key, value) = args
+                        .split_once(char::is_whitespace)
+                        .map_or((args, None), |(key, value)| (key, Some(value.trim())));
+                    let values = self.config_values(key);
+                    if values.is_empty() {
+                        self.clear_input();
+                        self.set_notice(format!(
+                            "This agent does not advertise {key}; run /config to list its settings"
+                        ));
+                        return ChatAction::None;
+                    }
+                    let Some(value) = value.filter(|value| !value.is_empty()) else {
+                        if self.open_config_value_dialog(key) {
+                            self.clear_input();
+                        } else {
+                            self.set_notice(format!(
+                                "The agent no longer advertises values for {key}"
+                            ));
+                        }
+                        return ChatAction::None;
+                    };
+                    if !values.iter().any(|choice| choice.value == value) {
+                        self.clear_input();
+                        self.set_notice(format!(
+                            "The agent does not offer {value:?} for {key}; choices: {}",
+                            values
+                                .iter()
+                                .map(|choice| choice.value.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                        return ChatAction::None;
+                    }
+                    self.clear_input();
+                    ChatAction::SetConfig {
+                        key: key.to_owned(),
+                        value: value.to_owned(),
+                    }
+                }
                 LocalCommand::Fast => {
                     if !args.is_empty() {
                         self.set_notice("usage: /fast");

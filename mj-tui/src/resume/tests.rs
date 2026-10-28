@@ -215,6 +215,8 @@ fn state_with(sessions: Vec<SessionRecord>) -> State {
 
 fn incomplete_move() -> MoveOperation {
     MoveOperation {
+        quota_stop_reason: None,
+        quota_continuation: None,
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,

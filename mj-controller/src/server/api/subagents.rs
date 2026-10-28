@@ -541,8 +541,8 @@ fn all_unhealthy(model: &str, notes: &[String], profile_description: &str) -> Ap
 }
 
 /// Order candidates for a spawn so that simultaneous spawns spread out
-/// instead of all taking the same profile. Positive pacing scores get a
-/// weighted random order; empty and unknown reports follow in ranked order.
+/// instead of all taking the same profile. Subscriptions with quota left get
+/// a weighted random order; the rest follow in ranked order.
 fn draw_candidates(
     candidates: &mut Vec<SubagentCandidate>,
     ranking_anchor: Option<&str>,
@@ -579,8 +579,8 @@ fn order_by_draw(
         .drain(..)
         .zip(units)
         .map(|(candidate, unit)| {
-            let key = match candidate_score(&candidate, model, now_seconds) {
-                Some(score) if score > 0.0 => unit.ln() / score,
+            let key = match quota_rank(&candidate, model, now_seconds) {
+                QuotaRank::Available(score) => unit.ln() / score,
                 _ => f64::NEG_INFINITY,
             };
             (key, candidate)
@@ -591,9 +591,9 @@ fn order_by_draw(
     candidates.extend(keyed.into_iter().map(|(_, candidate)| candidate));
 }
 
-/// Order candidates by pace score, with empty quota before unknown; then the
-/// optional anchor's profile and profile id, so the order never
-/// depends on how the configuration happens to list them.
+/// Order candidates by [`QuotaRank`], subscriptions with quota left by pace
+/// score; then the optional anchor's profile and profile id, so the order
+/// never depends on how the configuration happens to list them.
 pub(crate) fn rank_candidates(
     candidates: &mut [SubagentCandidate],
     ranking_anchor: Option<&str>,
@@ -601,9 +601,8 @@ pub(crate) fn rank_candidates(
     now_seconds: i64,
 ) {
     candidates.sort_by(|left, right| {
-        let left_score = candidate_score(left, model, now_seconds);
-        let right_score = candidate_score(right, model, now_seconds);
-        score_order(left_score, right_score)
+        quota_rank(left, model, now_seconds)
+            .order(quota_rank(right, model, now_seconds))
             .then_with(|| {
                 let left_is_anchor = ranking_anchor == Some(left.profile_id.as_str());
                 let right_is_anchor = ranking_anchor == Some(right.profile_id.as_str());
@@ -613,25 +612,48 @@ pub(crate) fn rank_candidates(
     });
 }
 
-fn candidate_score(candidate: &SubagentCandidate, model: &str, now_seconds: i64) -> Option<f64> {
-    match &candidate.quota {
-        CandidateQuota::Unknown => None,
-        // On pace: a subscription with quota to spare comes first.
-        CandidateQuota::UsagePriced => Some(1.0),
-        CandidateQuota::Windows(windows) => crate::quota::quota_score(windows, model, now_seconds),
+/// Where a candidate's quota places it, best first. Usage-priced (API)
+/// profiles bill each request, so every subscription that may still run the
+/// model comes before them; a subscription known to be out of quota for the
+/// model would only fail, so it comes after them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum QuotaRank {
+    /// Quota left, with its pace score; a higher score ranks first.
+    Available(f64),
+    Unknown,
+    UsagePriced,
+    Exhausted,
+}
+
+impl QuotaRank {
+    fn tier(self) -> u8 {
+        match self {
+            Self::Available(_) => 0,
+            Self::Unknown => 1,
+            Self::UsagePriced => 2,
+            Self::Exhausted => 3,
+        }
+    }
+
+    fn order(self, other: Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::Available(left), Self::Available(right)) => right.total_cmp(&left),
+            _ => self.tier().cmp(&other.tier()),
+        }
     }
 }
 
-fn score_order(left: Option<f64>, right: Option<f64>) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    match (left, right) {
-        (Some(left), Some(right)) if left > 0.0 && right > 0.0 => right.total_cmp(&left),
-        (Some(left), Some(_)) if left > 0.0 => Ordering::Less,
-        (Some(_), Some(right)) if right > 0.0 => Ordering::Greater,
-        (Some(_), Some(_)) => Ordering::Equal,
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
+fn quota_rank(candidate: &SubagentCandidate, model: &str, now_seconds: i64) -> QuotaRank {
+    match &candidate.quota {
+        CandidateQuota::Unknown => QuotaRank::Unknown,
+        CandidateQuota::UsagePriced => QuotaRank::UsagePriced,
+        CandidateQuota::Windows(windows) => {
+            match crate::quota::quota_score(windows, model, now_seconds) {
+                Some(score) if score > 0.0 => QuotaRank::Available(score),
+                Some(_) => QuotaRank::Exhausted,
+                None => QuotaRank::Unknown,
+            }
+        }
     }
 }
 
@@ -1005,8 +1027,12 @@ mod tests {
 
     // Hard-won: 435b4ed9: children used the parent's nearly depleted profile over one with quota
     #[test]
-    fn ranking_puts_most_quota_first_unknown_last_and_ties_to_the_parent() {
+    fn ranking_puts_most_quota_first_then_unknown_api_and_empty_and_ties_to_the_parent() {
         let mut candidates = vec![
+            SubagentCandidate {
+                quota: CandidateQuota::UsagePriced,
+                ..candidate("api", None, &["luna"])
+            },
             candidate("unknown", None, &["luna"]),
             candidate("b-other", Some(40), &["luna"]),
             candidate("parent", Some(40), &["luna"]),
@@ -1017,7 +1043,9 @@ mod tests {
         rank_candidates(&mut candidates, Some("parent"), "luna", 0);
         assert_eq!(
             ids(&candidates),
-            vec!["high", "parent", "a-other", "b-other", "empty", "unknown"]
+            vec![
+                "high", "parent", "a-other", "b-other", "unknown", "api", "empty"
+            ]
         );
     }
 
@@ -1053,9 +1081,13 @@ mod tests {
     }
 
     #[test]
-    fn drawing_picks_in_proportion_to_quota_and_never_before_empty_or_unknown() {
+    fn drawing_picks_in_proportion_to_quota_before_unknown_api_and_empty() {
         let profiles = || {
             vec![
+                SubagentCandidate {
+                    quota: CandidateQuota::UsagePriced,
+                    ..candidate("api", None, &["luna"])
+                },
                 candidate("unknown", None, &["luna"]),
                 candidate("empty", Some(0), &["luna"]),
                 candidate("sixty", Some(60), &["luna"]),
@@ -1077,7 +1109,7 @@ mod tests {
             let mut candidates = profiles();
             let units = (0..candidates.len()).map(|_| unit()).collect::<Vec<_>>();
             order_by_draw(&mut candidates, Some("thirty-b"), &units, "luna", 0);
-            assert_eq!(ids(&candidates)[3..], ["empty", "unknown"]);
+            assert_eq!(ids(&candidates)[3..], ["unknown", "api", "empty"]);
             *first.entry(candidates[0].profile_id.clone()).or_default() += 1;
         }
         let share = |id: &str| f64::from(first[id]) / f64::from(draws);

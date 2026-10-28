@@ -83,3 +83,5 @@ Update (2026-10-28): Implemented provisioning and refresh. The native process pr
 Validation update (2026-10-28): All required validation is complete. The AWS CLI test also passed when explicitly included; ordinary full suites keep that tool-dependent case ignored. Both repaired live sessions resumed tool calls.
 
 Outcome (2026-10-28): Both affected live sessions recovered after the approved manual credential repair. The permanent source fix provisions isolated workers and refreshes temporary credentials; it takes effect when the updated build is installed. All relevant full suites and workspace clippy passed, with the pre-existing stale resume assertion corrected and revalidated independently.
+
+Publication update (2026-10-28): Upstream independently corrected the stale notice assertions in 3a057b440 while validation ran. The required merge retains that upstream integration test unchanged, including its count-only notice checks; the only conflict was this already-diagnosed test correction. The AWS implementation merged without conflicts.

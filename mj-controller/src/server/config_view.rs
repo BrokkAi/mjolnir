@@ -24,13 +24,19 @@ pub fn viewer_config_options(
         .collect();
     keys.into_iter()
         .filter_map(|key| {
+            let option = mj_core::acp::find_session_config_option(config_options, &key)?;
             let choices = mj_core::acp::session_config_choices(config_options, &key);
             if choices.is_empty() {
                 return None;
             }
+            let name = option.name.trim();
             Some(ViewerConfigOption {
                 key: key.to_owned(),
-                label: key.to_owned(),
+                label: if name.is_empty() {
+                    key.to_owned()
+                } else {
+                    name.to_owned()
+                },
                 current: match key.as_str() {
                     "model" => facts.current_model(),
                     "effort" => facts.current_effort(),

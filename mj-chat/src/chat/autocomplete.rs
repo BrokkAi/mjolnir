@@ -12,6 +12,7 @@ use mj_core::acp::{SessionConfigChoice, session_config_choices};
 use mj_core::transcript::{ChatEntry, ChatRole};
 
 use super::ChatState;
+use super::config_picker::config_option_key;
 use super::rendering::truncate_to_width;
 use crate::components::{AutocompletePopup, PopupSide};
 
@@ -23,6 +24,7 @@ pub(super) enum LocalCommand {
     Detach,
     Model,
     Effort,
+    Config,
     Fast,
     Plan,
     Implement,
@@ -44,10 +46,11 @@ pub(super) struct CommandChoice {
     source: CommandSource,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum AutocompleteKind {
     Commands,
-    ConfigValues { key: &'static str },
+    ConfigKeys,
+    ConfigValues { key: String, command: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,20 +86,24 @@ impl ChatState {
         let Some(&index) = autocomplete.matches.get(autocomplete.selected) else {
             return false;
         };
-        let value = match autocomplete.kind {
+        let value = match &autocomplete.kind {
             AutocompleteKind::Commands => self
                 .command_choices
                 .get(index)
                 .map(|command| format!("/{} ", command.name)),
-            AutocompleteKind::ConfigValues { key: "model" } => self
-                .model_values
+            AutocompleteKind::ConfigKeys => self
+                .config_option_keys()
                 .get(index)
-                .map(|choice| format!("/model {}", choice.value)),
-            AutocompleteKind::ConfigValues { key: "effort" } => self
-                .effort_values
-                .get(index)
-                .map(|choice| format!("/effort {}", choice.value)),
-            AutocompleteKind::ConfigValues { .. } => None,
+                .map(|(key, _)| format!("/config {key} ")),
+            AutocompleteKind::ConfigValues { key, command } => {
+                self.config_values(key).get(index).map(|choice| {
+                    if command == "config" {
+                        format!("/config {key} {}", choice.value)
+                    } else {
+                        format!("/{command} {}", choice.value)
+                    }
+                })
+            }
         };
         let Some(value) = value else {
             return false;
@@ -130,13 +137,32 @@ impl ChatState {
             return;
         }
         if let Some(query) = self.input.strip_prefix("/model ") {
-            let next = value_autocomplete(query, &self.model_values, "model");
+            let next = value_autocomplete(query, &self.model_values, "model", "model");
             self.set_autocomplete(next);
             return;
         }
         if let Some(query) = self.input.strip_prefix("/effort ") {
-            let next = value_autocomplete(query, &self.effort_values, "effort");
+            let next = value_autocomplete(query, &self.effort_values, "effort", "effort");
             self.set_autocomplete(next);
+            return;
+        }
+        if let Some(query) = self.input.strip_prefix("/config ") {
+            let (key, value) = query
+                .split_once(char::is_whitespace)
+                .map_or((query, None), |(key, value)| (key, Some(value)));
+            if let Some(value) = value {
+                let values = self.config_values(key);
+                self.set_autocomplete(value_autocomplete(value, &values, key, "config"));
+            } else {
+                let matches = matching_indices(&self.config_option_keys(), key, |option| {
+                    (&option.0, Some(option.1.as_str()))
+                });
+                self.set_autocomplete((!matches.is_empty()).then_some(Autocomplete {
+                    kind: AutocompleteKind::ConfigKeys,
+                    selected: 0,
+                    matches,
+                }));
+            }
             return;
         }
         let Some(query) = self.input.strip_prefix('/') else {
@@ -174,8 +200,31 @@ impl ChatState {
         }
     }
 
+    fn config_option_keys(&self) -> Vec<(String, String)> {
+        let mut keys = Vec::new();
+        for option in self.acp_surface.config_options() {
+            let key = config_option_key(option);
+            if keys.iter().any(|(existing, _)| existing == &key) {
+                continue;
+            }
+            if self.config_values(&key).is_empty() {
+                continue;
+            }
+            keys.push((key, option.name.clone()));
+        }
+        keys
+    }
+
     pub(super) fn rebuild_command_choices(&mut self) {
         let mut commands = builtin_command_choices();
+        if !self.config_option_keys().is_empty() {
+            commands.push(CommandChoice {
+                name: "config".to_owned(),
+                description: "change any setting advertised by the active agent".to_owned(),
+                input_hint: Some("key [value]".to_owned()),
+                source: CommandSource::Hel,
+            });
+        }
         if self.clear_context_supported {
             commands.push(CommandChoice {
                 name: "clear".into(),
@@ -302,7 +351,8 @@ impl ChatState {
 fn value_autocomplete(
     query: &str,
     values: &[SessionConfigChoice],
-    key: &'static str,
+    key: &str,
+    command: &str,
 ) -> Option<Autocomplete> {
     // A bare command submits into the full value selector; the inline popup
     // only completes a partially typed value.
@@ -313,7 +363,10 @@ fn value_autocomplete(
         (&choice.value, Some(choice.name.as_str()))
     });
     (!matches.is_empty()).then_some(Autocomplete {
-        kind: AutocompleteKind::ConfigValues { key },
+        kind: AutocompleteKind::ConfigValues {
+            key: key.to_owned(),
+            command: command.to_owned(),
+        },
         selected: 0,
         matches,
     })
@@ -395,6 +448,7 @@ pub(super) fn parse_local_command(prompt: &str) -> Option<(LocalCommand, &str)> 
         "detach" => LocalCommand::Detach,
         "model" => LocalCommand::Model,
         "effort" => LocalCommand::Effort,
+        "config" => LocalCommand::Config,
         "fast" => LocalCommand::Fast,
         "plan" => LocalCommand::Plan,
         "implement" => LocalCommand::Implement,
@@ -430,8 +484,9 @@ pub(super) fn render_autocomplete(
     if visible == 0 {
         return None;
     }
-    let title = match autocomplete.kind {
+    let title = match &autocomplete.kind {
         AutocompleteKind::Commands => " commands · ↑/↓ select · Tab/Enter accept ",
+        AutocompleteKind::ConfigKeys => " settings · ↑/↓ select · Tab/Enter accept ",
         AutocompleteKind::ConfigValues { .. } => " values · ↑/↓ select · Tab/Enter accept ",
     };
     let (_, inner) = AutocompletePopup::render(
@@ -452,7 +507,7 @@ pub(super) fn render_autocomplete(
         .enumerate()
         .filter_map(|(offset, index)| {
             let selected = start + offset == autocomplete.selected;
-            autocomplete_row(chat, autocomplete.kind, *index).map(|row| {
+            autocomplete_row(chat, &autocomplete.kind, *index).map(|row| {
                 ListItem::new(truncate_to_width(&row, usize::from(inner.width))).style(
                     if selected {
                         theme::selection(true)
@@ -467,7 +522,7 @@ pub(super) fn render_autocomplete(
     Some(inner)
 }
 
-fn autocomplete_row(chat: &ChatState, kind: AutocompleteKind, index: usize) -> Option<String> {
+fn autocomplete_row(chat: &ChatState, kind: &AutocompleteKind, index: usize) -> Option<String> {
     match kind {
         AutocompleteKind::Commands => {
             let command = chat.command_choices.get(index)?;
@@ -485,13 +540,14 @@ fn autocomplete_row(chat: &ChatState, kind: AutocompleteKind, index: usize) -> O
                 command.name, command.description
             ))
         }
-        AutocompleteKind::ConfigValues { key: "model" } => {
-            config_value_row(chat.model_values.get(index)?)
+        AutocompleteKind::ConfigKeys => {
+            let (key, label) = chat.config_option_keys().get(index)?.clone();
+            Some(format!("/config {key}  — {label}"))
         }
-        AutocompleteKind::ConfigValues { key: "effort" } => {
-            config_value_row(chat.effort_values.get(index)?)
+        AutocompleteKind::ConfigValues { key, .. } => {
+            let values = chat.config_values(key);
+            config_value_row(values.get(index)?)
         }
-        AutocompleteKind::ConfigValues { .. } => None,
     }
 }
 
@@ -607,6 +663,38 @@ mod tests {
             ChatAction::SetConfig {
                 key: "effort".into(),
                 value: "max".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn config_command_completes_arbitrary_option_ids_and_values() {
+        use agent_client_protocol::schema::v1::{
+            SessionConfigSelectOption, SessionConfigSelectOptions,
+        };
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_config_options(&[SessionConfigOption::select(
+            "approval_mode",
+            "Approval mode",
+            "prompt",
+            SessionConfigSelectOptions::Ungrouped(vec![
+                SessionConfigSelectOption::new("prompt", "Ask first"),
+                SessionConfigSelectOption::new("allow", "Allow without asking"),
+            ]),
+        )]);
+        chat.set_input("/config app".into());
+        assert!(chat.autocomplete.is_some());
+        assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+        assert_eq!(chat.input, "/config approval_mode ");
+
+        chat.set_input("/config approval_mode allow".into());
+        assert!(chat.autocomplete.is_none());
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter)),
+            ChatAction::SetConfig {
+                key: "approval_mode".into(),
+                value: "allow".into(),
             }
         );
     }
