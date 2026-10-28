@@ -521,6 +521,7 @@ fn tool_output(tool: &serde_json::Value) -> String {
         &call.content,
         &terminals,
         call.raw_output.as_ref(),
+        mj_transcript::transcript::tool_status(&call.status),
     )
     .join("\n")
 }

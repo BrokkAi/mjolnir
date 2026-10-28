@@ -1299,7 +1299,24 @@ pub fn tool_content_details(
     content: &[ToolCallContent],
     terminal_outputs: &[TerminalOutputRecord],
     raw_output: Option<&serde_json::Value>,
+    status: ToolStatus,
 ) -> Vec<String> {
+    let terminal_finished = |record: &TerminalOutputRecord| {
+        !matches!(status, ToolStatus::Pending | ToolStatus::Running)
+            || record.exit_code.is_some()
+            || record.signal.is_some()
+    };
+    let terminal_detail = |record: &TerminalOutputRecord| {
+        if !terminal_finished(record) {
+            if record.truncated {
+                format!("{}\noutput truncated", record.output)
+            } else {
+                record.output.clone()
+            }
+        } else {
+            terminal_output_detail(record)
+        }
+    };
     let mut details = Vec::new();
     let mut referenced: Vec<&str> = Vec::new();
     for item in content {
@@ -1316,7 +1333,7 @@ pub fn tool_content_details(
                     terminal_outputs
                         .iter()
                         .find(|record| record.terminal_id.as_str() == terminal_id)
-                        .map(terminal_output_detail)
+                        .map(terminal_detail)
                         .or_else(|| raw_output.and_then(raw_output_terminal_detail))
                         .unwrap_or_else(|| format!("terminal {}", terminal.terminal_id)),
                 )
@@ -1339,9 +1356,11 @@ pub fn tool_content_details(
             // Kimi sends the captured stdout as ordinary tool content and in
             // its raw result. Keep the exit summary without printing those
             // same bytes a second time in Raw mode.
-            details.push(terminal_exit_summary(record));
+            if terminal_finished(record) {
+                details.push(terminal_exit_summary(record));
+            }
         } else {
-            details.push(sanitize_terminal_text(&terminal_output_detail(record)));
+            details.push(sanitize_terminal_text(&terminal_detail(record)));
         }
     }
     details
@@ -1396,7 +1415,7 @@ fn terminal_exit_summary(record: &TerminalOutputRecord) -> String {
     let mut summary = match (record.exit_code, &record.signal) {
         (_, Some(signal)) => format!("killed by {signal}"),
         (Some(code), None) => format!("exited {code}"),
-        (None, None) => "released before exit".to_owned(),
+        (None, None) => "exit status unavailable".to_owned(),
     };
     if record.truncated {
         summary.push_str(" · output truncated");
@@ -1514,7 +1533,12 @@ pub fn apply_session_update_to_entries(
             entry.tool_presentation = Some(presentation);
             entry.tool_input = call.raw_input;
             entry.tool_error = tool_error_detail(call.raw_output.as_ref());
-            entry.tool_content = tool_content_details(&call.content, &[], call.raw_output.as_ref());
+            entry.tool_content = tool_content_details(
+                &call.content,
+                &[],
+                call.raw_output.as_ref(),
+                tool_status(&call.status),
+            );
             entry.tool_diffstats = tool_diff_paths(&call.content);
             entry.tool_locations = tool_location_details(&call.locations);
             entries.push(entry);
@@ -1543,7 +1567,12 @@ pub fn apply_session_update_to_entries(
                 mark_tool_end(entry, recorded_at_ms);
             }
             if let Some(content) = update.fields.content {
-                entry.tool_content = tool_content_details(&content, &[], raw_output.as_ref());
+                entry.tool_content = tool_content_details(
+                    &content,
+                    &[],
+                    raw_output.as_ref(),
+                    entry.tool_status.unwrap_or(ToolStatus::Pending),
+                );
                 entry.tool_diffstats = tool_diff_paths(&content);
             }
             if let Some(locations) = update.fields.locations {

@@ -292,10 +292,6 @@ pub enum ActionOutcome {
         session_id: Option<String>,
         notice: Option<String>,
     },
-    /// The controller already runs as many phone actions as it allows.
-    /// `running` is the admission control's own count of in-flight actions and
-    /// `limit` the most it admits, so the message never keeps a second copy.
-    Busy { running: usize, limit: usize },
     /// This session already has an operation running.
     SessionBusy,
     /// A cancel found no operation to cancel.
@@ -330,15 +326,6 @@ impl ActionOutcome {
     pub(super) fn rejection(&self) -> Option<ApiError> {
         match self {
             Self::Accepted { .. } => None,
-            Self::Busy { running, limit } => Some(
-                ApiError::new(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    format!(
-                        "the daemon is at its limit of {limit} concurrent actions ({running} running; a session that is still starting holds one until it is ready); retry shortly"
-                    ),
-                )
-                .with_busy(*running, *limit),
-            ),
             Self::SessionBusy => Some(ApiError::new(
                 StatusCode::CONFLICT,
                 "another operation is already running for this session",

@@ -1940,10 +1940,10 @@ fn force_close_is_admitted_like_close() {
         session_id: "session-1".into(),
         delete_branch: false,
     };
-    // A full action pool and a session already busy with a stuck close
-    // are both exactly when a force close has to get through.
+    // A session already busy with a stuck close is exactly when a force
+    // close has to get through.
     assert_eq!(
-        admit_phone_action(&force_close, MAX_CONCURRENT_PHONE_ACTIONS, &mut active),
+        admit_phone_action(&force_close, &mut active),
         Ok(Some("session-1".into()))
     );
     assert_eq!(
@@ -1952,19 +1952,37 @@ fn force_close_is_admitted_like_close() {
     );
 }
 
+// Hard-won: 6c53a7462: the shared action cap let unrelated provisioning block session controls.
 #[test]
-fn close_is_admitted_while_provisioning_occupies_a_full_action_pool() {
-    let mut active = std::collections::BTreeSet::from(["session-1".to_owned()]);
+fn actions_on_other_sessions_do_not_block_admission_but_same_session_actions_do() {
+    let mut active = std::collections::BTreeSet::new();
+    for index in 1..=8 {
+        let session_id = format!("session-{index}");
+        let action = ControllerAction::Prompt {
+            session_id: session_id.clone(),
+            text: "continue".into(),
+            images: Vec::new(),
+            command_id: None,
+        };
+        assert_eq!(
+            admit_phone_action(&action, &mut active),
+            Ok(Some(session_id))
+        );
+    }
+    assert_eq!(
+        admit_phone_action(&prompt_action(), &mut active),
+        Err(ActionOutcome::SessionBusy)
+    );
     let close = ControllerAction::Suspend {
         session_id: "session-1".into(),
         acknowledge_unpublished_work: false,
     };
     assert_eq!(
-        admit_phone_action(&close, MAX_CONCURRENT_PHONE_ACTIONS, &mut active),
+        admit_phone_action(&close, &mut active),
         Ok(Some("session-1".into()))
     );
     assert_eq!(
-        admit_phone_action(&prompt_action(), 0, &mut active),
+        admit_phone_action(&prompt_action(), &mut active),
         Err(ActionOutcome::SessionBusy)
     );
 }

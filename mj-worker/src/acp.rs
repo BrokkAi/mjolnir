@@ -161,10 +161,8 @@ pub(crate) fn prompt_for_harness(
         .collect()
 }
 
-/// Private ACP metadata is provider-local and has no Hel projection. In
-/// particular, Codex can replay terminal-output metadata for old tool calls on
-/// every `session/load`; journaling those invisible deltas grows the relay and
-/// makes every later recovery replay them again.
+/// Keep terminal output for live calls, while rejecting delayed history from
+/// `session/load` and private metadata that has no transcript projection.
 fn session_update_is_relay_visible(
     update: &SessionUpdate,
     live_tool_calls: &Mutex<BTreeSet<String>>,
@@ -182,7 +180,12 @@ fn session_update_is_relay_visible(
             true
         }
         SessionUpdate::ToolCallUpdate(update)
-            if update.fields == ToolCallUpdateFields::default() =>
+            if update.fields == ToolCallUpdateFields::default()
+                && !update.meta.as_ref().is_some_and(|meta| {
+                    ["terminal_output", "terminal_output_delta", "terminal_exit"]
+                        .iter()
+                        .any(|key| meta.contains_key(*key))
+                }) =>
         {
             false
         }

@@ -2497,7 +2497,7 @@ fn an_abnormally_ended_standalone_terminal_item_renders_everywhere() {
             terminal_record(Some(0), Some("SIGKILL")),
             "killed by SIGKILL",
         ),
-        (terminal_record(None, None), "released before exit"),
+        (terminal_record(None, None), "exit status unavailable"),
     ] {
         let session = standalone_terminal_session(record);
 
@@ -2613,7 +2613,12 @@ fn codex_raw_output_renders_for_a_terminal_hel_has_no_record_for() {
     };
     let details = |raw_output: serde_json::Value| {
         let call = ToolCall::deserialize(&call(raw_output)).expect("valid ACP tool call");
-        tool_content_details(&call.content, &[], call.raw_output.as_ref())
+        tool_content_details(
+            &call.content,
+            &[],
+            call.raw_output.as_ref(),
+            tool_status(&call.status),
+        )
     };
 
     assert_eq!(
@@ -4173,6 +4178,7 @@ fn golden_conversation_title() {
 
 // Hard-won: d00682c9: expanded send_message details showed only the receipt, omitting its arguments.
 // Hard-won: 464f66ded: raw-output-only failures omitted their error message beside expanded arguments.
+// Hard-won: c823ba502: a failed Codex command expanded to only its terminal id.
 #[test]
 fn golden_rich_transcript_tool_presentation() {
     let mut output = String::new();
@@ -4441,6 +4447,80 @@ fn golden_rich_transcript_tool_presentation() {
     append_transcript_golden_state(
         &mut output,
         "empty input replaces earlier message arguments",
+        80,
+        28,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 28)),
+        &[],
+    );
+
+    let command = "git fetch origin master && git worktree add -b experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance origin/master";
+    let terminal_id = "exec-c88fb185-27bf-4e54-affa-c458b09d0b3c";
+    let mut terminal_session = MaterializedSession::empty("terminal-metadata-failure");
+    for (index, update) in [
+        serde_json::json!({
+            "sessionUpdate": "tool_call", "toolCallId": terminal_id,
+            "title": command, "kind": "execute", "status": "in_progress",
+            "rawInput": {"command": command, "cwd": "/home/jonathan/Projects/bifrost"},
+            "content": [{"type": "terminal", "terminalId": terminal_id}],
+            "_meta": {"terminal_info": {"terminal_id": terminal_id, "cwd": "/home/jonathan/Projects/bifrost"}}
+        }),
+        serde_json::json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": terminal_id,
+            "_meta": {"terminal_output": {"terminal_id": terminal_id, "data": "From github.com:BrokkAi/bifrost\n"}}
+        }),
+        serde_json::json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": terminal_id,
+            "_meta": {"terminal_output_delta": {"terminal_id": terminal_id, "data": "\u{1b}[31mfatal: a branch named 'experiment-bbtree-performance' already exists\u{1b}[0m\n"}}
+        }),
+        serde_json::json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": terminal_id, "status": "failed"
+        }),
+        serde_json::json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": terminal_id,
+            "_meta": {"terminal_exit": {"terminal_id": terminal_id, "exit_code": 128, "signal": null}}
+        }),
+    ].into_iter().enumerate() {
+        let mut event = mj_core::relay::RelayEvent {
+            format: mj_core::relay::RELAY_EVENT_FORMAT_V1,
+            ordinal: u64::try_from(index).unwrap() + 1,
+            previous_digest: terminal_session.applied_event_digest.clone(),
+            digest: String::new(), recorded_at_ms: started, command_id: None,
+            observation: mj_core::relay::RelayObservation::SessionUpdate {
+                update: Box::new(serde_json::from_value(update).unwrap()),
+            },
+        };
+        event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
+        let projected = mj_transcript::projection::project_relay_event(&terminal_session, &event).unwrap();
+        mj_transcript::projection::apply_committed_projection_event(&mut terminal_session, &event, projected.mutation).unwrap();
+        if index == 2 || index == 4 {
+            let mut chat = ChatState::from_materialized(&terminal_session, &[], &[]);
+            let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 28));
+            click_rendered_text(&mut chat, &rows, "git fetch");
+            let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 28));
+            let rendered = rows.join("\n");
+            assert!(rendered.contains("already exists"), "{rendered}");
+            assert!(!rendered.contains("terminal exec-"), "{rendered}");
+            assert!(!rendered.contains("exit status unavailable"), "{rendered}");
+            append_transcript_golden_state(&mut output, if index == 2 {
+                "streamed terminal output expanded while running"
+            } else {
+                "failed terminal metadata expanded with exit code"
+            }, 80, 28, &rows, &[]);
+        }
+    }
+    // Reopening from the canonical checkpoint preserves the output and status.
+    let canonical =
+        mj_transcript::projection::canonical_session_from_materialized(&terminal_session).unwrap();
+    let terminal_session = mj_transcript::projection::materialized_session_from_canonical(
+        "terminal-metadata-failure",
+        &canonical,
+    )
+    .unwrap();
+    let mut chat = ChatState::from_materialized(&terminal_session, &[], &[]);
+    chat.render_mode = TranscriptRenderMode::Raw;
+    append_transcript_golden_state(
+        &mut output,
+        "failed terminal metadata reopened in raw mode",
         80,
         28,
         &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 28)),
