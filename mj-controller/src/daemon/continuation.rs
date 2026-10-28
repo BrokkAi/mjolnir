@@ -11,7 +11,7 @@ use tokio::task::{AbortHandle, JoinSet};
 
 enum Outcome {
     Classified(Result<mj_core::continuation::ContinuationVerdict>),
-    QuotaPrepared(Result<mj_core::continuation::QuotaRecovery>),
+    QuotaPrepared(Result<Box<quota::Plan>>),
     Submitted(Result<Box<ManagedSessionView>>),
 }
 
@@ -53,6 +53,13 @@ fn current_rules(s: &mj_core::state::ManagedSessionSnapshot) -> bool {
     s.operational
         .relay_protocol_version
         .is_some_and(|v| v >= ENDED_TURN_PROTOCOL)
+}
+
+/// Keep goal recovery identical for a timed retry and a quota Move.
+pub(crate) fn goal_resumes_after_quota(s: &mj_core::relay::RelayOperationalState) -> bool {
+    s.relay_protocol_version
+        .is_some_and(|v| v >= ENDED_TURN_PROTOCOL)
+        && s.goal.resumable_after_quota()
 }
 
 /// The turn a check is about: the last prompted turn, or one the harness
@@ -368,6 +375,7 @@ struct Environment {
     live: Arc<dyn Fn() -> BTreeSet<String> + Send + Sync>,
     review: ReviewObserver,
     quota: quota::Resolver,
+    start_quota_move: quota::StartMove,
     profile: ProfileLookup,
 }
 type ProfileLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
@@ -505,6 +513,13 @@ pub(super) fn spawn(
                 let state = state.clone();
                 let service = service.clone();
                 Box::pin(async move { quota::prepare(&state, &service, &id, &view).await })
+            })
+        },
+        start_quota_move: {
+            let state = state.clone();
+            Arc::new(move |request, reason, continuation| {
+                let state = state.clone();
+                Box::pin(async move { state.start_quota_move(request, reason, continuation).await })
             })
         },
         profile: {
@@ -795,7 +810,7 @@ fn spawn_with_gate(
                                             let task_work = p._upgrade_work.clone();
                                             let abort = jobs.spawn(async move {
                                                 let _task_work = task_work;
-                                                let result = quota::schedule(&env, &session, view, recovery).await;
+                                                let result = quota::schedule(&env, &session, view, *recovery).await;
                                                 (session, epoch, Outcome::Submitted(result))
                                             });
                                             pending.insert(id, Pending { abort, submitting: true, ..p });
@@ -846,7 +861,7 @@ fn spawn_with_gate(
                                             let abort = jobs.spawn(async move {
                                                 let _task_work = task_work;
                                     let result = (env.quota)(session.clone(), view).await;
-                                    (session, epoch, Outcome::QuotaPrepared(result))
+                                    (session, epoch, Outcome::QuotaPrepared(result.map(Box::new)))
                                 });
                                 if let Some(diagnostic) = &p.diagnostic {
                                     diagnostic.finish("applied", "Quota exhaustion identified; resolving the reset deadline without an LLM.");
@@ -992,7 +1007,7 @@ fn spawn_with_gate(
                         if pending.contains_key(id) || retry_after.get(id).is_some_and(|t| *t > std::time::Instant::now()) { continue; }
                         let Some(snapshot) = &view.snapshot else { continue; };
                         let Some(recovery) = snapshot.operational.continuation.quota_recovery.as_ref().filter(|r| !r.submitted) else { continue; };
-                        let clear = !(environment.allowed)(id) || (environment.profile)(id).as_deref() != Some(&recovery.profile_id);
+                        let clear = (recovery.retry_at_ms.is_some() && !(environment.allowed)(id)) || (environment.profile)(id).as_deref() != Some(&recovery.profile_id);
                         if !clear && recovery.retry_at_ms.is_none_or(|t| t > mj_core::clock::epoch_millis()) { continue; }
                         // Due from here on: every refusal to submit is named, once a minute.
                         let mut refusal = if clear { Vec::new() } else { quota_resume_blockers(view) };

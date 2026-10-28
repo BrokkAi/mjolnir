@@ -1329,6 +1329,7 @@ impl Controller {
     pub async fn move_session_managed_controlled(
         &mut self,
         request: MoveSessionRequest,
+        quota_move: Option<(String, mj_core::state::QuotaMoveContinuation)>,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
     ) -> Result<MoveOutcome> {
@@ -1435,6 +1436,8 @@ impl Controller {
                 op
             }
             None => MoveOperation {
+                quota_stop_reason: None,
+                quota_continuation: None,
                 prepared_destination: None,
                 accepted_preparation: None,
                 acknowledge_interruption: false,
@@ -1487,6 +1490,10 @@ impl Controller {
                 error: None,
             },
         };
+        if let Some((reason, continuation)) = quota_move {
+            operation.quota_stop_reason = Some(reason);
+            operation.quota_continuation = Some(continuation);
+        }
         operation.accepted_preparation = Some(Box::new(checked.clone()));
         operation.acknowledge_interruption = request.acknowledge_interruption;
         crate::database::save_move_operation(&operation)?;
@@ -2420,6 +2427,31 @@ impl Controller {
                 verified.archive_sha256 == checkpoint.sha256 && verified.manifest.session.id == *id,
                 "move queue checkpoint verification failed"
             );
+            if operation.quota_stop_reason.is_some() && !operation.queue_admission_finished {
+                ensure!(
+                    !executor.cancellation_requested(),
+                    "move cancelled during queue admission; destination retained"
+                );
+                use mj_core::state::QuotaMoveContinuation;
+                let continuation = operation
+                    .quota_continuation
+                    .context("quota Move has no saved continuation action")?;
+                let command = match continuation {
+                    // Move owns the lifecycle, so use ordinary Resume semantics.
+                    QuotaMoveContinuation::ResumeGoal => RelayCommand::GoalControl {
+                        action: mj_core::goal::GoalControlAction::Resume,
+                    },
+                    QuotaMoveContinuation::Prompt => RelayCommand::Prompt {
+                        prompt: mj_core::continuation::prompt_blocks(),
+                    },
+                };
+                // The destination store is pinned above before any submission.
+                // Its durable ledger deduplicates this operation across retries,
+                // including a crash after acceptance but before our next save.
+                relay
+                    .submit_accepted(format!("quota-retry-{}", operation.operation_id), command)
+                    .await?;
+            }
             for queued in verified.canonical_session.queued_prompts {
                 if operation.queue_admission_finished {
                     continue;
@@ -2457,7 +2489,11 @@ impl Controller {
         let destination_target = operation.selection.target_template_id.as_deref().unwrap();
         // The two moves are different events for the person reading the
         // conversation: one rebuilt the environment, the other kept it.
-        let text = if operation.in_place {
+        let text = if let Some(reason) = &operation.quota_stop_reason {
+            format!(
+                "Switched from {source_profile} to {destination_profile} in place because {reason}; the workspace and environment were kept. Continuing the interrupted work. {queue_sentence}"
+            )
+        } else if operation.in_place {
             format!(
                 "Switched from {source_profile} / {source_target} to {destination_profile} / {destination_target} in place; the workspace and environment were kept. {queue_sentence} The interrupted prompt was not replayed."
             )

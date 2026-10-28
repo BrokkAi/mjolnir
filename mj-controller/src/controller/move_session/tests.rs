@@ -45,6 +45,7 @@ const PREPARATION_SNAPSHOT_CHILD: &str = "MJ_MOVE_PREPARATION_SNAPSHOT_CHILD";
 const RECOVERY_TERMINAL_CHILD: &str = "MJ_MOVE_RECOVERY_TERMINAL_CHILD";
 const MOVE_QUEUE_RELAY_ROOT: &str = "MJ_MOVE_QUEUE_RELAY_ROOT";
 const MOVE_QUEUE_RELAY_MARKER: &str = "MJ_MOVE_QUEUE_RELAY_MARKER";
+const MOVE_QUEUE_GOAL: &str = "MJ_MOVE_QUEUE_GOAL";
 const MOVE_QUEUE_SESSION_ID: &str = "0123456789abcdef0123456789abcdef";
 
 fn add_codex_profile(config: &mut Config, home: &Path) {
@@ -162,8 +163,20 @@ fn move_queue_relay_child() {
             continue;
         }
         let relay = relay.get_or_insert_with(|| {
-            DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "1.0.0")
-                .expect("open move queue test relay")
+            let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "1.0.0")
+                .expect("open move queue test relay");
+            if crash_after_first && std::env::var(MOVE_QUEUE_GOAL).as_deref() == Ok("1") {
+                relay.record_session_update(serde_json::from_value(serde_json::json!({
+                    "sessionUpdate": "session_info_update",
+                    "_meta": {
+                        "mjGoalCapability": {"version": 1, "controlMethod": "_session/goal", "actions": ["resume", "pause"]},
+                        "goal": {"objective": "Finish the interrupted work", "status": "limited", "createdAt": 42,
+                            "controlMethod": "_session/goal", "limitReason": "usage"},
+                        "execution": {"version": 1, "status": "idle"}
+                    }
+                })).unwrap()).unwrap();
+            }
+            relay
         });
         if let RelayRequest::Submit {
             command_id,
@@ -183,7 +196,9 @@ fn move_queue_relay_child() {
             && matches!(
                 &request.request,
                 RelayRequest::Submit {
-                    command: RelayCommand::Prompt { .. } | RelayCommand::SetConfig { .. },
+                    command: RelayCommand::Prompt { .. }
+                        | RelayCommand::SetConfig { .. }
+                        | RelayCommand::GoalControl { .. },
                     ..
                 }
             );
@@ -200,6 +215,18 @@ fn move_queue_relay_child() {
         };
         write_relay_frame(&mut output, &response).expect("write relay response");
         if should_crash {
+            if std::env::var(MOVE_QUEUE_GOAL).as_deref() == Ok("1") {
+                // The accepted resume changes the live predicate before the
+                // daemon can save queue completion or reconnect after the crash.
+                relay.record_session_update(serde_json::from_value(serde_json::json!({
+                    "sessionUpdate": "session_info_update",
+                    "_meta": {
+                        "goal": {"objective": "Finish the interrupted work", "status": "active", "createdAt": 42,
+                            "controlMethod": "_session/goal"},
+                        "execution": {"version": 1, "status": "running"}
+                    }
+                })).unwrap()).unwrap();
+            }
             fs::write(&marker, b"accepted then crashed").expect("record relay crash");
             return;
         }
@@ -325,6 +352,8 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
             resource_allocation: None,
         };
         let operation = MoveOperation {
+            quota_stop_reason: None,
+            quota_continuation: None,
             prepared_destination: None,
             accepted_preparation: None,
             acknowledge_interruption: false,
@@ -716,9 +745,19 @@ fn move_queue_checkpoint(directory: &Path, session_id: &str) -> CheckpointMetada
 #[test]
 fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store() {
     let short = "move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store";
-    if !isolated_test_child(&test_name(short), "MJ_MOVE_QUEUE_REPLAY_CHILD") {
+    if std::env::var_os("MJ_MOVE_QUEUE_REPLAY_CHILD").is_none() {
+        for goal in ["0", "1"] {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(short))
+                .env("MJ_MOVE_QUEUE_REPLAY_CHILD", "1")
+                .env(MOVE_QUEUE_GOAL, goal)
+                .isolated_store(directory.path())
+                .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
+                .run();
+        }
         return;
     }
+    let goal = std::env::var(MOVE_QUEUE_GOAL).as_deref() == Ok("1");
     let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
     let worker_root = directory.path().join(MOVE_QUEUE_SESSION_ID);
@@ -767,12 +806,18 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .move_configuration_fingerprint(&selection)
         .unwrap();
     let mut operation = MoveOperation {
+        quota_stop_reason: Some("the weekly quota is exhausted".into()),
+        quota_continuation: Some(if goal {
+            mj_core::state::QuotaMoveContinuation::ResumeGoal
+        } else {
+            mj_core::state::QuotaMoveContinuation::Prompt
+        }),
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,
         workspace_transfer: None,
         handoff: None,
-        in_place: false,
+        in_place: true,
         source_checkpoint_only: false,
         operation_id: "move-queue-replay".into(),
         selection,
@@ -818,6 +863,18 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .clone()
         .expect("store identity is persisted before queue replay");
     assert!(!operation.queue_admission_finished);
+    let retry_id = format!("quota-retry-{}", operation.operation_id);
+    let accepted_ordinal = {
+        let relay = DurableRelay::open(&worker_root, MOVE_QUEUE_SESSION_ID, "1.0.0").unwrap();
+        relay.events_after(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST).unwrap()
+            .into_iter().find(|event| matches!(&event.observation,
+                mj_core::relay::RelayObservation::CommandQueued { command_id, .. } if command_id == &retry_id))
+            .unwrap().ordinal
+    };
+    // Resume from the durable intent, as a replacement daemon does.
+    operation = crate::database::load_move_operation(MOVE_QUEUE_SESSION_ID)
+        .unwrap()
+        .unwrap();
 
     runtime
         .block_on(controller.admit_move_queue(&mut operation, &RefusingExecutor("move preflight")))
@@ -843,21 +900,75 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     );
     let reopened = DurableRelay::open(&worker_root, MOVE_QUEUE_SESSION_ID, "1.0.0").unwrap();
     let operational = reopened.operational_state();
+    if goal {
+        assert!(operational.goal.running());
+        assert!(!operational.goal.resumable_after_quota());
+    } else {
+        assert_eq!(
+            operational
+                .active_prompt
+                .as_ref()
+                .map(|prompt| prompt.command_id.as_str()),
+            Some(retry_id.as_str())
+        );
+    }
+    if !goal {
+        assert_eq!(
+            operational
+                .queued_prompts
+                .iter()
+                .map(|queued| queued.command_id.as_str())
+                .collect::<Vec<_>>(),
+            ["queued-image", "queued-config"]
+        );
+    }
     assert_eq!(
-        operational
-            .active_prompt
-            .as_ref()
-            .map(|prompt| prompt.command_id.as_str()),
-        Some("queued-image")
+        operation.quota_continuation,
+        Some(if goal {
+            mj_core::state::QuotaMoveContinuation::ResumeGoal
+        } else {
+            mj_core::state::QuotaMoveContinuation::Prompt
+        })
     );
+
+    let accepted: Vec<_> = reopened
+        .events_after(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.observation {
+            mj_core::relay::RelayObservation::CommandQueued { command_id, .. } => {
+                Some((command_id, event.ordinal))
+            }
+            _ => None,
+        })
+        .collect();
+    let retried: Vec<_> = accepted.iter().filter(|(id, _)| id == &retry_id).collect();
     assert_eq!(
-        operational
-            .queued_prompts
-            .iter()
-            .map(|queued| queued.command_id.as_str())
-            .collect::<Vec<_>>(),
-        ["queued-config"]
+        retried.len(),
+        1,
+        "continuation must be admitted only once: {accepted:?}"
     );
+    assert_eq!(retried[0].1, accepted_ordinal);
+    let image_ordinal = accepted
+        .iter()
+        .find(|(id, _)| id == "queued-image")
+        .unwrap()
+        .1;
+    let config_ordinal = accepted
+        .iter()
+        .find(|(id, _)| id == "queued-config")
+        .unwrap()
+        .1;
+    assert!(accepted_ordinal < image_ordinal && image_ordinal < config_ordinal);
+    let journal = fs::read_to_string(
+        worker_root
+            .join(mj_core::relay::RELAY_JOURNAL_DIR)
+            .join(mj_core::relay::RELAY_ACTIVE_SEGMENT),
+    )
+    .unwrap();
+    assert!(journal.contains("because the weekly quota is exhausted"));
+    assert!(journal.contains("Continuing the interrupted work"));
+    assert!(!journal.contains("The interrupted prompt was not replayed"));
 
     let replacement_target = TargetLocator::LocalBare {
         worker_root: replacement_root,
@@ -1356,6 +1467,8 @@ fn ssh_bare_targets_share_an_environment_only_on_the_same_connection() {
 #[cfg(unix)]
 pub(super) fn source_recovery_operation(session: &mj_core::state::SessionRecord) -> MoveOperation {
     MoveOperation {
+        quota_stop_reason: None,
+        quota_continuation: None,
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,
@@ -2613,6 +2726,8 @@ fn in_place_operation(controller: &Controller, destination_profile: &str) -> Mov
     };
     let source = &controller.state.sessions[LATCH_RELAY_SESSION];
     MoveOperation {
+        quota_stop_reason: None,
+        quota_continuation: None,
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,
@@ -3330,6 +3445,9 @@ fn in_place_profile_move_retains_native_state_and_installed_worker() {
         .target
         .clone();
     let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
+    operation.quota_stop_reason = Some("the weekly quota is exhausted".into());
+    operation.quota_continuation = Some(mj_core::state::QuotaMoveContinuation::Prompt);
+    operation.queue = ResumeQueueDisposition::Start;
     // This fixture's fake worker restores native state but does not export Git.
     // Model the verified, sealed source boundary before replacing the harness.
     controller
@@ -3482,7 +3600,7 @@ fn in_place_profile_move_retains_native_state_and_installed_worker() {
     )
     .unwrap();
     assert!(
-        journal.contains("in place; the workspace and environment were kept"),
+        journal.contains("in place because the weekly quota is exhausted"),
         "the move notice is missing from the destination journal: {journal}"
     );
 }

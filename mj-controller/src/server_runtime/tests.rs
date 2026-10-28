@@ -196,6 +196,8 @@ fn bare_preflight_config() -> Config {
 #[test]
 fn move_recovery_projection_exposes_safe_retry_settings_only() {
     let operation = mj_core::state::MoveOperation {
+        quota_stop_reason: None,
+        quota_continuation: None,
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,

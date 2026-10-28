@@ -338,6 +338,8 @@ mod tests {
 
     fn operation(session: &SessionRecord) -> MoveOperation {
         MoveOperation {
+            quota_stop_reason: None,
+            quota_continuation: None,
             prepared_destination: None,
             accepted_preparation: None,
             acknowledge_interruption: false,
@@ -560,6 +562,8 @@ mod tests {
         let connection = open(&path).unwrap();
         let mut intent = operation(&session);
         intent.in_place = true;
+        intent.quota_stop_reason = Some("Weekly quota exhausted".into());
+        intent.quota_continuation = Some(mj_core::state::QuotaMoveContinuation::ResumeGoal);
         save_move_operation_with(&connection, &intent).unwrap();
         let stored: String = connection
             .query_row(
@@ -576,6 +580,44 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(restored, intent);
+        let mut legacy_json: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        legacy_json
+            .as_object_mut()
+            .unwrap()
+            .remove("quota_stop_reason");
+        legacy_json
+            .as_object_mut()
+            .unwrap()
+            .remove("quota_continuation");
+        let legacy_intent: MoveOperation = serde_json::from_value(legacy_json).unwrap();
+        assert!(legacy_intent.quota_stop_reason.is_none());
+        assert!(legacy_intent.quota_continuation.is_none());
+        assert!(
+            !serde_json::to_string(&legacy_intent)
+                .unwrap()
+                .contains("quota_stop_reason")
+        );
+        assert!(
+            !serde_json::to_string(&legacy_intent)
+                .unwrap()
+                .contains("quota_continuation")
+        );
+        // Unknown fields from a newer daemon are skipped by every store reader.
+        let mut newer_json: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        newer_json["future_quota_field"] = serde_json::json!("new intent");
+        connection
+            .execute(
+                "UPDATE session_moves SET operation_json=?2 WHERE session_id=?1",
+                params![session.id, serde_json::to_string(&newer_json).unwrap()],
+            )
+            .unwrap();
+        assert!(
+            load_move_operation_with(&connection, &session.id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(load_move_operations_with(&connection).unwrap().is_empty());
+        save_move_operation_with(&connection, &intent).unwrap();
         // A row written before this field existed must still decode, as the
         // full fresh-environment move it was.
         let rewritten = connection

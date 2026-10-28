@@ -7790,6 +7790,8 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
     );
     crate::database::save_session(&session).unwrap();
     let operation = mj_core::state::MoveOperation {
+        quota_stop_reason: None,
+        quota_continuation: None,
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,
@@ -8896,6 +8898,8 @@ fn retained_startup_test_move(
     session: &mj_core::state::SessionRecord,
 ) -> mj_core::state::MoveOperation {
     mj_core::state::MoveOperation {
+        quota_stop_reason: None,
+        quota_continuation: None,
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,

@@ -29,6 +29,23 @@ pub struct QuotaWindow {
     pub resets_at_epoch_seconds: Option<i64>,
 }
 
+impl QuotaWindow {
+    /// Whether this allowance spans a week or longer, including model-scoped labels.
+    pub fn is_weekly_or_longer(&self) -> bool {
+        let label = if self.model_scope.is_some() {
+            self.label
+                .split_once(" (")
+                .map_or(self.label.as_str(), |(label, _)| label)
+        } else {
+            &self.label
+        };
+        is_weekly_quota_window(label)
+            || self
+                .duration_seconds
+                .is_some_and(|seconds| seconds >= 7 * 24 * 60 * 60)
+    }
+}
+
 /// What the daemon publishes about quota. The daemon is the only process that
 /// asks a provider for quota; every surface reads this instead.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

@@ -756,4 +756,4 @@ pub(crate) use guards::*;
 #[cfg(test)]
 mod tests;
 
-mod continuation;
+pub(crate) mod continuation;

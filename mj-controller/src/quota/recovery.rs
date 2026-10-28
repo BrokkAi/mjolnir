@@ -100,6 +100,26 @@ pub(crate) fn exhausted(window: &QuotaWindow, now_seconds: i64) -> bool {
                 .is_some_and(|(used, limit)| limit > 0 && used >= limit))
 }
 
+/// Only a long allowance with a distant or unknown continuation time merits a Move.
+pub(crate) fn long_window_stop(
+    windows: &[QuotaWindow],
+    model: &str,
+    explicit: Option<i64>,
+    reset: Option<i64>,
+    now_seconds: i64,
+) -> bool {
+    let exhausted: Vec<_> = windows
+        .iter()
+        .filter(|w| window_applies(w, model) && exhausted(w, now_seconds))
+        .collect();
+    if exhausted.is_empty() {
+        explicit.is_some_and(|time| time.saturating_sub(now_seconds) > 5 * 60 * 60)
+    } else {
+        exhausted.iter().any(|w| w.is_weekly_or_longer())
+            && reset.is_none_or(|time| time.saturating_sub(now_seconds) > 5 * 60 * 60)
+    }
+}
+
 /// A reset already used for an unsuccessful retry cannot schedule another retry.
 pub(crate) fn recovery_reset(
     windows: &[QuotaWindow],
@@ -215,6 +235,58 @@ mod tests {
         windows[0].remaining_percent = Some(20);
         assert_eq!(recovery_reset(&windows, None, 100, None), Some(900));
     }
+    #[test]
+    fn long_window_decision_respects_scope_unknown_resets_and_five_hour_boundary() {
+        let now = 1_000_000;
+        let short = window("5H", 0, Some(now + 18_000));
+        let weekly = window("Week", 0, Some(now + 18_001));
+        let mut scoped = window("Week (Fable)", 0, None);
+        scoped.model_scope = Some("fable".into());
+        let mut duration = window("Allowance", 0, None);
+        duration.duration_seconds = Some(604_800);
+        for (name, windows, model, explicit, expected) in [
+            (
+                "exactly five hours",
+                vec![window("Week", 0, Some(now + 18_000))],
+                "x",
+                None,
+                false,
+            ),
+            ("distant weekly", vec![weekly.clone()], "x", None, true),
+            ("short only", vec![short.clone()], "x", None, false),
+            (
+                "unknown weekly",
+                vec![window("Week", 0, None)],
+                "x",
+                None,
+                true,
+            ),
+            ("both exhausted", vec![short, weekly], "x", None, true),
+            (
+                "scoped applies",
+                vec![scoped.clone()],
+                "claude-fable",
+                None,
+                true,
+            ),
+            ("scoped excludes", vec![scoped], "claude-opus", None, false),
+            ("duration", vec![duration], "x", None, true),
+            ("explicit only", vec![], "x", Some(now + 18_001), true),
+            ("explicit boundary", vec![], "x", Some(now + 18_000), false),
+        ] {
+            let applicable: Vec<_> = windows
+                .into_iter()
+                .filter(|w| window_applies(w, model))
+                .collect();
+            let reset = recovery_reset(&applicable, explicit, now, None);
+            assert_eq!(
+                long_window_stop(&applicable, model, explicit, reset, now),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn message_clock_uses_named_zone_and_rejects_dst_ambiguity() {
         let observed = DateTime::parse_from_rfc3339("2026-09-21T16:50:00Z")
