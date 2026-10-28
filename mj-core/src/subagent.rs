@@ -1234,20 +1234,14 @@ pub fn in_place_subagents_notice(children: &[InPlaceSubagent]) -> Option<String>
     if children.is_empty() {
         return None;
     }
-    let listed = children
-        .iter()
-        .map(|child| {
-            format!(
-                "{} (child_session_id {}; {})",
-                safe_subagent_task_name(&child.task_name),
-                child.child_session_id,
-                child.state.label()
-            )
-        })
-        .collect::<Vec<_>>();
+    let count = children.len();
+    let noun = if count == 1 {
+        "sub-agent"
+    } else {
+        "sub-agents"
+    };
     Some(format!(
-        "In-place harness swap kept these sub-agents attached: {}. Any wait in progress was interrupted; reissue wait without arguments to collect reports. Check list_agents for pending_messages before resending a message.",
-        listed.join(", ")
+        "In-place harness swap kept {count} {noun} attached. Any wait in progress was interrupted; reissue wait without arguments to collect reports. Check list_agents for pending_messages before resending a message."
     ))
 }
 
@@ -2164,8 +2158,13 @@ mod tests {
         assert!(!context.contains("same child ids"));
         assert!(context.contains("list_agents and check pending_messages"));
         let notice = in_place_subagents_notice(&children).unwrap();
-        assert!(notice.contains("inspect migration (child_session_id child-running; running)"));
-        assert!(notice.contains("review tests (child_session_id child-parked; parked)"));
+        assert!(notice.starts_with("In-place harness swap kept 2 sub-agents attached."));
+        assert!(!notice.contains("child-running"));
+        assert!(
+            in_place_subagents_notice(&children[..1])
+                .unwrap()
+                .starts_with("In-place harness swap kept 1 sub-agent attached.")
+        );
         assert!(notice.contains("wait in progress was interrupted"));
         assert!(notice.contains("pending_messages before resending"));
         assert_eq!(in_place_subagents_prompt_context(&[]), None);
