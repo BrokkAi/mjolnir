@@ -570,26 +570,25 @@ pub(super) async fn run_daemon_runtime(
                         targets.send_replace(prepared_targets.borrow_and_update().clone());
                     }
                 }
-                result = &mut auto_afk => {
-                    auto_afk_outcome = Some(result.context("auto AFK task panicked").and_then(|result| result));
-                    if cancellation.is_cancelled() { break; }
-                    anyhow::bail!("auto AFK service stopped unexpectedly");
+                result = supervise_service(&mut auto_afk, &mut auto_afk_outcome, &cancellation, "auto AFK service") => {
+                    result?;
+                    break;
                 }
-                result = &mut cache_task => {
-                    cache_outcome = Some(result.context("machine cache service failed").and_then(|result| result));
-                    anyhow::bail!("machine build cache service stopped unexpectedly");
+                result = supervise_service(&mut cache_task, &mut cache_outcome, &cancellation, "machine build cache service") => {
+                    result?;
+                    break;
                 }
-                result = &mut mailbox_task => {
-                    mailbox_outcome = Some(result.context("mailbox outbox service failed").and_then(|result| result));
-                    anyhow::bail!("mailbox outbox service stopped unexpectedly");
+                result = supervise_service(&mut mailbox_task, &mut mailbox_outcome, &cancellation, "mailbox outbox service") => {
+                    result?;
+                    break;
                 }
-                result = &mut github_watch_task => {
-                    github_watch_outcome = Some(result.context("GitHub watch service failed").and_then(|result| result));
-                    anyhow::bail!("GitHub watch service stopped unexpectedly");
+                result = supervise_service(&mut github_watch_task, &mut github_watch_outcome, &cancellation, "GitHub watch service") => {
+                    result?;
+                    break;
                 }
-                result = &mut delegation_task => {
-                    delegation_outcome = Some(result.map_err(anyhow::Error::from).and_then(|result| result));
-                    anyhow::bail!("delegation coordinator stopped unexpectedly");
+                result = supervise_service(&mut delegation_task, &mut delegation_outcome, &cancellation, "delegation coordinator") => {
+                    result?;
+                    break;
                 }
                 _ = idle_tick.tick(), if exit_when_idle && state.ever_attached.load(Ordering::Acquire) => {
                     progress.phase(ServingPhase::IdleCheck);
@@ -966,6 +965,29 @@ pub(super) fn tombstone_session_ids(controller: &Controller) -> Vec<String> {
         })
         .map(|session| session.id.clone())
         .collect()
+}
+
+/// A service can observe cancellation and finish before the serving loop
+/// selects its own cancellation branch. The shared token owns that decision;
+/// selecting a completed task alone does not mean the service failed.
+async fn supervise_service(
+    task: &mut tokio::task::JoinHandle<Result<()>>,
+    outcome: &mut Option<Result<()>>,
+    cancellation: &CancellationToken,
+    service: &'static str,
+) -> Result<()> {
+    let result = task.await;
+    // Preserve errors for the epilogue even during an orderly shutdown, and
+    // record the consumed join so cleanup never polls the task a second time.
+    *outcome = Some(
+        result
+            .with_context(|| format!("{service} failed"))
+            .and_then(std::convert::identity),
+    );
+    if cancellation.is_cancelled() {
+        return Ok(());
+    }
+    anyhow::bail!("{service} stopped unexpectedly")
 }
 
 pub(super) fn remove_daemon_metadata(path: &Path) -> Result<()> {
@@ -1358,5 +1380,81 @@ pub(super) async fn refresh_runtime_controller(state: &RuntimeState) {
             error = format!("{error:#}"),
             "could not refresh daemon controller state"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Hard-won: #1383: a service finishing on cancellation made clean daemon shutdown fail.
+    #[tokio::test]
+    async fn service_completion_selected_before_shutdown_is_not_unexpected() {
+        let cancellation = CancellationToken::new();
+        let stop = cancellation.clone();
+        let mut task = tokio::spawn(async move {
+            stop.cancelled().await;
+            Ok(())
+        });
+        cancellation.cancel();
+        // Both select branches must be ready. Force the service branch to win,
+        // reproducing the daemon's losing order without scheduler timing.
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let mut outcome = None;
+        tokio::select! {
+            biased;
+            result = supervise_service(&mut task, &mut outcome, &cancellation, "GitHub watch service") => result.unwrap(),
+            () = cancellation.cancelled() => panic!("service completion must win"),
+        }
+        outcome.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_completion_while_serving_is_unexpected() {
+        let cancellation = CancellationToken::new();
+        let mut task = tokio::spawn(async { Ok(()) });
+        let mut outcome = None;
+        let error = supervise_service(
+            &mut task,
+            &mut outcome,
+            &cancellation,
+            "GitHub watch service",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "GitHub watch service stopped unexpectedly"
+        );
+        outcome.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_failure_during_shutdown_is_preserved_for_cleanup() {
+        let cancellation = CancellationToken::new();
+        let stop = cancellation.clone();
+        let mut task = tokio::spawn(async move {
+            stop.cancelled().await;
+            anyhow::bail!("service cleanup failed")
+        });
+        cancellation.cancel();
+        let mut outcome = None;
+        supervise_service(
+            &mut task,
+            &mut outcome,
+            &cancellation,
+            "GitHub watch service",
+        )
+        .await
+        .unwrap();
+        let mut daemon_outcome = Ok(());
+        record_daemon_cleanup(
+            &mut daemon_outcome,
+            "join GitHub watch service",
+            outcome.unwrap(),
+        );
+        assert!(format!("{:#}", daemon_outcome.unwrap_err()).contains("service cleanup failed"));
     }
 }
