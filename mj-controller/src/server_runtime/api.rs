@@ -1647,9 +1647,9 @@ fn finish_identity(
 /// its newest message, which is the point of looking at a running child.
 ///
 /// `closing` says a close the daemon admitted is still running for this child.
-/// A close is not instant: it cancels whatever owned the session, checkpoints,
-/// seals the relay and tears the child's process tree down, and the record only
-/// says `Closing` once that is under way. Without this, a child whose turn had
+/// A close is not instant: it cancels whatever owned the session, persists its
+/// final conversation, seals the relay and tears the child's process tree down.
+/// The record only says `Closing` once that is under way. Without this, a child whose turn had
 /// finished reported `completed` the moment its close was admitted, so a parent
 /// that closed a child and spawned its replacement stacked the two process
 /// trees inside one container (#1087). This is the projection the daemon's own

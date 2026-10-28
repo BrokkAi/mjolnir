@@ -2605,10 +2605,29 @@ fn append_worktree_entry(
         let mut file = File::open(&source)
             .with_context(|| format!("open {} file {}", kind.label(), source.display()))?;
         builder.append_data(&mut header, relative, &mut file)?;
+    } else if metadata.is_dir() {
+        if kind == WorktreeTar::Untracked
+            && source.join(".git").try_exists().with_context(|| {
+                format!("inspect nested repository directory {}", source.display())
+            })?
+        {
+            bail!(
+                "cannot checkpoint nested Git repository directory at {}: \
+                 for a disposable scratch worktree, exclude this path using the outer \
+                 repository's .git/info/exclude; otherwise preserve its work separately",
+                source.display()
+            );
+        }
+        bail!(
+            "unsupported {} directory at {}",
+            kind.label(),
+            source.display()
+        );
     } else {
         bail!(
-            "unsupported {} file type at {}",
+            "unsupported {} file type {:?} at {}",
             kind.label(),
+            metadata.file_type(),
             source.display()
         );
     }

@@ -2254,6 +2254,58 @@ fn restore_without_a_bundle_reports_an_unreachable_commit_actionably() {
     );
 }
 
+// Hard-won: #1384: a registered nested worktree failed with an unidentified untracked file type.
+#[test]
+fn nested_worktree_checkpoint_names_the_directory_and_explicit_scratch_exclusion() {
+    let source = tempfile::tempdir().unwrap();
+    initialize_repository(source.path());
+    commit_file(source.path(), "tracked.txt", b"base\n", "base");
+    let base = git_line(source.path(), &["rev-parse", "HEAD"]);
+    let nested = ".mj/csharp-parity/bin-src";
+    git(
+        source.path(),
+        &["worktree", "add", "--detach", nested, "HEAD"],
+    );
+    fs::write(
+        source.path().join(nested).join("valuable.txt"),
+        b"nested work\n",
+    )
+    .unwrap();
+    let spec = GitCollectionSpec {
+        id: "repo".into(),
+        relative_destination: "repo".into(),
+        history: GitHistoryMode::DeltaFrom(base),
+        origin_override: None,
+    };
+    let error = collect_git_snapshot(&SystemGit, source.path(), &spec).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("nested Git repository directory"),
+        "{message}"
+    );
+    assert!(
+        message.contains(&source.path().join(nested).display().to_string()),
+        "{message}"
+    );
+    assert!(message.contains(".git/info/exclude"), "{message}");
+    assert!(
+        message.contains("preserve its work separately"),
+        "{message}"
+    );
+    fs::write(
+        source.path().join(".git/info/exclude"),
+        format!("/{nested}/\n"),
+    )
+    .unwrap();
+    let snapshot = collect_git_snapshot(&SystemGit, source.path(), &spec).unwrap();
+    let mut untracked = tar::Archive::new(Cursor::new(snapshot.untracked_tar));
+    assert!(untracked.entries().unwrap().next().is_none());
+    assert_eq!(
+        fs::read(source.path().join(nested).join("valuable.txt")).unwrap(),
+        b"nested work\n"
+    );
+}
+
 #[test]
 fn system_git_round_trip_restores_commits_index_worktree_and_untracked() {
     let source = tempfile::tempdir().unwrap();

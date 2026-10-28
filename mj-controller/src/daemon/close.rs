@@ -585,8 +585,18 @@ impl RuntimeState {
             });
         }
         let deferred = match route {
+            CloseRoute::Subagent => {
+                controller
+                    .suspend_subagent_controlled(
+                        session_id,
+                        executor,
+                        Some(&self.session_manager),
+                        Some(self.stop_subagents_before_close(session_id, commit.cloned())),
+                    )
+                    .await?
+            }
             // `prepare_suspension` marks a live session `Closing`,
-            // so this is also the route of every live suspend.
+            // so this is also the route of every live workspace-owning suspend.
             CloseRoute::RecoverInterrupted => {
                 controller
                     .recover_interrupted_close_managed(

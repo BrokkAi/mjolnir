@@ -138,11 +138,16 @@ impl RuntimeState {
 
             let durable = durable_session_state(lifecycle_owner.controller(), &session_id);
             let lifecycle = &mut lifecycle_owner.lifecycle;
-            let completed_other_kind = lifecycle.get(&session_id).is_some_and(|active| {
-                (active.kind != kind || kind == LifecycleKind::UpgradeContainer)
-                    && !active.is_running()
+            // Completion releases ownership under this same lock. Retained
+            // results answer identical retries; they cannot block a fresh
+            // request just because its original waiter disappeared.
+            let completed_other_request = lifecycle.get(&session_id).is_some_and(|active| {
+                !active.is_running()
+                    && (active.kind != kind
+                        || active.request_key != request_key
+                        || kind == LifecycleKind::UpgradeContainer)
             });
-            if completed_other_kind {
+            if completed_other_request {
                 ensure!(
                     !lifecycle
                         .get(&session_id)

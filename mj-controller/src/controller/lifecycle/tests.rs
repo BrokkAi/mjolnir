@@ -850,7 +850,7 @@ fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
     assert!(reports.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_dir());
 }
 
-/// A close of a running child goes through the checkpoint route; reports
+/// A child closed by an older daemon can retain a checkpoint; reports
 /// survive there too, not only on the no-checkpoint path.
 // Hard-won: #1333: close deleted the child's report_dir that parents were told to cite.
 #[test]
