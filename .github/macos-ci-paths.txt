@@ -75,3 +75,6 @@ mj-controller/src/targets/container_upgrade.rs
 
 # Shared target worker installation uses Darwin checksum and filesystem tools.
 mj-controller/src/controller/worker_binary/store.rs
+
+# Move transfers must remain compatible with stock macOS rsync.
+mj-controller/src/controller/move_session/transfer.rs

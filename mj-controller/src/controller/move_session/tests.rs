@@ -2152,11 +2152,10 @@ fn a_container_session_moved_to_a_local_checkout_is_restored_into_it() {
     );
 }
 
-/// The rsync that ships with macOS answers `--version` but rejects
-/// `--protect-args`, which every Move transfer passes.
-struct RsyncWithoutProtectArgs(GitWithPodmanPreflightExecutor);
+/// A transport can answer `--version` while rejecting a required option.
+struct RsyncWithoutPartialDir(GitWithPodmanPreflightExecutor);
 
-impl CommandExecutor for RsyncWithoutProtectArgs {
+impl CommandExecutor for RsyncWithoutPartialDir {
     fn execute_with_stdin(
         &self,
         command: &CommandSpec,
@@ -2169,12 +2168,15 @@ impl CommandExecutor for RsyncWithoutProtectArgs {
         if !runs_rsync {
             return self.0.execute(command);
         }
-        let (status, stdout, stderr): (i32, &[u8], &[u8]) =
-            if command.args.iter().any(|a| a == "--protect-args") {
-                (1, b"", b"rsync: unrecognized option `--protect-args'\n")
-            } else {
-                (0, b"openrsync: protocol version 29\n", b"")
-            };
+        let (status, stdout, stderr): (i32, &[u8], &[u8]) = if command
+            .args
+            .iter()
+            .any(|a| a == "--partial-dir=.move-partial")
+        {
+            (1, b"", b"rsync: unrecognized option `--partial-dir'\n")
+        } else {
+            (0, b"rsync fixture\n", b"")
+        };
         Ok(CommandOutput {
             status,
             stdout: stdout.to_vec(),
@@ -2183,14 +2185,14 @@ impl CommandExecutor for RsyncWithoutProtectArgs {
     }
 }
 
-// Hard-won: 6fc2ed80: unsupported rsync protection flags were discovered only after copying began
+// Hard-won: 6fc2ed80: unsupported rsync transfer flags were discovered only after copying began
 #[test]
 #[cfg_attr(
     windows,
     ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
 )]
-fn a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args() {
-    let short = "a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args";
+fn a_move_is_blocked_before_copying_when_an_rsync_rejects_partial_dir() {
+    let short = "a_move_is_blocked_before_copying_when_an_rsync_rejects_partial_dir";
     if !isolated_test_child(&test_name(short), "MJ_MOVE_RSYNC_PROBE_CHILD") {
         return;
     }
@@ -2227,7 +2229,7 @@ fn a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args() {
         additional_mounts: None,
         resource_allocation: None,
     };
-    let executor = RsyncWithoutProtectArgs(GitWithPodmanPreflightExecutor { remote });
+    let executor = RsyncWithoutPartialDir(GitWithPodmanPreflightExecutor { remote });
     let preparation = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2242,9 +2244,9 @@ fn a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args() {
                 .blockers
                 .iter()
                 .any(|blocker| blocker.contains(side)
-                    && blocker.contains("--protect-args")
-                    // The destination is a container: its rsync comes from the image, not brew.
-                    && blocker.contains("brew install rsync") == (side != "Destination")),
+                    && blocker.contains("--partial-dir")
+                    // Container rsync must be supplied by the image.
+                    && blocker.contains("container image") == (side == "Destination")),
             "{side} rsync is not reported: {:?}",
             assessment.blockers
         );
@@ -2255,7 +2257,7 @@ fn a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args() {
             .validate(&assessment)
             .unwrap_err()
             .to_string()
-            .contains("--protect-args"),
+            .contains("--partial-dir"),
         "the transfer must refuse to start"
     );
 }

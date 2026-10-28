@@ -420,9 +420,10 @@ is running. A source worker older than relay protocol 32 cannot keep them, so
 Move stops them, and the confirmation warns about this.
 
 A Move that rebuilds the environment copies the workspace with rsync, so the
-machine running Mjolnir, the source, and the destination each need rsync 3.0 or
-newer. The rsync that ships with macOS is older; install a current one with
-`brew install rsync`. Move checks every side before it interrupts the session.
+machine running Mjolnir, the source, and the destination each need rsync.
+GNU rsync and the rsync included with macOS (including openrsync) are supported.
+Move checks the required transfer options on every side before it interrupts
+the session.
 
 If an in-place swap fails, or the daemon restarts while it runs, Mjolnir does
 not retry in place. It releases the environment and leaves the session suspended
