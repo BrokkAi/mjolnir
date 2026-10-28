@@ -20,8 +20,8 @@ Frequent session updates must cost work proportional to changed sessions, rather
 - [x] Identify remaining long poles: finite SessionWiki startup indexing and repeated local delegation queue copies.
 - [x] (2026-10-28 16:01Z) Retain delegation and operational publications across empty polls and index report-parent candidates from committed differences; focused regressions and final suites pass.
 - [x] (2026-10-28 16:07Z) Commit the follow-up as 15f77c5e1, merge upstream as f499e3945, push, install, and verify session survival.
-- [ ] Separate immediate mailbox delivery from periodic historical repair, validate and install.
-- [ ] Record settled CPU and remaining reconciliation costs against the user’s under-one-core target.
+- [x] (2026-10-28 16:34Z) Separate immediate delivery from periodic repair; validate, commit as 0288889e8, merge upstream as 500b2b572, push and install.
+- [x] (2026-10-28 16:38Z) Verify settled live CPU at 0.66 cores over 30 seconds and 0.90 cores over 50 seconds; record residual costs.
 
 ## Surprises & Discoveries
 
@@ -35,7 +35,11 @@ Use immutable, serializable shared values with copy-on-write mutation and pointe
 
 ## Outcomes & Retrospective
 
-The initial implementation passed 3,348 tests and the delegation follow-up passed 3,351 tests; workspace clippy and formatting passed for both. Both changes are pushed and installed. The daemon fell from roughly four cores to samples of 1.46–1.8 cores, with checkpoint bursts higher. The under-one-core target remains unverified, and profiling identified additional amplified mailbox maintenance. Automatic approval review rejected creating a GitHub tracking issue containing internal profile details; this does not block implementation.
+All three fixes are committed, pushed and installed. The initial implementation passed 3,348 tests, the delegation follow-up passed 3,351 tests, and the final mailbox change passed all 2,193 controller tests (18 ignored). Workspace dev clippy and formatting passed after the last code change. The installed build is 2.61.1+500b2b572 and the session survived normal startup handoff. Automatic approval review rejected creation of a GitHub tracking issue containing internal profiling details; it did not block the fix.
+
+The original daemon averaged 389% CPU. The final installed daemon averaged 66.43% CPU over 30 seconds and 89.78% over a separate 50 seconds after startup indexing. During the last window the store listed 95 running sessions and its projected event count advanced by 3,646 over 33.6 seconds. This meets the user's steady-state target of under one core under observed live activity; indexing and checkpoints can still exceed it temporarily. These are live workload observations, not a controlled throughput benchmark.
+
+Mailbox maintenance now follows its five-second timer rather than streamed publications. Writer CPU fell from about 27% of a core to 3–4%. Remaining steady cost is relay JSON decoding and allocation/copying of operational/configuration and view snapshots. Debugger samples caught RelayResponseBody decoding and RelayOperationalState cloning in catch-up; roughly one-third of the small settled user-CPU sample was allocator functions. The startup SessionWiki full-text indexing thread separately used about 81% of a core while active, with stacks in trigram FTS deletion/merge and provenance parsing. Checkpoint packaging/compression caused additional finite bursts. Further optimization should target these measured paths rather than widening the scope of already-fixed historical scans.
 
 ## Context and Orientation
 
@@ -82,3 +86,5 @@ Follow-up validation: 3,351 tests passed across core, client, controller and TUI
 Third-round evidence: debugger snapshots repeatedly caught orphan cleanup and parent InputProgress rebuilding in the outbox service. The database writer consumed about 27% of a core, and ten orphan questions generated 1,000–3,000 warnings per minute: several whole maintenance passes per second rather than one every five seconds. Every session view publication called the same wakeup used by new mail. Separate repair from that immediate delivery wakeup. A paused-clock regression drives 100 streaming notifications, a coincident timer and delivery, a long maintenance pause, and cancellation; it protects maintenance cadence without delaying mail. Baseline just before this change averaged 178.6% CPU over twenty seconds.
 
 Third-round validation: the delivery/maintenance concurrency regression passes; all 2,193 controller tests pass (18 ignored), workspace dev clippy and formatting pass. Delivery still wakes on every committed mail or published view, while only the sweep performs historical repair.
+
+Final evidence is in `/mnt/optane/tmp/mj-cpu-20261028/`: `cpu-before-schedule.txt` (178.6% intermediate baseline), `cpu-schedule-2.txt` (66.43%), `threads-schedule-final.txt` (89.78% and writer 3.34%), `schedule-steady.perf.data`, `schedule-steady-self.txt`, `schedule-steady-gdb-*.txt`, and the final activity JSON files. `install-schedule.log` records successful installation. The handoff waited for four accepted remote provisioning operations, then completed without terminating them.
