@@ -57,7 +57,7 @@ Tests follow the "Which tests to add" rules in `AGENTS.md`; these are tricky-con
 - [x] Part A: continuation decision, candidate choice, schedule branch, timer rule, tests (2026-10-28).
 - [x] Part B: MoveOperation fields, quota Move daemon entry points, continuation at queue admission, tests (2026-10-28).
 - [x] Integrated review and full validation: workspace clippy clean; mj-controller, mj-core, mj-client and mj-tui suites pass (2026-10-28). The one failure, `in_place_subagent_prompt_roster_uses_latest_child_state`, came from 73ba8f905 and was fixed separately.
-- [ ] Commit, push, local install.
+- [x] Committed (e4de00b0c), merged with upstream and pushed (2e41e0e3c); installed locally, and the daemon handed off to 2.60.1+2e41e0e3c (2026-10-28).
 
 
 ## Surprises & Discoveries
