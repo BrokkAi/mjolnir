@@ -424,7 +424,8 @@ mj new --workspace eval --bundle product --target builder \
 - `mj fetch` copies a file, or a directory as a zip archive, from a session's
   target to this machine and prints where it landed. See below.
 - `mj models` lists the models and efforts a profile offers.
-- `mj set-config` applies one session setting, such as the model or effort.
+- `mj set-config` applies any selectable session setting the harness advertises,
+  such as the model, effort, approval mode, or collaboration mode.
   Without `--key` and `--value` it lists the settings the session's agent
   offers, with their choices.
 
