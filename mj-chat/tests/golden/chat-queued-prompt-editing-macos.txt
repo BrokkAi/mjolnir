@@ -22,7 +22,7 @@ Editing the most recently queued prompt
 │                                                                                                  │
 │> second                                                                                          │
 ╰ 1 queued────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+Up/Ctrl-P edit last queued · Enter send/queue │ ctrl+b then q detach · : / ? palette
 action: RemoveQueuedPrompt { id: "queued-2", text: "second", kind: Prompt }
 draft: "second"
 remaining queue: ["first"]
@@ -51,7 +51,7 @@ Editing the most recently queued prompt
 │                                                                                                  │
 │> third                                                                                           │
 ╰ 2 queued────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+Up/Ctrl-P edit last queued · Enter send/queue │ ctrl+b then q detach · : / ? palette
 action: RemoveQueuedPrompt { id: "queued-3", text: "third", kind: Prompt }
 draft: "third"
 remaining queue: ["first", "second"]
@@ -80,7 +80,7 @@ Editing the most recently queued prompt
 │                                                                                                  │
 │> second                                                                                          │
 ╰ 1 queued────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+Up/Ctrl-P edit last queued · Enter send/queue │ ctrl+b then q detach · : / ? palette
 action: RemoveQueuedPrompt { id: "queued-2", text: "second", kind: Prompt }
 draft: "second"
 remaining queue: ["first"]
@@ -167,7 +167,7 @@ remaining queue: []
 │                                                                                                  │
 │> What would you like to build?                                                                   │
 ╰ 1 queued────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+Up/Ctrl-P edit last queued · Enter send/queue │ ctrl+b then q detach · : / ? palette
 queue label: queued config
 
 === Ctrl-P peels queued config into composer (100x24) ===

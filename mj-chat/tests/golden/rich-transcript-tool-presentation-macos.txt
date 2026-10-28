@@ -133,7 +133,7 @@ expanded tools: {1, 2}
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 expanded tools: {}
 
 === execute pending (100x24) ===
@@ -926,7 +926,7 @@ expanded tools: {}
 │  for commands              │
 │                            │
 ╰────────────────────────────╯
-ctrl+b then q detach · : / ? palette
+q detach · : / ? palette
 second member hitboxes: 3
 expanded tools: {2}
 
@@ -980,7 +980,7 @@ Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 │  for commands              │
 │                            │
 ╰────────────────────────────╯
-ctrl+b then q detach · : / ? palette
+q detach · : / ? palette
 
 === inline tool calls (80x36) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
@@ -1133,7 +1133,7 @@ Tab pane - Cmd-V paste - Enter send | ctrl+b then q detach - : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === an expanded event without a report wraps its header once (44x24) ===
 ╭ Conversation ────────────────────────────╮
@@ -1159,7 +1159,7 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then q detach · : / ? palette
+ctrl+b then q detach · : / ? palette
 
 === only the second repeated event expands after resize (44x36) ===
 ╭ Conversation ────────────────────────────╮
@@ -1197,7 +1197,7 @@ Tab pane │ ctrl+b then q detach · : / ? palette
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then q detach · : / ? palette
+ctrl+b then q detach · : / ? palette
 copied report: "支持 Unicode and <script>literal text</script>.\n- A report bullet stays in this event."
 
 
@@ -1237,7 +1237,7 @@ copied report: "支持 Unicode and <script>literal text</script>.\n- A report bu
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then q detach · : / ? palette
+ctrl+b then q detach · : / ? palette
 
 === both reports expand independently (44x48) ===
 ╭ Conversation ────────────────────────────╮
@@ -1287,7 +1287,7 @@ Tab pane │ ctrl+b then q detach · : / ? palette
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then q detach · : / ? palette
+ctrl+b then q detach · : / ? palette
 
 === mailbox report scrolled before collapse (44x22) ===
 ╭ Conversation · message 1 of 1 · End to f…╮
@@ -1311,7 +1311,7 @@ Tab pane │ ctrl+b then q detach · : / ? palette
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then q detach · : / ? palette
+ctrl+b then q detach · : / ? palette
 
 === one report collapsed from wrapped body with ASCII arrows (44x48) ===
 + Conversation ----------------------------+
@@ -1361,7 +1361,7 @@ Tab pane │ ctrl+b then q detach · : / ? palette
 |                                          |
 |                                          |
 +------------------------------------------+
-Tab pane | ctrl+b then q detach - : / ? palette
+ctrl+b then q detach - : / ? palette
 
 === mailbox header scrolled out of view (44x14) ===
 ╭ Conversation · message 1 of 1 · End to f…╮
@@ -1377,7 +1377,7 @@ Tab pane | ctrl+b then q detach - : / ? palette
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then q detach · : / ? palette
+ctrl+b then q detach · : / ? palette
 
 === body click collapses the report and restores its header (44x14) ===
 ╭ Conversation ────────────────────────────╮
@@ -1393,7 +1393,7 @@ Tab pane │ ctrl+b then q detach · : / ? palette
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then q detach · : / ? palette
+ctrl+b then q detach · : / ? palette
 
 === raw mailbox text remains complete (60x48) ===
 ╭ Conversation · raw source ───────────────────────────────╮
@@ -1443,7 +1443,7 @@ Tab pane │ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === incoming messages start collapsed between agent replies (44x36) ===
 ╭ Conversation ────────────────────────────╮
@@ -1481,7 +1481,7 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then q detach · : / ? palette
+ctrl+b then q detach · : / ? palette
 
 === header text opens only one message in a shared delivery (44x36) ===
 ╭ Conversation ────────────────────────────╮
@@ -1519,7 +1519,7 @@ Tab pane │ ctrl+b then q detach · : / ? palette
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then q detach · : / ? palette
+ctrl+b then q detach · : / ? palette
 
 === both incoming messages stay open after update and resize (32x36) ===
 ╭ Conversation ────────────────╮
@@ -1557,7 +1557,7 @@ Tab pane │ ctrl+b then q detach · : / ? palette
 │  commands                    │
 │                              │
 ╰──────────────────────────────╯
-ctrl+b then q detach · : / ? palette
+q detach · : / ? palette
 
 === wrapped message body collapses only that message (32x36) ===
 ╭ Conversation ────────────────╮
@@ -1595,7 +1595,7 @@ ctrl+b then q detach · : / ? palette
 │  commands                    │
 │                              │
 ╰──────────────────────────────╯
-ctrl+b then q detach · : / ? palette
+q detach · : / ? palette
 
 === raw mode keeps complete incoming messages (44x36) ===
 ╭ Conversation · raw source ───────────────╮
@@ -1633,7 +1633,7 @@ ctrl+b then q detach · : / ? palette
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then q detach · : / ? palette
+ctrl+b then q detach · : / ? palette
 
 === restored anchor distinguishes messages in one delivery (44x24) ===
 ╭ Conversation ────────────────────────────╮
@@ -1659,7 +1659,7 @@ Tab pane │ ctrl+b then q detach · : / ? palette
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then q detach · : / ? palette
+ctrl+b then q detach · : / ? palette
 {"Entry":{"start_seq":2,"stable_id":"message:review-two","row":0}}
 
 === incoming message ASCII marks (44x36) ===
@@ -1698,4 +1698,4 @@ Tab pane │ ctrl+b then q detach · : / ? palette
 |                                          |
 |                                          |
 +------------------------------------------+
-Tab pane | ctrl+b then q detach - : / ? palette
+ctrl+b then q detach - : / ? palette

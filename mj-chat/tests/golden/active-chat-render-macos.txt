@@ -330,13 +330,13 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history · Shift-Enter newline �
 footer text fg=Rgb(158, 194, 238)
 
 === composer and host key hints (200x1) ===
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history · Shift-Enter newline │ ctrl+b then q detach · : / ? palette
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history · Shift-Enter newline │ ctrl+b then b panes · q detach · : / ? palette
 
 === queued prompt keeps composer hints (200x1) ===
-Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history · Shift-Enter newline · Esc interrupts │ ctrl+b then q detach · : / ? palette
+Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history · Shift-Enter newline · Esc interrupts │ ctrl+b then b panes · q detach · : / ? palette
 
 === narrow footer preserves palette and help hints (32x1) ===
-ctrl+b then q detach · : / ? palette
+q detach · : / ? palette
 
 === live model and effort during an in-flight prompt (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -1664,7 +1664,7 @@ prompt rect=Rect { x: 3, y: 17, width: 75, height: 3 }
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-Tab pane · PgUp/PgDn transcript │ ctrl+b then q detach · : / ? palette
+Tab pane · PgUp/PgDn transcript │ ctrl+b then b panes · q detach · : / ? palette
 
 cursor=Ok(Position { x: 0, y: 0 })
 

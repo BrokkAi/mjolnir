@@ -133,7 +133,7 @@ queued prompts: 0
 │                                                                                                  │
 │> Type a draft · sending opens when the session is live                                           │
 ╰ 1 queued───────────────────────────────────────────────────────────────── Enter  keeps the draft ╯
-Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+Up/Ctrl-P edit last queued · Enter send/queue │ ctrl+b then q detach · : / ? palette
 action: Prompt("alpha beta…\nsecond")
 draft empty: true
 queued prompts: ["alpha beta…\nsecond"]
@@ -189,6 +189,6 @@ autocomplete active: false
 │                                                                                                  │
 │> Type a draft · sending opens when the session is live                                           │
 ╰ 1 queued───────────────────────────────────────────────────────────────── Enter  keeps the draft ╯
-Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+Up/Ctrl-P edit last queued · Enter send/queue │ ctrl+b then q detach · : / ? palette
 action: Prompt("describe [image 1]")
 queued images: 1

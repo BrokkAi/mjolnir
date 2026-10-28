@@ -162,7 +162,7 @@ button area: Some(Rect { x: 2, y: 18, width: 5, height: 1 })
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Listening… click the microphone to stop · PgUp/PgDn transcript │ ctrl+b then q detach · : / ? palette
+Listening… click the microphone to stop │ ctrl+b then q detach · : / ? palette
 action: None
 draft: "dictated draft"
 
@@ -196,5 +196,5 @@ button area: None
 ╰────────────────────────────╯
 ╭  mic ──────────────────────╮
 ╰────────────────────────────╯
-ctrl+b then q detach · : / ? palette
+q detach · : / ? palette
 button area: Some(Rect { x: 6, y: 2, width: 5, height: 1 })

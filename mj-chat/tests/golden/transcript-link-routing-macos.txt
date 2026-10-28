@@ -184,7 +184,7 @@ action: None
 │  for commands              │
 │                            │
 ╰────────────────────────────╯
-ctrl+b then q detach · : / ? palette
+q detach · : / ? palette
 action: OpenLink("https://example.com/1")
 
 === narrow table label (30x24) ===
@@ -211,5 +211,5 @@ action: OpenLink("https://example.com/1")
 │  for commands              │
 │                            │
 ╰────────────────────────────╯
-ctrl+b then q detach · : / ? palette
+q detach · : / ? palette
 action: None
