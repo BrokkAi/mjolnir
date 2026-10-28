@@ -965,7 +965,7 @@ while the pane has focus. **Refresh** runs the same refresh as
 | Grok Build | The harness's ACP billing extension. |
 | Muse Code | Native subscription usage windows and reset times, when reported. The daemon refreshes the Muse login itself, so the reading does not depend on Muse having run. |
 | OpenCode | No published quota endpoint; the profile shows an unavailable reading. |
-| MiMo Code | No published quota endpoint; the profile shows an unavailable reading. |
+| MiMo Code | Xiaomi publishes no quota endpoint for Token Plan API keys, so the profile shows an unavailable reading. Remaining credits appear only in the Xiaomi console at `platform.xiaomimimo.com/console/plan-manage`. |
 | DSH | No quota endpoint; DeepSeek bills by usage, so the profile shows `API`. |
 
 A Codex profile on a provider that publishes no quota endpoint, and a DSH
@@ -1027,8 +1027,9 @@ handoffs; see
   reads permission rules from `opencode.json`. Its sessions live in a SQLite
   database, so native import and SessionWiki search do not list them, and it
   never serves Mjolnir's delegation or utility inference.
-- MiMo Code also publishes no quota endpoint, accepts one workspace root, and
-  keeps native sessions in a SQLite database. Native import and SessionWiki
+- MiMo Code has no quota reading, because Xiaomi exposes Token Plan usage only
+  to a logged-in console session and not to the API key. It accepts one
+  workspace root and keeps native sessions in a SQLite database. Native import and SessionWiki
   search do not list them yet, and it does not serve Mjolnir's delegation or
   utility inference.
 - DSH has no sandbox: commands run directly on the host, and only its file

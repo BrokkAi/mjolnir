@@ -7,6 +7,8 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 pub const SHARED_CREDENTIALS_FILE: &str = "aws-credentials";
+pub const CONFIG_FILE: &str = "aws-config";
+pub const EMPTY_CREDENTIALS_FILE: &str = "aws-empty-credentials";
 
 /// The controller environment used by the AWS CLI to resolve one profile.
 #[derive(Clone, PartialEq, Eq)]
@@ -125,8 +127,16 @@ impl AwsCredentials {
         .into_bytes())
     }
 
-    pub fn install(&self, home: &Path) -> Result<crate::credentials::CredentialSnapshot> {
+    /// Install the complete provider, in staging or at its final home. The
+    /// JSON is published last, after the files the SDK needs to resolve it.
+    pub fn install(
+        &self,
+        home: &Path,
+        target_home: &Path,
+    ) -> Result<crate::credentials::CredentialSnapshot> {
         let bytes = self.encode()?;
+        crate::config::atomic_write(&home.join(CONFIG_FILE), &self.configuration(target_home)?)?;
+        crate::config::atomic_write(&home.join(EMPTY_CREDENTIALS_FILE), b"")?;
         crate::config::atomic_write(&home.join(SHARED_CREDENTIALS_FILE), &bytes)?;
         Ok(snapshot(&bytes))
     }
@@ -141,11 +151,32 @@ pub fn snapshot(bytes: &[u8]) -> crate::credentials::CredentialSnapshot {
 }
 
 pub fn state(home: &Path) -> Result<crate::credentials::CredentialSnapshot> {
-    match std::fs::read(home.join(SHARED_CREDENTIALS_FILE)) {
-        Ok(bytes) => Ok(snapshot(&bytes)),
+    let absent = crate::credentials::CredentialSnapshot::absent;
+    let bytes = match std::fs::read(home.join(SHARED_CREDENTIALS_FILE)) {
+        Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(crate::credentials::CredentialSnapshot::absent())
+            return Ok(absent());
         }
-        Err(error) => Err(error).context("read session AWS credentials"),
+        Err(error) => return Err(error).context("read session AWS credentials"),
+    };
+    // Matching JSON alone does not make the provider usable. Worker upgrades
+    // can introduce these launch paths without restaging the profile. Invalid
+    // or expired JSON must likewise allow reconciliation to replace it.
+    let Ok(configuration) =
+        AwsCredentials::decode(&bytes).and_then(|credentials| credentials.configuration(home))
+    else {
+        return Ok(absent());
+    };
+    for (name, expected) in [
+        (CONFIG_FILE, configuration),
+        (EMPTY_CREDENTIALS_FILE, Vec::new()),
+    ] {
+        match std::fs::read(home.join(name)) {
+            Ok(actual) if actual == expected => {}
+            Ok(_) => return Ok(absent()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(absent()),
+            Err(error) => return Err(error).with_context(|| format!("read session AWS {name}")),
+        }
     }
+    Ok(snapshot(&bytes))
 }

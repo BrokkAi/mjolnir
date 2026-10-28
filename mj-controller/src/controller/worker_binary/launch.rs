@@ -199,12 +199,7 @@ impl Controller {
         result?;
         if let Some(source) = self.aws_credential_source(session_id)? {
             let credentials = crate::aws_credentials::export(&source, executor)?;
-            credentials.install(&profile_stage)?;
-            atomic_write(
-                &profile_stage.join("aws-config"),
-                &credentials.configuration(Path::new(&target_profile_home))?,
-            )?;
-            atomic_write(&profile_stage.join("aws-empty-credentials"), b"")?;
+            credentials.install(&profile_stage, Path::new(&target_profile_home))?;
         }
         stage_claude_keychain_login(
             profile,
@@ -1004,8 +999,11 @@ pub(super) fn worker_launch_config_with_checkout(
             source.environment["AWS_PROFILE"].clone(),
         );
         for (key, name) in [
-            ("AWS_SHARED_CREDENTIALS_FILE", "aws-empty-credentials"),
-            ("AWS_CONFIG_FILE", "aws-config"),
+            (
+                "AWS_SHARED_CREDENTIALS_FILE",
+                mj_core::aws_credentials::EMPTY_CREDENTIALS_FILE,
+            ),
+            ("AWS_CONFIG_FILE", mj_core::aws_credentials::CONFIG_FILE),
         ] {
             environment.insert(
                 key.into(),
