@@ -710,7 +710,7 @@ impl ChatState {
                         return ChatAction::None;
                     }
                     let Some(value) = value.filter(|value| !value.is_empty()) else {
-                        if self.open_config_picker(key) {
+                        if self.open_config_value_dialog(key) {
                             self.clear_input();
                         } else {
                             self.set_notice(format!(

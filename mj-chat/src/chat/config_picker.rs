@@ -3,8 +3,8 @@
 use crate::theme;
 use crossterm::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEventKind};
 use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
@@ -35,6 +35,7 @@ pub(super) struct ConfigPicker {
     title: String,
     key: Option<String>,
     current: Option<String>,
+    dialog: bool,
     items: Vec<ConfigPickerItem>,
     filter: TextInput,
     form: Form<ConfigControl>,
@@ -56,7 +57,7 @@ enum ConfigPickerItem {
 }
 
 impl ConfigPicker {
-    fn new_options(options: &[SessionConfigOption]) -> Option<Self> {
+    fn new_options(options: &[SessionConfigOption], dialog: bool) -> Option<Self> {
         let mut items = Vec::new();
         for option in options {
             let key = config_option_key(option);
@@ -79,10 +80,16 @@ impl ConfigPicker {
                 current,
             });
         }
-        (!items.is_empty()).then(|| Self::new("Session settings".to_owned(), None, None, items))
+        (!items.is_empty())
+            .then(|| Self::new("Session settings".to_owned(), None, None, dialog, items))
     }
 
-    fn new_values(key: String, choices: Vec<SessionConfigChoice>, current: Option<String>) -> Self {
+    fn new_values(
+        key: String,
+        choices: Vec<SessionConfigChoice>,
+        current: Option<String>,
+        dialog: bool,
+    ) -> Self {
         let items = choices
             .into_iter()
             .map(|choice| ConfigPickerItem::Value {
@@ -90,13 +97,14 @@ impl ConfigPicker {
                 choice,
             })
             .collect();
-        Self::new(key.clone(), Some(key), current, items)
+        Self::new(key.clone(), Some(key), current, dialog, items)
     }
 
     fn new(
         title: String,
         key: Option<String>,
         current: Option<String>,
+        dialog: bool,
         items: Vec<ConfigPickerItem>,
     ) -> Self {
         let selected = current
@@ -123,6 +131,7 @@ impl ConfigPicker {
             title,
             key,
             current,
+            dialog,
             items,
             filter: TextInput::new(),
             form,
@@ -174,6 +183,37 @@ impl ConfigPicker {
             },
         );
     }
+
+    fn rows(&self) -> Vec<Line<'static>> {
+        self.filtered
+            .iter()
+            .map(|&index| match &self.items[index] {
+                ConfigPickerItem::Option { label, current, .. } => {
+                    let current = current
+                        .as_deref()
+                        .map(|current| format!(": {current}"))
+                        .unwrap_or_default();
+                    Line::from(format!("  {label}{current}"))
+                }
+                ConfigPickerItem::Value { choice, .. } => {
+                    let marker = self.current.as_deref() == Some(choice.value.as_str());
+                    Line::from(format!(
+                        "{} {}",
+                        if marker { theme::glyphs().check } else { " " },
+                        config_choice_name(choice)
+                    ))
+                }
+            })
+            .collect()
+    }
+
+    fn title(&self) -> String {
+        if self.filter.is_empty() {
+            self.title.clone()
+        } else {
+            format!("{}: {}", self.title, self.filter.value())
+        }
+    }
 }
 
 pub(super) fn config_option_key(option: &SessionConfigOption) -> String {
@@ -209,7 +249,8 @@ impl ChatState {
     }
 
     pub(super) fn open_config_menu(&mut self) -> bool {
-        let Some(picker) = ConfigPicker::new_options(self.acp_surface.config_options()) else {
+        let Some(picker) = ConfigPicker::new_options(self.acp_surface.config_options(), true)
+        else {
             return false;
         };
         self.config_picker = Some(picker);
@@ -217,12 +258,25 @@ impl ChatState {
     }
 
     pub(super) fn open_config_picker(&mut self, key: &str) -> bool {
+        self.open_config_picker_with_presentation(key, false)
+    }
+
+    pub(super) fn open_config_value_dialog(&mut self, key: &str) -> bool {
+        self.open_config_picker_with_presentation(key, true)
+    }
+
+    fn open_config_picker_with_presentation(&mut self, key: &str, dialog: bool) -> bool {
         let choices = self.config_values(key);
         if choices.is_empty() {
             return false;
         }
         let current = self.current_config_value(key);
-        self.config_picker = Some(ConfigPicker::new_values(key.to_owned(), choices, current));
+        self.config_picker = Some(ConfigPicker::new_values(
+            key.to_owned(),
+            choices,
+            current,
+            dialog,
+        ));
         true
     }
 
@@ -332,9 +386,10 @@ impl ChatState {
         let Some(selection) = picker.selection().cloned() else {
             return ChatAction::None;
         };
+        let dialog = picker.dialog;
         let (key, value) = match selection {
             ConfigPickerItem::Option { key, .. } => {
-                if !self.open_config_picker(&key) {
+                if !self.open_config_picker_with_presentation(&key, dialog) {
                     self.set_notice(format!(
                         "The agent no longer advertises values for {key}; this configuration change was not sent"
                     ));
@@ -373,32 +428,11 @@ pub(super) fn render_config_picker(
         .map(|(_, area)| *area)
         .or(chat.voice_button_area)
         .unwrap_or(Rect::new(area.x, area.bottom().saturating_sub(1), 1, 1));
-    let rows = picker
-        .filtered
-        .iter()
-        .map(|&index| match &picker.items[index] {
-            ConfigPickerItem::Option { label, current, .. } => {
-                let current = current
-                    .as_deref()
-                    .map(|current| format!(": {current}"))
-                    .unwrap_or_default();
-                Line::from(format!("  {label}{current}"))
-            }
-            ConfigPickerItem::Value { choice, .. } => {
-                let marker = picker.current.as_deref() == Some(choice.value.as_str());
-                Line::from(format!(
-                    "{} {}",
-                    if marker { theme::glyphs().check } else { " " },
-                    config_choice_name(choice)
-                ))
-            }
-        })
-        .collect::<Vec<_>>();
-    let title = if picker.filter.is_empty() {
-        format!(" {} ", picker.title)
-    } else {
-        format!(" {}: {} ", picker.title, picker.filter.value())
-    };
+    let rows = picker.rows();
+    if picker.dialog {
+        return Some(render_config_dialog(frame, area, picker, rows));
+    }
+    let title = format!(" {} ", picker.title());
     let width = rows
         .iter()
         .map(Line::width)
@@ -438,6 +472,63 @@ pub(super) fn render_config_picker(
     }
     picker.form.end_frame(ConfigControl::Values);
     Some(outer)
+}
+
+fn render_config_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    picker: &mut ConfigPicker,
+    rows: Vec<Line<'static>>,
+) -> Rect {
+    let width = area
+        .width
+        .saturating_sub(4)
+        .clamp(32, 76)
+        .min(area.width.max(1));
+    let desired_height = u16::try_from(rows.len().saturating_add(4)).unwrap_or(u16::MAX);
+    let height = desired_height.min(area.height.max(1)).min(16);
+    let popup = crate::modal::centered_modal_rect_fixed(frame, width, height, area);
+    let inner = popup.inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    let title = Line::from(Span::styled(
+        format!(" {} ", picker.title()),
+        theme::title(true),
+    ));
+    frame.render_widget(
+        theme::panel(true)
+            .title(title)
+            .title_bottom(Line::from(Span::styled(" Esc close ", theme::muted())).right_aligned()),
+        popup,
+    );
+
+    picker.form.begin_frame();
+    picker
+        .form
+        .declare(ConfigControl::Filter, ControlKind::TextField);
+    ChoiceList::render(
+        frame,
+        chunks[0],
+        &rows,
+        picker.selected(),
+        &mut picker.form,
+        ConfigControl::Values,
+    );
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No matches").style(theme::muted()),
+            chunks[0],
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(" type to filter · ↑/↓ select · Enter choose ").style(theme::muted()),
+        chunks[1],
+    );
+    picker.area = popup;
+    picker.form.end_frame(ConfigControl::Values);
+    popup
 }
 
 #[cfg(test)]
@@ -560,6 +651,7 @@ mod tests {
         chat.set_input("/config".into());
         assert_eq!(chat.submit_input(), ChatAction::None);
         assert!(chat.config_picker_active());
+        assert!(chat.config_picker.as_ref().unwrap().dialog);
         assert!(
             drawn_transcript(&mut chat, 100, 24)
                 .join("\n")
@@ -567,6 +659,7 @@ mod tests {
         );
         type_text(&mut chat, "approval");
         assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+        assert!(chat.config_picker.as_ref().unwrap().dialog);
         assert!(
             drawn_transcript(&mut chat, 100, 24)
                 .join("\n")
@@ -580,6 +673,11 @@ mod tests {
                 value: "allow".into(),
             }
         );
+
+        chat.set_input("/config approval_mode".into());
+        assert_eq!(chat.submit_input(), ChatAction::None);
+        assert!(chat.config_picker.as_ref().unwrap().dialog);
+        chat.handle_key(key(KeyCode::Esc));
 
         chat.set_input("/config approval_mode prompt".into());
         assert_eq!(

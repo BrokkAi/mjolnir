@@ -45,10 +45,13 @@ After this change, a person in a live session can run `/config` to see every sel
 - Decision: Apply one setting per user selection rather than batching several settings in the web dialog.
   Rationale: A model change can replace the effort catalogue. Sequential one-setting mutations preserve the harness's ordering and make each rejection attributable.
   Date/Author: 2026-10-28 / Codex
+- Decision: Make `/config` open a centered terminal dialog while leaving `/model` and `/effort` on the existing anchored dropdowns.
+  Rationale: The complete settings catalogue needs more visual separation than an anchored model picker, while the focused shortcuts remain fastest in their existing form.
+  Date/Author: 2026-10-28 / Codex
 
 ## Outcomes & Retrospective
 
-The feature is implemented on both interactive clients. The full `brokk-mj-chat` suite (419 tests), `brokk-mj-core` suite (549 tests), and `brokk-mj-controller` suite (2184 tests) pass with 17 controller tests ignored for their documented external prerequisites. Workspace clippy passes with warnings denied. The complete web suite passes 58 unit tests and 114 deterministic browser tests, with 3 environment-dependent skips.
+The feature is implemented on both interactive clients. `/config` opens a centered terminal dialog, while the browser exposes a Session settings modal and keeps the prompt settings visible. The full `brokk-mj-chat` suite (419 tests), `brokk-mj-core` suite (549 tests), and `brokk-mj-controller` suite (2184 tests) pass with 17 controller tests ignored for their documented external prerequisites. Workspace clippy passes with warnings denied. The complete web suite passes 58 unit tests and 114 deterministic browser tests, with 3 environment-dependent skips.
 
 A real harness is installed in the container, but no configured Mjolnir profile or provider login exists, so the paid real-harness path was not exercised. The shipped viewer assets and daemon projection were exercised with an arbitrary `approval_mode` option, and terminal command and picker transitions were covered directly.
 
