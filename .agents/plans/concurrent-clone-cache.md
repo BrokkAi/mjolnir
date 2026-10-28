@@ -14,7 +14,7 @@ Concurrent container launches for the same repository should share an overlappin
 - [x] (2026-10-28) Retain each remote lifecycle's identity and last notice together so unchanged notices are not redisplayed.
 - [x] (2026-10-28) Add and run isolated concurrency, eviction, failure cleanup, and notification replay regressions; the real-Git test and both lifecycle-notice tests pass.
 - [x] (2026-10-28) Run touched-crate suites, workspace clippy, and formatting; review the diff and merge upstream cleanly.
-- [ ] Commit the final host-only pin correction and push all work to origin/master.
+- [x] (2026-10-28) Commit the final host-only pin correction and push all work to origin/master (`bcbf7dd75`).
 
 ## Surprises & Discoveries
 
@@ -26,7 +26,7 @@ Use Git's existing local mirror clone under the shared lock to pin a private imm
 
 ## Outcomes & Retrospective
 
-Implementation is complete and focused regressions pass. The real-Git concurrency regression passed in 6.46 seconds, including a wait exceeding the former five-second limit, one refresh shared by both preparations, eviction during a paused reader, exact cutoff history, and failure cleanup. The lifecycle-notice filter passed both selected tests. Upstream merged cleanly and the first full controller/CLI test run passed. Final review moved temporary full-history pins out of session-mounted subtrees; the strengthened concurrency regression also checks this boundary. Final validation is complete: the corrected concurrency regression passes; the final controller suite passed 2,188 tests with one timing failure in the existing local-bare hung-launch test (5.37 seconds against a five-second bound), which passed alone in 1.62 seconds. The earlier full controller suite passed all 2,189 tests, and the unchanged CLI suite and isolated integrations passed. Workspace `cargo clippy --all-targets -- -D warnings` and formatting passed. No live daemon or session was restarted. No live daemon or session was restarted for validation.
+Implementation is complete and focused regressions pass. The real-Git concurrency regression passed in 6.46 seconds, including a wait exceeding the former five-second limit, one refresh shared by both preparations, eviction during a paused reader, exact cutoff history, and failure cleanup. The lifecycle-notice filter passed both selected tests. Upstream merged cleanly and the first full controller/CLI test run passed. Final review moved temporary full-history pins out of session-mounted subtrees; the strengthened concurrency regression also checks this boundary. Final validation is complete: the corrected concurrency regression passes; the final controller suite passed 2,188 tests with one timing failure in the existing local-bare hung-launch test (5.37 seconds against a five-second bound), which passed alone in 1.62 seconds. The earlier full controller suite passed all 2,189 tests, and the unchanged CLI suite and isolated integrations passed. Workspace `cargo clippy --all-targets -- -D warnings` and formatting passed. No live daemon or session was restarted for validation.
 
 ## Context and Orientation
 
@@ -79,3 +79,5 @@ Plan updated 2026-10-28: focused regressions pass; checkpoint the coherent fix b
 Plan updated 2026-10-28: final review placed the full-history pin in a private preparation directory beside the shared mirror. Keeping that workspace owned until cleanup also avoids deleting a vacated temporary path after publication. The first full merged controller/CLI suites passed; rerun them for this final boundary correction, then run workspace clippy.
 
 Plan updated 2026-10-28: final code and regression validation is complete. The sole final-suite failure was an existing launch-cancellation timing assertion, unrelated to the container Git cache, and passed on its focused rerun; no timing bounds were changed. Required workspace clippy passed in the dev profile. Commit and push remain.
+
+Plan completed 2026-10-28: implementation commits `6ffe73392` and `bcbf7dd75`, with upstream merge `cab7a32f4`, were pushed successfully to origin/master. The shared mirror refresh and pin are the only serialized work; session-specific bundle work runs independently, and the TUI reports retained notices only on transitions. The fix is committed and published to the repository; no installation or live restart was performed.
