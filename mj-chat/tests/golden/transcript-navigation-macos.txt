@@ -100,7 +100,7 @@ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === page up (60x24) ===
 ╭ Conversation · message 30 of 40 · End to follow ─────────╮
@@ -126,7 +126,7 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === page down follows (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮
@@ -152,7 +152,7 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === ctrl end follows (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮
@@ -178,7 +178,7 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === ctrl home (40x24) ===
 ╭ Conversation · message 1 of 200 · En…╮
@@ -364,7 +364,7 @@ input cursor: 12
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === revealed transcript tail (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮
@@ -390,7 +390,7 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === reopened transcript tail (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮
@@ -416,7 +416,7 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === short transcript ignores scrolling (40x24) ===
 ╭ Conversation ────────────────────────╮
@@ -469,7 +469,7 @@ viewport unchanged: true
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 track content surface: None
 
 === scrollbar track seeks (60x24) ===
@@ -496,7 +496,7 @@ track content surface: None
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 anchor: Row { entry: 0, row: 99 }
 
 === scrollbar release preserves seek (60x24) ===
@@ -523,7 +523,7 @@ anchor: Row { entry: 0, row: 99 }
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 anchor unchanged: true
 
 === empty transcript drag (60x24) ===
@@ -550,7 +550,7 @@ anchor unchanged: true
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 scrollbar dragging: false
 
 === empty transcript drag (4x24) ===
@@ -666,7 +666,7 @@ scrollbar dragging: false
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === historical view after prompt and reply (60x24) ===
 ╭ Conversation · message 30 of 42 · End to follow ─────────╮
@@ -692,7 +692,7 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === historical view while reply grows (60x24) ===
 ╭ Conversation · message 30 of 42 · End to follow ─────────╮
@@ -718,7 +718,7 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === historical identity after window slides (60x24) ===
 ╭ Conversation · message 20 of 32 · End to follow ─────────╮
@@ -744,7 +744,7 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === explicit end resumes following updates (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮
@@ -770,7 +770,7 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === historical view while sending shell (60x24) ===
 ╭ Conversation · message 30 of 40 · End to follow ─────────╮
@@ -796,7 +796,7 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === historical view after shell and reply (60x24) ===
 ╭ Conversation · message 30 of 42 · End to follow ─────────╮
@@ -822,7 +822,7 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === automatic reveal follows materialized update (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮
@@ -848,7 +848,7 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === explicit reveal navigation (same row) (60x24) ===
 ╭ Conversation · message 1 of 41 · End to follow ──────────╮
@@ -874,7 +874,7 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === restored explicit reveal navigation (same row) (60x24) ===
 ╭ Conversation · message 1 of 41 · End to follow ──────────╮
@@ -900,7 +900,7 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === explicit reveal navigation (away and back) (60x24) ===
 ╭ Conversation · message 1 of 41 · End to follow ──────────╮
@@ -926,7 +926,7 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === restored explicit reveal navigation (away and back) (60x24) ===
 ╭ Conversation · message 1 of 41 · End to follow ──────────╮
@@ -952,4 +952,4 @@ Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+Tab pane │ ctrl+b then q detach · : / ? palette
