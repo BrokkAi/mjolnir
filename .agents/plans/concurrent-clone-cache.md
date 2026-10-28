@@ -13,7 +13,8 @@ Concurrent container launches for the same repository should share an overlappin
 - [x] (2026-10-28) Shorten the shared mirror critical section and share overlapping refreshes.
 - [x] (2026-10-28) Retain each remote lifecycle's identity and last notice together so unchanged notices are not redisplayed.
 - [x] (2026-10-28) Add and run isolated concurrency, eviction, failure cleanup, and notification replay regressions; the real-Git test and both lifecycle-notice tests pass.
-- [ ] Run touched-crate test suites and workspace clippy, review the diff, commit, merge any upstream changes, and push to origin/master.
+- [x] (2026-10-28) Run touched-crate suites, workspace clippy, and formatting; review the diff and merge upstream cleanly.
+- [ ] Commit the final host-only pin correction and push all work to origin/master.
 
 ## Surprises & Discoveries
 
@@ -25,7 +26,7 @@ Use Git's existing local mirror clone under the shared lock to pin a private imm
 
 ## Outcomes & Retrospective
 
-Implementation is complete and focused regressions pass. The real-Git concurrency regression passed in 6.46 seconds, including a wait exceeding the former five-second limit, one refresh shared by both preparations, eviction during a paused reader, exact cutoff history, and failure cleanup. The lifecycle-notice filter passed both selected tests. Full touched-crate suites, workspace clippy, and upstream integration remain. No live daemon or session was restarted for validation.
+Implementation is complete and focused regressions pass. The real-Git concurrency regression passed in 6.46 seconds, including a wait exceeding the former five-second limit, one refresh shared by both preparations, eviction during a paused reader, exact cutoff history, and failure cleanup. The lifecycle-notice filter passed both selected tests. Upstream merged cleanly and the first full controller/CLI test run passed. Final review moved temporary full-history pins out of session-mounted subtrees; the strengthened concurrency regression also checks this boundary. Final validation is complete: the corrected concurrency regression passes; the final controller suite passed 2,188 tests with one timing failure in the existing local-bare hung-launch test (5.37 seconds against a five-second bound), which passed alone in 1.62 seconds. The earlier full controller suite passed all 2,189 tests, and the unchanged CLI suite and isolated integrations passed. Workspace `cargo clippy --all-targets -- -D warnings` and formatting passed. No live daemon or session was restarted. No live daemon or session was restarted for validation.
 
 ## Context and Orientation
 
@@ -33,7 +34,7 @@ Implementation is complete and focused regressions pass. The real-Git concurrenc
 
 ## Plan of Work
 
-First, revise the preparation script to capture a successful refresh generation before acquiring the shared lock. Under the lock, refresh only when no overlapping caller has published a new generation. Clone the mirror locally into a private temporary repository under the session snapshot directory, then release the shared lock exactly once. Perform subsequent work only against this private repository; remove it on success, failure, and handled cancellation. Keep partial files distinct from the final snapshot and do not expose full history in a completed history-limited session's mounted directory.
+First, revise the preparation script to capture a successful refresh generation before acquiring the shared lock. Under the lock, refresh only when no overlapping caller has published a new generation. Clone the mirror locally into a private temporary repository in an unmounted host preparation directory beside the mirror, then release the shared lock exactly once. Perform subsequent work only against this private repository; remove it on success, failure, and handled cancellation. Keep partial files distinct from the final snapshot and do not expose full history in a completed history-limited session's mounted directory.
 
 Next, extend the existing UI lifecycle observation to retain operation identity and notice together. A new operation or changed notice is reported once; an unchanged retained notice never replaces a newer notice or reappears after dismissal. Forget observations when operations disappear.
 
@@ -74,3 +75,7 @@ Plan created 2026-10-28 after diagnosis and repository inspection.
 Plan updated 2026-10-28: implemented private object pins, successful-refresh generation sharing, a five-minute bounded cancellable wait, and a single UI lifecycle observation map; added deterministic real-Git and notice replay regressions. Shell syntax checks pass; targeted Rust tests are compiling.
 
 Plan updated 2026-10-28: focused regressions pass; checkpoint the coherent fix before merging the concurrent upstream release and running final validation. The initial test closure ownership error was corrected before the successful regression run.
+
+Plan updated 2026-10-28: final review placed the full-history pin in a private preparation directory beside the shared mirror. Keeping that workspace owned until cleanup also avoids deleting a vacated temporary path after publication. The first full merged controller/CLI suites passed; rerun them for this final boundary correction, then run workspace clippy.
+
+Plan updated 2026-10-28: final code and regression validation is complete. The sole final-suite failure was an existing launch-cancellation timing assertion, unrelated to the container Git cache, and passed on its focused rerun; no timing bounds were changed. Required workspace clippy passed in the dev profile. Commit and push remain.

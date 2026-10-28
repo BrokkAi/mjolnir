@@ -276,16 +276,18 @@ mirror="$entry/repo.git"
 # is authoritative; this optimistic read may race eviction or publication.
 observed_generation=$(cat "$entry/generation" 2>/dev/null || :)
 lock="$cache_root/locks/$key"
-partial=$(mktemp -d "$cache_root/mirrors/$key.partial-XXXXXX")
+preparation=$(mktemp -d "$cache_root/mirrors/$key.partial-$$-XXXXXX")
+partial="$preparation/mirror"
 snapshot_partial="$snapshot.partial-$$"
-pinned="$snapshot.pinned-$$"
+# Full history must never enter a session's mounted subtree, even temporarily.
+pinned="$preparation/pinned.git"
 cutoff_repository="$snapshot.cutoff-$$"
 locked=0
 cleanup() {
     if [ "$locked" -eq 1 ]; then
         rmdir "$lock"
     fi
-    rm -rf -- "$partial" "$snapshot_partial" "$pinned" "$cutoff_repository"
+    rm -rf -- "$preparation" "$snapshot_partial" "$cutoff_repository"
 }
 trap cleanup EXIT
 trap 'exit 129' HUP
@@ -317,13 +319,14 @@ git_remote() {
 generation=$(cat "$entry/generation" 2>/dev/null || :)
 if [ ! -d "$mirror" ]; then
     rm -rf -- "$entry"
+    mkdir "$partial"
     git_remote clone --mirror -- "$source" "$partial/repo.git"
     git -C "$partial/repo.git" config gc.auto 0
-    printf '%s\n' "${partial##*/}" > "$partial/generation"
+    printf '%s\n' "${preparation##*/}" > "$partial/generation"
     mv -- "$partial" "$entry"
 elif [ -z "$generation" ] || [ "$generation" = "$observed_generation" ]; then
     git_remote -C "$mirror" remote update --prune
-    printf '%s\n' "${partial##*/}" > "$entry/generation"
+    printf '%s\n' "${preparation##*/}" > "$entry/generation"
 fi
 : > "$entry/last-used"
 # Own every object and ref before releasing the mirror to refresh or eviction.
@@ -1043,6 +1046,16 @@ exec "$CACHE_TEST_MKDIR" "$@"
             let early = done_rx.recv_timeout(Duration::from_secs(6));
             std::fs::write(root.join("release-refresh"), []).unwrap();
             wait_for("snapshot-pinned");
+            let mounted_entries = std::fs::read_dir(snapshot_a.parent().unwrap())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect::<Vec<_>>();
+            assert!(
+                mounted_entries
+                    .iter()
+                    .all(|entry| entry.starts_with("repository.bundle.cutoff-")),
+                "a full-history pin entered the mounted session subtree: {mounted_entries:?}"
+            );
             let completed = match early {
                 Ok(result) => result,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -1077,6 +1090,7 @@ exec "$CACHE_TEST_MKDIR" "$@"
                 .count(),
             1
         );
+        assert_eq!(std::fs::read_dir(cache.join("mirrors")).unwrap().count(), 0);
         for snapshot in [&snapshot_a, &snapshot_b] {
             assert_eq!(
                 git(root, &["bundle", "list-heads", snapshot.to_str().unwrap()]),
@@ -1128,6 +1142,11 @@ exec "$CACHE_TEST_MKDIR" "$@"
             0
         );
         assert!(!cache.join("locks/repository").exists());
+        assert!(
+            std::fs::read_dir(cache.join("mirrors"))
+                .unwrap()
+                .all(|entry| { entry.unwrap().file_name() == "repository" })
+        );
     }
 
     #[test]
