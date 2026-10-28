@@ -4827,7 +4827,7 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
                 summary.insert(format!("{field}_environments"), environments(value));
             }
         }
-        for field in ["page", "notice", "error"] {
+        for field in ["page", "subagent_options", "notice", "error"] {
             if let Some(value) = response.get(field) {
                 summary.insert(field.to_owned(), value.clone());
             }

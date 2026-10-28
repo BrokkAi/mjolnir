@@ -32,6 +32,9 @@ pub(super) struct SettingsPageRequest {
 #[derive(Debug, Serialize)]
 pub(super) struct SettingsPageResponse {
     page: view::SettingsPage,
+    /// The draft's discovered sub-agent choices, which the page refreshes
+    /// while they are still being discovered.
+    subagent_options: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,7 +76,8 @@ fn document(
     let (mut original, mut draft) = draft::open(config);
     hidden::hide(&mut original);
     hidden::hide(&mut draft);
-    let unreachable = discover(&mut draft, capabilities);
+    // A saved configuration's selections are already hydrating.
+    let unreachable = discover(&mut draft, capabilities, None);
     let page = render(&draft, page, unreachable.as_deref())
         .or_else(|_| render(&draft, &[], None))
         .expect("the first settings page always renders");
@@ -117,12 +121,23 @@ pub(super) async fn read_settings(
 /// and effort choices. Their identity includes each profile's environment,
 /// which the browser's draft carries hidden, so they are computed on a copy
 /// with the stored values put back, and only the choices, which hold no
-/// secrets, are copied over. Returns what discovery could not reach.
-fn discover(draft: &mut Value, capabilities: &ProfileCapabilitiesSnapshot) -> Option<String> {
+/// secrets, are copied over. A selected model's efforts are discovered once
+/// it is selected, so `warm` is handed the draft. Returns what discovery
+/// could not reach.
+fn discover(
+    draft: &mut Value,
+    capabilities: &ProfileCapabilitiesSnapshot,
+    warm: Option<&dyn api::SubagentBackend>,
+) -> Option<String> {
     let discovered = (|| {
         let stored = serde_json::to_value(Config::load().ok()?).ok()?;
         let mut real = draft.clone();
         hidden::restore(&mut real, &stored).ok()?;
+        if let Some(backend) = warm
+            && let Ok(config) = draft::config_from_draft(real.clone())
+        {
+            backend.warm_profile_capabilities(&config);
+        }
         let unreachable = discovery::fill_subagent_options(&mut real, capabilities).ok()?;
         Some((real["_subagent_options"].take(), unreachable))
     })();
@@ -162,13 +177,17 @@ pub(super) async fn render_settings_page(
 ) -> Result<Json<SettingsPageResponse>, ApiError> {
     check_draft(&request.draft)?;
     let capabilities = capabilities(&state);
+    let backend = state.subagent.clone();
     // Discovery reads the configuration file.
     tokio::task::spawn_blocking(move || {
         let mut draft = request.draft;
-        let unreachable = discover(&mut draft, &capabilities);
+        let unreachable = discover(&mut draft, &capabilities, backend.as_deref());
         let page =
             render(&draft, &request.path, unreachable.as_deref()).map_err(ApiError::not_found)?;
-        Ok(SettingsPageResponse { page })
+        Ok(SettingsPageResponse {
+            page,
+            subagent_options: draft["_subagent_options"].take(),
+        })
     })
     .await
     .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
@@ -181,16 +200,17 @@ pub(super) async fn edit_settings(
 ) -> Result<Json<SettingsEditResponse>, ApiError> {
     check_draft(&request.draft)?;
     let capabilities = capabilities(&state);
+    let backend = state.subagent.clone();
     // Discovery reads the configuration file, and an edit may expand `~`
     // against this user's home directory.
     tokio::task::spawn_blocking(move || {
         let mut before = request.draft;
-        let unreachable = discover(&mut before, &capabilities);
+        let unreachable = discover(&mut before, &capabilities, None);
         let mut draft = before.clone();
         match view::apply(&mut draft, &request.page, request.edit) {
             Ok(result) => {
                 // A new model offers its own efforts.
-                let unreachable = discover(&mut draft, &capabilities);
+                let unreachable = discover(&mut draft, &capabilities, backend.as_deref());
                 let page = render(&draft, &result.page, unreachable.as_deref())
                     .or_else(|_| render(&draft, &request.page, unreachable.as_deref()))
                     .map_err(ApiError::not_found)?;

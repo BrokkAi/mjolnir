@@ -154,10 +154,14 @@ impl DashboardState {
             return None;
         };
         let config = config_from_draft(dialog.draft.clone()).ok()?;
-        let key = config.profiles_discovery_key();
-        // Saved profiles are already hydrating from daemon startup/reload.
-        if key == self.config.profiles_discovery_key()
+        // A selected model's efforts are discovered only once it is selected,
+        // so a draft choosing another model is warmed like a new profile.
+        let key = config.capability_demand_key();
+        // Saved profiles and selections are already hydrating from daemon
+        // startup/reload.
+        if key == self.config.capability_demand_key()
             || self.profile_hydration_requests.contains_key(&key)
+            || self.profile_hydration_sent.as_ref() == Some(&key)
         {
             return None;
         }
@@ -166,9 +170,7 @@ impl DashboardState {
             .map(|(id, profile)| profile.capabilities_key(id))
             .filter(|identity| !self.profile_capabilities.profiles.contains_key(identity))
             .collect::<BTreeSet<_>>();
-        if missing.is_empty() {
-            return None;
-        }
+        self.profile_hydration_sent = Some(key.clone());
         self.profile_hydration_requests.insert(key.clone(), missing);
         Some(DashboardAction::WarmProfileCapabilities {
             key,
@@ -178,7 +180,8 @@ impl DashboardState {
 
     pub fn apply_profile_hydration(&mut self, key: String, result: Result<(), String>) {
         if let Err(error) = result
-            && self.profile_hydration_requests.contains_key(&key)
+            && (self.profile_hydration_requests.contains_key(&key)
+                || self.profile_hydration_sent.as_ref() == Some(&key))
         {
             self.profile_hydration_errors.insert(key, error.clone());
             self.set_notice(format!("Profile capability hydration failed: {error}"));

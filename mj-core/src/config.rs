@@ -542,6 +542,40 @@ impl Config {
         ))
     }
 
+    /// The models this configuration selects on profile `id`, whose efforts
+    /// its settings offer: the sub-agent choices, which any enabled profile
+    /// may serve, and the reviewer's model on the review profile. Only these
+    /// and each profile's current model have their efforts discovered ahead
+    /// of a request; aggregating harnesses advertise hundreds of models.
+    pub fn selected_models(&self, id: &str) -> BTreeSet<String> {
+        let mut models = [&self.subagents.straightforward, &self.subagents.subtle]
+            .into_iter()
+            .flatten()
+            .map(|choice| choice.model.clone())
+            .collect::<BTreeSet<_>>();
+        if self.review.profile.as_deref() == Some(id)
+            && let Some(model) = &self.review.model
+        {
+            models.insert(model.clone());
+        }
+        models
+    }
+
+    /// Identity of what capability hydration covers for this configuration:
+    /// its profile definitions and the models each enabled profile is
+    /// selected for.
+    pub fn capability_demand_key(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let selected: BTreeMap<_, _> = self
+            .enabled_profiles()
+            .map(|(id, _)| (id, self.selected_models(id)))
+            .collect();
+        crate::hex::lower_hex(Sha256::digest(
+            serde_json::to_vec(&(self.profiles_discovery_key(), selected))
+                .expect("capability demand serializes"),
+        ))
+    }
+
     /// An opaque identity safe to send to control surfaces without exposing
     /// profile environments. Policies and unrelated preferences are absent.
     pub fn subagent_discovery_key(&self, parent: &str, model: Option<&str>) -> String {
