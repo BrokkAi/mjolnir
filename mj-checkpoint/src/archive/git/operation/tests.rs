@@ -352,7 +352,7 @@ fn copy_tree(from: &Path, to: &Path) {
 
 fn capture(source: &Path, base: &str) -> RepositorySnapshot {
     let snapshot = collect_git_snapshot(
-        &crate::test_support::Git225,
+        &crate::test_support::Git231,
         source,
         &GitCollectionSpec {
             id: "repo".into(),
@@ -376,7 +376,7 @@ fn restore(lab: &Lab, archive: &Path, name: &str) -> PathBuf {
     let workspace = lab.directory.path().join(name);
     fs::create_dir_all(&workspace).unwrap();
     let destination = clone_repository(&workspace, &lab.origin, "repo");
-    crate::checkpoint::restore_repositories(archive, &workspace, &crate::test_support::Git225)
+    crate::checkpoint::restore_repositories(archive, &workspace, &crate::test_support::Git231)
         .unwrap();
     destination
 }

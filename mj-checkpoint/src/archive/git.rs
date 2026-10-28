@@ -633,15 +633,19 @@ fn git_directories(runner: &dyn GitCommandRunner, repository: &Path) -> Result<(
     let output = git_text(
         runner,
         repository,
-        ["rev-parse", "--absolute-git-dir", "--git-common-dir"],
+        [
+            "rev-parse",
+            "--path-format=absolute",
+            "--absolute-git-dir",
+            "--git-common-dir",
+        ],
     )
     .context("locate the Git directories")?;
     let mut lines = output.lines();
     let (Some(git_dir), Some(common_dir)) = (lines.next(), lines.next()) else {
         bail!("git rev-parse named no common directory: {output}");
     };
-    // `--git-common-dir` may be relative to the directory Git ran in.
-    Ok((PathBuf::from(git_dir), repository.join(common_dir)))
+    Ok((PathBuf::from(git_dir), PathBuf::from(common_dir)))
 }
 
 fn same_directory(left: &Path, right: &Path) -> Result<bool> {
@@ -2354,7 +2358,7 @@ fn ensure_branch_available_for_checkout(
         );
     }
 
-    // Git 2.25 has no `worktree list -z`. A branch line holds a ref name,
+    // Git 2.31 has no `worktree list -z`. A branch line holds a ref name,
     // which cannot contain a newline.
     let worktrees = run_git(runner, repository, ["worktree", "list", "--porcelain"], &[])?;
     ensure!(

@@ -1653,7 +1653,7 @@ async fn prepare_and_start_harness(
             claude_mailbox_hook_available = mailbox_hook_available;
             registered
         }
-        HarnessKind::Kimi if config.reviewer_launch.is_some() => {
+        HarnessKind::Kimi if subagent_role.is_some() => {
             let budget = preparation_step(
                 root,
                 status,
@@ -1669,7 +1669,7 @@ async fn prepare_and_start_harness(
                 .clone();
             let root = root.to_owned();
             let session_id = config.session_id.clone();
-            let role = subagent_role.context("reviewer child has no handback MCP role")?;
+            let role = subagent_role.context("Kimi session has no MCP role")?;
             bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                 if step_cancel.is_cancelled() {
                     bail!("preparation cancelled before configuring the Kimi profile");

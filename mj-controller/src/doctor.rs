@@ -47,6 +47,8 @@ pub(crate) const APPLE_CONTAINER_INSTALL_URL: &str =
 /// or a credential helper waiting on something that will never arrive.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
+const MINIMUM_GIT_VERSION: (u64, u64) = (2, 31);
+
 /// The executor `mj doctor` and `mj setup` run their prerequisite probes
 /// through: one deadline per probe, so a wedged runtime cannot hang the run.
 pub const fn probe_executor() -> BoundedProcessExecutor {
@@ -195,6 +197,7 @@ pub fn run_with_config_path(
 ) -> Vec<DoctorCheck> {
     let (loaded, mut checks) = configuration_checks(config_path);
     let config: ConfigStatus<'_> = loaded.as_ref().map_err(|gap| *gap);
+    checks.extend(git_checks(config, executor));
     checks.push(harness_discovery_check(config, executor));
     if let Some(check) = session_environment_check() {
         checks.push(check);
@@ -238,6 +241,89 @@ pub fn run_with_config_path(
     // Reported last, where it has always been.
     checks.push(apple_container);
     checks
+}
+
+fn git_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<DoctorCheck> {
+    let mut checks = vec![git_version_check(
+        "git.local",
+        "this machine",
+        CommandSpec::new("git", ["--version"]).purpose("check local Git version"),
+        executor,
+    )];
+    if let Ok(config) = config {
+        for (id, target) in &config.targets {
+            if let TargetTemplate::SshBare { ssh, .. } = target {
+                let ssh = RuntimeSshTarget::from(ssh);
+                let mut command = ssh_validation_command(
+                    &ssh,
+                    vec!["git".into(), "--version".into()],
+                    "check remote Git version",
+                );
+                // Like the connectivity probe, doctor must not accept a new
+                // host key, even when the target normally uses accept-new.
+                command
+                    .args
+                    .splice(0..0, ["-o".into(), "StrictHostKeyChecking=yes".into()]);
+                checks.push(git_version_check(
+                    &format!("git.ssh-bare.{id}"),
+                    &ssh.destination,
+                    command,
+                    executor,
+                ));
+            }
+        }
+    }
+    checks
+}
+
+fn git_version_check(
+    id: &str,
+    location: &str,
+    command: CommandSpec,
+    executor: &impl CommandExecutor,
+) -> DoctorCheck {
+    let title = format!("Git on {location}");
+    let minimum = format!("{}.{}", MINIMUM_GIT_VERSION.0, MINIMUM_GIT_VERSION.1);
+    let remediation = format!(
+        "Install or upgrade to Git {minimum} or newer on {location}, ensure it is the `git` found on PATH, then rerun `mj doctor`."
+    );
+    let detail = match executor.execute(&command) {
+        Ok(output) if output.status == 0 => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            let version = version.trim();
+            // Apple Git appends a build label; Git for Windows adds dotted
+            // suffixes. Only the numeric major/minor determine this minimum.
+            let parsed = version.strip_prefix("git version ").and_then(|version| {
+                let mut parts = version.split_whitespace().next()?.split('.');
+                Some((
+                    parts.next()?.parse::<u64>().ok()?,
+                    parts.next()?.parse::<u64>().ok()?,
+                ))
+            });
+            match parsed {
+                Some(found) if found >= MINIMUM_GIT_VERSION => {
+                    return DoctorCheck::ready(
+                        id,
+                        title,
+                        format!("{version} meets the minimum required version {minimum}."),
+                    );
+                }
+                Some(_) => format!(
+                    "{version} is older than the minimum required version {minimum}; workspace moves and other Git operations require a newer Git."
+                ),
+                None => format!(
+                    "Could not determine the Git version from {version:?}; Git {minimum} or newer is required."
+                ),
+            }
+        }
+        Ok(output) => format!(
+            "`git --version` failed (exit {}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Err(error) => format!("Could not run `git --version`: {error:#}"),
+    };
+    DoctorCheck::fixable(id, title, detail, remediation)
 }
 
 fn build_cache_checks(

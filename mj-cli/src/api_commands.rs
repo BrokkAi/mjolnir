@@ -1752,17 +1752,11 @@ pub(crate) async fn fetch(args: FetchArgs) -> Result<()> {
             .context("write the fetched path")?;
         return stdout.flush().context("write the fetched path");
     }
-    let local = fetched_location(&std::env::temp_dir(), &args.session, &fetched)?;
-    mj_core::config::atomic_write(&local, &fetched.bytes)?;
+    let saved = fetched.save(&std::env::temp_dir(), &args.session)?;
     if args.json {
-        return print_json(&serde_json::json!({
-            "path": local,
-            "kind": fetched.kind,
-            "source": fetched.path,
-            "bytes": fetched.bytes.len(),
-        }));
+        return print_json(&saved);
     }
-    println!("{}", local.display());
+    println!("{}", saved.path.display());
     Ok(())
 }
 
@@ -1798,42 +1792,6 @@ fn listing_lines(listing: &mj_checkpoint::archive::SessionListing) -> Vec<String
             )
         })
         .collect()
-}
-
-/// Where a fetched path lands on this machine:
-/// `<temp>/mjolnir/<session>/<the path on the target>`, with `.zip` after a
-/// directory's name. Keeping the target's whole path means two sub-agents'
-/// `report.md` files, or a fetch from two sessions, never overwrite each other.
-fn fetched_location(
-    temp: &std::path::Path,
-    session: &str,
-    fetched: &mj_checkpoint::archive::FetchedPath,
-) -> Result<PathBuf> {
-    let mut components = std::path::Path::new(session).components();
-    ensure!(
-        matches!(
-            (components.next(), components.next()),
-            (Some(std::path::Component::Normal(_)), None)
-        ),
-        "session id {session:?} cannot name a directory"
-    );
-    let mut local = temp.join("mjolnir").join(session);
-    let mut named = false;
-    // Only plain names are kept, so the result cannot leave the session's
-    // directory whatever the target answered.
-    for component in std::path::Path::new(&fetched.path).components() {
-        if let std::path::Component::Normal(part) = component {
-            local.push(part);
-            named = true;
-        }
-    }
-    ensure!(named, "the target answered no path for the fetch");
-    if fetched.kind == mj_checkpoint::archive::FetchedKind::Directory {
-        let mut name = local.file_name().unwrap_or_default().to_os_string();
-        name.push(".zip");
-        local.set_file_name(name);
-    }
-    Ok(local)
 }
 
 pub(crate) async fn sessions(
@@ -2578,55 +2536,6 @@ mod tests {
             listing_lines(&list(&probes.join("probe.log"))).join("\n"),
         );
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "fetch-ls", &output);
-    }
-
-    #[test]
-    fn a_fetched_path_lands_under_its_session_and_cannot_leave_it() {
-        use mj_checkpoint::archive::{FetchedKind, FetchedPath};
-        let temp = PathBuf::from("/scratch");
-        let fetched = |kind, path: &str| FetchedPath {
-            kind,
-            path: path.to_owned(),
-            bytes: Vec::new(),
-        };
-        // Two children's reports share a name; the target path keeps them apart.
-        assert_eq!(
-            fetched_location(
-                &temp,
-                "d8443f17",
-                &fetched(
-                    FetchedKind::File,
-                    "/workspace/d8443f17/.mj-agents/c1/report.md"
-                ),
-            )
-            .unwrap(),
-            PathBuf::from("/scratch/mjolnir/d8443f17/workspace/d8443f17/.mj-agents/c1/report.md")
-        );
-        assert_eq!(
-            fetched_location(
-                &temp,
-                "d8443f17",
-                &fetched(FetchedKind::Directory, "/tmp/rust-veto-cf")
-            )
-            .unwrap(),
-            PathBuf::from("/scratch/mjolnir/d8443f17/tmp/rust-veto-cf.zip")
-        );
-        // Whatever the target answers, the file stays in the session's directory.
-        assert_eq!(
-            fetched_location(
-                &temp,
-                "s",
-                &fetched(FetchedKind::File, "/a/../../etc/passwd")
-            )
-            .unwrap(),
-            PathBuf::from("/scratch/mjolnir/s/a/etc/passwd")
-        );
-        for session in ["../s", "a/b", "/s", ".."] {
-            assert!(
-                fetched_location(&temp, session, &fetched(FetchedKind::File, "/x")).is_err(),
-                "{session:?} must not name a directory"
-            );
-        }
     }
 
     #[test]

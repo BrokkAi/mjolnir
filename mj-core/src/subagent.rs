@@ -392,6 +392,12 @@ pub struct SubagentToolRequest {
     deny_unknown_fields
 )]
 pub enum SubagentToolAction {
+    Fetch {
+        session_id: String,
+        path: PathBuf,
+        #[serde(default)]
+        ls: bool,
+    },
     ListProfiles,
     RequestReview {},
     Spawn {
@@ -451,6 +457,12 @@ pub enum SubagentToolAction {
     deny_unknown_fields
 )]
 enum SubagentToolActionWire {
+    Fetch {
+        session_id: String,
+        path: PathBuf,
+        #[serde(default)]
+        ls: bool,
+    },
     ListProfiles,
     RequestReview {},
     Spawn {
@@ -548,6 +560,15 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
         let wire =
             serde_json::from_value::<SubagentToolActionWire>(value).map_err(D::Error::custom)?;
         Ok(match wire {
+            SubagentToolActionWire::Fetch {
+                session_id,
+                path,
+                ls,
+            } => Self::Fetch {
+                session_id,
+                path,
+                ls,
+            },
             SubagentToolActionWire::ListProfiles => Self::ListProfiles,
             SubagentToolActionWire::RequestReview {} => Self::RequestReview {},
             SubagentToolActionWire::Spawn {
@@ -790,6 +811,7 @@ pub enum SubagentMcpRole {
     Parent,
 
     MessageOnly,
+    FetchOnly,
     Child,
 }
 
@@ -799,6 +821,7 @@ impl SubagentMcpRole {
         match self {
             Self::Parent => "parent",
             Self::MessageOnly => "message_only",
+            Self::FetchOnly => "fetch_only",
             Self::Child => "child",
         }
     }
@@ -808,9 +831,10 @@ impl SubagentMcpRole {
     #[must_use]
     pub fn tool_names(self) -> &'static [&'static str] {
         match self {
-            Self::Parent => &["spawn", "list_agents", "send_message", "close"],
-            Self::MessageOnly => &["send_message"],
-            Self::Child => &["handback"],
+            Self::Parent => &["spawn", "list_agents", "send_message", "close", "fetch"],
+            Self::MessageOnly => &["send_message", "fetch"],
+            Self::FetchOnly => &["fetch"],
+            Self::Child => &["handback", "fetch"],
         }
     }
 }
@@ -829,6 +853,7 @@ impl std::str::FromStr for SubagentMcpRole {
             "parent" => Ok(Self::Parent),
             "fixed_parent" => Ok(Self::Parent),
             "message_only" => Ok(Self::MessageOnly),
+            "fetch_only" => Ok(Self::FetchOnly),
             "child" => Ok(Self::Child),
             other => anyhow::bail!("unknown sub-agent MCP role {other:?}"),
         }
