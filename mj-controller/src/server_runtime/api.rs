@@ -786,6 +786,63 @@ impl ApiBackend {
         use mj_core::subagent::SubagentToolAction;
         let request_created_at_ms = request.created_at_ms;
         match &request.action {
+            SubagentToolAction::Fetch {
+                session_id,
+                path,
+                ls,
+            } => {
+                let fetch_error = |error| match error {
+                    ExportError::Refused(reason) => anyhow!(reason),
+                    ExportError::Failed(error) => error,
+                };
+                ensure!(
+                    !path.as_os_str().is_empty(),
+                    "path must name a file or directory on the session's target"
+                );
+                let mode = if *ls {
+                    FetchMode::Listing
+                } else {
+                    FetchMode::Content
+                };
+                let fetched = self
+                    .read_file(session_id.clone(), path.clone(), mode)
+                    .await
+                    .map_err(fetch_error)?;
+                if *ls {
+                    let listing: mj_checkpoint::archive::SessionListing =
+                        serde_json::from_slice(&fetched.bytes).context("decode the listing")?;
+                    return Ok(serde_json::to_value(listing)?);
+                }
+                self.require_live_target(parent_session_id)
+                    .map_err(fetch_error)?;
+                let layout = export_layout(parent_session_id.to_owned())
+                    .await
+                    .map_err(fetch_error)?;
+                let mut arguments = vec![
+                    "store-fetch".to_owned(),
+                    "--session".to_owned(),
+                    session_id.clone(),
+                    "--source".to_owned(),
+                    fetched.path,
+                    "--length".to_owned(),
+                    fetched.bytes.len().to_string(),
+                ];
+                if fetched.kind == mj_checkpoint::archive::FetchedKind::Directory {
+                    arguments.push("--directory".to_owned());
+                }
+                let output = worker_command_with_input(
+                    layout,
+                    parent_session_id.to_owned(),
+                    arguments,
+                    "session fetched file storage",
+                    Some(fetched.bytes),
+                )
+                .await
+                .map_err(fetch_error)?;
+                let saved: mj_checkpoint::archive::SavedFetch =
+                    serde_json::from_slice(&output).context("decode the saved fetch")?;
+                Ok(serde_json::to_value(saved)?)
+            }
             SubagentToolAction::RequestReview {} => {
                 self.exports
                     .request_review(parent_session_id.to_owned())
@@ -2412,6 +2469,16 @@ async fn worker_command(
     arguments: Vec<String>,
     purpose: &'static str,
 ) -> Result<Vec<u8>, ExportError> {
+    worker_command_with_input(layout, session_id, arguments, purpose, None).await
+}
+
+async fn worker_command_with_input(
+    layout: SessionExportLayout,
+    session_id: String,
+    arguments: Vec<String>,
+    purpose: &'static str,
+    input: Option<Vec<u8>>,
+) -> Result<Vec<u8>, ExportError> {
     let output: CommandOutput = export_blocking(purpose, move || {
         let binary = format!(
             "{}/hel",
@@ -2419,7 +2486,10 @@ async fn worker_command(
         );
         let mut argv = vec![binary, "worker".to_owned()];
         argv.extend(arguments);
-        let command = targets::command_on_locator(&layout.backend, &session_id, argv, purpose)?;
+        let mut command = targets::command_on_locator(&layout.backend, &session_id, argv, purpose)?;
+        if let Some(input) = input {
+            command = command.with_sensitive_stdin(input);
+        }
         CancellableProcessExecutor::with_timeout(EXPORT_TIMEOUT).execute(&command)
     })
     .await?;

@@ -137,6 +137,9 @@ Moving work in and out:
   (its workspace, sub-agent reports, or temporary directory) into
   `$TMPDIR/mjolnir/<session>/`; prints the local path. `--stdout` streams it
   instead; `--ls` lists the path with sizes and modification times.
+  Sessions also get the `mj-agents.fetch` tool with `session_id`, `path`, and
+  optional `ls`, even with Mjolnir sub-agents disabled. Copies land in the
+  calling session's target temporary directory; listings return structured data.
 - `mj put-file` — upload one file into an idle session's workspace.
 
 Diagnosis:
