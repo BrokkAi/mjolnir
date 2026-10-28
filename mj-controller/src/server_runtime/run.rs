@@ -1249,7 +1249,6 @@ pub(crate) async fn run_server(
                     }
                     let session_id = match admit_phone_action(
                         &request.action,
-                        action_cancellations.len(),
                         &mut active_actions,
                     ) {
                         Ok(session_id) => session_id,

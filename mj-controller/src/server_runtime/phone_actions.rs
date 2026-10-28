@@ -1,6 +1,5 @@
 use super::*;
 
-pub(super) const MAX_CONCURRENT_PHONE_ACTIONS: usize = 4;
 pub(super) const MAX_CONCURRENT_BUNDLE_CREATIONS: usize = 4;
 pub(super) const MAX_CONCURRENT_PREFLIGHTS: usize = 4;
 
@@ -137,19 +136,12 @@ impl PendingActionReplies {
 /// the action occupies, or the outcome that refuses it.
 pub(super) fn admit_phone_action(
     action: &ControllerAction,
-    running_actions: usize,
     active_sessions: &mut std::collections::BTreeSet<String>,
 ) -> std::result::Result<Option<String>, ActionOutcome> {
     let closing = matches!(
         action,
         ControllerAction::Suspend { .. } | ControllerAction::Destroy { .. }
     );
-    if !closing && !phone_action_capacity_available(running_actions) {
-        return Err(ActionOutcome::Busy {
-            running: running_actions,
-            limit: MAX_CONCURRENT_PHONE_ACTIONS,
-        });
-    }
     let session_id = controller_action_session_id(action);
     if let Some(session_id) = &session_id
         && !active_sessions.insert(session_id.clone())
