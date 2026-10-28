@@ -112,6 +112,7 @@ fn restart_recovery_requires_the_checkpoint_bound_to_its_intent() {
         session_id: "session-1".into(),
         operation_id: "restart-1".into(),
         phase: crate::database::SessionRestartPhase::Stopping,
+        handoff: None,
         checkpoint_sha256: None,
         checkpoint_started: true,
         container_recreation_acknowledged: true,
@@ -123,6 +124,13 @@ fn restart_recovery_requires_the_checkpoint_bound_to_its_intent() {
     intent.checkpoint_sha256 = Some("older-checkpoint".into());
     assert!(!restart::restart_checkpoint_matches(&record, &intent));
     intent.checkpoint_sha256 = Some("fresh-checkpoint".into());
+    assert!(restart::restart_checkpoint_matches(&record, &intent));
+    intent.handoff = record.checkpoint.clone();
+    intent.handoff.as_mut().unwrap().sha256 = "handoff".into();
+    assert!(!restart::restart_checkpoint_matches(&record, &intent));
+    intent.checkpoint_sha256 = Some("handoff".into());
+    assert!(restart::restart_checkpoint_matches(&record, &intent));
+    record.checkpoint = None;
     assert!(restart::restart_checkpoint_matches(&record, &intent));
 }
 

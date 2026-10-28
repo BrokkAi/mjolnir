@@ -66,13 +66,15 @@ pub(super) fn configure_claude_subagent_mcp(
         && regular_file_or_absent(&settings_path))
     {
         return match role {
-            Some(role @ (SubagentMcpRole::Parent | SubagentMcpRole::Child)) => {
-                Err(anyhow::anyhow!(
-                    "cannot register the Claude {} tools: {} is not a private staged profile",
-                    role.id(),
-                    home.display()
-                ))
-            }
+            Some(
+                role @ (SubagentMcpRole::Parent
+                | SubagentMcpRole::Child
+                | SubagentMcpRole::FetchOnly),
+            ) => Err(anyhow::anyhow!(
+                "cannot register the Claude {} tools: {} is not a private staged profile",
+                role.id(),
+                home.display()
+            )),
             Some(SubagentMcpRole::MessageOnly) => {
                 tracing::warn!(path = %home.display(), "skipping the Claude send_message server: the profile is not a private staged directory");
                 Ok(())
@@ -1101,7 +1103,7 @@ mod tests {
                     .unwrap();
             assert_eq!(
                 settings["permissions"]["allow"],
-                serde_json::json!(["mcp__mj-agents__send_message"])
+                serde_json::json!(["mcp__mj-agents__send_message", "mcp__mj-agents__fetch"])
             );
             let command = settings["hooks"]["PostToolBatch"][0]["hooks"][0]["command"]
                 .as_str()
@@ -1557,7 +1559,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
             serde_json::from_slice(&std::fs::read(home.join("settings.json")).unwrap()).unwrap();
         assert_eq!(
             settings["permissions"]["allow"],
-            serde_json::json!(["mcp__mj-agents__send_message"])
+            serde_json::json!(["mcp__mj-agents__send_message", "mcp__mj-agents__fetch"])
         );
 
         // Losing the role removes the server; the person's servers stay.
@@ -1618,7 +1620,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
             (settings, config, allow)
         };
 
-        // A child's only tool is handback.
+        // Children can hand back and fetch without asking the person.
         let root = profile();
         std::fs::write(
             root.path().join("profile/settings.json"),
@@ -1626,7 +1628,14 @@ print(sys.argv[sys.argv.index('--role') + 1])
         )
         .unwrap();
         let (settings, _, allow) = configure(&root, SubagentMcpRole::Child, true);
-        assert_eq!(allow, ["Bash(ls:*)", "mcp__mj-agents__handback"]);
+        assert_eq!(
+            allow,
+            [
+                "Bash(ls:*)",
+                "mcp__mj-agents__handback",
+                "mcp__mj-agents__fetch"
+            ]
+        );
         assert_eq!(
             settings["permissions"]["deny"],
             serde_json::json!(["WebFetch"])
@@ -1658,7 +1667,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
             1,
             "{allow:?}"
         );
-        for tool in ["spawn", "list_agents", "send_message", "close"] {
+        for tool in ["spawn", "list_agents", "send_message", "close", "fetch"] {
             assert!(
                 allow.contains(&format!("mcp__mj-agents__{tool}")),
                 "{tool}: {allow:?}"
@@ -2589,6 +2598,7 @@ mod review_gate_tests {
             SubagentMcpRole::Parent,
             SubagentMcpRole::Child,
             SubagentMcpRole::MessageOnly,
+            SubagentMcpRole::FetchOnly,
         ] {
             for gate in [false, true] {
                 let root = tempfile::tempdir().unwrap();

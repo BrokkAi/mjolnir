@@ -365,6 +365,49 @@ fn the_daemon_is_listed_as_mj_daemon_run() {
     assert_eq!(arguments, ["mj", "daemon-run"]);
 }
 
+#[cfg(target_os = "linux")]
+// Hard-won: 92b39c9da: suspending the launcher's session deleted the daemon's working directory.
+#[test]
+fn daemon_working_directory_survives_removal_of_the_launching_checkout() {
+    let storage = upgrade_storage();
+    let home = storage.path().join("home");
+    let checkout = storage.path().join("checkout");
+    fs::create_dir(&home).unwrap();
+    fs::create_dir(&checkout).unwrap();
+    fs::write(home.join(".gitconfig"), "[user]\nname = Test User\n").unwrap();
+    let output = mj_core::subprocess::run_with_input(
+        upgrade_command(&storage)
+            .env("HOME", &home)
+            .current_dir(&checkout),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(storage.path().join("data/daemon.json")).unwrap())
+            .unwrap();
+    fs::remove_dir(&checkout).unwrap();
+    let daemon_cwd = std::path::PathBuf::from(format!("/proc/{}/cwd", metadata.pid));
+    let output = mj_core::subprocess::run_with_input(
+        Command::new("git")
+            .args(["config", "--global", "--includes", "--null", "--list"])
+            .env("HOME", &home)
+            .current_dir(&daemon_cwd),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_link(daemon_cwd).unwrap(), home);
+}
+
 #[test]
 fn ordinary_startup_migrates_an_old_store_without_a_daemon() {
     let storage = upgrade_storage();

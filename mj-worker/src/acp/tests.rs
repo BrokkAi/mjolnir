@@ -314,7 +314,8 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
         ] {
             for role in [
                 SubagentMcpRole::Parent,
-                SubagentMcpRole::Parent,
+                SubagentMcpRole::MessageOnly,
+                SubagentMcpRole::FetchOnly,
                 SubagentMcpRole::Child,
             ] {
                 let mut spec = reload_fallback_spec(harness);

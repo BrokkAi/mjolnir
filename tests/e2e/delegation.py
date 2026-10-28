@@ -618,6 +618,64 @@ def main():
         refused = fetch("/etc/passwd")
         assert refused.returncode != 0, refused.stdout
         assert "outside the directories a session shares" in refused.stderr, refused.stderr
+
+        # Fetch is available through the real MCP server with delegation off
+        # or native. The reply stays small even at the full 16 MiB file limit.
+        binary = bytes(range(256)) * (16 * 1024 * 1024 // 256)
+        large_source = source.with_name("fetch binary λ.dat")
+        large_source.write_bytes(binary)
+        for policy in ["none", "native"]:
+            receiver = json.loads(cli(
+                "new", "--workspace", "Delegation test", "--profile", "fake",
+                "--target", "localhost", "--project-directory", str(lab.project),
+                "--subagents", policy, "--json",
+            ))["session_id"]
+            receiver_socket = endpoint(receiver)
+
+            def mcp_fetch(path, ls=False):
+                requests = [
+                    {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                        "name": "fetch", "arguments": {
+                            "session_id": parent, "path": path, "ls": ls,
+                        },
+                    }},
+                ]
+                response = subprocess.run(
+                    [str(args.worker.resolve()), "worker", "subagent-mcp",
+                     "--socket", str(receiver_socket), "--role", "message_only"],
+                    env=env, input="".join(json.dumps(r) + "\n" for r in requests),
+                    capture_output=True, text=True, timeout=WAIT_SECONDS,
+                )
+                assert response.returncode == 0, response.stderr
+                replies = {r["id"]: r for r in map(json.loads, response.stdout.splitlines())}
+                assert {t["name"] for t in replies[1]["result"]["tools"]} == {"send_message", "fetch"}
+                assert "error" not in replies[2], replies[2]
+                return replies[2]["result"]
+
+            copied = mcp_fetch(large_source.name)
+            assert not copied["isError"], copied
+            saved = copied["structuredContent"]
+            assert saved["bytes"] == len(binary) and saved["kind"] == "file", saved
+            assert Path(saved["path"]).read_bytes() == binary
+            assert Path(saved["path"]) != large_source
+            assert len(json.dumps(copied)) < 2048
+            Path(saved["path"]).unlink()
+            archived = mcp_fetch(str(report_dir / "probes"))
+            assert not archived["isError"], archived
+            saved_zip = archived["structuredContent"]
+            assert saved_zip["kind"] == "directory" and saved_zip["path"].endswith(".zip")
+            with zipfile.ZipFile(saved_zip["path"]) as archive:
+                assert archive.read("probes/probe.log") == b"probe\n" * 20000
+            Path(saved_zip["path"]).unlink()
+            listing = mcp_fetch(str(report_dir / "probes"), ls=True)
+            assert not listing["isError"], listing
+            assert listing["structuredContent"]["entries"] == entries
+            refused = mcp_fetch("/etc/passwd")
+            assert refused["isError"] and "outside the directories a session shares" in json.dumps(refused)
+            cli("destroy", "--session", receiver)
+        large_source.unlink()
+
         legacy = tool(parent, "spawn", {
             "task_name": "legacy-accepted",
             "instructions": "Return the legacy attachment evidence.",
