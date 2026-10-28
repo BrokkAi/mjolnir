@@ -848,8 +848,7 @@ pub(super) fn require_session_record<'a>(
 ) -> Result<&'a ViewerSession, ApiError> {
     snapshot
         .sessions
-        .iter()
-        .find(|session| session.id == id)
+        .get(id)
         .ok_or_else(|| ApiError::not_found("unknown session"))
 }
 

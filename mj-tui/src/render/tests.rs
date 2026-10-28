@@ -1604,7 +1604,7 @@ fn feed_installed_config_hides_default_docker_but_keeps_a_user_written_one() {
         let daemon_config = daemon_config.with_local_targets();
         let sent = mj_client::runtime_feed::RuntimeMetadata {
             default_targets: daemon_config.default_targets.clone(),
-            config: daemon_config,
+            config: daemon_config.into(),
             ..Default::default()
         };
         let received: mj_client::runtime_feed::RuntimeMetadata =

@@ -18,6 +18,10 @@ pub(super) struct ViewerPublication {
     project_dirty: BTreeSet<String>,
     pub(super) inputs_changed: bool,
     engines: InstalledEngines,
+    capabilities: mj_core::snapshot_map::SharedSnapshot<
+        mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    >,
+    capabilities_dirty: bool,
 }
 
 impl ViewerPublication {
@@ -35,8 +39,10 @@ impl ViewerPublication {
         self.inputs_changed |= self.runtime.records != next.records
             || self.runtime.subagents != next.subagents
             || self.runtime.metadata.config != next.metadata.config;
-        self.inputs_changed |=
-            self.runtime.metadata.profile_capabilities != next.metadata.profile_capabilities;
+        self.capabilities_dirty |= self.runtime.metadata.profile_capabilities
+            != next.metadata.profile_capabilities
+            || self.runtime.metadata.config != next.metadata.config;
+        self.inputs_changed |= self.capabilities_dirty;
         for (id, summary) in self.runtime.native_agents.changes(&next.native_agents) {
             if self.runtime.native_agents.get(id).map(|old| &old.agent)
                 == summary.map(|next| &next.agent)
@@ -178,14 +184,21 @@ impl ViewerPublication {
             }
         }
         snapshot.sessions = self.rows.clone();
-        snapshot.profile_capabilities = self
-            .runtime
-            .metadata
-            .profile_capabilities
-            .for_config(&controller.config);
+        if self.capabilities_dirty || self.config.as_ref() != Some(&controller.config) {
+            self.capabilities = self
+                .runtime
+                .metadata
+                .profile_capabilities
+                .for_config(&controller.config)
+                .into();
+            self.capabilities_dirty = false;
+        }
+        snapshot.profile_capabilities = self.capabilities.clone();
         self.records = controller.state.sessions.clone();
         self.subagents = controller.state.subagents.clone();
-        self.config = Some(controller.config.clone());
+        if self.config.as_ref() != Some(&controller.config) {
+            self.config = Some(controller.config.clone());
+        }
         self.operations = views.operations.clone();
         self.reviews = views.reviews.clone();
         self.dirty.clear();

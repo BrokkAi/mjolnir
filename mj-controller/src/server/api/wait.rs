@@ -21,7 +21,7 @@ enum Wake {
 /// whose every change publishes a revision.
 #[derive(Debug, PartialEq)]
 struct WaitInputs {
-    session: ViewerSession,
+    session: Arc<ViewerSession>,
     launch_failure: Option<crate::server::ViewerLaunchFailure>,
     start_status: Option<StartStatus>,
     child_report: Option<(bool, mj_core::subagent::SubagentReport)>,
@@ -86,7 +86,10 @@ async fn wait_for_turn(
         // startup steps. Unrelated streaming sessions must cost no such reads.
         let unchanged = {
             let snapshot = snapshot_rx.borrow();
-            let session = require_session_record(&snapshot, &session_id)?;
+            let session = snapshot
+                .sessions
+                .get_shared(&session_id)
+                .ok_or_else(|| ApiFailure::not_found("unknown session"))?;
             let launch_failure = snapshot
                 .launch_failures
                 .iter()
@@ -95,7 +98,7 @@ async fn wait_for_turn(
                 && durable_revision.is_some()
                 && decided.as_ref().is_some_and(|decided| {
                     decided.durable_revision == durable_revision
-                        && decided.session == *session
+                        && (Arc::ptr_eq(&decided.session, &session) || *decided.session == *session)
                         && decided.launch_failure.as_ref() == launch_failure
                 })
         };
@@ -107,19 +110,24 @@ async fn wait_for_turn(
                 backend.subagent_report(session_id.clone()).await?,
             )
         };
-        let inputs = {
+        let inputs = if unchanged {
+            None
+        } else {
             let snapshot = snapshot_rx.borrow();
-            let session = require_session_record(&snapshot, &session_id)?;
+            let session = snapshot
+                .sessions
+                .get_shared(&session_id)
+                .ok_or_else(|| ApiFailure::not_found("unknown session"))?;
             let launch_failure = snapshot
                 .launch_failures
                 .iter()
                 .find(|failure| failure.session_id.as_deref() == Some(session_id.as_str()));
             match &decided {
-                _ if unchanged => None,
                 Some(decided)
                     if wake == Wake::Published
                         && decided.durable_revision == durable_revision
-                        && decided.session == *session
+                        && (Arc::ptr_eq(&decided.session, &session)
+                            || *decided.session == *session)
                         && decided.launch_failure.as_ref() == launch_failure
                         && decided.start_status == start_status
                         && decided.child_report == child_report =>

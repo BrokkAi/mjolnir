@@ -6,6 +6,64 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+/// An immutable publication whose clones and unchanged comparisons are cheap.
+/// Copy-on-write edits leave every previously published value intact. The wire
+/// representation is exactly the inner value, including for older readers.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SharedSnapshot<T>(Arc<T>);
+
+impl<T> Clone for SharedSnapshot<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T: Default> Default for SharedSnapshot<T> {
+    fn default() -> Self {
+        Self::from(T::default())
+    }
+}
+
+impl<T> From<T> for SharedSnapshot<T> {
+    fn from(value: T) -> Self {
+        Self(Arc::new(value))
+    }
+}
+
+impl<T> SharedSnapshot<T> {
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl<T: Clone> SharedSnapshot<T> {
+    pub fn into_inner(self) -> T {
+        Arc::unwrap_or_clone(self.0)
+    }
+}
+
+impl<T: PartialEq> PartialEq for SharedSnapshot<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr_eq(other) || self.0.as_ref() == other.0.as_ref()
+    }
+}
+
+impl<T: Eq> Eq for SharedSnapshot<T> {}
+
+impl<T> std::ops::Deref for SharedSnapshot<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T: Clone> std::ops::DerefMut for SharedSnapshot<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        Arc::make_mut(&mut self.0)
+    }
+}
+
 /// Cloning shares the tree and its records. Mutating a record copies only that
 /// record and its tree path, even while readers hold an older snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

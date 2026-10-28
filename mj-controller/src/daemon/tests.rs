@@ -898,7 +898,10 @@ async fn published_quota_reaches_an_attached_client_through_the_runtime_feed() {
     replica
         .apply(state.runtime_changes(None, false).await.unwrap())
         .unwrap();
-    assert_eq!(replica.projection.metadata.quotas, QuotaSnapshot::default());
+    assert_eq!(
+        *replica.projection.metadata.quotas,
+        QuotaSnapshot::default()
+    );
 
     let snapshot = QuotaSnapshot {
         probing: ["claude".to_owned()].into(),
@@ -911,7 +914,7 @@ async fn published_quota_reaches_an_attached_client_through_the_runtime_feed() {
         .await
         .unwrap();
     replica.apply(frame).unwrap();
-    assert_eq!(replica.projection.metadata.quotas, snapshot);
+    assert_eq!(*replica.projection.metadata.quotas, snapshot);
 
     // Publishing what is already published wakes nobody.
     let before = state.revisions().borrow().to_owned();

@@ -5911,6 +5911,7 @@ fn spawn_wait(
 /// callers beside three streaming sessions kept the daemon above two cores.
 /// It must still answer as soon as its own session asks for input.
 // Hard-won: f5c83878: waiters opened the database repeatedly on unrelated session changes.
+// Hard-won: 8c88175f7: wait wakeups linearly searched the entire session history.
 #[tokio::test(start_paused = true)]
 async fn a_waiter_reads_nothing_for_other_sessions_revisions_and_answers_its_own() {
     let backend = Arc::new(FakeBackend {
@@ -5928,7 +5929,14 @@ async fn a_waiter_reads_nothing_for_other_sessions_revisions_and_answers_its_own
         })]),
         ..FakeBackend::default()
     });
-    let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), add_second_session);
+    let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
+        add_second_session(snapshot);
+        for index in 0..6_000 {
+            let mut history = snapshot.sessions.get("session-1").unwrap().clone();
+            history.id = format!("history-{index:06}");
+            snapshot.sessions.push(history);
+        }
+    });
     let reads = || {
         backend
             .turn_state_reads
@@ -5938,12 +5946,14 @@ async fn a_waiter_reads_nothing_for_other_sessions_revisions_and_answers_its_own
     let waiter = spawn_wait(app, r#"{"return_on_input":true,"timeout_secs":600}"#);
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert_eq!(reads(), 1, "the first pass decides");
+    crate::server::take_viewer_session_scan_visits();
 
     for revision in 0..50 {
         snapshot_tx.send_modify(|snapshot| {
             snapshot.revision += 1;
-            snapshot.sessions[1].title = format!("streaming {revision}");
-            snapshot.sessions[1].latest_event_ordinal = revision;
+            let other = snapshot.sessions.0.get_mut("session-2").unwrap();
+            other.title = format!("streaming {revision}");
+            other.latest_event_ordinal = revision;
         });
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -5965,11 +5975,21 @@ async fn a_waiter_reads_nothing_for_other_sessions_revisions_and_answers_its_own
         50,
         "every publication woke the waiter, and none needed a decision"
     );
+    assert_eq!(
+        crate::server::take_viewer_session_scan_visits(),
+        0,
+        "unrelated revisions must not walk historical viewer rows"
+    );
     assert!(!waiter.is_finished());
 
     snapshot_tx.send_modify(|snapshot| {
         snapshot.revision += 1;
-        snapshot.sessions[0].pending_elicitations = vec![input_request()];
+        snapshot
+            .sessions
+            .0
+            .get_mut("session-1")
+            .unwrap()
+            .pending_elicitations = vec![input_request()];
     });
     let response = tokio::time::timeout(Duration::from_secs(1), waiter)
         .await
