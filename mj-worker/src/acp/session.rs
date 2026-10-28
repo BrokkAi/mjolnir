@@ -28,6 +28,10 @@ pub(super) async fn serve_session(
 ) -> Result<Option<SessionRestart>> {
     let mut meta = serde_json::Map::new();
     meta.insert("terminal_output".into(), serde_json::Value::Bool(true));
+    meta.insert(
+        "terminal_output_delta".into(),
+        serde_json::Value::Bool(true),
+    );
     if spec.harness == HarnessKind::Codex {
         meta.insert("execution".into(), serde_json::json!({"version":1}));
     }

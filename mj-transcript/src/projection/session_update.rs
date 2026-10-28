@@ -50,6 +50,7 @@ pub(super) fn project_session_update(
                 *existing = serde_json::to_value(call)?;
                 *presentation = Some(Box::new(tool_call_presentation(call)));
                 item.last_changed_at_ms = item.last_changed_at_ms.max(event.recorded_at_ms);
+                apply_terminal_metadata(&mut item, call.meta.as_ref());
                 attach_terminal_outputs(current, index, mutation, &mut item);
                 consume_fallback_terminal_tools(index, mutation, &mut item, false)?;
                 finalize_fallback_terminal_tool(&mut item)?;
@@ -68,6 +69,7 @@ pub(super) fn project_session_update(
                         presentation: Some(Box::new(tool_call_presentation(call))),
                     },
                 };
+                apply_terminal_metadata(&mut item, call.meta.as_ref());
                 attach_terminal_outputs(current, index, mutation, &mut item);
                 consume_fallback_terminal_tools(index, mutation, &mut item, true)?;
                 finalize_fallback_terminal_tool(&mut item)?;
@@ -122,6 +124,7 @@ pub(super) fn project_session_update(
             }
             *call = serde_json::to_value(materialized_call)?;
             item.last_changed_at_ms = item.last_changed_at_ms.max(event.recorded_at_ms);
+            apply_terminal_metadata(&mut item, update.meta.as_ref());
             attach_terminal_outputs(current, index, mutation, &mut item);
             consume_fallback_terminal_tools(index, mutation, &mut item, false)?;
             finalize_fallback_terminal_tool(&mut item)?;

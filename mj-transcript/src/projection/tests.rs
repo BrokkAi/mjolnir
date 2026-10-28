@@ -2165,6 +2165,64 @@ fn metadata_only_tool_update_without_an_initial_call_is_ignored() {
     assert_eq!(session.applied_event_ordinal, 1);
 }
 
+// Hard-won: c823ba502: ACP terminal metadata vanished instead of reaching persisted tool details.
+#[test]
+fn terminal_metadata_retains_bounded_unicode_output_across_restore_and_late_exit() {
+    let mut session = MaterializedSession::empty("terminal-metadata");
+    apply_observation(&mut session, terminal_tool_call("call-1", "term-1"));
+    let update = |session: &mut MaterializedSession, meta: Value| {
+        let update = json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "call-1", "_meta": meta
+        });
+        apply_observation(
+            session,
+            RelayObservation::SessionUpdate {
+                update: Box::new(serde_json::from_value(update).unwrap()),
+            },
+        );
+    };
+    // More than a pipe buffer and the retained-output budget, ending partway
+    // through a multibyte character if the byte cap ignores UTF-8 boundaries.
+    let output = format!("{}\nfirst failure\n", "🦀".repeat(1_048_577));
+    update(
+        &mut session,
+        json!({"terminal_output_delta": {"terminal_id": "term-1", "data": output}}),
+    );
+    let record = &attached_terminal_outputs(&session.transcript[0])[0];
+    assert!(record.truncated);
+    assert!(record.output.len() <= 4 * 1024 * 1024);
+    assert!(output.ends_with(&record.output));
+
+    // A daemon rebuilds projection ownership solely from the serialized session.
+    session = serde_json::from_value(serde_json::to_value(&session).unwrap()).unwrap();
+    update(
+        &mut session,
+        json!({"terminal_output_delta": {"terminal_id": "term-1", "data": "late failure\n"}}),
+    );
+    update(
+        &mut session,
+        json!({"terminal_exit": {"terminal_id": "term-1", "exit_code": 128, "signal": null}}),
+    );
+    let record = &attached_terminal_outputs(&session.transcript[0])[0];
+    assert!(record.output.ends_with("first failure\nlate failure\n"));
+    assert_eq!(record.exit_code, Some(128));
+    assert!(record.truncated);
+
+    // A final snapshot replaces earlier chunks rather than repeating them.
+    update(
+        &mut session,
+        json!({
+            "terminal_output": {"terminal_id": "term-1", "data": "complete failure\n"},
+            "terminal_exit": {"terminal_id": "term-1", "exit_code": null, "signal": "SIGTERM"}
+        }),
+    );
+    let record = &attached_terminal_outputs(&session.transcript[0])[0];
+    assert_eq!(record.output, "complete failure\n");
+    assert_eq!(record.exit_code, None);
+    assert_eq!(record.signal.as_deref(), Some("SIGTERM"));
+    assert!(!record.truncated);
+}
+
 // Hard-won: 111f6dcd: Codex resent a revised tool call as a new item, changing identity and failing every recovery retry.
 #[test]
 fn resent_tool_call_keeps_identity_and_replaces_the_call_payload() {
