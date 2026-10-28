@@ -405,6 +405,7 @@ mod tests {
     /// record: a worker is not always recognisable by its command line, and
     /// one that is not was reported as gone while it was still running.
     // Hard-won: 915d5c30: a live worker with an unexpected command line was reported gone.
+    // Hard-won: #1383: a worker recorded local time while its controller checked UTC.
     #[test]
     #[cfg_attr(
         windows,
@@ -413,15 +414,46 @@ mod tests {
     fn a_worker_is_found_by_the_pid_it_recorded_even_when_its_command_line_differs() {
         let root = tempfile::tempdir().unwrap();
         // This test process is certainly alive, and its command line is a test
-        // binary, which matches nothing the probe looks for.
+        // binary, which matches nothing the probe looks for. Recording and
+        // checking use different environments, as worker login re-exec does.
+        let locales = mj_core::subprocess::run_with_input(
+            std::process::Command::new("locale").arg("-a"),
+            &[],
+        )
+        .unwrap();
+        assert!(locales.status.success());
+        let locales = String::from_utf8(locales.stdout).unwrap();
+        let recording_locale = locales
+            .lines()
+            .find(|locale| !matches!(*locale, "C" | "POSIX"))
+            .unwrap_or("C");
+        let birth = mj_core::subprocess::run_with_input(
+            std::process::Command::new("sh")
+                .args([
+                    "-c",
+                    &format!(
+                        "{}\nmj_process_birth \"$1\"",
+                        mj_core::subprocess::PROCESS_BIRTH_SCRIPT
+                    ),
+                    "record-worker-birth",
+                    &std::process::id().to_string(),
+                ])
+                .env("TZ", "America/Chicago")
+                .env("LC_ALL", recording_locale),
+            &[],
+        )
+        .unwrap();
+        assert!(birth.status.success());
+        let birth = String::from_utf8(birth.stdout).unwrap().trim().to_owned();
         std::fs::write(
             root.path().join(mj_core::relay::WORKER_STARTUP_FILE),
             serde_json::to_vec(&serde_json::json!({
                 "step": "review-baseline",
                 "pid": std::process::id(),
-                "process_birth": mj_core::subprocess::process_birth_identity(std::process::id()).unwrap(),
+                "process_birth": birth,
                 "steps": [],
-            })).unwrap(),
+            }))
+            .unwrap(),
         )
         .unwrap();
 
@@ -429,10 +461,23 @@ mod tests {
             "{}\nhel_recorded_worker",
             worker_daemon_identity_script(&root.path().to_string_lossy())
         );
-        let (status, stdout) = run_script(&script);
-
-        assert_eq!(status, 0, "the probe must find the recorded worker");
-        assert_eq!(stdout, std::process::id().to_string());
+        let output = mj_core::subprocess::run_with_input(
+            std::process::Command::new("sh")
+                .args(["-c", &script])
+                .env("TZ", "UTC")
+                .env("LC_ALL", "C"),
+            &[],
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "the probe must find the recorded worker across TZ/locale changes: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            std::process::id().to_string()
+        );
     }
 
     /// A startup record left by a worker that has since gone must not be read

@@ -57,7 +57,8 @@ impl Drop for ProcessGroupGuard {
 
 /// A process birth identity, shared with remote teardown's POSIX shell.
 /// Linux uses boot identity and kernel start ticks; other Unix hosts use ps's
-/// process start timestamp. A PID by itself is never a durable identity.
+/// process start timestamp in UTC and the C locale. Recording and checking
+/// must not depend on their callers' environments. A PID alone is not an identity.
 pub const PROCESS_BIRTH_SCRIPT: &str = r#"mj_process_birth() {
     if [ -r "/proc/$1/stat" ] && [ -r /proc/sys/kernel/random/boot_id ]; then
         mj_stat=$(cat "/proc/$1/stat") || return 1
@@ -67,7 +68,7 @@ pub const PROCESS_BIRTH_SCRIPT: &str = r#"mj_process_birth() {
         mj_boot=$(cat /proc/sys/kernel/random/boot_id) || return 1
         printf '%s:%s\n' "$mj_boot" "$mj_ticks"
     else
-        LC_ALL=C ps -o lstart= -p "$1" | awk '{$1=$1; print}'
+        TZ=UTC LC_ALL=C ps -o lstart= -p "$1" | awk '{$1=$1; print}'
     fi
 }
 "#;
