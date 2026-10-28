@@ -368,8 +368,7 @@ pub(crate) struct DashboardContext {
     runtime_review_views: BTreeMap<String, mj_controller::review_host::RuntimeReviewView>,
     runtime_config: Feed<watch::Receiver<Config>>,
     pending_runtime_updates: Vec<io::PendingRuntimeUpdate>,
-    remote_lifecycle_sessions: BTreeSet<String>,
-    remote_lifecycle_operations: BTreeMap<String, String>,
+    remote_lifecycle_operations: BTreeMap<String, drains::RemoteLifecycleObservation>,
     /// A workspace the user just created, opened once the feed carries it.
     pending_workspace_selection: Option<String>,
     pub(crate) worker_commands_tx: SessionManagerControl,
@@ -1783,7 +1782,6 @@ impl DashboardContext {
             review_capabilities: capabilities_rx.clone(),
             profile_capabilities: Feed::new(capabilities_rx),
             pending_runtime_updates: Vec::new(),
-            remote_lifecycle_sessions: BTreeSet::new(),
             remote_lifecycle_operations: BTreeMap::new(),
             pending_workspace_selection: None,
             worker_commands_tx,

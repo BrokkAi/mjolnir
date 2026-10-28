@@ -270,23 +270,37 @@ has_token=$5
 shift 5
 umask 077
 mkdir -p "$cache_root/mirrors" "$cache_root/locks" "$(dirname "$snapshot")"
+entry="$cache_root/mirrors/$key"
+mirror="$entry/repo.git"
+# An overlapping refresher satisfies this request too. The locked read below
+# is authoritative; this optimistic read may race eviction or publication.
+observed_generation=$(cat "$entry/generation" 2>/dev/null || :)
 lock="$cache_root/locks/$key"
+partial=$(mktemp -d "$cache_root/mirrors/$key.partial-XXXXXX")
+snapshot_partial="$snapshot.partial-$$"
+pinned="$snapshot.pinned-$$"
+cutoff_repository="$snapshot.cutoff-$$"
+locked=0
+cleanup() {
+    if [ "$locked" -eq 1 ]; then
+        rmdir "$lock"
+    fi
+    rm -rf -- "$partial" "$snapshot_partial" "$pinned" "$cutoff_repository"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 attempt=0
 while ! mkdir "$lock" 2>/dev/null; do
     attempt=$((attempt + 1))
-    if [ "$attempt" -ge 50 ]; then
+    if [ "$attempt" -ge 1500 ]; then
         echo "timed out waiting for clone-cache lock $key" >&2
         exit 75
     fi
-    sleep 0.1
+    sleep 0.2
 done
-partial="$cache_root/mirrors/$key.partial-$$"
-snapshot_partial="$snapshot.partial-$$"
-cutoff_repository="$snapshot.cutoff-$$"
-cleanup() {
-    rm -rf -- "$partial" "$snapshot_partial" "$cutoff_repository" "$lock"
-}
-trap cleanup EXIT HUP INT TERM
+locked=1
 if [ "$has_token" = 1 ]; then
     IFS= read -r GH_TOKEN || exit 1
     export GH_TOKEN
@@ -300,25 +314,30 @@ git_remote() {
         git "$@"
     fi
 }
-entry="$cache_root/mirrors/$key"
-mirror="$entry/repo.git"
+generation=$(cat "$entry/generation" 2>/dev/null || :)
 if [ ! -d "$mirror" ]; then
-    rm -rf -- "$entry" "$partial"
-    mkdir -p "$partial"
+    rm -rf -- "$entry"
     git_remote clone --mirror -- "$source" "$partial/repo.git"
     git -C "$partial/repo.git" config gc.auto 0
-    : > "$partial/last-used"
+    printf '%s\n' "${partial##*/}" > "$partial/generation"
     mv -- "$partial" "$entry"
-else
+elif [ -z "$generation" ] || [ "$generation" = "$observed_generation" ]; then
     git_remote -C "$mirror" remote update --prune
-    : > "$entry/last-used"
+    printf '%s\n' "${partial##*/}" > "$entry/generation"
 fi
+: > "$entry/last-used"
+# Own every object and ref before releasing the mirror to refresh or eviction.
+# Git hardlinks immutable objects; this private repository needs no shared lock
+# while packing a cutoff bundle or making the mounted snapshot readable.
+git clone --mirror --local -- "$mirror" "$pinned"
+locked=0
+rmdir "$lock"
 rm -rf -- "$snapshot" "$snapshot_partial"
 if [ "$#" -eq 0 ]; then
-    git clone --mirror --local -- "$mirror" "$snapshot_partial"
+    mv -- "$pinned" "$snapshot_partial"
 else
-    # Copy only the cutoff commits and their history out of the mirror, which
-    # holds every later commit too. A fetch sends only what the wanted
+    # Copy only the cutoff commits and their history out of the private pin,
+    # which holds every later commit too. A fetch sends only what the wanted
     # commits reach.
     git init --quiet --bare -- "$cutoff_repository"
     # The names HistoryCutoff::BUNDLE_HEAD_REF and BASE_REF give them, which
@@ -338,10 +357,10 @@ else
     # shellcheck disable=SC2086
     git -C "$cutoff_repository" fetch --quiet --no-tags \
         --upload-pack='git -c uploadpack.allowAnySHA1InWant=true upload-pack' \
-        -- "$mirror" $refspecs
+        -- "$pinned" $refspecs
     # shellcheck disable=SC2086
     git -C "$cutoff_repository" bundle create "$snapshot_partial" $refs
-    rm -rf -- "$cutoff_repository"
+    rm -rf -- "$cutoff_repository" "$pinned"
 fi
 mv -- "$snapshot_partial" "$snapshot"
 # A bind mount can expose the host owner as container root, while the worker
@@ -349,8 +368,6 @@ mv -- "$snapshot_partial" "$snapshot"
 # files on the host; the mounted session subtree must be readable.
 chmod -R a+rX "$snapshot"
 chmod a+rx "$(dirname "$snapshot")"
-trap - EXIT HUP INT TERM
-rm -rf -- "$lock"
 "#;
 
 #[allow(clippy::too_many_arguments)]
@@ -872,6 +889,245 @@ mod tests {
             .is_err()
         );
         assert!(!snapshot.exists());
+    }
+
+    // Hard-won: #1388: packing one session's history blocked every clone of the same repository.
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_snapshots_share_a_refresh_and_survive_mirror_eviction() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let source = root.join("source with spaces");
+        let cache = root.join("cache");
+        let wrappers = root.join("bin");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&wrappers).unwrap();
+        let git = |directory: &Path, args: &[&str]| {
+            let command = CommandSpec::new(
+                "git",
+                ["-C", directory.to_str().unwrap()]
+                    .into_iter()
+                    .chain(args.iter().copied()),
+            );
+            let output = checked(ProcessExecutor.execute(&command).unwrap(), &command).unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&source, &["init", "--quiet", "--initial-branch=main"]);
+        git(&source, &["config", "user.name", "Cache Test"]);
+        git(&source, &["config", "user.email", "cache@example.test"]);
+        std::fs::write(source.join("data"), vec![b'a'; 128 * 1024]).unwrap();
+        git(&source, &["add", "data"]);
+        git(&source, &["commit", "--quiet", "-m", "cutoff"]);
+        let head = git(&source, &["rev-parse", "HEAD"]);
+        std::fs::write(source.join("data"), "later history").unwrap();
+        git(&source, &["commit", "--quiet", "-am", "later"]);
+        let later = git(&source, &["rev-parse", "HEAD"]);
+        let cutoff = HistoryCutoff {
+            head: head.clone(),
+            base: None,
+        };
+
+        let executable = |name: &str| {
+            let command = CommandSpec::new("sh", ["-c", &format!("command -v {name}")]);
+            let output = checked(ProcessExecutor.execute(&command).unwrap(), &command).unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let real_git = executable("git");
+        let real_mkdir = executable("mkdir");
+        let git_wrapper = r#"#!/bin/sh
+set -eu
+wait_for() {
+    attempts=0
+    while [ ! -f "$1" ]; do
+        attempts=$((attempts + 1))
+        if [ "$attempts" -ge 1200 ]; then
+            echo "cache regression gate timed out: $1" >&2
+            exit 99
+        fi
+        sleep 0.05
+    done
+}
+if { [ "$1" = clone ] && [ "$2" = --mirror ] && [ "$3" = -- ]; } ||
+   { [ "$1" = -C ] && [ "$3" = remote ] && [ "$4" = update ]; }; then
+    echo refresh >> "$CACHE_TEST_ROOT/refreshes"
+    : > "$CACHE_TEST_ROOT/refresh-started"
+    wait_for "$CACHE_TEST_ROOT/release-refresh"
+fi
+if [ "$1" = -C ] && [ "$3" = fetch ]; then
+    if [ "${CACHE_TEST_PAUSE_FETCH:-0}" = 1 ]; then
+        : > "$CACHE_TEST_ROOT/snapshot-pinned"
+        wait_for "$CACHE_TEST_ROOT/release-snapshot"
+    fi
+    if [ "${CACHE_TEST_FAIL_FETCH:-0}" = 1 ]; then
+        echo 'injected cutoff failure' >&2
+        exit 42
+    fi
+fi
+exec "$CACHE_TEST_GIT" "$@"
+"#;
+        let mkdir_wrapper = r#"#!/bin/sh
+set -eu
+if [ "$#" -eq 1 ] && [ "$1" = "$CACHE_TEST_ROOT/cache/locks/repository" ] &&
+   [ "${CACHE_TEST_WAITER:-0}" = 1 ]; then
+    : > "$CACHE_TEST_ROOT/waiter-started"
+fi
+exec "$CACHE_TEST_MKDIR" "$@"
+"#;
+        for (name, script) in [("git", git_wrapper), ("mkdir", mkdir_wrapper)] {
+            let path = wrappers.join(name);
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        struct GitExecutor(BTreeMap<String, String>);
+        impl CommandExecutor for GitExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                let mut command = command.clone();
+                command.env.extend(self.0.clone());
+                ProcessExecutor.execute(&command)
+            }
+        }
+        let environment = BTreeMap::from([
+            (
+                "PATH".into(),
+                format!("{}:{}", wrappers.display(), std::env::var("PATH").unwrap()),
+            ),
+            ("CACHE_TEST_ROOT".into(), root.display().to_string()),
+            ("CACHE_TEST_GIT".into(), real_git),
+            ("CACHE_TEST_MKDIR".into(), real_mkdir),
+        ]);
+        let mut first = GitExecutor(environment.clone());
+        first.0.insert("CACHE_TEST_PAUSE_FETCH".into(), "1".into());
+        let mut second = GitExecutor(environment.clone());
+        second.0.insert("CACHE_TEST_WAITER".into(), "1".into());
+        let snapshot_a = cache.join("sessions/first/repository.bundle");
+        let snapshot_b = cache.join("sessions/second/repository.bundle");
+        let prepare = |snapshot: &Path, executor: &GitExecutor| {
+            prepare_repository(
+                &CacheHost::Local,
+                &cache,
+                "repository",
+                source.to_str().unwrap(),
+                snapshot,
+                Some(&cutoff),
+                None,
+                executor,
+            )
+        };
+        let wait_for = |name: &str| {
+            let marker = root.join(name);
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while !marker.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(marker.exists(), "missing regression marker: {name}");
+        };
+        std::thread::scope(|scope| {
+            let a = scope.spawn(|| prepare(&snapshot_a, &first));
+            wait_for("refresh-started");
+            let (done_tx, done_rx) = mpsc::channel();
+            let b = scope.spawn({
+                let snapshot = &snapshot_b;
+                let executor = &second;
+                let prepare = &prepare;
+                move || {
+                    let result = prepare(snapshot, executor);
+                    done_tx.send(result).unwrap();
+                }
+            });
+            wait_for("waiter-started");
+            // The old implementation abandons this accepted wait after five seconds.
+            let early = done_rx.recv_timeout(Duration::from_secs(6));
+            std::fs::write(root.join("release-refresh"), []).unwrap();
+            wait_for("snapshot-pinned");
+            let completed = match early {
+                Ok(result) => result,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    done_rx.recv_timeout(Duration::from_secs(20)).unwrap()
+                }
+                Err(error) => panic!("waiter disconnected: {error}"),
+            };
+            // A private snapshot must own its files even if the shared mirror is evicted.
+            collect_garbage_with_limit(
+                &CacheHost::Local,
+                &cache,
+                &["first".into(), "second".into()],
+                0,
+                &ProcessExecutor,
+            )
+            .unwrap();
+            let evicted = !cache.join("mirrors/repository").exists();
+            std::fs::write(root.join("release-snapshot"), []).unwrap();
+            b.join().unwrap();
+            let first_result = a.join().unwrap();
+            completed.unwrap();
+            first_result.unwrap();
+            assert!(
+                evicted,
+                "the shared mirror was not evicted while the reader was pinned"
+            );
+        });
+        assert_eq!(
+            std::fs::read_to_string(root.join("refreshes"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+        for snapshot in [&snapshot_a, &snapshot_b] {
+            assert_eq!(
+                git(root, &["bundle", "list-heads", snapshot.to_str().unwrap()]),
+                format!("{head} refs/mj/head")
+            );
+            let checkout = snapshot.with_extension("checkout");
+            git(
+                root,
+                &["init", "--quiet", "--bare", checkout.to_str().unwrap()],
+            );
+            git(
+                &checkout,
+                &["fetch", "--quiet", "--", snapshot.to_str().unwrap(), &head],
+            );
+            let command = CommandSpec::new(
+                "git",
+                ["-C", checkout.to_str().unwrap(), "cat-file", "-e", &later],
+            );
+            assert_ne!(ProcessExecutor.execute(&command).unwrap().status, 0);
+            assert_eq!(
+                std::fs::read_dir(snapshot.parent().unwrap())
+                    .unwrap()
+                    .filter_map(|entry| {
+                        let name = entry.unwrap().file_name();
+                        name.to_str()
+                            .filter(|name| {
+                                name.contains(".pinned-")
+                                    || name.contains(".cutoff-")
+                                    || name.contains(".partial-")
+                            })
+                            .map(str::to_owned)
+                    })
+                    .collect::<Vec<_>>(),
+                Vec::<String>::new()
+            );
+        }
+
+        let mut failing = GitExecutor(environment);
+        failing.0.insert("CACHE_TEST_FAIL_FETCH".into(), "1".into());
+        let failed = cache.join("sessions/failed/repository.bundle");
+        assert!(
+            prepare(&failed, &failing)
+                .unwrap_err()
+                .to_string()
+                .contains("injected cutoff failure")
+        );
+        assert_eq!(
+            std::fs::read_dir(failed.parent().unwrap()).unwrap().count(),
+            0
+        );
+        assert!(!cache.join("locks/repository").exists());
     }
 
     #[test]

@@ -193,6 +193,12 @@ while preserving the image's checkout behavior. Git object files are
 immutable, so local snapshots can share them with hardlinks; filesystem
 reflink or ZFS permissions are not required.
 
+Concurrent launches share an overlapping mirror refresh. Each launch pins its
+own local snapshot before releasing the mirror lock, then builds any
+history-limited bundle and sets snapshot permissions independently. A slow
+bundle does not block other launches, and cache eviction cannot remove objects
+from a snapshot already being prepared.
+
 The cache is opportunistic. Missing host Git, authentication trouble, or a
 cache preparation failure produces a launch notice and falls back to the
 ordinary in-container clone. A first cache miss still downloads the complete
