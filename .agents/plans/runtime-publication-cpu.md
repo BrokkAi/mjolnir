@@ -19,7 +19,8 @@ Frequent session updates must cost work proportional to changed sessions, rather
 - [x] (2026-10-28 15:28Z) Install the first fix and verify handoff/session survival.
 - [x] Identify remaining long poles: finite SessionWiki startup indexing and repeated local delegation queue copies.
 - [x] (2026-10-28 16:01Z) Retain delegation and operational publications across empty polls and index report-parent candidates from committed differences; focused regressions and final suites pass.
-- [ ] Commit, push, and install the validated follow-up; measure settled CPU again.
+- [x] (2026-10-28 16:07Z) Commit the follow-up as 15f77c5e1, merge upstream as f499e3945, push, install, and verify session survival.
+- [ ] Separate immediate mailbox delivery from periodic historical repair, validate and install.
 - [ ] Record settled CPU and remaining reconciliation costs against the user’s under-one-core target.
 
 ## Surprises & Discoveries
@@ -28,11 +29,13 @@ Capacity projection added on October 25 scans all sessions for each host on ever
 
 ## Decision Log
 
+Session publications wake mailbox delivery immediately, but must not schedule global historical repair. Keep the existing five-second timer as the sole owner of periodic reconciliation. Explicit child completion and lifecycle paths already reconcile their parent promptly. Preserve durable retry and recovery while allowing delivery to proceed if a maintenance attempt fails.
+
 Use immutable, serializable shared values with copy-on-write mutation and pointer identity before deep equality. Keep their JSON identical so no protocol change is necessary. Owners replace publications on input changes; consumers clone shared values. The runtime history owns the capacity projection and derives its allocation inputs incrementally from durable session differences. Admission retains its existing serialized calculation. Avoid modifying or restarting the live store during tests.
 
 ## Outcomes & Retrospective
 
-Implementation and validation are complete. The four touched crate suites passed 3,348 tests, with no failures; workspace clippy and formatting passed. The large-history capacity, API waiter, catalog-sharing and immutable metadata/wire regressions all passed. Delivery and installed CPU measurement are pending. Automatic approval review rejected creating a GitHub tracking issue containing internal profile details; this does not block implementation.
+The initial implementation passed 3,348 tests and the delegation follow-up passed 3,351 tests; workspace clippy and formatting passed for both. Both changes are pushed and installed. The daemon fell from roughly four cores to samples of 1.46–1.8 cores, with checkpoint bursts higher. The under-one-core target remains unverified, and profiling identified additional amplified mailbox maintenance. Automatic approval review rejected creating a GitHub tracking issue containing internal profile details; this does not block implementation.
 
 ## Context and Orientation
 
@@ -75,3 +78,7 @@ Reconciliation decision: the operational owner now incrementally indexes parents
 Operational follow-up: retain the standalone connection’s operational publication on empty catch-up too. This removes another deep JSON copy per poll while keeping exported view and wire shapes unchanged. The existing isolated submit/catch-up integration verifies unchanged polling preserves publication identity.
 
 Follow-up validation: 3,351 tests passed across core, client, controller and TUI, including the newly merged upstream regression. Workspace clippy and formatting pass. The queue test covers large payloads, empty deltas, completion/retirement, and partial-page failure. The committed-store test covers clean closure, active/parked/lost/error states, failed resume and resumption. The initial installed fix settled to 145.7% CPU in a fresh ten-second sample before this follow-up.
+
+Third-round evidence: debugger snapshots repeatedly caught orphan cleanup and parent InputProgress rebuilding in the outbox service. The database writer consumed about 27% of a core, and ten orphan questions generated 1,000–3,000 warnings per minute: several whole maintenance passes per second rather than one every five seconds. Every session view publication called the same wakeup used by new mail. Separate repair from that immediate delivery wakeup. A paused-clock regression drives 100 streaming notifications, a coincident timer and delivery, a long maintenance pause, and cancellation; it protects maintenance cadence without delaying mail. Baseline just before this change averaged 178.6% CPU over twenty seconds.
+
+Third-round validation: the delivery/maintenance concurrency regression passes; all 2,193 controller tests pass (18 ignored), workspace dev clippy and formatting pass. Delivery still wakes on every committed mail or published view, while only the sweep performs historical repair.

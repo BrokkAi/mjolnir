@@ -133,26 +133,35 @@ pub(crate) async fn run(
 ) -> Result<()> {
     let mut sweep = tokio::time::interval(WORKER_SWEEP);
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            _ = stop.cancelled() => return Ok(()),
-            _ = outbox_notify().notified() => {},
-            _ = sweep.tick() => {},
-        }
+    while let Some(maintenance) = next_wake(outbox_notify(), &mut sweep, &stop).await {
         if stop.is_cancelled() {
             return Ok(());
+        }
+        if maintenance && let Err(error) = reconcile_durable_state(&state, &stop).await {
+            tracing::warn!(error = %format!("{error:#}"), "mailbox reconciliation failed; the next sweep will retry");
         }
         if let Err(error) = process_pending(state.clone(), sessions.clone(), stop.clone()).await {
             tracing::warn!(error = %format!("{error:#}"), "mailbox outbox sweep failed; pending rows remain durable");
         }
     }
+    Ok(())
 }
 
-async fn process_pending(
-    state: std::sync::Arc<RuntimeState>,
-    sessions: SessionManagerControl,
-    stop: CancellationToken,
-) -> Result<()> {
+/// Session publications wake delivery immediately. Historical repair belongs
+/// only to the periodic sweep; streaming output must not accelerate it.
+async fn next_wake(
+    notify: &Notify,
+    sweep: &mut tokio::time::Interval,
+    stop: &CancellationToken,
+) -> Option<bool> {
+    tokio::select! {
+        _ = stop.cancelled() => None,
+        _ = notify.notified() => Some(false),
+        _ = sweep.tick() => Some(true),
+    }
+}
+
+async fn reconcile_durable_state(state: &RuntimeState, stop: &CancellationToken) -> Result<()> {
     tokio::task::spawn_blocking(crate::database::reconcile_pending_subagent_questions)
         .await
         .context("child question reconciliation task failed")??;
@@ -189,6 +198,14 @@ async fn process_pending(
                 "parent report reconciliation failed; the next mailbox sweep will retry");
         }
     }
+    Ok(())
+}
+
+async fn process_pending(
+    state: std::sync::Arc<RuntimeState>,
+    sessions: SessionManagerControl,
+    stop: CancellationToken,
+) -> Result<()> {
     let entries = tokio::task::spawn_blocking(|| {
         crate::database::pending_mailbox_events(PENDING_BATCH_PER_SESSION)
     })
@@ -463,6 +480,41 @@ fn downgrade_review_or_report(event: &mut mj_core::mailbox::MailboxEvent, protoc
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    // Hard-won: f499e3945: every streamed view reran global mailbox reconciliation.
+    #[tokio::test(start_paused = true)]
+    async fn delivery_wakes_do_not_run_or_postpone_periodic_reconciliation() {
+        let notify = Notify::new();
+        let stop = CancellationToken::new();
+        let mut sweep = tokio::time::interval(WORKER_SWEEP);
+        sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        assert_eq!(next_wake(&notify, &mut sweep, &stop).await, Some(true));
+
+        for _ in 0..100 {
+            tokio::time::advance(Duration::from_millis(40)).await;
+            notify.notify_one();
+            assert_eq!(next_wake(&notify, &mut sweep, &stop).await, Some(false));
+        }
+        // A delivery at the deadline must neither reset nor starve maintenance.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        notify.notify_one();
+        let first = next_wake(&notify, &mut sweep, &stop).await;
+        let second = next_wake(&notify, &mut sweep, &stop).await;
+        assert!(matches!(
+            (first, second),
+            (Some(true), Some(false)) | (Some(false), Some(true))
+        ));
+
+        // Slow maintenance coalesces missed sweeps instead of replaying them.
+        tokio::time::advance(WORKER_SWEEP * 4).await;
+        assert_eq!(next_wake(&notify, &mut sweep, &stop).await, Some(true));
+        notify.notify_one();
+        assert_eq!(next_wake(&notify, &mut sweep, &stop).await, Some(false));
+        stop.cancel();
+        assert_eq!(next_wake(&notify, &mut sweep, &stop).await, None);
+    }
+
     #[test]
     fn review_verdict_wire_body_downgrades_for_protocol_42() {
         let event = mj_core::mailbox::MailboxEvent {
