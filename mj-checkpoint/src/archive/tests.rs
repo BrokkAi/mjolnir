@@ -2893,10 +2893,10 @@ fn review_capture_preserves_tracked_ignored_files_and_staged_deletions() {
     );
     let index_before_ignored_capture = fs::read(repository.path().join(".git/index")).unwrap();
     let baseline_tree =
-        capture_worktree_tree(&crate::test_support::Git225, repository.path()).unwrap();
+        capture_worktree_tree(&crate::test_support::Git231, repository.path()).unwrap();
     fs::write(repository.path().join("new-ignored"), b"ignored\n").unwrap();
     let ignored_only_tree =
-        capture_worktree_tree(&crate::test_support::Git225, repository.path()).unwrap();
+        capture_worktree_tree(&crate::test_support::Git231, repository.path()).unwrap();
     assert_eq!(
         baseline_tree, ignored_only_tree,
         "a new ignored file does not change the captured review tree"
@@ -2914,7 +2914,7 @@ fn review_capture_preserves_tracked_ignored_files_and_staged_deletions() {
     fs::write(repository.path().join("forced"), b"forced\n").unwrap();
     git(repository.path(), &["add", "-f", "forced"]);
     let index = fs::read(repository.path().join(".git/index")).unwrap();
-    let tree = capture_worktree_tree(&crate::test_support::Git225, repository.path()).unwrap();
+    let tree = capture_worktree_tree(&crate::test_support::Git231, repository.path()).unwrap();
     assert_eq!(
         git(repository.path(), &["show", &format!("{tree}:unchanged")]),
         b"base\n"
